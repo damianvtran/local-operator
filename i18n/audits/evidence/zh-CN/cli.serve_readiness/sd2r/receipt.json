@@ -1,0 +1,12 @@
+{
+  "locale": "zh-CN",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd2r",
+  "sha256": {
+    "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd2r/record.json": "2e55dc71c1ecff6d1412dec2b1095f027fffc8e177af9ec52409720d58711c2c",
+    "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd2r/report.md": "5517730b42c172a116cedebfefbce6e92cd3cd798c6a01cdeb7f208d3ab5f376",
+    "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd2r/rendered.txt": "ccfd5d156c4f4e3f448bbc72d816952e73a0b1e16b64e6f8852a43ef0d11fe97",
+    "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd2r/delta.json": "99a1343b2d81e15d8b04a5bead89899711ca2cb1315fc312602776cd12e541d3"
+  },
+  "shared_audit_log_sha256": "c1ecac4f1fa41d1b5a8ae1f0ef7f25da6c093ab87f3283f31f315bde07860699"
+}

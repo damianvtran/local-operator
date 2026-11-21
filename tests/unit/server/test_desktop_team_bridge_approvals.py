@@ -7,12 +7,12 @@ disk), the REAL ask queue writing a real ``asks.jsonl`` and index, the REAL
 request it receives, and the real ``require_desktop`` door. Only the
 credential store (``FakeStore``) and the hub's domain are fixtures.
 
-THE OPERATOR PRESENCE PROOF is exercised with a REAL operator key: a file-backed
-key created by ``operator.sign.create_key`` in the scratch root and signed by the
-real ``sign_challenge`` (the call that raises Touch ID on a presence host) and
-verified by the real ``signature_verdict``. Only the anchor's ``presence`` flag
-is asserted by the fixture — the OS gesture itself cannot run headless, the
-same limit the operator-authority suite documents.
+NO OS PROMPT (decision a-856f). Ordinary approvals are authorized by the
+desktop bearer and the explicit selection only. The fixture still stages a REAL
+operator key and anchor (``presence`` switchable, or no anchor at all) so the
+tests prove the decide works on presence, file-only and keyless hosts alike,
+and it replaces ``operator.sign.sign_challenge`` (the call that raises Touch ID)
+and the authority-level read with recorders: any call is a regression.
 """
 
 from __future__ import annotations
@@ -178,9 +178,13 @@ def _presence_host(root: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespa
     staged = trust.staging_path(root)
     staged.parent.mkdir(parents=True, exist_ok=True)
     staged.write_bytes(trust.anchor_bytes(anchor))
-    state = SimpleNamespace(presence=True, anchor=anchor)
+    state = SimpleNamespace(presence=True, anchor=anchor, absent=False)
 
     def load(_uid: Any = None) -> Any:
+        if state.absent:
+            return trust.AnchorLoad(
+                anchor=None, path=root / "anchor.json", root_owned=False, reason="", exists=False
+            )
         return trust.AnchorLoad(
             anchor=replace(anchor, presence=state.presence),
             path=root / "anchor.json",
@@ -191,6 +195,34 @@ def _presence_host(root: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespa
 
     monkeypatch.setattr(operator_authority, "load_anchor", load)
     return state
+
+
+def _signer_guard(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every reach for the OS presence path; the approvals flow makes none.
+
+    ``sign_challenge`` is the call that raises the Touch ID sheet (and on a
+    keychain host, the keychain access); ``authority_level_load`` is the
+    presence-level read the retired gate started with. Both are replaced with
+    recorders that also FAIL the call, so a regression shows up as a non-empty
+    log and an error rather than a silently passing prompt.
+    """
+
+    from local_operator import operator as operator_authority
+    from local_operator.operator import sign as sign_mod
+
+    calls: list[str] = []
+
+    def signer(**_kwargs: Any) -> Any:
+        calls.append("sign_challenge")
+        raise AssertionError("ordinary approvals must never sign (a-856f)")
+
+    def level(*_args: Any, **_kwargs: Any) -> Any:
+        calls.append("authority_level_load")
+        raise AssertionError("ordinary approvals must never read the presence level")
+
+    monkeypatch.setattr(sign_mod, "sign_challenge", signer)
+    monkeypatch.setattr(operator_authority, "authority_level_load", level)
+    return calls
 
 
 @pytest.fixture
@@ -266,29 +298,24 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
     presence = _presence_host(root, monkeypatch)
+    signer_calls = _signer_guard(monkeypatch)
     app = FastAPI()
     app.include_router(routes.router)
     app.dependency_overrides[get_config_manager] = lambda: SimpleNamespace(config_dir=root)
     try:
         with TestClient(app) as http:
             yield SimpleNamespace(
-                http=http, hub=hub_state, root=root, owner=owner, presence=presence
+                http=http,
+                hub=hub_state,
+                root=root,
+                owner=owner,
+                presence=presence,
+                signer_calls=signer_calls,
             )
     finally:
         server.shutdown()
         server.server_close()
         thread.join(10)
-
-
-@pytest.fixture(autouse=True)
-def _fresh_prompt_state():
-    """The challenge store and the prompt gate are process-global: reset per test."""
-
-    from local_operator.team_bridge import approvals
-
-    approvals.reset_for_tests()
-    yield
-    approvals.reset_for_tests()
 
 
 def _raise_ask(root: Path, message_id: str, *, session_id: str = COS, owner=None) -> str:
@@ -329,7 +356,7 @@ def _items(*pairs: tuple[str, str]) -> list[dict[str, str]]:
 
 
 def _authorize(world, items: list[dict[str, str]], *, account: str = ACC) -> dict[str, Any]:
-    """The desktop's confirm step: the daemon mints, prompts and signs."""
+    """The shipped desktop's confirm step: now a non-prompting shim (a-856f)."""
 
     response = world.http.post(
         AUTHORIZE, json={"expected_account_id": account, "items": items}, headers=AUTH
@@ -342,11 +369,12 @@ def _decide(
     world,
     items: list[dict[str, str]],
     *,
-    proof: Any = "authorize",
+    proof: Any = None,
     account: str = ACC,
     headers: dict[str, str] = AUTH,
 ):
-    """POST the batch; by default with a fresh proof over exactly ``items``."""
+    """POST the batch. No proof by default (a-856f); ``proof="authorize"`` runs
+    the shipped desktop's two-step flow through the compatibility shim."""
 
     body: dict[str, Any] = {"expected_account_id": account, "items": items}
     if proof == "authorize":
@@ -379,17 +407,16 @@ def test_list_counts_pending_and_carries_references_only(world) -> None:
     )
     assert response.status_code == 200, response.text
     result = response.json()["result"]
-    # Only the ACTIONABLE rows count (R1-4): bmsg_b/c have no local ask.
     assert result["pending_count"] == 1
     assert result["has_more"] is False and result["next_cursor"] is None
-    assert [row["message_id"] for row in result["items"]] == ["bmsg_a", "bmsg_b", "bmsg_c"]
+    # Gap 2: bmsg_b/c are pending at the hub but have no local ask (screening
+    # rejected them or has not run yet), so they are not listed at all.
+    assert [row["message_id"] for row in result["items"]] == ["bmsg_a"]
     first = result["items"][0]
     assert first["ask"] == {"session_id": COS, "ask_id": ask_a, "status": "open"}
     assert first["decidable"] is True
     # S-2: the ask card's own screened question text, so a batch is not blind.
     assert first["excerpt"] == "priya@acme.example: approve the spend?"
-    assert result["items"][1]["ask"] is None and result["items"][1]["decidable"] is False
-    assert result["items"][1]["excerpt"] is None
     assert first["sender"] == {
         "account_id": "acc_2",
         "endpoint_id": "ep_2",
@@ -474,12 +501,13 @@ def test_mixed_batch_gives_per_item_results_and_settles_asks(world) -> None:
 
     assert refused["error"] == BATCH_DECIDED_COPY
     assert _ask_status(world.root, COS, ask_a) == "withdrawn"
-    # The settled requests leave the list once the hub stops serving them.
+    # The settled requests leave the list once the hub stops serving them
+    # (bmsg_c is still pending at the hub, but has no local ask: gap 2).
     world.hub.pending = ["bmsg_c"]
     listed = world.http.get(
         "/v1/desktop/team-bridge/requests", params={"expected_account_id": ACC}, headers=AUTH
     ).json()["result"]
-    assert [row["message_id"] for row in listed["items"]] == ["bmsg_c"]
+    assert listed["items"] == []
 
 
 def test_an_ask_answered_on_the_card_leaves_the_list_and_is_not_decided_again(world) -> None:
@@ -506,7 +534,7 @@ def test_an_ask_answered_on_the_card_leaves_the_list_and_is_not_decided_again(wo
         "/v1/desktop/team-bridge/requests", params={"expected_account_id": ACC}, headers=AUTH
     ).json()["result"]
     assert "bmsg_a" not in [row["message_id"] for row in listed["items"]]
-    assert listed["pending_count"] == 0  # bmsg_b/c are listed but not decidable here
+    assert listed["pending_count"] == 0 and listed["items"] == []  # bmsg_b/c: no ask
     decided = _decide(world, _items(("bmsg_a", "deny"))).json()["result"]["results"]
     assert decided[0]["error"] == "answered_on_card" and decided[0]["sent"] is False
     assert _hub_calls(world.hub, "/v1/messaging/requests/decide") == []
@@ -694,114 +722,134 @@ async def test_client_requests_refuses_an_unknown_state_before_any_io(tmp_path) 
         await client.requests(tenant_id="tnt_1", state="open")
 
 
-# --- S-1: a decision needs the operator's presence, not just the bearer ------
+# --- a-856f: ordinary approvals never raise an OS prompt ---------------------
 
 
-def test_a_bearer_only_post_is_refused_with_zero_hub_calls(world) -> None:
-    """What ``curl`` from an agent shell sends: bearer, no Origin, no proof."""
+@pytest.mark.parametrize("host", ["presence", "file-only", "no-anchor"])
+def test_a_batch_decide_succeeds_on_every_host_with_no_signer_call(world, host) -> None:
+    """Decision a-856f: no Touch ID, keychain or OS call, on any kind of host.
 
+    A presence host used to prompt; a file-only or keyless host used to be
+    refused ``operator_presence_required``. Now all three decide the same way
+    — bearer + explicit selection — and the hub records the decision.
+    """
+
+    world.presence.presence = host == "presence"
+    world.presence.absent = host == "no-anchor"
     ask_a = _raise_ask(world.root, "bmsg_a")
-    response = _decide(world, _items(("bmsg_a", "approve")), proof=None)
-    assert response.status_code == 403, response.text
-    assert response.json()["detail"]["code"] == "operator_signature_required"
-    assert world.hub.calls == []
-    assert _ask_status(world.root, COS, ask_a) == "open"
-    assert _intent_states(world.root) == {}
+    response = _decide(world, _items(("bmsg_a", "approve")))
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["results"][0]["status"] == "approved"
+    (call,) = _hub_calls(world.hub, "/v1/messaging/requests/decide")
+    assert call["body"]["decisions"][0]["ask_ref"] == {"ask_id": ask_a, "question_id": "bmsg_a"}
+    assert world.hub.ledger[0]["request_id"] == "bmsg_a"  # the hub's audit row
+    assert _intent_states(world.root) == {"bmsg_a": "sent"}  # the local intent ledger
+    assert world.signer_calls == []
 
 
-def test_a_signature_over_a_different_selection_is_refused(world) -> None:
+def test_the_authorize_shim_answers_at_once_without_prompting(world) -> None:
+    """The shipped desktop's two-step flow keeps working, with nothing signed."""
+
+    from local_operator.team_bridge import approvals
+
     _raise_ask(world.root, "bmsg_a")
     _raise_ask(world.root, "bmsg_b")
-    proof = _authorize(world, _items(("bmsg_a", "deny")))
-    # Flipped word, then an added item: neither is what was confirmed.
-    flipped = _decide(world, _items(("bmsg_a", "approve")), proof=proof)
-    assert flipped.status_code == 403
-    assert flipped.json()["detail"]["code"] == "operator_signature_invalid"
-    proof = _authorize(world, _items(("bmsg_a", "deny")))
-    widened = _decide(world, _items(("bmsg_a", "deny"), ("bmsg_b", "approve")), proof=proof)
-    assert widened.json()["detail"]["code"] == "operator_signature_invalid"
-    assert world.hub.calls == []
-
-
-def test_a_replayed_signature_is_refused(world) -> None:
-    _raise_ask(world.root, "bmsg_a")
-    items = _items(("bmsg_a", "approve"))
-    proof = _authorize(world, items)
-    first = _decide(world, items, proof=proof)
-    assert first.status_code == 200, first.text
-    assert first.json()["result"]["results"][0]["status"] == "approved"
-    replay = _decide(world, items, proof=proof)
-    assert replay.status_code == 403
-    assert replay.json()["detail"]["code"] == "operator_signature_invalid"
-    assert len(_hub_calls(world.hub, "/v1/messaging/requests/decide")) == 1
-
-
-def test_a_forged_or_expired_proof_is_refused(world, monkeypatch) -> None:
-    from local_operator.team_bridge import approvals
-
-    _raise_ask(world.root, "bmsg_a")
-    items = _items(("bmsg_a", "approve"))
-    proof = _authorize(world, items)
-    forged = _decide(world, items, proof={**proof, "sig": "30" + "ab" * 35})
-    assert forged.json()["detail"]["code"] == "operator_signature_invalid"
-    monkeypatch.setattr(approvals, "CHALLENGE_TTL_S", -1.0)
-    expired = _decide(world, items)
-    assert expired.status_code == 403
-    assert expired.json()["detail"]["code"] == "operator_signature_expired"
-    assert world.hub.calls == []
-
-
-def test_the_proof_names_the_selection_digest_the_daemon_signed(world) -> None:
-    """The signed message is the runtime's own ``signed_message``, re-checkable."""
-
-    from local_operator.operator.verify import signed_message, verify_signature
-    from local_operator.team_bridge import approvals
-
     items = _items(("bmsg_b", "deny"), ("bmsg_a", "approve"))
     response = world.http.post(
         AUTHORIZE, json={"expected_account_id": ACC, "items": items}, headers=AUTH
     )
+    assert response.status_code == 200, response.text
     result = response.json()["result"]
-    digest = approvals.selection_digest(
+    assert set(result) == {"operator_proof", "selection_digest", "expires_s"}
+    assert result["operator_proof"]["key_id"] == "unsigned"  # a placeholder, not a signature
+    assert result["selection_digest"] == approvals.selection_digest(
         account_id=ACC,
         tenant_id="tnt_1",
-        selection=[approvals.Selection(i["message_id"], i["decision"]) for i in reversed(items)],
-    )
-    assert result["selection_digest"] == digest  # submitted order does not matter
-    assert result["expires_s"] == 30
-    message = signed_message(
-        action="decide",
-        session_id=approvals.SIGNING_SESSION,
-        request_id=f"batch:{digest}",
-        challenge=result["operator_proof"]["challenge"],
-    )
-    assert verify_signature(
-        spki=world.presence.anchor.spki,
-        message=message,
-        signature=bytes.fromhex(result["operator_proof"]["sig"]),
+        selection=[approvals.Selection(i["message_id"], i["decision"]) for i in items],
     )
     assert world.hub.calls == []  # authorizing calls nobody
+    # Echoed verbatim, as v0.58.x does: accepted, ignored, and the batch goes out.
+    decided = _decide(world, items, proof=result["operator_proof"])
+    assert decided.status_code == 200, decided.text
+    assert [r["status"] for r in decided.json()["result"]["results"]] == ["denied", "approved"]
+    assert world.signer_calls == []
 
 
-def test_a_host_without_a_presence_key_cannot_batch_decide(world) -> None:
+def test_a_proof_carries_no_authority_either_way(world) -> None:
+    """A stale, foreign or reused proof neither blocks nor grants anything."""
+
     _raise_ask(world.root, "bmsg_a")
-    items = _items(("bmsg_a", "approve"))
-    proof = _authorize(world, items)
-    world.presence.presence = False  # the anchor is now file-only
-    authorize = world.http.post(
-        AUTHORIZE, json={"expected_account_id": ACC, "items": items}, headers=AUTH
-    )
-    assert authorize.status_code == 409
-    assert authorize.json()["detail"]["code"] == "operator_presence_required"
-    # QA round 2, Q3: one sentence for any count (this selection has ONE item).
-    assert authorize.json()["detail"]["message"] == (
-        "deciding from the approvals list needs operator authority with Touch ID on this "
-        "machine; answer the request on its card instead"
-    )
-    decided = _decide(world, items, proof=proof)
-    assert decided.status_code == 409
-    assert decided.json()["detail"]["code"] == "operator_presence_required"
-    assert world.hub.calls == []
+    stale = {"challenge": "ab" * 32, "sig": "30" + "ab" * 35, "key_id": "old-key"}
+    response = _decide(world, _items(("bmsg_a", "approve")), proof=stale)
+    assert response.status_code == 200, response.text
+    # And no proof can make an item without a local ask decidable.
+    unknown = _decide(world, _items(("bmsg_c", "approve")), proof=stale)
+    assert unknown.json()["result"]["results"][0]["error"] == "no_open_ask"
+    assert len(_hub_calls(world.hub, "/v1/messaging/requests/decide")) == 1
+
+
+def test_an_ordinary_note_dm_produces_no_approvals_row_and_no_ask(world) -> None:
+    """A note is a message, not a decision: it never reaches Approvals.
+
+    The session never raises an ask for a stored note (``stored_kind_not_request``,
+    pinned in ``tests/unit/team_bridge/test_h5_envelope_negatives.py``). Here the
+    stub hub even serves the note on the requests read — the list still shows
+    no row (no local ask), and naming it in a batch sends nothing.
+    """
+
+    from local_operator.team_bridge import approvals
+
+    world.hub.pending = ["bmsg_note"]
+    original = world.hub.answer
+
+    def answer(method, path, query, body):
+        out = original(method, path, query, body)
+        if method == "GET" and path == "/v1/messaging/requests":
+            for item in out["items"]:
+                item["message"]["type"] = "note"
+                item["message"].pop("request", None)
+        return out
+
+    world.hub.answer = answer
+    assert "bmsg_note" not in approvals.bridge_asks_by_message(world.root)
+    listed = world.http.get(LIST, params={"expected_account_id": ACC}, headers=AUTH)
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["result"]["items"] == []
+    assert listed.json()["result"]["pending_count"] == 0
+    decided = _decide(world, _items(("bmsg_note", "approve")))
+    assert decided.json()["result"]["results"][0]["error"] == "no_open_ask"
+    assert _hub_calls(world.hub, "/v1/messaging/requests/decide") == []
+    assert asks_store.index_asks(world.root) == []  # no ask was raised anywhere
+
+
+def test_a_screening_rejected_request_has_no_decidable_row(world) -> None:
+    """Gap 2: no local ask (rejected, or not screened yet) means no row at all."""
+
+    ask_a = _raise_ask(world.root, "bmsg_a")  # the genuine, screened request
+    # bmsg_b: the hub still holds it pending, but screening rejected it here,
+    # so no ask was ever raised. bmsg_c: not screened yet — likewise no ask.
+    listed = world.http.get(LIST, params={"expected_account_id": ACC}, headers=AUTH)
+    result = listed.json()["result"]
+    assert [r["message_id"] for r in result["items"]] == ["bmsg_a"]
+    assert result["items"][0]["decidable"] is True
+    assert result["items"][0]["ask"]["ask_id"] == ask_a
+    assert result["pending_count"] == 1
+    # Once screening admits bmsg_c and raises its ask, it appears, decidable.
+    _raise_ask(world.root, "bmsg_c")
+    again = world.http.get(LIST, params={"expected_account_id": ACC}, headers=AUTH).json()
+    rows = {r["message_id"]: r["decidable"] for r in again["result"]["items"]}
+    assert rows == {"bmsg_a": True, "bmsg_c": True}
+
+
+def test_a_genuine_request_is_still_decidable_end_to_end(world) -> None:
+    ask_a = _raise_ask(world.root, "bmsg_a")
+    listed = world.http.get(LIST, params={"expected_account_id": ACC}, headers=AUTH).json()
+    assert listed["result"]["items"][0]["decidable"] is True
+    decided = _decide(world, _items(("bmsg_a", "deny")))
+    assert decided.status_code == 200, decided.text
+    assert decided.json()["result"]["results"][0]["status"] == "denied"
+    assert _ask_status(world.root, COS, ask_a) == "withdrawn"
+    assert world.signer_calls == []
 
 
 # --- R1-1: a lost response never strands a decided request ------------------
@@ -822,7 +870,7 @@ def test_drop_after_commit_is_settled_from_the_ledger_on_the_next_list(world) ->
     world.hub.drop_after_commit = False
     listed = world.http.get(LIST, params={"expected_account_id": ACC}, headers=AUTH)
     assert listed.status_code == 200, listed.text
-    assert [r["message_id"] for r in listed.json()["result"]["items"]] == ["bmsg_b", "bmsg_c"]
+    assert listed.json()["result"]["items"] == []  # bmsg_b/c have no local ask (gap 2)
     # The ledger read settled it: no POST, ask retired, intent confirmed.
     assert len(_hub_calls(world.hub, "/v1/messaging/decisions")) == 1
     assert len(_hub_calls(world.hub, "/v1/messaging/requests/decide")) == 1
@@ -895,20 +943,11 @@ def test_an_unsent_batch_word_is_never_carried_by_another_batch(world) -> None:
     assert _ask_status(world.root, COS, ask_a) == "open"
 
 
-def test_a_conflicting_reselection_is_refused_at_authorize_before_the_prompt(
-    world, monkeypatch
-) -> None:
-    """Exit 6a (P5): the other word is refused before any mint or prompt."""
-
-    from local_operator.team_bridge import approvals
+def test_a_conflicting_reselection_is_refused_by_the_authorize_shim(world) -> None:
+    """Exit 6a (P5): the other word is refused at the shim, as the old client expects."""
 
     _raise_ask(world.root, "bmsg_a")
     _fail_one_batch(world, "bmsg_a", "approve")
-    signed: list[str] = []
-    real = approvals.sign_selection
-    monkeypatch.setattr(
-        approvals, "sign_selection", lambda *a, **k: signed.append("x") or real(*a, **k)
-    )
     refused = world.http.post(
         AUTHORIZE,
         json={"expected_account_id": ACC, "items": _items(("bmsg_a", "deny"))},
@@ -918,32 +957,17 @@ def test_a_conflicting_reselection_is_refused_at_authorize_before_the_prompt(
     detail = refused.json()["detail"]
     assert detail["code"] == "earlier_decision_unconfirmed"
     assert detail["details"] == {"items": [{"message_id": "bmsg_a", "unsent_decision": "approve"}]}
-    assert signed == []
-    assert approvals._challenges == {}
+    assert world.signer_calls == []
 
 
 def test_decide_refuses_a_conflicting_selection_whole_with_zero_hub_calls(world) -> None:
-    """Exit 6b: a VALID proof over a conflicting selection changes nothing."""
-
-    from local_operator.team_bridge import approvals
+    """Exit 6b: a direct decide (no shim) over a conflicting selection changes nothing."""
 
     _raise_ask(world.root, "bmsg_a")
     _raise_ask(world.root, "bmsg_b")
     _fail_one_batch(world, "bmsg_a", "approve")
     calls_before = len(_hub_calls(world.hub, "/v1/messaging/requests/decide"))
-    selection = [
-        approvals.Selection("bmsg_a", "deny"),
-        approvals.Selection("bmsg_b", "approve"),
-    ]
-    # A proof minted outside ``/authorize``'s check (the daemon's own primitives).
-    digest = approvals.selection_digest(account_id=ACC, tenant_id="tnt_1", selection=selection)
-    challenge = approvals.mint_challenge(account_id=ACC, tenant_id="tnt_1", digest=digest)
-    signature = approvals.sign_selection(world.root, challenge=challenge, digest=digest)
-    refused = _decide(
-        world,
-        _items(("bmsg_a", "deny"), ("bmsg_b", "approve")),
-        proof={"challenge": challenge, **signature},
-    )
+    refused = _decide(world, _items(("bmsg_a", "deny"), ("bmsg_b", "approve")))
     assert refused.status_code == 409, refused.text
     assert refused.json()["detail"]["code"] == "earlier_decision_unconfirmed"
     assert len(_hub_calls(world.hub, "/v1/messaging/requests/decide")) == calls_before
@@ -951,7 +975,7 @@ def test_decide_refuses_a_conflicting_selection_whole_with_zero_hub_calls(world)
 
 
 def test_a_list_row_carries_its_unsent_decision_and_only_that_word_sends(world) -> None:
-    """Exit 9: the row shows the frozen word; selecting it sends it, signed."""
+    """Exit 9: the row shows the frozen word; selecting it again sends it."""
 
     ask_a = _raise_ask(world.root, "bmsg_a")
     _raise_ask(world.root, "bmsg_b")
@@ -993,7 +1017,7 @@ def test_a_card_answer_between_record_and_post_is_not_sent(world, monkeypatch) -
     assert _ask_status(world.root, COS, ask_a) == "answered"
 
 
-# --- S-6 / S-8: the prompt gate and the published prompt state ---------------
+# --- S-2: the shim publishes no feed frame ------------------------------------
 
 
 def _post_authorize(world, items, **extra):
@@ -1002,160 +1026,150 @@ def _post_authorize(world, items, **extra):
     )
 
 
-def _dismissing_signer(monkeypatch) -> list[str]:
-    """``sign_challenge`` as a dismissed Touch ID sheet; returns the call log."""
-
-    from local_operator.operator import sign as sign_mod
-    from local_operator.operator.keychain import KeyBackendError
-
-    calls: list[str] = []
-
-    def dismissed(**kwargs):
-        calls.append(kwargs["challenge"])
-        raise KeyBackendError("the person dismissed the sheet")
-
-    monkeypatch.setattr(sign_mod, "sign_challenge", dismissed)
-    return calls
-
-
-def test_a_concurrent_authorize_is_refused_while_a_prompt_is_up(world, monkeypatch) -> None:
-    """Exit 1: single-flight — one signer call, one live challenge, a 429 for the rest."""
-
-    from local_operator.operator import sign as sign_mod
-    from local_operator.team_bridge import approvals
-
-    _raise_ask(world.root, "bmsg_a")
-    entered, release = threading.Event(), threading.Event()
-    calls: list[str] = []
-    real = sign_mod.sign_challenge
-
-    def blocking(**kwargs):
-        calls.append(kwargs["challenge"])
-        entered.set()
-        assert release.wait(10)
-        return real(**kwargs)
-
-    monkeypatch.setattr(sign_mod, "sign_challenge", blocking)
-    first: dict[str, Any] = {}
-    worker = threading.Thread(
-        target=lambda: first.update(r=_post_authorize(world, _items(("bmsg_a", "approve"))))
-    )
-    worker.start()
-    try:
-        assert entered.wait(10)
-        second = _post_authorize(world, _items(("bmsg_a", "approve")))
-        assert second.status_code == 429, second.text
-        assert second.json()["detail"]["code"] == "operator_prompt_in_flight"
-        assert len(calls) == 1
-        assert len(approvals._challenges) == 1
-    finally:
-        release.set()
-        worker.join(10)
-    assert first["r"].status_code == 200, first["r"].text
-
-
-def test_dismissed_prompts_never_exhaust_the_challenge_store(world, monkeypatch) -> None:
-    """Exit 2 (S-8): 65 dismissals, then a real prompt still mints and signs."""
-
-    from local_operator.operator import sign as sign_mod
-    from local_operator.team_bridge import approvals
-
-    _raise_ask(world.root, "bmsg_a")
-    clock = SimpleNamespace(now=1000.0)
-    monkeypatch.setattr(approvals, "_gate_clock", lambda: clock.now)
-    real = sign_mod.sign_challenge
-    calls = _dismissing_signer(monkeypatch)
-    for _ in range(65):
-        refused = _post_authorize(world, _items(("bmsg_a", "approve")))
-        assert refused.json()["detail"]["code"] == "operator_signature_unavailable"
-        clock.now += approvals.PROMPT_COOLDOWN_MAX_S + 1  # step past the cool-down
-    assert len(calls) == 65
-    assert approvals._challenges == {}
-    monkeypatch.setattr(sign_mod, "sign_challenge", real)
-    assert _post_authorize(world, _items(("bmsg_a", "approve"))).status_code == 200
-
-
-def test_a_dismissal_starts_a_doubling_cooldown_that_success_resets(world, monkeypatch) -> None:
-    """Exit 3: 10 s, doubling to a 60 s cap; refused calls never reach the signer."""
-
-    from local_operator.operator import sign as sign_mod
-    from local_operator.team_bridge import approvals
-
-    _raise_ask(world.root, "bmsg_a")
-    clock = SimpleNamespace(now=1000.0)
-    monkeypatch.setattr(approvals, "_gate_clock", lambda: clock.now)
-    real = sign_mod.sign_challenge
-    dismissed = _dismissing_signer(monkeypatch)
-    item = _items(("bmsg_a", "approve"))
-
-    assert _post_authorize(world, item).status_code == 409  # dismissal 1 at t=1000
-    clock.now += 5
-    early = _post_authorize(world, item)
-    assert early.status_code == 429, early.text
-    assert early.json()["detail"]["code"] == "operator_prompt_cooldown"
-    assert early.json()["detail"]["details"] == {"retry_after_s": 5}
-    assert early.headers["retry-after"] == "5"
-    assert len(dismissed) == 1  # the refused call never prompted
-    clock.now += 6  # +11 s: prompts again (and is dismissed: window doubles)
-    assert _post_authorize(world, item).json()["detail"]["code"] == "operator_signature_unavailable"
-    windows = []
-    for _ in range(4):
-        clock.now += 1
-        windows.append(
-            _post_authorize(world, item).json()["detail"]["details"]["retry_after_s"] + 1
-        )
-        clock.now += windows[-1]
-        assert _post_authorize(world, item).status_code == 409
-    assert windows == [20, 40, 60, 60]
-
-    monkeypatch.setattr(sign_mod, "sign_challenge", real)
-    clock.now += 61
-    assert _post_authorize(world, item).status_code == 200  # success resets
-    _dismissing_signer(monkeypatch)
-    assert _post_authorize(world, item).status_code == 409
-    clock.now += 11
-    assert _post_authorize(world, item).status_code == 409  # 10 s again, not 120
-
-
-def test_each_prompt_is_published_on_the_desktop_feed(world, monkeypatch) -> None:
-    """Exit 4: ``team_bridge_authorize`` frames name what the prompt is for."""
+def test_the_authorize_shim_publishes_no_feed_frame(world) -> None:
+    """PR #4208 security round 1, S-2: a lone ``signed`` frame renders nothing in
+    the shipped desktop, so the shim no longer claims a detection signal."""
 
     frames: list[dict[str, Any]] = []
     world.http.app.state.desktop_feed = SimpleNamespace(
         publish_team_bridge_authorize=lambda payload: frames.append(payload)
     )
     _raise_ask(world.root, "bmsg_a")
-    ok = _post_authorize(
-        world, _items(("bmsg_a", "approve"), ("bmsg_zz", "deny")), client_ref="c0ffee"
-    )
+    ok = _post_authorize(world, _items(("bmsg_a", "approve")), client_ref="c0ffee")
     assert ok.status_code == 200, ok.text
-    assert [f["state"] for f in frames] == ["prompting", "signed"]
-    first = frames[0]
-    assert set(first) == {"authorize_id", "client_ref", "state", "items"}
-    assert first["client_ref"] == "c0ffee"
-    assert first["items"] == [
-        {
-            "message_id": "bmsg_a",
-            "word": "approve",
-            "sender": "priya@acme.example",
-            "excerpt": "approve the spend?",
-        },
-        {"message_id": "bmsg_zz", "word": "deny", "sender": None, "excerpt": None},
-    ]
-    assert frames[1]["authorize_id"] == first["authorize_id"]
-    flat = json.dumps(frames)
-    for leaked in ("PRIVATE BODY", "PRIVATE RATIONALE", "body_hash", "rationale"):
-        assert leaked not in flat
-
-    _dismissing_signer(monkeypatch)
-    _post_authorize(world, _items(("bmsg_a", "approve")))
-    assert [f["state"] for f in frames[2:]] == ["prompting", "dismissed"]
-    assert frames[2]["client_ref"] is None
-
+    assert frames == []
+    # ``client_ref`` is still grammar-checked, so a shipped client's body keeps
+    # its contract and a malformed one is still refused.
     for bad in ("C0FFEE", "x" * 4, "a" * 33, "", 7):
         refused = _post_authorize(world, _items(("bmsg_a", "approve")), client_ref=bad)
         assert refused.status_code == 422, (bad, refused.text)
-    assert len(frames) == 4  # a malformed body publishes nothing
+    assert world.signer_calls == []
+
+
+# --- S-1: a desktop CARD answer to a Team Bridge request never prompts --------
+
+
+def _card(world, *, ask_id: str, message_id: str, word: str):
+    import asyncio
+
+    return asyncio.run(
+        routes.decide_request_from_card(world.root, ask_id=ask_id, message_id=message_id, word=word)
+    )
+
+
+def test_a_card_decision_settles_the_ask_with_no_signer_call(world) -> None:
+    """The bearer path the answer route takes for a terminal-started session."""
+
+    ask_a = _raise_ask(world.root, "bmsg_a")
+    assert _card(world, ask_id=ask_a, message_id="bmsg_a", word="deny") == "decided"
+    (call,) = _hub_calls(world.hub, "/v1/messaging/requests/decide")
+    assert call["body"]["decisions"] == [
+        {
+            "message_id": "bmsg_a",
+            "decision": "denied",
+            "ask_ref": {"ask_id": ask_a, "question_id": "bmsg_a"},
+            "decided_via": "bearer-only",
+        }
+    ]
+    assert world.hub.ledger[0]["request_id"] == "bmsg_a"
+    assert _ask_status(world.root, COS, ask_a) == "withdrawn"
+    assert _intent_states(world.root) == {"bmsg_a": "sent"}
+    assert world.signer_calls == []
+
+
+def test_a_card_for_another_ask_keeps_the_runtime_door(world) -> None:
+    """A card whose ask is not this machine's Team Bridge ask for that request
+    (another ask id, or no ask) is not decided here: ``None``, zero hub calls."""
+
+    _raise_ask(world.root, "bmsg_a")
+    assert _card(world, ask_id="a-elsewhere", message_id="bmsg_a", word="approve") is None
+    assert _card(world, ask_id="a-none", message_id="bmsg_c", word="approve") is None
+    assert _hub_calls(world.hub, "/v1/messaging/requests/decide") == []
+
+
+def test_a_card_refusal_is_a_card_sentence_and_nothing_is_decided_twice(world) -> None:
+    ask_a = _raise_ask(world.root, "bmsg_a")
+    world.hub.pending = ["bmsg_b"]  # decided elsewhere: the hub answers already-decided
+    with pytest.raises(ValueError, match="already decided"):
+        _card(world, ask_id=ask_a, message_id="bmsg_a", word="approve")
+    assert _ask_status(world.root, COS, ask_a) == "withdrawn"  # terminal: settled
+    assert world.signer_calls == []
+
+
+def test_a_card_answer_outside_approve_or_deny_saves_nothing(world) -> None:
+    """S-4 (security round 2): a word outside the closed set is refused BEFORE
+    any intent is recorded, so it cannot wedge the request; approve then decides."""
+
+    ask_a = _raise_ask(world.root, "bmsg_a")
+    for word in ("maybe", "dismiss", ""):
+        with pytest.raises(ValueError) as refused:
+            _card(world, ask_id=ask_a, message_id="bmsg_a", word=word)
+        assert str(refused.value) == (
+            "that is not an answer this request accepts — choose Approve or Deny."
+        )
+    assert _intent_states(world.root) == {}  # nothing saved
+    assert _hub_calls(world.hub, "/v1/messaging/requests/decide") == []
+    assert _ask_status(world.root, COS, ask_a) == "open"
+    assert _card(world, ask_id=ask_a, message_id="bmsg_a", word="approve") == "decided"
+    assert _intent_states(world.root) == {"bmsg_a": "sent"}
+    assert world.signer_calls == []
+
+
+def test_decide_selection_never_records_a_word_outside_the_closed_set(world) -> None:
+    """The backstop for any caller that skips the route's ``Literal``."""
+
+    import asyncio
+
+    from local_operator.team_bridge import approvals
+    from local_operator.team_bridge.read_context import resolve_read_context, wire_for
+
+    _raise_ask(world.root, "bmsg_a")
+
+    async def run() -> dict[str, Any]:
+        wire = wire_for(world.root)
+        context = await resolve_read_context(world.root, expected_account_id=ACC, wire=wire)
+        return await approvals.decide_selection(
+            wire,
+            [approvals.Selection("bmsg_a", "maybe")],
+            config_dir=world.root,
+            owner=context.owner,
+            access=context.access,
+            expected_account_id=ACC,
+            batch_ref=f"{approvals.BATCH_INTENT_PREFIX}test",
+        )
+
+    (result,) = asyncio.run(run())["results"]
+    assert result["error"] == "not_a_decision_word" and result["sent"] is False
+    assert _intent_states(world.root) == {}
+    assert _hub_calls(world.hub, "/v1/messaging/requests/decide") == []
+    # And the list stays decidable: no unsent word was frozen on the row.
+    listed = world.http.get(LIST, params={"expected_account_id": ACC}, headers=AUTH)
+    (row,) = listed.json()["result"]["items"]
+    assert row["decidable"] is True and row["unsent_decision"] is None
+
+
+def test_a_card_whose_item_the_hub_omits_reads_as_possibly_committed(world) -> None:
+    """R2-2: sent but unconfirmed is NOT "nothing was decided"; a retry is safe."""
+
+    ask_a = _raise_ask(world.root, "bmsg_a")
+    world.hub.batch_answer = {"bmsg_a": {"omit": "1"}}
+    with pytest.raises(ValueError) as unconfirmed:
+        _card(world, ask_id=ask_a, message_id="bmsg_a", word="approve")
+    assert str(unconfirmed.value) == (
+        "the decision was sent but Team Bridge has not confirmed it yet; it may already be "
+        "decided — answering again is safe"
+    )
+    assert "nothing was decided" not in str(unconfirmed.value)
+    assert len(_hub_calls(world.hub, "/v1/messaging/requests/decide")) == 1
+    world.hub.batch_answer = {}
+    assert _card(world, ask_id=ask_a, message_id="bmsg_a", word="approve") == "decided"
+
+
+def test_a_card_in_a_non_designated_session_is_refused(world) -> None:
+    ask_o = _raise_ask(world.root, "bmsg_a", session_id="s-other")
+    with pytest.raises(ValueError, match="no longer your Team Bridge session"):
+        _card(world, ask_id=ask_o, message_id="bmsg_a", word="approve")
+    assert _hub_calls(world.hub, "/v1/messaging/requests/decide") == []
 
 
 def test_a_request_decided_elsewhere_is_settled_by_the_list(world) -> None:
@@ -1232,7 +1246,9 @@ def test_the_list_pages_with_after_and_next_cursor(world) -> None:
     first = world.http.get(
         LIST, params={"expected_account_id": ACC, "limit": "2"}, headers=AUTH
     ).json()["result"]
-    assert [r["message_id"] for r in first["items"]] == ["bmsg_a", "bmsg_b"]
+    # bmsg_b has no local ask, so its page shows one row (gap 2) — the cursor
+    # still follows the hub's page, not the visible row count.
+    assert [r["message_id"] for r in first["items"]] == ["bmsg_a"]
     assert first["pending_count"] == 1 and first["has_more"] is True
     assert first["next_cursor"] == "cur_page2"
     second = world.http.get(
@@ -1247,6 +1263,8 @@ def test_the_list_pages_with_after_and_next_cursor(world) -> None:
 
 
 def test_the_list_drops_an_item_with_no_tenant(world) -> None:
+    for message_id in ("bmsg_a", "bmsg_b", "bmsg_c"):
+        _raise_ask(world.root, message_id)
     world.hub.tenantless = {"bmsg_b"}
     listed = world.http.get(LIST, params={"expected_account_id": ACC}, headers=AUTH)
     assert [r["message_id"] for r in listed.json()["result"]["items"]] == ["bmsg_a", "bmsg_c"]

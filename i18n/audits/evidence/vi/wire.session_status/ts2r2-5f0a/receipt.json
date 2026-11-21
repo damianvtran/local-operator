@@ -1,0 +1,31 @@
+{
+  "locale": "vi",
+  "namespace": "wire.session_status",
+  "date": "2026-11-19T21:48:43.012312+00:00",
+  "source_sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326",
+  "context_sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525",
+  "target_sha256": "91fdc2a9fb34b9bd23efce8daabd33a74a7511ad67a9b269e711dd90c96b277e",
+  "translator": {
+    "agent": "i18n-translator",
+    "task": "terminal-status-vi",
+    "session": "56c3029571f6",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session host Model header",
+    "fallback_used": false
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "5f0a2918d2f2",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host session-state Model declaration",
+    "fallback_used": false,
+    "independent_from_translator_session": "56c3029571f6",
+    "independent_from_translator": true
+  },
+  "status": "passed",
+  "round": "second-r2-ts2r2-5f0a",
+  "keys_audited": 17,
+  "note": "R2 second independent delta: VI-S2-01 fixed; 0 blocker/major. Record: i18n/audits/evidence/vi/wire.session_status/ts2r2-5f0a/record.json. Prior failed audit retained; no visual/runtime clearance.",
+  "evidence": "i18n/audits/evidence/vi/wire.session_status/ts2r2-5f0a/record.json",
+  "evidence_sha256": "4ef6b6e2b4fbd0315cd6367259b55dd3a3a086d6cbcafab7bc303507918057f1"
+}

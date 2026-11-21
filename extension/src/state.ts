@@ -34,6 +34,17 @@ export interface StoredSurface {
   // ephemeral, so a mismatch is never repaired on an ordinary command; only
   // explicit open/resume may establish and persist a fresh LO-owned group.
   appliedGroupId?: number;
+  // Origins this tab reached through a CONSUMED one-time approval (allow-once
+  // or an in-command popup approval). The once grant is spent by the
+  // navigation that used it, so the persistent grant set never names these
+  // origins; without this record every later read of the page the user just
+  // approved would be refused (surface-origin.ts). Bounded and per-surface:
+  // it dies with the tab, like the approval it records. It deliberately
+  // survives the tab leaving and returning (SSO/OAuth round trips, payment
+  // hand-offs, link out + Back): the user allowed the site for this tab, and a
+  // second prompt for it mid-flow is the friction allow-once must not cause.
+  // A saved Deny outranks it and a revoke removes it.
+  admittedOrigins?: string[];
 }
 
 export interface PendingOrigin {
@@ -206,13 +217,98 @@ export function withAdmission<T>(op: () => Promise<T>): Promise<T> {
 export function putSurface(surface: StoredSurface): Promise<void> {
   return withStore(async () => {
     const surfaces = await getSurfaces();
-    surfaces[surfaceToken(surface)] = surface;
+    const token = surfaceToken(surface);
+    // Callers write back a copy they read BEFORE a navigation (goto/open bump
+    // the epoch after `navigate`), while the navigation itself added or
+    // dropped admitted origins (noteAdmittedOrigin / forgetAdmittedOrigin).
+    // The STORED list is therefore the authority for an existing surface: a
+    // stale copy must neither erase an admission nor resurrect one a revoke
+    // already dropped. Only a brand-new
+    // surface takes the caller's list.
+    const existing = surfaces[token];
+    const admitted = existing ? existing.admittedOrigins : surface.admittedOrigins;
+    const next: StoredSurface = { ...surface };
+    if (admitted?.length) next.admittedOrigins = admitted.slice(-MAX_ADMITTED_ORIGINS);
+    else delete next.admittedOrigins;
+    surfaces[token] = next;
     await deadline(
       chrome.storage.session.set({ surfaces }),
       CHROME_API_DEADLINE_MS,
       "chrome.storage.session.set(surfaces)",
     );
   });
+}
+
+/** Admitted origins kept per surface; a driven tab rarely crosses more than a
+ * handful of once-approved sites, and the oldest entry is dropped past this. */
+export const MAX_ADMITTED_ORIGINS = 16;
+
+/**
+ * Remember that every surface bound to `tabId` was admitted to `origin` by a
+ * consumed one-time approval (see `StoredSurface.admittedOrigins`).
+ *
+ * Keyed by tab id, not token: the navigation gate (`withOriginGate`) only knows
+ * the CDP tab id. Runs in the store lane so it cannot interleave with a prune
+ * or another surface write, and writes nothing when the origin is already
+ * recorded — the common repeat case costs one read.
+ */
+export function noteAdmittedOrigin(tabId: number, origin: string): Promise<void> {
+  // An opaque or non-web origin ("null", "", about:blank's) names no site a
+  // grant could cover; recording it would only crowd out real admissions.
+  if (!isAdmissibleOrigin(origin)) return Promise.resolve();
+  return withStore(async () => {
+    const surfaces = await getSurfaces();
+    let changed = false;
+    for (const surface of Object.values(surfaces)) {
+      if (surface.tabId !== tabId) continue;
+      const admitted = surface.admittedOrigins ?? [];
+      if (admitted.includes(origin)) continue;
+      surface.admittedOrigins = [...admitted, origin].slice(-MAX_ADMITTED_ORIGINS);
+      changed = true;
+    }
+    if (!changed) return;
+    await deadline(
+      chrome.storage.session.set({ surfaces }),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.set(surfaces)",
+    );
+  });
+}
+
+/** Rewrite the admitted list of every surface `select` picks; one store-lane
+ * read, and a write only when something actually changed. */
+function rewriteAdmitted(
+  select: (surface: StoredSurface) => boolean,
+  keep: (origin: string) => boolean,
+): Promise<void> {
+  return withStore(async () => {
+    const surfaces = await getSurfaces();
+    let changed = false;
+    for (const surface of Object.values(surfaces)) {
+      if (!select(surface) || !surface.admittedOrigins?.length) continue;
+      const kept = surface.admittedOrigins.filter(keep);
+      if (kept.length === surface.admittedOrigins.length) continue;
+      if (kept.length) surface.admittedOrigins = kept;
+      else delete surface.admittedOrigins;
+      changed = true;
+    }
+    if (!changed) return;
+    await deadline(
+      chrome.storage.session.set({ surfaces }),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.set(surfaces)",
+    );
+  });
+}
+
+function isAdmissibleOrigin(origin: string): boolean {
+  return origin.startsWith("https://") || origin.startsWith("http://");
+}
+
+/** A revoke names an origin the user no longer wants exposed: drop it from
+ * every live surface so an earlier allow-once cannot outlive the revoke. */
+export function forgetAdmittedOrigin(origin: string): Promise<void> {
+  return rewriteAdmitted(() => true, (admitted) => admitted !== origin);
 }
 
 /** Remove one surface and its snapshot refs; other surfaces are untouched. */

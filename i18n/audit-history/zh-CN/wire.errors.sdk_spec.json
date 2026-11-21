@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "wire.errors.sdk_spec",
+  "history_sha256": "860b356cb83f216705ea234c279bed7d6fc93c2ee8f2915ff9e409e4f4b8e4fa",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.sdk_spec",
+      "source_sha256": "aa91c5029e2807e1fd8aaf53a1b068d06eb23a314624ecc7171acea6325298eb",
+      "translator": {
+        "agent": "coder (lopdev)",
+        "session": "22b4da040af8",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (task)",
+        "session": "75e71b9bd834",
+        "model": "openai/gpt-6.2-sol",
+        "date": "2026-11-20",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #4349: independent audit of the new mcp_ready_timeout_invalid diagnostic at cac0388a5296; all 21 carried messages unchanged from the prior passed source. Compact developer phrasing 必须为…的有限数值; full-width colon and no mixed-script spacing. Both technical identifiers are byte-identical, no placeholders or ICU, finite with inclusive lower bound zero. Target catalogue_sha256 = 9f37950280ff8c40bb2af5200aefc85d40095d311db2b79370bd7e9b940414b9. No native terminal shaping claim."
+    }
+  ]
+}

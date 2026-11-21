@@ -1,0 +1,9 @@
+PASS: original SHA-256 unchanged; frozen en/context verified; exact 17-key order; exactly 2 byte replacements and reversible byte-identical remainder; retired_label preserved
+PASS: NFC and single logical line for all 17 values
+PASS: both runtime_overdue bodies formatted with new copy; all other 24 cause bodies, selector identity/order and ICU arguments unchanged
+PASS: repository check.py::check_catalogues isolated en/vi namespace: 0 problems
+PASS: missing-key negative control rejected
+PASS: renamed-placeholder negative control rejected
+PASS: restored candidate: 0 problems
+LIMIT: translated revision only, NOT self-audited; both previous audit results inapplicable to new target SHA pending two independent delta audits; no runtime/visual/pseudo/native clearance
+GAP: external diagnostic legacy English remains unresolved, not an accepted exception

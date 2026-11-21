@@ -1,0 +1,18 @@
+{
+  "cli.services_heavy.heavy": "Chờ khe tác vụ nặng dùng chung của máy, hoặc chạy một lệnh trong khi giữ khe đó",
+  "cli.services_heavy.heavy_description": "Các bản build và lượt chạy kiểm thử nặng dùng chung một vài khe trên mỗi máy để các bản build song song không làm cạn bộ nhớ. “wait” chờ đến khi có khe trống mà không chiếm khe; “run” chiếm một khe, chạy một lệnh trong khi giữ khe và giải phóng khe khi lệnh kết thúc; “status” cho biết ai đang giữ từng khe. Hãy dùng các lệnh này thay vì thăm dò một tiến trình khác theo tên.",
+  "cli.services_heavy.wait": "Chờ đến khi có khe tác vụ nặng trống, không chiếm khe",
+  "cli.services_heavy.run": "Chạy một lệnh trong khi giữ một khe tác vụ nặng và giải phóng khe khi lệnh kết thúc",
+  "cli.services_heavy.status": "Hiển thị các khe tác vụ nặng cùng pid, thời gian chạy và lệnh của từng bên giữ khe",
+  "cli.services_heavy.timeout": "Thời gian xếp hàng tối đa để chờ khe, tính bằng giây (mặc định: giới hạn hàng đợi của máy, {wait_seconds}s trừ khi {env_name} đặt giá trị khác)",
+  "cli.services_heavy.command": "Lệnh cần chạy, đặt sau `--`",
+  "cli.services_heavy.holder": "  khe {slot}: {holder}, đã chạy {age}: {command}",
+  "cli.services_heavy.no_command": "Không có gì để chạy: hãy đặt lệnh sau `--`, ví dụ `lop services heavy run -- make test`",
+  "cli.services_heavy.events_header": "  sự kiện thuê khe gần đây (nhật ký: {path}):",
+  "cli.services_heavy.event_line": "    {time} {record}",
+  "cli.services_heavy.no_events": "  chưa ghi nhận sự kiện thuê khe nào (nhật ký: {path})",
+  "cli.services_heavy.audit_row": "kiểm toán tác vụ nặng: gần nhất {record}, {age} trước (nhật ký: {path})",
+  "cli.services_heavy.start_by": "Thời điểm muộn nhất để lệnh bắt đầu: số giây epoch hoặc ISO-8601 có độ lệch hoặc Z (ví dụ 2026-11-19T08:05:00Z). Được kiểm tra sau khi chờ hàng đợi, ngay trước khi lệnh bắt đầu; nếu đã quá hạn, lệnh không chạy và mã thoát là 79",
+  "cli.services_heavy.late_start": "bắt đầu trễ: hạn start-by {start_by} đã qua (hiện tại {now}, trễ {late} giây); lệnh không được bắt đầu",
+  "cli.services_heavy.not_start_by": "{value} không phải số giây epoch hay thời điểm ISO-8601 có độ lệch hoặc Z"
+}

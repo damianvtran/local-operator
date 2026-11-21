@@ -397,7 +397,9 @@ async def test_images_ride_the_completed_request() -> None:
     handle, session = make_handle()
     captured: list[Any] = []
 
-    async def capture(text: str, images: Any = None, command_id: str | None = None) -> str:
+    async def capture(
+        text: str, images: Any = None, command_id: str | None = None, **_fields: Any
+    ) -> str:
         captured.append(images)
         session.prompt_calls.append(text)
         return "ok"
@@ -430,7 +432,9 @@ async def test_each_completion_uses_a_fresh_command_id() -> None:
     handle, session = make_handle()
     ids: list[str | None] = []
 
-    async def capture(text: str, images: Any = None, command_id: str | None = None) -> str:
+    async def capture(
+        text: str, images: Any = None, command_id: str | None = None, **_fields: Any
+    ) -> str:
         ids.append(command_id)
         session.prompt_calls.append(text)
         return "ok"

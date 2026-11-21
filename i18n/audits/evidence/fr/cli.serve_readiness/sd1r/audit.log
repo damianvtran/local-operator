@@ -1,0 +1,60 @@
+# Actual execution log
+Record reference: i18n/audits/evidence/fr/cli.serve_readiness/sd1r/record.json
+Auditor: Audit daemon French; session 19f657b90086; actual model openai/gpt-6.1-sol; no fallback reported
+UTC: 2026-11-16T04:51:11.522853+00:00
+CWD: /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade
+
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+exit_code: 0
+stdout:
+check.py: catalogue checks: 0 problem(s)
+
+stderr:
+
+
+$ .venv/bin/python -c <exact code retained in i18n/audits/evidence/fr/cli.serve_readiness/sd1r/verify.py.txt>
+exit_code: 0
+stdout:
+DELTA PASS: English/context hashes unchanged; exact FR-SD1-01 suggested replacement applied; all other French bytes unchanged
+CURRENT FRENCH SHA256: 4f3fcbc1a716d020cc9735382e607ca315e5cdbf2d922750f8d333f2e4f9ae68
+REUSING hash-verified original mechanical parser check, not repeating the semantic audit of unchanged keys
+PASS cli.serve_readiness.unproven arguments= () plural_categories= ()
+RENDER count=1 cells=125 est enregistré, mais l’identité de son processus ne peut pas être prouvée (aucun horodatage de démarrage n’a pu être comparé)
+PASS cli.serve_readiness.not_reporting arguments= () plural_categories= ()
+RENDER count=1 cells=69 est enregistré mais ne répond pas (il n’envoie plus de signal de vie)
+PASS cli.serve_readiness.not_this_daemon arguments= () plural_categories= ()
+RENDER count=1 cells=64 est enregistré, mais un autre processus détient désormais ce PID
+PASS cli.serve_readiness.unknown_state arguments= () plural_categories= ()
+RENDER count=1 cells=35 est enregistré dans un état inconnu
+PASS cli.serve_readiness.install_unknown arguments= () plural_categories= ()
+RENDER count=1 cells=62 utilise un build qui ne peut pas être comparé à l’installation
+PASS cli.serve_readiness.cgroup_unknown arguments= () plural_categories= ()
+RENDER count=1 cells=66 s’exécute dans un cgroup que cette vérification ne peut pas situer
+PASS cli.serve_readiness.recorded_gap arguments= (('recorded', 'simple'), ('install', 'simple')) plural_categories= ()
+RENDER count=1 cells=72 build enregistré v1, installation v2 (identité du processus non prouvée)
+PASS cli.serve_readiness.unknown arguments= (('count', 'plural'), ('device', 'simple'), ('reasons', 'simple')) plural_categories= (('one', 'many', 'other'),)
+RENDER count=0 cells=184 le daemon `lop serve` sur node-a : pid 123 est enregistré, mais son identité reste non prouvée ; il est donc impossible de savoir s’il correspond à l’installation et s’il est supervisé
+RENDER count=1 cells=184 le daemon `lop serve` sur node-a : pid 123 est enregistré, mais son identité reste non prouvée ; il est donc impossible de savoir s’il correspond à l’installation et s’il est supervisé
+RENDER count=2 cells=193 les daemons `lop serve` sur node-a : pid 123 est enregistré, mais son identité reste non prouvée ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés
+RENDER count=1000000 cells=193 les daemons `lop serve` sur node-a : pid 123 est enregistré, mais son identité reste non prouvée ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés
+PASS cli.serve_readiness.stale arguments= (('count', 'plural'), ('device', 'simple'), ('pids', 'simple'), ('builds', 'simple'), ('install', 'simple')) plural_categories= (('one', 'many', 'other'),)
+RENDER count=0 cells=147 le daemon `lop serve` sur node-a (123, 456) utilise v1, mais l’installation est v2 : les sessions distantes qu’il héberge utilisent cet autre build
+RENDER count=1 cells=147 le daemon `lop serve` sur node-a (123, 456) utilise v1, mais l’installation est v2 : les sessions distantes qu’il héberge utilisent cet autre build
+RENDER count=2 cells=156 les daemons `lop serve` sur node-a (123, 456) utilisent v1, mais l’installation est v2 : les sessions distantes qu’ils hébergent utilisent ces autres builds
+RENDER count=1000000 cells=156 les daemons `lop serve` sur node-a (123, 456) utilisent v1, mais l’installation est v2 : les sessions distantes qu’ils hébergent utilisent ces autres builds
+PASS cli.serve_readiness.other_unit arguments= (('count', 'plural'), ('device', 'simple'), ('holders', 'simple')) plural_categories= (('one', 'many', 'other'),)
+RENDER count=0 cells=111 le daemon `lop serve` sur node-a est rattaché à un autre service (custom.service), et non à une unité lop serve
+RENDER count=1 cells=111 le daemon `lop serve` sur node-a est rattaché à un autre service (custom.service), et non à une unité lop serve
+RENDER count=2 cells=116 les daemons `lop serve` sur node-a sont rattachés à d’autres services (custom.service), et non à une unité lop serve
+RENDER count=1000000 cells=116 les daemons `lop serve` sur node-a sont rattachés à d’autres services (custom.service), et non à une unité lop serve
+PASS cli.serve_readiness.identity_restart arguments= (('device', 'simple'),) plural_categories= ()
+RENDER count=1 cells=207 sur node-a, lancez `lop services status` pour inspecter les enregistrements, puis `lop services restart` pour enregistrer les identités des processus ; le redémarrage vérifie chaque daemon avant toute action
+SUMMARY: 11/11 keys; valid duplicate-free JSON; exact keys and context coverage; per-branch placeholder kinds and code/tag literals preserved; 3/3 plural messages contain one/many/other; no bidi controls
+FIT: no maxCells/maxChars supplied; widths above use synthetic bounded values, not screenshot/layout evidence
+NEIGHBOR INTEGRATION count=1: le daemon `lop serve` sur node-a : pid 123 est enregistré mais ne répond pas (il n’envoie plus de signal de vie) ; il est donc impossible de savoir s’il correspond à l’installation et s’il est supervisé
+NEIGHBOR INTEGRATION count=2: les daemons `lop serve` sur node-a : pid 123 est enregistré mais ne répond pas (il n’envoie plus de signal de vie) ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés
+NEIGHBOR INTEGRATION count=1000000: les daemons `lop serve` sur node-a : pid 123 est enregistré mais ne répond pas (il n’envoie plus de signal de vie) ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés
+SUMMARY: FR-SD1-01 fixed exactly; 10 unchanged keys retain original semantic coverage; direct unknown diagnostic composition renders; no live process or provider calls
+
+stderr:
+

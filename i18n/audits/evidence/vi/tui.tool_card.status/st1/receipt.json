@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "audit_id": "st1",
+  "locale": "vi",
+  "namespace": "tui.tool_card.status",
+  "record": "i18n/audits/evidence/vi/tui.tool_card.status/st1/record.json",
+  "record_note": "record.json is the independent auditor's own machine-readable receipt, copied byte-for-byte from its session scratchpad (~/.local-operator/sessions/fb7a98e20635/scratchpad/status-audit-vi.json)",
+  "record_sha256": "57551259a77666e34bebadc715a9d2543750e1cd3aaf7a0c82b8cbe29ed1f95c",
+  "source_sha256": "521c2289a94bca69288753c2ac7fbd73544ff823669c6e5422d98c8e1f7bba93",
+  "context_sha256": "33fdaa44400ced67d6326a594e024fc38eaeb2865562d2b2b4d8dfc5b2a81bd0",
+  "target_sha256": "aea0cec3b3489f5d25a22757751ef64d6b7d73398d5ea4e55a4374c7e3811438",
+  "verdict": "passed",
+  "commit_audited": "66c87c0755e2 (worktree head; locale bytes uncommitted at audit time)",
+  "auditor": {
+    "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+    "session": "fb7a98e20635",
+    "model": "openai/gpt-6.1-sol"
+  },
+  "ledger_receipt": {
+    "locale": "vi",
+    "namespace": "tui.tool_card.status",
+    "source_sha256": "521c2289a94bca69288753c2ac7fbd73544ff823669c6e5422d98c8e1f7bba93",
+    "context_sha256": "33fdaa44400ced67d6326a594e024fc38eaeb2865562d2b2b4d8dfc5b2a81bd0",
+    "target_sha256": "aea0cec3b3489f5d25a22757751ef64d6b7d73398d5ea4e55a4374c7e3811438",
+    "translator": {
+      "agent": "translator (lopdev task subagent, profile 'translator')",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-20",
+      "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+    },
+    "auditor": {
+      "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+      "session": "fb7a98e20635",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-20",
+      "result": "clean-with-findings",
+      "findings": 2,
+      "unresolved_blocker_major": 0,
+      "severity_counts": {
+        "blocker": 0,
+        "major": 0,
+        "minor": 2,
+        "nit": 0
+      },
+      "finding_ids": [
+        "VI-S1",
+        "VI-S2"
+      ],
+      "fallback_used": false,
+      "independent_from_translator": true,
+      "actual_model_source": "auditor's own receipt (model field)"
+    },
+    "status": "passed",
+    "note": "Independent full audit (round 1) of the new tui.tool_card.status namespace (18 keys), source commit 66c87c0755e2. Auditor fb7a98e20635 (openai/gpt-6.1-sol) verdict clean-with-findings: 0 blocker, 0 major, 2 minor, 0 nit (VI-S1, VI-S2). Superseded: target_sha256 is the round-1 file as hashed by the auditor; the translator then revised it and a round-2 audit (row st2) covers the current bytes. Record: i18n/audits/evidence/vi/tui.tool_card.status/st1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+    "evidence": "i18n/audits/evidence/vi/tui.tool_card.status/st1/record.json",
+    "round": "st1"
+  }
+}

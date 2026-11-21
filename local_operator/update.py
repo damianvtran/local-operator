@@ -2477,9 +2477,23 @@ def generation_in_argv(argv: str) -> Path | None:
     fields = argv.split(None, 1)
     if not fields:
         return None
-    candidate = Path(fields[0])
+    return generation_containing(Path(fields[0]))
+
+
+def generation_containing(path: Path) -> Path | None:
+    """The generation root ``path`` lies under, spelled as an ANCESTOR of ``path``.
+
+    The path-level half of :func:`generation_in_argv`, with the same lexical-file /
+    resolved-ancestors rule (see there for why both halves are load-bearing). The
+    answer is one of ``path``'s own (unresolved) ancestors, so a caller can
+    ``path.relative_to(answer)`` to re-anchor the same file under
+    :func:`pointer_path` — which is what the bash tool's ``lop`` shim does so its
+    link follows ``lop update`` instead of pinning the generation it was made in.
+
+    ``None`` for a path not under ``generations_dir()`` and for that directory itself.
+    """
     generations = generations_dir().resolve()
-    for parent in candidate.parents:
+    for parent in path.parents:
         if parent.parent.resolve() == generations:
             return parent
     return None
@@ -8385,6 +8399,13 @@ def background_refresh_lines() -> list[str]:
                     f"(log: {latest})"
                 )
             elif unit == "serve":
+                # A move can land INSIDE a retry attempt, and the worker writes
+                # its result only after its next pre-check sleep (120 s observed,
+                # up to 480 s). Until then status printed "serve … current" and
+                # "pending" together (#4175 QA Q1). The same proven-``[]`` read
+                # that clears a failed row clears this one; ``None`` keeps it.
+                if _serve_since_moved():
+                    continue
                 # The operator's words for fix B's state: the update did not
                 # give up, a bounded retry is still asking serve to move.
                 lines.append(f"serve move: pending, retrying in the background ({latest})")
@@ -8889,7 +8910,11 @@ def refresh_service_daemons_after_upgrade(*, deadline: float | None = None) -> D
     installed = _installed_daemon_plists()
     if not installed:
         if not _DAEMONS_ARE_LAUNCHD_AGENTS:
-            if not (_linux_relay_unit_installed() or _linux_restart_units_installed()):
+            if not (
+                _linux_relay_unit_installed()
+                or _linux_restart_units_installed()
+                or _secret_broker_socket_present()
+            ):
                 return DaemonRefresh(
                     name,
                     lines=(
@@ -8905,7 +8930,7 @@ def refresh_service_daemons_after_upgrade(*, deadline: float | None = None) -> D
             # let the child's platform step table pick the rows
             # (``_linux_refresh_steps``). The A24 sentence above stays for
             # every host that still has nothing this child may refresh.
-        else:
+        elif not _secret_broker_socket_present():
             return DaemonRefresh(name)
     import subprocess
 
@@ -9320,6 +9345,7 @@ def _refresh_steps() -> tuple[tuple[str, str, Callable[[], launchd.PlistRefresh]
             "lop team-bridge receiver install",
             connector_install.refresh_plist_if_stale,
         ),
+        _SECRET_BROKER_STEP,
     )
 
 
@@ -9418,6 +9444,48 @@ def wake_children_deferral(count: int | None) -> str:
     )
 
 
+def kill_mode_deferral(unit: str, kill_mode: str, recovery: str) -> str:
+    """Why a unit that keeps children was left, when its LOADED KillMode forbids a restart.
+
+    Shared by the update report and ``lop services status`` (#4175 QA Q2): a
+    wakes unit still on ``KillMode=control-group`` does NOT move when its
+    conversations end, it needs its unit rewritten first. Status used to give
+    the census sentence ("moves when they end") for it, which contradicted the
+    report and named a recovery that never arrives. ``""`` (the manager did
+    not answer) reads as ``unknown``, the same refusal the restart takes.
+    """
+    return (
+        f"restarting {unit} under KillMode={kill_mode or 'unknown'} would stop the "
+        f"conversations it started — run `{recovery}` to rewrite the unit, then `lop "
+        "services restart`"
+    )
+
+
+def wakes_unit_kill_mode() -> str | None:
+    """The wakes unit's LOADED ``KillMode`` as the restart gate reads it, or ``None``.
+
+    ``None`` means the KillMode gate does not apply: not Linux, no unit file,
+    or a unit this home cannot address (a redirected ``HOME``). That is the
+    same set of cases where :func:`_systemd_restart_if_build_moved` never
+    reaches its KillMode check, so status and report take the same branch.
+    ``""`` means the unit is ours but the manager gave no answer, which the
+    gate refuses as ``unknown``. Never raises: a status row is a report.
+    """
+    try:
+        from local_operator import supervisors
+
+        if not sys.platform.startswith("linux"):
+            return None
+        if not supervisors.systemd_unit_path(_WAKES_UNIT).exists():
+            return None
+        if not supervisors.systemd_unit_is_addressable(_WAKES_UNIT):
+            return None
+        return _systemd_show(supervisors.systemctl_user, _WAKES_UNIT).get("KillMode", "")
+    except Exception:  # noqa: BLE001 — a status row must not fail the command
+        logger.debug("wakes unit KillMode read failed", exc_info=True)
+        return None
+
+
 #: Unit → census of the conversations its main process would stop on SIGTERM.
 #: Only units whose stop handler forwards the signal belong here (see the
 #: KILLMODE block above :data:`_LINUX_RESTART_UNITS`).
@@ -9467,6 +9535,106 @@ def _main_pid(fields: Mapping[str, str]) -> int | None:
     except ValueError:
         return None
     return pid if pid > 0 else None
+
+
+def systemd_install_build_line(
+    *,
+    name: str,
+    unit: str,
+    recovery: str,
+    restart_when_unproven: bool,
+    systemctl: Callable[..., Any] | None = None,
+    stale_of: Callable[[int], Path | None] | None = None,
+    verdict_of: Callable[[int], bool | None] | None = None,
+) -> launchd.InstallBuildCheck:
+    """The Linux installers' build check after ``enable --now``.
+
+    THE SAME TRAP AS THE MACOS "ALREADY CURRENT" BRANCH (field finding,
+    2026-11-18): ``systemctl --user enable --now`` does not restart a unit that
+    is already running, and the unit file names the stable shim, so a re-install
+    after an upgrade left the old build serving.
+
+    Answers the SAME :class:`launchd.InstallBuildCheck` as the macOS
+    :func:`launchd.check_running_build_on_install`, so both platforms share the
+    keyed ``cli.daemon_build`` copy and the same failure handling (review R1-2:
+    a ``failed`` outcome fails the install, it is not an ordinary step).
+
+    PROOF FIRST, via #4175's :func:`_systemd_restart_if_build_moved` reused
+    UNCHANGED (the update path's behaviour is not this PR's to alter): it
+    restarts on proven staleness and answers ``current`` otherwise. THAT
+    ``current`` CONFLATES "proven current" WITH "could not read" (its two-state
+    reader maps unreadable to not-stale; review R1-1), which on a pip/uv
+    in-place install left the old process running in silence. So a ``current``
+    is re-asked here with the tri-state reader: ``False`` stays silent; anything
+    else restarts when the daemon can take an unrequested bounce
+    (``restart_when_unproven`` — mobile, mirroring macOS) and otherwise answers
+    ``unconfirmed``, whose step names ``recovery``.
+
+    The collaborators are injectable so tests never reach a live user manager.
+    """
+    from local_operator import supervisors
+
+    run = systemctl or supervisors.systemctl_user
+    staleness = stale_of or stale_generation_of_process
+    verdict_reader = verdict_of or generation_staleness_of_process
+    # The mover's proof, captured on the way through: its ``restarted`` detail
+    # is the generation, but its ``unverified`` detail is a sentence, and the
+    # keyed step needs the bare generation either way.
+    proven: list[Path] = []
+
+    def stale_capture(pid: int) -> Path | None:
+        found = staleness(pid)
+        if found is not None:
+            proven.append(found)
+        return found
+
+    moved = _systemd_restart_if_build_moved(
+        name=name,
+        unit=unit,
+        recovery=recovery,
+        keeps_children=False,
+        systemctl=run,
+        stale_of=stale_capture,
+    )
+    if moved.kind in {"restarted", "unverified"}:
+        # ``unverified`` = a NEW MainPID whose build could not be read: the same
+        # confirmation (a new process behind the unit) macOS's ``restarted``
+        # rests on, so it gets the same line.
+        generation = proven[0].name if proven else moved.detail
+        return launchd.InstallBuildCheck(kind="restarted", recovery=recovery, generation=generation)
+    if moved.kind in {"failed", "stale"}:
+        # ``stale`` (a deferral) cannot arise with ``keeps_children=False``; if
+        # it ever does, a needed restart did not happen, which is a failure.
+        return launchd.InstallBuildCheck(kind="failed", recovery=recovery)
+    if moved.kind != "current":
+        # not-installed / not-addressable: the unit this install just enabled
+        # is not one this home can address; the enable step already spoke.
+        return launchd.InstallBuildCheck(kind="current", recovery=recovery)
+    try:
+        pid = _main_pid(_systemd_show(run, unit))
+        if pid is None:
+            # A stopped unit right after ``enable --now`` has no running build
+            # to be stale; whatever stopped it is the install's health check's.
+            return launchd.InstallBuildCheck(kind="current", recovery=recovery)
+        if verdict_reader(pid) is False:
+            return launchd.InstallBuildCheck(kind="current", recovery=recovery)
+        # None (unreadable) or a late True (the pointer moved between the
+        # mover's read and this one) is UNPROVEN, as on macOS.
+        if not restart_when_unproven:
+            return launchd.InstallBuildCheck(kind="unconfirmed", recovery=recovery)
+        restarted = run("restart", unit, timeout=120)
+        if getattr(restarted, "returncode", 1) != 0:
+            return launchd.InstallBuildCheck(kind="failed", recovery=recovery)
+        after = _main_pid(_systemd_show(run, unit))
+        if after is None or after == pid:
+            # No NEW process: the restart did not happen, whatever the exit
+            # code said (the mover's and ``launchd._await_new_pid``'s rule).
+            return launchd.InstallBuildCheck(kind="failed", recovery=recovery)
+        return launchd.InstallBuildCheck(kind="restarted-unconfirmed", recovery=recovery)
+    except Exception:  # noqa: BLE001 — an install's build probe never raises
+        if restart_when_unproven:
+            return launchd.InstallBuildCheck(kind="failed", recovery=recovery)
+        return launchd.InstallBuildCheck(kind="unconfirmed", recovery=recovery)
 
 
 def _systemd_restart_if_build_moved(
@@ -9535,12 +9703,7 @@ def _systemd_restart_if_build_moved(
             return launchd.PlistRefresh(
                 name=name,
                 kind="stale",
-                detail=(
-                    f"left on {stale.name}: restarting {unit} under "
-                    f"KillMode={kill_mode or 'unknown'} would stop the conversations it "
-                    f"started — run `{recovery}` to rewrite the unit, then `lop services "
-                    "restart`"
-                ),
+                detail=f"left on {stale.name}: {kill_mode_deferral(unit, kill_mode, recovery)}",
             )
         if child_census is not None:
             # Read-only and taken LAST, right before the restart, so the window in
@@ -9631,7 +9794,85 @@ def _linux_refresh_steps() -> tuple[tuple[str, str, Callable[[], launchd.PlistRe
             )
 
         steps.append((name, recovery, step))
+    # Unconditional, like the macOS row: the broker is not a systemd unit (it is
+    # spawned on demand), so there is no unit file to gate on, and the step
+    # answers "current" by itself when no broker is running.
+    steps.append(_SECRET_BROKER_STEP)
     return tuple(steps)
+
+
+def _refresh_secret_broker() -> launchd.PlistRefresh:
+    """Roll the secret broker onto this child's build, or say exactly why not.
+
+    WHY THE BROKER JOINED THE REFRESH TABLES (2026-11-21). It used to be
+    report-only on the theory that "it moves when it idles out" — false on any
+    node with a long-lived serve runtime, because the broker never idles out
+    while a session is registered (node2: 7+ days on 0.102.2). This child runs
+    on the NEW generation's interpreter, so ``secrets.roll.roll_broker`` starts
+    the successor from the new build; one step here covers the head and every
+    mesh node, each rolling only its own broker (security R6).
+
+    The vocabulary maps onto the existing outcome kinds so the report and
+    ``_reconcile_with_processes`` need nothing new: ``rolled`` → ``restarted``
+    (→ refreshed); ``already`` → ``current``; ``deferred`` → ``stale`` (→
+    ``pending`` WITH the deferral reason, which reconcile keeps); ``failed`` →
+    ``failed``; a rolled broker whose old process did not exit → ``unverified``.
+    """
+    try:
+        from local_operator.secrets.roll import roll_broker
+
+        result = roll_broker(None)
+    except Exception as exc:  # noqa: BLE001 — a refresher never raises
+        return launchd.PlistRefresh(name="secret broker", kind="failed", detail=str(exc))
+    return _broker_roll_refresh(result)
+
+
+def _secret_broker_socket_present() -> bool:
+    """Is there a broker socket the refresh child's "secret broker" step could roll?
+
+    The child is otherwise spawned only for installed plists/units, and a host
+    with a long-lived session but no supervised daemon still has a broker that
+    never idles out. A FILE check, deliberately, not a connection: this runs in
+    the updating parent, and the child's roll asks the broker itself.
+    """
+    try:
+        from local_operator.secrets.protocol import socket_path
+
+        return socket_path(None).exists()
+    except Exception:  # noqa: BLE001 — a gate input, never a failure
+        return False
+
+
+def _broker_roll_refresh(result: Any) -> launchd.PlistRefresh:
+    """``RollResult`` → ``PlistRefresh`` (see :func:`_refresh_secret_broker`)."""
+    name = "secret broker"
+    if result.status == "rolled":
+        if result.warning:
+            return launchd.PlistRefresh(name=name, kind="unverified", detail=result.warning)
+        return launchd.PlistRefresh(
+            name=name, kind="restarted", detail=f"pid {result.old_pid}, now pid {result.new_pid}"
+        )
+    if result.status == "deferred":
+        return launchd.PlistRefresh(name=name, kind="stale", detail=result.reason)
+    if result.status == "failed":
+        return launchd.PlistRefresh(
+            name=name,
+            kind="failed",
+            detail=f"{result.reason}; the running broker was left in place",
+        )
+    return launchd.PlistRefresh(name=name, kind="current")
+
+
+#: The one row both platform tables carry: (name, recovery, step). The name is
+#: ``services._DAEMON_MODULES``'s, so a stale-process row and this step's status
+#: reconcile by name.
+#: The repair is looked up BY NAME at call time (the lambda) so a test can
+#: replace ``_refresh_secret_broker`` without a live broker roll.
+_SECRET_BROKER_STEP: tuple[str, str, Callable[[], launchd.PlistRefresh]] = (
+    "secret broker",
+    "lop secret broker restart",
+    lambda: _refresh_secret_broker(),
+)
 
 
 def _platform_refresh_steps() -> tuple[tuple[str, str, Callable[[], launchd.PlistRefresh]], ...]:
@@ -10755,6 +10996,18 @@ def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any
         "runtimes": {
             "measured": measured,
             **{key: value if measured else None for key, value in counts.items()},
+            # "RETIRING", NOT "LEFT BEHIND" (update-parity item 4, 2026-11-18). The
+            # receipt is written seconds after the flip, but an idle runtime on a
+            # superseded generation leaves on its OWN soft refresh — the settle
+            # (``buildwatch.BUILD_SETTLE_S``, 10 s) plus a stagger of up to
+            # ``BUILD_STAGGER_S`` (20 s) — so ``known_old_idle`` alone read as
+            # runtimes the update had stranded when they were ~30 s from gone.
+            # The smaller of the two honest fixes: a label, not a 35 s re-count
+            # that would hold every `lop update` exit (and the desktop app's
+            # blocking wait on this line) for a reading that changes nothing it
+            # does. Additive, so the ``rolling-no-kill-v1`` keys keep their
+            # meaning; busy ones are NOT retiring — they wait for their turn.
+            "retiring": counts["known_old_idle"] if measured else None,
         },
     }
 

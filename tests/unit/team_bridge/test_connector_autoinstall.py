@@ -303,50 +303,58 @@ async def test_a_slow_launchctl_never_blocks_the_event_loop(service, monkeypatch
     """R1-1: the OFF write must not freeze the server while launchctl works.
 
     The fake sleeps for real, so the proof is a timer on the SAME loop: if the
-    lifecycle ran inline no tick would land while the request was in flight.
-    Inline was the defect — QA measured 0.97 s of a blocked loop on one disable,
-    against every route and the SSE fan-out waiting behind it.
+    lifecycle ran inline the loop could not wake the timer while launchctl was
+    running. Inline was the defect — QA measured 0.97 s of a blocked loop on
+    one disable, against every route and the SSE fan-out waiting behind it.
+
+    loop and a merely STARVED one (a loaded CI runner, other threads holding
+    the GIL) both land fewer ticks in a fixed window, so the earlier "at least
+    2 ticks in 0.4 s" bound was a machine-speed constant: a starved but healthy
+    loop landed 1 tick on a loaded runner (Main Full Suite run 44249580020) and
+    failed. A longest-gap bound has the same flaw — under starvation the
+    write's own ON-loop steps (request, config reads) stretch past any fixed
+    duration. The property that separates the two is WHERE the wake-ups fall
+    relative to each fake launchctl call's own [start, end]: an inline call
+    holds the loop for that whole interval, so no wake-up can land inside it —
+    zero, by construction, on any host. Off the loop, the only thing the loop
+    has to do during the fake's sleep is wake this timer, so a starved loop
+    still lands one. The bound (at least one) is therefore the defect's own
+    definition, not a guess at host speed.
     """
 
     fake, home, root = service
     _commit(root)
     install.sync_connector_service(root)
     immediate = install._launchctl
+    calls: list[tuple[float, float]] = []
 
     def sleepy(*args: str):
+        began = time.monotonic()
         time.sleep(0.8)
+        calls.append((began, time.monotonic()))
         return immediate(*args)
 
     monkeypatch.setattr(install, "_launchctl", sleepy)
-    ticks: list[float] = []
-
-    async def ticker() -> None:
-        for _ in range(12):
-            await asyncio.sleep(0.05)
-            ticks.append(time.monotonic())
 
     write = asyncio.create_task(
         _client(_active, root).put_settings(state="disabled", expected_account_id="acc_1")
     )
-    ticking = asyncio.create_task(ticker())
-    # 0.4 s of an operation that sleeps at least 0.8 s per launchctl call, so
-    # the window sits well inside it. The threshold is deliberately LOOSE (2 of
-    # ~8 possible ticks): the defect is a COMPLETELY blocked loop, i.e. zero
-    # ticks, and a tight bound only adds flakiness on a loaded machine.
-    await asyncio.sleep(0.4)
-    in_flight = not write.done()
-    landed = len(ticks)
-    await asyncio.gather(write, ticking)
+    # Sample until the write settles, so every fake call is covered however
+    # long a loaded host makes the steps before it.
+    wakeups: list[float] = []
+    while not write.done():
+        await asyncio.sleep(0.02)
+        wakeups.append(time.monotonic())
+    await write
 
-    # 0.3 s at a 0.05 s interval is ~6 ticks; a blocked loop yields none — and
-    # on the inline code the whole write finished first, so ``in_flight`` was
-    # already false by the time this line ran. Ordered so the message names the
-    # defect rather than the setup.
-    assert landed >= 2, (
-        f"the event loop was blocked by launchctl: only {landed} ticks landed in "
-        "0.4 s while the write was in flight"
+    # Setup check first: without a fake call there is no interval to test.
+    assert calls, "the write made no launchctl call; the fake was not on the path"
+    inside = [sum(began < t < ended for t in wakeups) for began, ended in calls]
+    assert sum(inside) >= 1, (
+        "the event loop was blocked by launchctl: no timer wake-up landed while any "
+        f"of the {len(calls)} 0.8 s launchctl calls ran (wake-ups inside each: "
+        f"{inside}, {len(wakeups)} wake-ups in total)"
     )
-    assert in_flight, "the write finished inside the window; the fake was not slow enough"
     assert not install.plist_path().exists()
 
 

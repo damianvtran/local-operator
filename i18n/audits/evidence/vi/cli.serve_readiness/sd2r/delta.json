@@ -1,0 +1,7 @@
+[
+  {
+    "key": "cli.serve_readiness.cgroup_unknown",
+    "before": "chạy trong cgroup mà lần kiểm tra này không thể xác định vị trí",
+    "after": "chạy trong cgroup mà lần kiểm tra này chưa phân loại được"
+  }
+]

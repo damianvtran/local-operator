@@ -69,6 +69,9 @@ class _Rig:
         self.path = home / "Library" / "LaunchAgents" / f"{install.LABEL}.plist"
         self.calls: list[list[str]] = []
         self.loaded = True
+        # The pid launchd publishes; a kickstart moves it, the way a real
+        # `kickstart -k` respawns the job under a new process.
+        self.pid = 4242
         self.answering = True
         self.reloads: list[Path] = []
         # Stated rather than inherited from the runner's OS, like the mobile
@@ -88,10 +91,11 @@ class _Rig:
             # `pid = …` is what launchd prints only while a process is alive:
             # this is the reading `launchd.job_running` parses.
             if self.loaded:
-                return FakeProc(returncode=0, stdout="\tpid = 4242\n")
+                return FakeProc(returncode=0, stdout=f"\tpid = {self.pid}\n")
             return FakeProc(returncode=113, stdout="Bad request.", stderr="Could not find service")
         if cmd[:2] == ("kickstart", "-k"):
             self.loaded = True
+            self.pid += 1
         return FakeProc(returncode=0)
 
     def _reload_job(self, **kwargs: object) -> launchd.JobReload:
@@ -140,12 +144,97 @@ def test_a_reinstall_that_changes_nothing_does_not_write_or_reload(
     rig = _Rig(monkeypatch, tmp_path)
     rig.write_current_plist()
     before = rig.path.stat().st_mtime_ns
+    _running_build(monkeypatch, stale=None, verdict=False)
 
-    install.install()
+    note = install.install()
 
     assert rig.path.stat().st_mtime_ns == before, "the plist was rewritten"
     assert rig.reloads == [], "an unchanged plist must not be reloaded"
     assert rig.calls == [["print", f"{launchd.job_domain()}/{install.LABEL}"]], rig.calls
+    assert note == "", "a PROVEN-current connector needs no note"
+
+
+def _running_build(
+    monkeypatch: pytest.MonkeyPatch, *, stale: Path | None, verdict: bool | None
+) -> None:
+    """Pin what the running pid's build reads as, both readers together.
+
+    ``stale`` is the repair's two-state answer (a generation when proven stale),
+    ``verdict`` the surface's tri-state; they come from one comparison in
+    production, so a cell sets them consistently.
+    """
+    from local_operator import update
+
+    monkeypatch.setattr(update, "stale_generation_of_process", lambda pid: stale)
+    monkeypatch.setattr(update, "generation_staleness_of_process", lambda pid: verdict)
+
+
+def test_a_current_plist_over_a_stale_build_restarts_the_connector(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Field finding 2026-11-18: "already current" over a connector on the OLD build.
+
+    After 0.96.5 -> 0.106.7 the plist was byte-identical (it names the shim),
+    the old connector answered, and `lop tunnel install` changed nothing. A
+    PROVEN stale running build must be kicked onto the new one, confirmed by a
+    new pid, and the note must name the build it was on.
+    """
+    rig = _Rig(monkeypatch, tmp_path)
+    rig.write_current_plist()
+    before = rig.path.stat().st_mtime_ns
+    _running_build(monkeypatch, stale=Path("/gen/20261113T090000Z-oldbuild"), verdict=True)
+
+    note = install.install()
+
+    assert ["kickstart", "-k", f"{launchd.job_domain()}/{install.LABEL}"] in rig.calls, rig.calls
+    assert rig.pid == 4243, "the restart must be confirmed by a NEW pid"
+    assert rig.reloads == [], "a current plist needs a kickstart, not a reload"
+    assert rig.path.stat().st_mtime_ns == before, "the plist was rewritten"
+    assert "20261113T090000Z-oldbuild" in note
+    assert "restarted" in note
+
+
+def test_an_unconfirmed_build_is_named_not_bounced(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No generation layout (pip/uv in place): the build cannot be read.
+
+    The connector is NOT restarted on a guess (a bounce drops remote access),
+    and the install no longer passes it off as current: the note names
+    `lop tunnel restart`.
+    """
+    rig = _Rig(monkeypatch, tmp_path)
+    rig.write_current_plist()
+    _running_build(monkeypatch, stale=None, verdict=None)
+
+    note = install.install()
+
+    assert not any(c[:1] == ["kickstart"] for c in rig.calls), rig.calls
+    assert rig.reloads == []
+    assert "lop tunnel restart" in note
+
+
+def test_a_refused_restart_onto_the_new_build_is_an_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """launchd refusing the kick must not read as success: it names the recovery."""
+    rig = _Rig(monkeypatch, tmp_path)
+    rig.write_current_plist()
+    _running_build(monkeypatch, stale=Path("/gen/old"), verdict=True)
+    real = rig._launchctl
+
+    def refusing(*cmd: str) -> FakeProc:
+        if cmd[:1] == ("kickstart",):
+            rig.calls.append(list(cmd))
+            return FakeProc(returncode=1, stderr="Operation not permitted")
+        return real(*cmd)
+
+    monkeypatch.setattr(install, "_launchctl", refusing)
+
+    with pytest.raises(ValueError) as raised:
+        install.install()
+
+    assert "lop tunnel restart" in str(raised.value)
 
 
 def test_a_reinstall_still_writes_and_reloads_a_changed_plist(

@@ -19,6 +19,7 @@ only the syncer's debounce is driven with an injected clock.
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -291,16 +292,23 @@ def test_the_pairing_ceremony_link_runs_no_link_up_hook(
 ) -> None:
     """Review round 1, n2: the ceremony's link is the joiner CLI's socket, closing as the
     ceremony ends; a slice's ``on_link_up`` hook must not see it (``link_up_hooks``)."""
-    server_a = devices[0]
+    server_a, server_b = devices[:2]
+    joiner = server_b.identity.device_id
     seen: list[Any] = []
     ceremony: list[Any] = []
+    admitted = threading.Event()
     admit = server_a._admit_link  # noqa: SLF001
 
     def _admit(link: Any, *, outbound: bool = False) -> str:
         # Forward dial()'s outbound=True so the spy keeps _admit_link's signature.
-        if not getattr(link, "link_up_hooks", True):
-            ceremony.append(link)
-        return admit(link, outbound=outbound)
+        refusal = admit(link, outbound=outbound)
+        if link.device_id == joiner and not getattr(link, "link_up_hooks", True):
+            if not refusal:
+                ceremony.append(link)
+            # Signal AFTER the real admission returns: its hooks run inline, so
+            # signalling on entry could let the no-hook assertion pass too early.
+            admitted.set()
+        return refusal
 
     monkeypatch.setattr(server_a, "_admit_link", _admit)
     monkeypatch.setattr(
@@ -309,6 +317,10 @@ def test_the_pairing_ceremony_link_runs_no_link_up_hook(
         [*server_a._slice_link_up_hooks, ("spy", seen.append)],  # noqa: SLF001
     )
     _pair(devices, monkeypatch, role="drive")
+    # The join-result reaches B before A admits the ceremony socket. _pair waits
+    # for B, not A; only this ceremony/peer's completed admission orders the spy
+    # observations, without mistaking an unrelated member link for the ceremony.
+    assert net_fixtures.wait_for(admitted.is_set), "the ceremony's admission did not finish"
     assert ceremony, "the ceremony's link was not admitted through _admit_link"
     assert not [link for link in seen if any(link is c for c in ceremony)], seen
 

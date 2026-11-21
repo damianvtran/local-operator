@@ -1,0 +1,10 @@
+{
+  "cli.network_uplink.no_connection": "Cet appareil n’a aucune route vers Internet.",
+  "cli.network_uplink.dual": "cet appareil a des routes IPv4 et IPv6",
+  "cli.network_uplink.ipv4_only": "cet appareil a une route IPv4 mais aucune route IPv6",
+  "cli.network_uplink.ipv6_only": "cet appareil a une route IPv6 mais aucune route IPv4",
+  "cli.network_uplink.no_ipv4_for_peer": "Le réseau de cet appareil n’a aucune route IPv4 ; {peer} n’a que des adresses IPv4",
+  "cli.network_uplink.no_ipv6_for_peer": "Le réseau de cet appareil n’a aucune route IPv6 ; {peer} n’a que des adresses IPv6",
+  "cli.network_uplink.not_answering": "{peer} ne répond pas depuis ce réseau",
+  "cli.network_uplink.check_network": "vérifiez le réseau de cet appareil"
+}

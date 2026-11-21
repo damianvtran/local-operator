@@ -1,0 +1,6 @@
+{
+  "wire.providers.reauth.sign_in_expired": "Your {label} sign-in has expired and can't be renewed automatically. Sign in again: /login {provider} in the app, or lop login {provider} in a terminal.",
+  "wire.providers.reauth.session_policy": "Your Google Workspace requires you to sign in to {label} again (Google Cloud session control), so the sign-in can't be renewed automatically. Sign in again: /login {provider} in the app, or lop login {provider} in a terminal.",
+  "wire.providers.reauth.status_sign_in_required": "sign-in required",
+  "wire.providers.reauth.status_session_policy": "sign-in required (Workspace policy)"
+}

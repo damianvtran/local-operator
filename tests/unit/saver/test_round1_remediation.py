@@ -790,17 +790,37 @@ async def test_r1_a_hung_availability_read_adds_nothing_to_the_turn(
 
     monkeypatch.setattr(gate_mod, "read_availability", blackhole)
     stream = create_stream_fn(_NO_STORE, {"radient": {"saver": {"mode": "auto"}}})
+    # A spawn-time parent value of ON (resolver step 4) makes the best-case
+    # resolution ON, so the turn gets PAST the "cannot turn on" early return and
+    # actually starts the availability read. Without it LO1's `auto` resolves
+    # off (`auto_unavailable`) and returns before the read, so a wait added on
+    # the read path could never fail this test (review round 1, R2).
+    stream._saver_parent_value = True
     try:
         request = ChatRequest(model=MODEL, messages=_history(2))
-        started = time.perf_counter()
-        out = await stream._apply_saver(request)
-        elapsed = time.perf_counter() - started
+        # "Adds nothing to the turn" is checked as "the turn never suspended":
+        # with the read still unanswered this path has no await to reach, so
+        # one step of the coroutine runs it to completion. Any wait on the
+        # read -- bounded by its own deadline or not -- yields instead. This
+        # replaces `elapsed < 0.1`, a ceiling a loaded runner crosses with the
+        # non-awaiting code intact (docs/TEST_TIME_ASSERTIONS.md).
+        turn = stream._apply_saver(request)
+        try:
+            turn.send(None)
+        except StopIteration as done:
+            out = done.value
+        else:
+            turn.close()
+            raise AssertionError("the turn suspended on the availability read")
+        # The read path was really exercised: the background read is started
+        # (and still unanswered), so "never suspended" covers it.
+        assert stream._saver_availability_read is not None, "the read never started"
     finally:
         read = stream._saver_availability_read
         await stream.close()
         if read is not None:
             read._task.cancel()
-    assert out is request and elapsed < 0.1, elapsed
+    assert out is request
 
 
 @pytest.mark.asyncio

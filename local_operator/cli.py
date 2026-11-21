@@ -57,7 +57,11 @@ from local_operator.agent_profiles import (
     SEED_SHA256_PREFIX,
     SEED_VERSION_PREFIX,
 )
-from local_operator.agent_shell import exec_session_refusal, interactive_session_refusal
+from local_operator.agent_shell import (
+    exec_session_refusal,
+    in_agent_shell,
+    interactive_session_refusal,
+)
 from local_operator.config import ConfigManager
 from local_operator.env import get_env_config
 from local_operator.i18n.boot import activate_resolved_locale
@@ -92,15 +96,18 @@ from local_operator.i18n.keys import cli_refresh_help as _re
 from local_operator.i18n.keys import cli_resume_click_help as _rc
 from local_operator.i18n.keys import cli_send_help as _se
 from local_operator.i18n.keys import cli_serve_help as _sv
+from local_operator.i18n.keys import cli_services_heavy as _shv
 from local_operator.i18n.keys import cli_services_help as _sr
 from local_operator.i18n.keys import cli_services_status as _svc
 from local_operator.i18n.keys import cli_sessions_help as _sh
+from local_operator.i18n.keys import cli_sessions_move_workset as _wsh
 from local_operator.i18n.keys import cli_skills_push as _sp
 from local_operator.i18n.keys import cli_stop_help as _st
 from local_operator.i18n.keys import cli_teams_help as _th
 from local_operator.i18n.keys import cli_update_help as _up
 from local_operator.i18n.keys import cli_wake_help as _wh
 from local_operator.i18n.keys import wire_exec as _wd
+from local_operator.i18n.messages import Msg, render_resolved
 from local_operator.i18n.text import tr
 from local_operator.logger import configure_cli_logging, file_logging
 from local_operator.optional import missing_extra_error
@@ -113,6 +120,7 @@ from local_operator.remote_compute.arguments import add_remote_arguments, wants_
 from local_operator.resume import RESUME_LATEST
 
 if TYPE_CHECKING:
+    import threading
     from collections.abc import Sequence
 
     from local_operator.agents import AgentData, AgentRegistry
@@ -162,6 +170,25 @@ def _positive_seconds(text: str) -> float:
     return value
 
 
+def _start_by_time(text: str) -> float:
+    """argparse ``type`` for ``lop services heavy run --start-by``.
+
+    Epoch seconds or ISO-8601 with an offset/Z (``bounded_contract.parse_start_by``,
+    shared with ``scripts/run_bounded.py``). Unreadable is a usage error (exit 2)
+    before any queue wait; a past deadline is NOT one: it parses, and the run is
+    refused at spawn time with the late-start code instead.
+    """
+    from local_operator import bounded_contract
+    from local_operator.i18n.keys import cli_services_heavy as _shv_copy
+
+    try:
+        return bounded_contract.parse_start_by(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            tr("cli.services_heavy")(_shv_copy.not_start_by(value=repr(text)))
+        ) from None
+
+
 #: RFC §3.1 render point for this slice's copy (the exec verb's help text and
 #: the exec refusals this module prints).
 _t = tr("wire.exec")
@@ -169,6 +196,82 @@ _bt = tr("cli.browser")
 _bnt = tr("cli.browser_node")
 _spt = tr("cli.skills_push")
 _cct = tr("cli.config")
+
+
+def _add_services_heavy_parser(
+    group: argparse._SubParsersAction,  # type: ignore[type-arg]
+    parent_parser: argparse.ArgumentParser,
+    help_locale: str | None,
+) -> None:
+    """``lop services heavy {wait,run,status}`` (``local_operator/heavy_cli.py``).
+
+    Before these verbs, anything outside the agent's ``bash`` tool coordinated
+    the machine-wide heavy-job slot (#4104) by hand — peer messages, or
+    ``pgrep -f`` loops that match their own shell — so the queue had no
+    first-class door for scripts or operators.
+
+    A helper of its own, not inline in ``build_cli_parser``'s services block:
+    that block's parser protocol is frozen by the update/services/install
+    extraction slice (``tests/unit/i18n/test_cli_update_services_install_help_slice.py``),
+    and this group's copy lives in its own namespace, ``cli.services_heavy``.
+    """
+    # Constants, not the live setting: the parser must not open config.yml on
+    # every `lop` start for the sake of one help string.
+    from local_operator.heavy_lease import (
+        HEAVY_JOBS_WAIT_SECONDS_DEFAULT,
+        HEAVY_JOBS_WAIT_SECONDS_ENV,
+    )
+
+    timeout_help = _shv.timeout(
+        wait_seconds=f"{HEAVY_JOBS_WAIT_SECONDS_DEFAULT:g}",
+        env_name=HEAVY_JOBS_WAIT_SECONDS_ENV,
+    ).envelope(locale=help_locale)["text"]
+    heavy = group.add_parser(
+        "heavy",
+        help=_shv.heavy().envelope(locale=help_locale)["text"],
+        description=_shv.heavy_description().envelope(locale=help_locale)["text"],
+        parents=[parent_parser],
+    )
+    verbs = heavy.add_subparsers(dest="heavy_command")
+    wait = verbs.add_parser(
+        "wait",
+        help=_shv.wait().envelope(locale=help_locale)["text"],
+        parents=[parent_parser],
+    )
+    wait.add_argument(
+        "--timeout", type=_positive_seconds, default=None, metavar="SECONDS", help=timeout_help
+    )
+    run = verbs.add_parser(
+        "run",
+        help=_shv.run().envelope(locale=help_locale)["text"],
+        parents=[parent_parser],
+    )
+    run.add_argument(
+        "--timeout", type=_positive_seconds, default=None, metavar="SECONDS", help=timeout_help
+    )
+    # Latest-start window granted by a node host ("start by 08:05Z"). An
+    # unreadable value is a usage error here, before any queue wait; a deadline
+    # already past parses and is refused at spawn time with the breach code.
+    run.add_argument(
+        "--start-by",
+        type=_start_by_time,
+        default=None,
+        metavar="WHEN",
+        help=_shv.start_by().envelope(locale=help_locale)["text"],
+    )
+    # REMAINDER after `--`: the wrapped command's own flags (`pytest -x`) must
+    # reach it untouched instead of being parsed as lop's.
+    run.add_argument(
+        "heavy_argv",
+        nargs=argparse.REMAINDER,
+        metavar="COMMAND",
+        help=_shv.command().envelope(locale=help_locale)["text"],
+    )
+    verbs.add_parser(
+        "status",
+        help=_shv.status().envelope(locale=help_locale)["text"],
+        parents=[parent_parser],
+    )
 
 
 def build_cli_parser() -> LocalizedArgumentParser:
@@ -287,6 +390,7 @@ def build_cli_parser() -> LocalizedArgumentParser:
             "kimi",
             "alibaba",
             "google",
+            "google-vertex",
             "mistral",
             "openrouter",
             "xai",
@@ -1192,6 +1296,15 @@ def build_cli_parser() -> LocalizedArgumentParser:
 
     add_team_bridge_parser(subparsers, parent_parser, help_locale=help_locale)
 
+    # `lop community …` (RFC v2.4; the TUI doc's "Commands for scripts"). Hidden
+    # from `lop --help` while the community ships dark: its subparser takes no
+    # `help=` (the `resume-click` idiom) and every verb refuses unless
+    # LOCAL_OPERATOR_COMMUNITY=1. The CLI module defers the client (httpx) to
+    # the verb, so registration stays cheap on every `lop` start.
+    from local_operator.community.cli import add_parser as add_community_parser
+
+    add_community_parser(subparsers, parent_parser)
+
     # `lop disk reclaim` (issue #2676): the sanctioned disk-pressure front door.
     # Stdlib-only registration for the same reason as `network`: the planner is
     # imported by the handler, never while the parser is built.
@@ -1554,7 +1667,8 @@ def build_cli_parser() -> LocalizedArgumentParser:
     # in `guides/configuration/GUIDE.md`. They are added below, after the other
     # visible commands, and a new visible command must be added here too.
     sessions_subparsers = sessions_parser.add_subparsers(
-        dest="sessions_command", metavar="{cleanup,reclaim,resume,move,sync}"
+        dest="sessions_command",
+        metavar="{cleanup,reclaim,resume,move,setup-deps,sync,notifications}",
     )
     cleanup_parser = sessions_subparsers.add_parser(
         "cleanup",
@@ -1840,12 +1954,85 @@ def build_cli_parser() -> LocalizedArgumentParser:
     # successful move (`sessions_move_command` returns the MOVE's status) — so on the
     # device that engaged the answer is only in `engagement.engaged`, and the help is
     # where a caller that never reads this comment finds that out.
-    move_parser.add_argument(
+    #
+    # `--engage-on-arrival` and `--no-engage-on-arrival` share a mutually exclusive
+    # group so argparse refuses the pair (exit 2) with its own conflict line, which
+    # `i18n.cli_failures.localise_failure` already renders in the user's language. A
+    # hand-written refusal in the command body would be a new untranslated legacy
+    # literal in cli.py, and the file's i18n ceiling may only fall.
+    engage_group = move_parser.add_mutually_exclusive_group()
+    engage_group.add_argument(
         "--engage-on-arrival",
         action="store_true",
         help=(_sh.move_engage_on_arrival().envelope(locale=help_locale)["text"]),
     )
+    # THE OPT-OUT FROM THE ACTIVE-MOVE RESUME (docs/design/move-working-set.md §7.4): a
+    # conversation that was active when it moved is engaged on arrival by default and
+    # handed one continuation note; this flag keeps the old cold arrival. Its help
+    # lives in the fully translated working-set namespace, like the flags below.
+    engage_group.add_argument(
+        "--no-engage-on-arrival",
+        action="store_true",
+        help=_wsh.help_no_engage_on_arrival().envelope(locale=help_locale)["text"],
+    )
+    # THE WORKING-SET GATE (docs/design/move-working-set.md §11.2). A conversation
+    # that worked in git worktrees is refused by the owner until the user has seen
+    # what the move leaves behind: `--dry-run` shows it, an interactive terminal is
+    # prompted, a script passes the shown `working_set.scope_digest` back (or `--yes`
+    # to confirm whatever the current scope is), and `--without-working-set` is the
+    # explicit "leave it here". Help strings live in their own fully translated
+    # namespace so `cli.sessions_help`'s recorded coverage gaps do not grow.
     move_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=_wsh.help_dry_run().envelope(locale=help_locale)["text"],
+    )
+    move_parser.add_argument(
+        "--confirm-working-set",
+        metavar="DIGEST",
+        default="",
+        help=_wsh.help_confirm().envelope(locale=help_locale)["text"],
+    )
+    move_parser.add_argument(
+        "--without-working-set",
+        action="store_true",
+        help=_wsh.help_without().envelope(locale=help_locale)["text"],
+    )
+    move_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help=_wsh.help_yes().envelope(locale=help_locale)["text"],
+    )
+    move_parser.add_argument(
+        "--json", action="store_true", help=_sh.json().envelope(locale=help_locale)["text"]
+    )
+
+    # `lop sessions setup-deps <id> --status`: the READ-ONLY dependency status of a
+    # working set that arrived on this device (design move-working-set.md §9). A move
+    # never carries node_modules/.venv; this says, per restored worktree, what is still
+    # to be created, what exists (unverified) and what could not be read. It runs
+    # NOTHING: the security ruling on #4378 (owner 60334) is that a CLI flag, stdin or
+    # the moved agent's shell is not the operator's authority to run a package
+    # manager's install scripts, so there is no `--yes` and no run mode. `--status` is
+    # REQUIRED so the verb's only form today says what it does; a future run mode
+    # needs the authenticated, move-bound operator opt-in (§9 "Phase 2 exit criteria").
+    deps_parser = sessions_subparsers.add_parser(
+        "setup-deps",
+        help=_wsh.deps_help().envelope(locale=help_locale)["text"],
+        description=_wsh.deps_description().envelope(locale=help_locale)["text"],
+        parents=[parent_parser],
+    )
+    deps_parser.add_argument(
+        "session", help=_wsh.deps_session_help().envelope(locale=help_locale)["text"]
+    )
+    deps_parser.add_argument(
+        "--status",
+        action="store_true",
+        required=True,
+        help=_wsh.deps_status_help().envelope(locale=help_locale)["text"],
+    )
+    deps_parser.add_argument(
         "--json", action="store_true", help=_sh.json().envelope(locale=help_locale)["text"]
     )
 
@@ -1895,6 +2082,13 @@ def build_cli_parser() -> LocalizedArgumentParser:
     # holds and the store audit" section of `guides/configuration/GUIDE.md`;
     # the handlers and `session/cleanup.py`'s holds block carry the semantics
     # for a code reader. Follow-up: one help-tranche key per argument/command.
+    notifications_parser = sessions_subparsers.add_parser("notifications", parents=[parent_parser])
+    notifications_parser.add_argument("session")
+    notifications_action = notifications_parser.add_mutually_exclusive_group()
+    notifications_action.add_argument("--grant", action="store_true")
+    notifications_action.add_argument("--revoke", action="store_true")
+    notifications_parser.add_argument("--reason", default="")
+
     hold_parser = sessions_subparsers.add_parser("hold", parents=[parent_parser])
     hold_parser.add_argument("session")
     hold_parser.add_argument("--reason", required=True)
@@ -2358,6 +2552,7 @@ def build_cli_parser() -> LocalizedArgumentParser:
         type=int,
         help=_sr.pid().envelope(locale=help_locale)["text"],
     )
+    _add_services_heavy_parser(services_subparsers, parent_parser, help_locale)
 
     # The install LAYOUT's own commands. One verb group rather than flags on
     # ``update`` because neither of these installs anything from a network: they
@@ -4970,6 +5165,7 @@ def send_command(args: argparse.Namespace) -> int:
     # unique match come back, and neither may be converted into a stored send).
     from local_operator.mobile.peer_send import (
         live_scan_found_nothing,
+        pid_not_on_this_device,
         session_id_unowned,
     )
 
@@ -5091,6 +5287,41 @@ def send_command(args: argparse.Namespace) -> int:
             cold_session_id = stored_id
         elif stored_error:
             error = stored_error
+    if (
+        record is None
+        and getattr(args, "pid", None) is not None
+        and pid_not_on_this_device(error or "")
+    ):
+        # A REMOTE PID: same rule and same fresh read as the in-session `send`
+        # tool (``peer_send.remote_pid_decision``), so a pid copied from a
+        # remote row of `lop sessions` gets an answer naming the session it
+        # is. `lop send` has no cross-device route of its own (a remote
+        # `--session` is not routed here either), so the ONE-live-match case
+        # names the mesh command that delivers by session id instead of
+        # inventing a transport; every other case is the tool's refusal in
+        # this command's grammar. Entered only on the local MISS form, so a
+        # local pid hit never reads the catalogue: local wins.
+        from local_operator.mobile.peer_send import remote_pid_decision
+        from local_operator.session.peer_rows import peer_pid_rows
+
+        def _mesh_address(session_id: str, device: str) -> str:
+            return (
+                f"lop network sessions --peer {device} --send {session_id} "
+                "--mailbox -- '<message>'"
+            )
+
+        routed_row, pid_refusal = remote_pid_decision(
+            args.pid, peer_pid_rows(args.pid, config_dir()), address=_mesh_address
+        )
+        if routed_row is not None:
+            pid_refusal = (
+                f"pid {args.pid} is session {routed_row.session_id} on "
+                f"{routed_row.owner_device_name}; `lop send` does not cross devices — "
+                f"deliver by session id with "
+                f"`{_mesh_address(routed_row.session_id, routed_row.owner_device)}`"
+            )
+        _peer_red(pid_refusal)
+        return 1
     if not cold_session_id and (error or record is None):
         if error and live_scan_found_nothing(error):
             # The stored fallback just failed too, so the message names BOTH
@@ -7582,7 +7813,15 @@ def _sessions_move_words(
                 "The move itself succeeded — open the conversation there to start it."
             ]
         )
-    elif engage_on_arrival:
+        if engaged and engagement.get("reason") == "active":
+            # THE ACTIVE-MOVE RESUME (nobody passed --engage-on-arrival): say WHY it is
+            # live and that it was handed a note. Keyed, unlike the lines above, because
+            # it is new copy (AGENTS.md i18n: new user-visible text is keyed).
+            engage_lines.append(render_resolved(_wsh.receipt_resumed(device=target)))
+    elif engage_on_arrival or isinstance(result.get("resume_requested"), dict):
+        # ``resume_requested`` covers the ACTIVE-MOVE RESUME on an offload: the
+        # destination engages by default, nobody passed the flag, and saying nothing
+        # read as "nothing is running there" (UI #1978 QA Q-1). Same request, same line.
         # ASKED HERE, ANSWERED THERE. On an offload the receipt is the SOURCE's, and the
         # engage is the destination's own post-move work: this device settles on its own
         # durable progress and does not wait for the peer's runtime to start, so the
@@ -7683,41 +7922,716 @@ def sessions_move_command(args: argparse.Namespace) -> int:
         )
         return 2
     wait_s = mobility.MOVE_MAX_WAIT_S if int(args.wait) < 0 else float(args.wait)
-    result = mobility.request_move(
-        session_id,
-        to=to,
-        keep=bool(args.keep),
-        wait_s=wait_s,
-        from_replica=bool(args.from_replica),
-        # ``--engage-on-arrival``: a flag on THIS verb, so the only callers that get
-        # the engaged arrival are the ones that asked for it. The TUI's own `/move`
-        # does not pass it and therefore still moves a conversation cold, which is
-        # today's behaviour and the behaviour every existing caller keeps.
-        engage_on_arrival=bool(getattr(args, "engage_on_arrival", False)),
-        # ``--queue``: the explicit "move at the next safe point" request. Read
-        # with ``bool(...)`` so a hand-rolled Namespace without the attribute is
-        # off, the same contract the parser's default gives it.
-        queue=bool(getattr(args, "queue", False)),
-        # ``bool(...)`` so a hand-rolled Namespace without the attribute gets the
-        # protective default (the source refuses; nothing is dropped silently).
-        drop_session_roles=bool(getattr(args, "drop_session_roles", False)),
+    as_json = bool(getattr(args, "json", False))
+    if bool(getattr(args, "dry_run", False)):
+        return _sessions_move_dry_run(session_id, to=to, as_json=as_json)
+
+    def _issue(confirm: str, surface: str) -> dict[str, Any]:
+        return dict(
+            mobility.request_move(
+                session_id,
+                to=to,
+                keep=bool(args.keep),
+                wait_s=wait_s,
+                from_replica=bool(args.from_replica),
+                # ``--engage-on-arrival``: a flag on THIS verb, so the only callers that
+                # get the engaged arrival are the ones that asked for it. The TUI's own
+                # `/move` does not pass it and therefore still moves a conversation
+                # cold, which is today's behaviour and the behaviour every existing
+                # caller keeps.
+                engage_on_arrival=bool(getattr(args, "engage_on_arrival", False)),
+                # ``--no-engage-on-arrival``: the opt-out from the active-move resume
+                # (an ACTIVE conversation is engaged on arrival and handed one
+                # continuation note by default). Absent attribute reads False.
+                no_engage_on_arrival=bool(getattr(args, "no_engage_on_arrival", False)),
+                # ``--queue``: the explicit "move at the next safe point" request. Read
+                # with ``bool(...)`` so a hand-rolled Namespace without the attribute is
+                # off, the same contract the parser's default gives it.
+                queue=bool(getattr(args, "queue", False)),
+                # ``bool(...)`` so a hand-rolled Namespace without the attribute gets
+                # the protective default (the source refuses; nothing is dropped
+                # silently).
+                drop_session_roles=bool(getattr(args, "drop_session_roles", False)),
+                # The working-set consent (design §11.2): a digest the user was shown,
+                # or the explicit "leave it here". Neither → the owner refuses a
+                # conversation with worktrees and the branch below asks.
+                confirm_working_set=confirm,
+                without_working_set=bool(getattr(args, "without_working_set", False)),
+                consent_surface=surface,
+            )
+        )
+
+    yes = bool(getattr(args, "yes", False))
+    given_digest = str(getattr(args, "confirm_working_set", "") or "")
+    if given_digest and in_agent_shell() and not bool(args.keep):
+        declined, shown = _sessions_move_agent_digest_declined(
+            session_id, to=to, given_digest=given_digest, args=args
+        )
+        if declined is not None:
+            refusal: dict[str, Any] = {
+                "ok": False,
+                "code": "working_set_unconfirmed",
+                "message": str(declined["message"]),
+                "session_id": session_id,
+                "changed": False,
+                "consent_declined": declined,
+            }
+            if shown is not None:
+                refusal["working_set"] = shown
+            if as_json:
+                print(_json.dumps(refusal, indent=2, sort_keys=True, default=str))
+            else:
+                print(_sessions_move_declined_text(declined), file=sys.stderr)
+            return 1
+    result = _issue(
+        given_digest,
+        (
+            "cli-digest"
+            if given_digest
+            else ("cli-without" if getattr(args, "without_working_set", False) else "")
+        ),
     )
-    if getattr(args, "json", False):
+    code = str(result.get("code") or "")
+    block = result.get("working_set") if isinstance(result.get("working_set"), dict) else None
+    scope_refusal = bool(
+        not result.get("ok")
+        and code in ("working_set_unconfirmed", "working_set_changed")
+        and block is not None
+        and block.get("scope_digest")
+    )
+    if given_digest and not scope_refusal:
+        # AN EXPLICIT CARRYING DIGEST THE OWNER NARROWED (security S1, round 1): the
+        # gate honours a carrying digest that reaches a prepare which can no longer
+        # carry by moving the conversation WITHOUT the files. That is safe, but the
+        # same case under `--yes`/the prompt exits 1, so a script that named the
+        # digest itself must get the same verdict, not a silent exit 0.
+        result = _sessions_move_bind_digest(result, given_digest)
+    preflighted = False
+    preflight_error = ""
+    preflight_message = ""
+    if scope_refusal:
+        # THE PROBED BLOCK, NOT THE GATE'S, ON EVERY ENTRY (review R6 / UX U3, round 1;
+        # widened to `--yes` and `--json` by the v0.111.0 offload fix). The owner's
+        # refusal is computed BEFORE the destination is asked, so on an offload it is
+        # always the non-carrying scope ("the files stay here") and never carries the
+        # destination's answer. Only the dry-run preflight asks the destination
+        # whether it can take the files (protocol + its `workset_import` grant) and
+        # recomputes the carrying manifest. v0.111.0 ran this for the y/N prompt only,
+        # so `--yes` confirmed the gate's non-carrying digest and every scripted
+        # offload left the worktrees behind while reporting `done`. Now the y/N
+        # prompt, `--yes` and the `--json` refusal all show/confirm this ONE plan; a
+        # preflight that fails keeps the gate's block for the prompt and the JSON
+        # refusal, and `--yes` refuses on it (below), never widened or narrowed.
+        probed = _sessions_move_preflight(session_id, to=to)
+        fresh = probed.get("working_set")
+        if probed.get("ok") and isinstance(fresh, dict) and fresh.get("scope_digest"):
+            block = fresh
+            result = {**result, "working_set": fresh}
+            # AN UNANSWERED DESTINATION IS NOT A "NO" (QA Q-1, round 1): the dry run
+            # stays `ok` when the destination does not answer the probe (offline,
+            # rate-limited, too old to serve it) and recomputes the plan as "files
+            # stay" with `destination_probe.state: unknown_destination`. That plan
+            # says nothing about whether the files CAN travel, so `--yes` must treat
+            # it as a failed preflight, never as "the destination cannot take them".
+            if _sessions_move_destination_unanswered(fresh):
+                preflight_error = "destination_unanswered"
+            else:
+                preflighted = True
+        else:
+            # The machine code goes on the JSON; the English relay message is kept
+            # beside it but never put into a localized sentence (review R1-6).
+            preflight_error = str(probed.get("code") or "preflight_failed")
+            preflight_message = str(probed.get("message") or "")
+    if scope_refusal and block is not None:
+        # ONE CONFIRMATION ROUND, never a loop: the owner answered with the manifest,
+        # the user (or `--yes`) confirms THAT scope, and the move is re-issued with its
+        # digest. A scope that changes again in between is refused again and reported
+        # — the user then sees the fresh list on the next run. `--json` never prompts:
+        # a script gets the refusal document and passes the digest back itself.
+        digest = str(block["scope_digest"])
+        if yes:
+            declined = _sessions_move_yes_declined(
+                block,
+                session_id=session_id,
+                to=to,
+                preflighted=preflighted,
+                preflight_error=preflight_error,
+                preflight_message=preflight_message,
+                given_digest=given_digest,
+                args=args,
+            )
+            if declined is not None:
+                # REFUSED, NOTHING MOVED: the refusal document keeps the owner's code
+                # and gains the reason `--yes` did not consent, machine-readable.
+                result = {**result, "consent_declined": declined}
+                if declined["reason"] in _SESSIONS_MOVE_SOLE_VOICE:
+                    # The owner's top-level `message` offers `--confirm-working-set
+                    # <digest>`, the route this refusal just closed (QA Q-4 / UX U2).
+                    result["message"] = declined["message"]
+                    if not as_json:
+                        _sessions_move_print_declined(declined, block, session_id, to)
+                        return 1
+                # A mismatched digest is already said once by the refusal's own
+                # lines (``mistyped`` below); every other reason is said here.
+                if not as_json and declined["reason"] != "explicit_digest_mismatch":
+                    print(_sessions_move_declined_text(declined), file=sys.stderr)
+            else:
+                result = _sessions_move_bind_plan(_issue(digest, "cli-yes"), block)
+        elif not as_json and sys.stdin.isatty() and sys.stdout.isatty():
+            if in_agent_shell() and block.get("carries_files"):
+                # THE PROMPT IS NOT AN OPERATOR SURFACE FROM AN AGENT'S SHELL (review
+                # R1-2): an agent can fake a tty and answer `y`. The same advisory
+                # restriction as `--yes` — it only adds a refusal, never a grant; a
+                # files-stay plan still prompts, as on the human path.
+                surfaces = _sessions_move_operator_surfaces(session_id, to, args)
+                declined = _sessions_move_declined(
+                    "agent_shell",
+                    _sessions_move_agent_message("lop sessions move", surfaces),
+                    block,
+                    surfaces,
+                )
+                _sessions_move_print_declined(declined, block, session_id, to)
+                return 1
+            # A mistyped `--confirm-working-set` is told apart from a list that moved
+            # (review U8): the owner can only say "this is not the current scope".
+            shown = "digest_mismatch" if (code == "working_set_changed" and given_digest) else code
+            try:
+                confirmed = _confirm_working_set(block, session_id=session_id, to=to, code=shown)
+            except KeyboardInterrupt:
+                # Ctrl-C at the prompt is a "no" (review U5): nothing was moved, so no
+                # traceback; 130 is the shell's own code for an interrupted command.
+                print(file=sys.stderr)
+                print(render_resolved(_wsh.aborted()), file=sys.stderr)
+                return 130
+            if confirmed:
+                result = _sessions_move_bind_plan(_issue(digest, "cli-prompt"), block)
+            else:
+                print(render_resolved(_wsh.aborted()), file=sys.stderr)
+                return 1
+    # Narrow once so the type checker sees a dict on every path (a ``.get()`` re-read
+    # inside ``isinstance`` does not narrow the second lookup); behaviour unchanged.
+    confirmed_plan = result.get("confirmed_plan")
+    plan: dict[str, Any] = confirmed_plan if isinstance(confirmed_plan, dict) else {}
+    plan_broken = plan.get("honoured") is False
+    if as_json:
         print(_json.dumps(result, indent=2, sort_keys=True, default=str))
-        return 0 if result.get("ok") else 1
-    lines = _sessions_move_words(
+        # A move that ran but did not deliver the plan the user consented to is not
+        # a success to a script: exit 1 even though the conversation moved.
+        return 0 if result.get("ok") and not plan_broken else 1
+    if plan_broken:
+        # A CONFIRMED CARRY THAT DID NOT HAPPEN LEADS, ON STDERR (UX U1, round 1):
+        # "Moved … (done)" plus a row saying the files stayed "as confirmed" read as
+        # success and misstated what the user agreed to. The keyed line says the
+        # files were NOT sent, that the user had confirmed sending them, and what to
+        # do; the rows below then name the real cause instead of `kept_as_confirmed`.
+        result = _sessions_move_plan_broken_rows(result)
+        print(_sessions_move_plan_broken_text(result, to), file=sys.stderr)
+        sys.stderr.flush()
+    workset_lines = _sessions_move_workset_words(
         dict(result),
         session_id=session_id,
         to=to,
-        engage_on_arrival=bool(getattr(args, "engage_on_arrival", False)),
+        mistyped=bool(given_digest) and str(result.get("code") or "") == "working_set_changed",
     )
+    if (
+        not result.get("ok")
+        and str(result.get("code") or "") in mobility.WORKSET_REFUSAL_CODES
+        and workset_lines
+    ):
+        # ONE VOICE (review U4, round 1): the owner's `message` is its English relay
+        # fallback, written from the OWNER's side ("on this device" names the wrong
+        # machine on a recall). When the keyed summary renders, it alone speaks.
+        lines = workset_lines
+    else:
+        lines = _sessions_move_words(
+            dict(result),
+            session_id=session_id,
+            to=to,
+            engage_on_arrival=bool(getattr(args, "engage_on_arrival", False)),
+        )
+        lines.extend(workset_lines)
     if result.get("ok"):
         for line in lines:
             print(line)  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
-        return 0
+        return 1 if plan_broken else 0
     for line in lines:
         print(line, file=sys.stderr)
     return 1
+
+
+#: ``consent_declined`` reasons whose sentence is the WHOLE text answer (UX U2/U3,
+#: round 1). The gate's summary and its "re-run with --confirm-working-set <digest>"
+#: line would follow an agent-shell refusal with the route it just refused, and a
+#: failed preflight with a "the files stay" verdict nobody actually knows.
+_SESSIONS_MOVE_SOLE_VOICE = frozenset({"agent_shell", "preflight_failed"})
+
+#: Move flags that change WHAT the operator's own run does, carried into the command
+#: an agent-shell refusal hands over (UX U6) so the operator re-runs the same move.
+_SESSIONS_MOVE_CARRIED_FLAGS = (
+    ("queue", "--queue"),
+    ("engage_on_arrival", "--engage-on-arrival"),
+    ("no_engage_on_arrival", "--no-engage-on-arrival"),
+    ("from_replica", "--from-replica"),
+    ("drop_session_roles", "--drop-session-roles"),
+)
+
+
+def _sessions_move_operator_surfaces(
+    session_id: str, to: str, args: argparse.Namespace | None = None
+) -> list[str]:
+    """Where an OPERATOR can confirm a carrying working set (agent-path ruling).
+
+    Machine tokens, never prose (the sentence that names them is keyed):
+    ``desktop_move_card`` is the desktop/mobile app's move card; the other two are
+    the operator's own `lop sessions move` (which shows the plan and asks) and the
+    `--dry-run` whose digest the operator reads and passes back themselves. The
+    first command keeps the caller's own move flags (``args``), so the operator
+    runs the move the agent asked for, not a different one.
+    """
+    extra = "".join(
+        f" {flag}" for attr, flag in _SESSIONS_MOVE_CARRIED_FLAGS if getattr(args, attr, False)
+    )
+    return [
+        "desktop_move_card",
+        f"lop sessions move {session_id} --to {to}{extra}",
+        f"lop sessions move {session_id} --to {to} --dry-run",
+    ]
+
+
+def _sessions_move_destination_unanswered(block: dict[str, Any]) -> bool:
+    """Did the destination fail to answer the preflight's probe? (QA Q-1, round 1)
+
+    ``mobility._probe_destination`` turns any failed ask (unreachable link, timeout,
+    a ``rate_limited`` refusal, a destination too old to serve the probe) into
+    ``destination_probe.state == "unknown_destination"`` inside an ``ok`` dry run.
+    """
+    probe = block.get("destination_probe")
+    return isinstance(probe, dict) and probe.get("state") == "unknown_destination"
+
+
+def _sessions_move_print_declined(
+    declined: dict[str, Any], block: dict[str, Any], session_id: str, to: str
+) -> None:
+    """The text answer for a refusal that speaks alone (``_SESSIONS_MOVE_SOLE_VOICE``).
+
+    The sentence, then — for an agent-shell refusal only — the list of what WOULD be
+    sent, so the agent can relay it, without the closing advice or the digest line:
+    both tell the reader to continue, and that route is the operator's.
+    """
+    from local_operator.network import workset_text
+
+    print(_sessions_move_declined_text(declined), file=sys.stderr)
+    if declined.get("reason") == "agent_shell":
+        for line in workset_text.summary_lines(block, session=session_id, device=to, advice=False):
+            print(line, file=sys.stderr)
+
+
+def _sessions_move_yes_declined(
+    block: dict[str, Any],
+    *,
+    session_id: str,
+    to: str,
+    preflighted: bool,
+    preflight_error: str,
+    given_digest: str,
+    preflight_message: str = "",
+    args: argparse.Namespace | None = None,
+) -> dict[str, Any] | None:
+    """Why ``--yes`` must NOT consent to ``block``, or ``None`` when it may.
+
+    THE v0.111.0 OFFLOAD FIX'S CONSENT RULES (security ruling, 2026-11-21). ``--yes``
+    is implicit consent, so it may confirm ONE thing only: the destination-aware
+    preflight this same invocation computed, and only when that plan sends the files.
+    Everything else refuses with a machine-readable ``reason`` and nothing moves:
+
+    * ``explicit_digest_mismatch`` — the caller passed ``--confirm-working-set`` and
+      it no longer matches. An explicit digest is honoured EXACTLY (a narrow
+      "files stay" digest still narrows, in the owner's gate); ``--yes`` never swaps
+      in a different scope the caller did not name.
+    * ``preflight_failed`` — the destination could not be asked, so whether the files
+      can travel is unknown: the dry run itself failed, or it answered ``ok`` but
+      the destination did not answer its probe (``unknown_destination``, QA Q-1).
+      Confirming the owner's own block here is exactly the v0.111.0 defect (a
+      "files stay" digest confirmed as if it were the plan).
+    * ``agent_shell`` — this process descends from an agent's tool call
+      (``agent_shell.in_agent_shell()``). An agent's tool call is not the
+      operator's consent to send files to another device (security-owner ruling),
+      so ``--yes`` from an agent refuses whatever the plan: the agent's own route
+      is ``--without-working-set`` only (a files-stay digest it passes explicitly
+      follows the human path, ``_sessions_move_agent_digest_declined``), and
+      carrying needs an operator surface. The marker is ADVISORY — any same-uid
+      process can unset it — so this is defence in depth, never a security
+      boundary; the receiver's own ``workset_import`` grant stays the enforcement
+      point.
+    * ``carry_unavailable`` — the preflight says the files cannot travel (no
+      ``workset_import`` grant on the destination, an older destination). Leaving
+      them behind is a decision the caller states with ``--without-working-set`` or
+      the "stays" digest, never one ``--yes`` makes silently.
+    """
+    from local_operator.network import workset_text
+
+    surfaces = _sessions_move_operator_surfaces(session_id, to, args)
+    # The device as the lines under the refusal name it, not the `--to` argument as
+    # typed (a mesh id reads as noise next to "device-b"; UX U5 / QA Q-3).
+    device = workset_text.device_label(block, to)
+    if given_digest:
+        # The existing sentence is the truthful one: the digest the caller named does
+        # not match. The human refusal already prints it (``mistyped``), once.
+        return _sessions_move_declined(
+            "explicit_digest_mismatch", _wsh.digest_mismatch(), block, surfaces
+        )
+    if not preflighted:
+        message = _wsh.yes_preflight_failed(device=device)
+        declined = _sessions_move_declined("preflight_failed", message, block, surfaces)
+        # Machine truth for a script; the localized sentence carries no relay English.
+        declined["preflight_error"] = preflight_error or "preflight_failed"
+        if preflight_message:
+            declined["preflight_message"] = preflight_message
+        return declined
+    if in_agent_shell():
+        message = _sessions_move_agent_message("--yes", surfaces)
+        return _sessions_move_declined("agent_shell", message, block, surfaces)
+    if not block.get("carries_files"):
+        message = _wsh.yes_carry_unavailable(device=device)
+        return _sessions_move_declined("carry_unavailable", message, block, surfaces)
+    return None
+
+
+def _sessions_move_agent_message(flag: str, surfaces: list[str]) -> Msg:
+    """The agent-shell refusal sentence: names WHERE the operator confirms, and does
+    not claim the agent is prevented (the marker is advisory)."""
+    return _wsh.agent_needs_operator(flag=flag, command=surfaces[1], dry_run_command=surfaces[2])
+
+
+def _sessions_move_declined(
+    reason: str, message: Msg, block: dict[str, Any], surfaces: list[str]
+) -> dict[str, Any]:
+    """The machine-readable ``consent_declined`` field: a refusal that can never be
+    read as a completed carry (``files: not_moved``), with where to confirm.
+
+    ``reason`` is the machine truth. ``message`` is the English text and
+    ``message_envelope`` its ``{code, params, text}`` envelope, both pinned to
+    ``en`` because a script or an agent reads this document (docs/I18N.md: persisted
+    and model-facing text renders English); a terminal renders the envelope in the
+    active locale (:func:`_sessions_move_declined_text`).
+    """
+    wire = message.envelope(locale="en")
+    return {
+        "reason": reason,
+        "message": str(wire["text"]),
+        "message_envelope": wire,
+        "files": "not_moved",
+        # Only the agent-shell refusal waits on the OPERATOR (QA Q-3); a mismatch, a
+        # failed preflight or a destination that cannot take the files is something
+        # the caller itself can act on.
+        "operator_confirmation_required": reason == "agent_shell",
+        "operator_surfaces": surfaces,
+        "scope_digest": str(block.get("scope_digest") or ""),
+        "carries_files": bool(block.get("carries_files")),
+    }
+
+
+def _sessions_move_declined_text(declined: dict[str, Any]) -> str:
+    """``consent_declined``'s sentence in the ACTIVE locale, for a terminal."""
+    wire = declined.get("message_envelope")
+    if not isinstance(wire, dict):
+        return str(declined.get("message") or "")
+    params = wire.get("params") if isinstance(wire.get("params"), dict) else {}
+    return render_resolved(Msg(str(wire.get("code") or ""), dict(params or {})))
+
+
+def _sessions_move_agent_digest_declined(
+    session_id: str, *, to: str, given_digest: str, args: argparse.Namespace | None = None
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """``(declined, preflight_block)`` for an explicit digest typed in an agent's shell.
+
+    THE SAME ADVISORY RESTRICTION AS ``--yes`` (security ruling, 2026-11-21): a
+    digest an agent passes is not the operator's consent to send files, so in an
+    agent shell (``in_agent_shell()`` — advisory, defence in depth, never a
+    boundary) a digest that the destination-aware preflight shows WOULD CARRY files
+    is refused.
+
+    A digest the preflight CANNOT JUDGE is refused too (review R1-4), whatever plan it
+    names, because telling a files-stay digest from a carrying one needs the
+    destination's answer: the dry run failed, or the destination did not answer its
+    probe (QA Q-1 — a rate-limited destination that IS granted would otherwise let
+    an old carrying digest through to a gate that carries it). The reason stays
+    ``agent_shell`` because the agent restriction is what refuses (a human shell
+    passes the digest straight to the owner), with ``preflight_error`` saying why it
+    could not be judged. Once the preflight answers, a digest for a plan that leaves
+    the files here passes untouched and follows the human path; a human shell never
+    reaches this function.
+    """
+    surfaces = _sessions_move_operator_surfaces(session_id, to, args)
+    message = _sessions_move_agent_message("--confirm-working-set", surfaces)
+    probed = _sessions_move_preflight(session_id, to=to)
+    fresh = probed.get("working_set")
+    if not (probed.get("ok") and isinstance(fresh, dict)):
+        declined = _sessions_move_declined("agent_shell", message, {}, surfaces)
+        # The machine truth of WHY it could not be judged; the sentence stays the
+        # operator-confirmation one, which is true either way.
+        declined["preflight_error"] = str(probed.get("code") or "preflight_failed")
+        return declined, None
+    if _sessions_move_destination_unanswered(fresh):
+        declined = _sessions_move_declined("agent_shell", message, fresh, surfaces)
+        declined["preflight_error"] = "destination_unanswered"
+        return declined, fresh
+    if fresh.get("carries_files") and str(fresh.get("scope_digest") or "") == given_digest:
+        return _sessions_move_declined("agent_shell", message, fresh, surfaces), fresh
+    return None, fresh
+
+
+def _sessions_move_preflight(session_id: str, *, to: str) -> dict[str, Any]:
+    """The destination-aware dry run (``request_move(dry_run=True)``), one seam."""
+    from local_operator.network import mobility
+
+    return dict(mobility.request_move(session_id, to=to, dry_run=True))
+
+
+def _sessions_move_bind_plan(result: dict[str, Any], block: dict[str, Any]) -> dict[str, Any]:
+    """Stamp the plan the user consented to on the move's result, and say if it broke.
+
+    The owner's gate keeps one narrowing rule (``mobility._workset_gate_full``): a
+    carrying digest reaching a prepare that cannot carry (the destination changed
+    between the preflight and the move) moves the conversation WITHOUT the files.
+    That is safe but must never read as the plan the user approved, so the result
+    names the consented plan and ``honoured: false`` with a machine ``reason``; the
+    caller exits 1 on it and its text leads with the keyed "not sent" line (U1).
+
+    ``honoured`` IS A VERDICT ON A MOVE THAT RAN (review R1-1): a refused re-issue
+    (e.g. ``working_set_changed``) or a queued move has no verdict yet, so the key is
+    absent there. A carry the destination never answered for (``side: source``,
+    ``state: outcome_unknown``) is not "not sent" either — the files may well have
+    arrived — so it gets ``reason: outcome_unknown`` and no ``honoured``; its receipt
+    already says where to check.
+    """
+    planned = bool(block.get("carries_files"))
+    plan: dict[str, Any] = {
+        "scope_digest": str(block.get("scope_digest") or ""),
+        "carries_files": planned,
+    }
+    raw = result.get("working_set")
+    received: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    if not result.get("ok") or isinstance(result.get("queue"), dict):
+        return {**result, "confirmed_plan": plan}
+    if not planned or received.get("transferred") is True:
+        plan["honoured"] = True
+    elif received.get("side") == "source" and received.get("state") == "outcome_unknown":
+        plan["reason"] = "outcome_unknown"
+    else:
+        plan["honoured"] = False
+        plan["reason"] = "files_not_sent"
+    return {**result, "confirmed_plan": plan}
+
+
+def _sessions_move_bind_digest(result: dict[str, Any], given_digest: str) -> dict[str, Any]:
+    """``confirmed_plan`` for an explicit ``--confirm-working-set`` the owner NARROWED.
+
+    The gate accepts a digest that names either carry answer of the same scope and
+    returns the receipt of the scope it actually used (``workset.arrival_block``
+    keeps that manifest's digest). So a move that ran, did not transfer, and whose
+    receipt digest differs from the one the caller named was a CARRYING digest the
+    gate narrowed (security S1) — stamped like the ``--yes``/prompt case. A digest
+    that matches, a transfer, or a move that did not run is returned untouched.
+    """
+    raw = result.get("working_set")
+    received: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    shown = str(received.get("scope_digest") or "")
+    if (
+        not result.get("ok")
+        or isinstance(result.get("queue"), dict)
+        or received.get("consent") != "confirmed"
+        or received.get("transferred") is not False
+        or not shown
+        or shown == given_digest
+    ):
+        return result
+    return _sessions_move_bind_plan(result, {"scope_digest": given_digest, "carries_files": True})
+
+
+def _sessions_move_plan_broken_rows(result: dict[str, Any]) -> dict[str, Any]:
+    """The receipt with each ``kept_as_confirmed`` row re-reasoned for the text answer.
+
+    That reason renders "it stays on the source, as confirmed for this move" — the
+    opposite of what a user who confirmed SENDING the files agreed to (UX U1). The
+    narrowing happens only because the destination could not take them at the
+    prepare, which ``unsupported_by_peer`` ("the other device cannot receive it")
+    says truthfully. A copy: the JSON document keeps the owner's own codes.
+    """
+    raw = result.get("working_set")
+    if not isinstance(raw, dict):
+        return result
+    block = dict(raw)
+    block["worktrees"] = [
+        (
+            {**row, "reason": "unsupported_by_peer"}
+            if isinstance(row, dict) and row.get("reason") == "kept_as_confirmed"
+            else row
+        )
+        for row in raw.get("worktrees") or []
+    ]
+    return {**result, "working_set": block}
+
+
+def _sessions_move_plan_broken_text(result: dict[str, Any], to: str) -> str:
+    """The keyed lead line for ``confirmed_plan.honoured: false`` (UX U1)."""
+    from local_operator.network import workset_text
+
+    raw = result.get("working_set")
+    block: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    sender = result.get("from_device")
+    origin: dict[str, Any] = sender if isinstance(sender, dict) else {}
+    source = workset_text.source_label(
+        block, str(origin.get("name") or origin.get("device_id") or "?")
+    )
+    return render_resolved(
+        _wsh.plan_not_honoured(device=workset_text.device_label(block, to), source=source)
+    )
+
+
+def sessions_setup_deps_command(args: argparse.Namespace) -> int:
+    """``lop sessions setup-deps <id> --status``: read-only dependency status here.
+
+    Reads THIS device's restore record and trees (``network/workset_setup.py``) and
+    prints one row per dependency kind per restored worktree, then a summary. It
+    never runs, installs, links or removes anything, whatever the caller. Exit 0
+    when a status was produced (whatever it says — a query that answered did not
+    fail), 1 when no working set of ``<id>`` was restored on this device.
+    """
+    import json as _json
+
+    from local_operator.network import workset_setup
+
+    session_id = str(args.session)
+    as_json = bool(getattr(args, "json", False))
+    status = workset_setup.dependency_status(Path(config_dir()), Path.home(), session_id)
+    if status is None:
+        if as_json:
+            print(
+                _json.dumps(
+                    {
+                        "schema": workset_setup.STATUS_SCHEMA,
+                        "executes": False,
+                        "ran": False,
+                        "session_id": session_id,
+                        "state": "no_working_set",
+                        "rows": [],
+                        "not_restored": [],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(render_resolved(_wsh.deps_none(session=session_id)), file=sys.stderr)
+        return 1
+    if as_json:
+        print(_json.dumps(status.to_json(), indent=2, sort_keys=True))
+        return 0
+    labels = {
+        "pending": _wsh.deps_state_pending,
+        "present_unverified": _wsh.deps_state_present_unverified,
+        "unknown": _wsh.deps_state_unknown,
+        "refused": _wsh.deps_state_refused,
+        "manual": _wsh.deps_state_manual,
+        "not_needed": _wsh.deps_state_not_needed,
+    }
+    print(render_resolved(_wsh.deps_header(session=session_id)))
+    for row in status.rows:
+        # An unrecognised state renders as "unknown": the report never upgrades a
+        # value it does not understand into a reassuring label.
+        label = render_resolved(labels.get(row.state, _wsh.deps_state_unknown)())
+        if row.kind:
+            line = _wsh.deps_row(state=label, cwd=row.cwd, kind=row.kind)
+        else:
+            line = _wsh.deps_row_plain(state=label, cwd=row.cwd)
+        print(render_resolved(line))
+        if row.missing_tool:
+            hint = render_resolved(_wsh.deps_missing_tool(tool=row.missing_tool))
+            print("  " + hint)  # i18n: ignore indentation around a keyed line
+    for path in status.not_restored:
+        print(render_resolved(_wsh.deps_not_restored(path=str(path))))
+    summary = {
+        "unknown": _wsh.deps_summary_unknown,
+        "pending": _wsh.deps_summary_pending,
+        "present_unverified": _wsh.deps_summary_present_unverified,
+        "nothing_needed": _wsh.deps_summary_nothing_needed,
+    }[status.state]
+    print(render_resolved(summary()))
+    return 0
+
+
+def _sessions_move_dry_run(session_id: str, *, to: str, as_json: bool) -> int:
+    """``lop sessions move <id> --to <peer> --dry-run``: the manifest, nothing moved.
+
+    Exit 0 when the owner answered (whatever the manifest holds), 1 on a refusal. The
+    JSON document is ``{ok, dry_run, session_id, confirmation_required, working_set}``;
+    a script confirms by passing ``working_set.scope_digest`` back.
+    """
+    import json as _json
+
+    from local_operator.network import mobility, workset_text
+
+    answer: dict[str, Any] = dict(mobility.request_move(session_id, to=to, dry_run=True))
+    if as_json:
+        print(_json.dumps(answer, indent=2, sort_keys=True, default=str))
+        return 0 if answer.get("ok") else 1
+    if not answer.get("ok"):
+        print(str(answer.get("message") or ""), file=sys.stderr)
+        return 1
+    raw = answer.get("working_set")
+    block: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    for line in workset_text.summary_lines(block, session=session_id, device=to):
+        print(line)  # i18n: ignore rendered from cli.sessions_move_workset keys
+    if answer.get("confirmation_required") and block.get("scope_digest"):
+        print(f"scope_digest: {block['scope_digest']}")  # i18n: ignore machine token
+    return 0
+
+
+def _confirm_working_set(block: dict[str, Any], *, session_id: str, to: str, code: str) -> bool:
+    """Show the working set and ask. Default NO: only an explicit y/yes confirms."""
+    from local_operator.network import workset_text
+
+    if code == "working_set_changed":
+        print(render_resolved(_wsh.changed()))
+    elif code == "digest_mismatch":
+        print(render_resolved(_wsh.digest_mismatch()))
+    for line in workset_text.summary_lines(block, session=session_id, device=to):
+        print(line)  # i18n: ignore rendered from cli.sessions_move_workset keys
+    try:
+        answer = input(workset_text.prompt_text(block, session=session_id, device=to))
+    except EOFError:
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
+def _sessions_move_workset_words(
+    result: dict[str, Any], *, session_id: str, to: str, mistyped: bool = False
+) -> list[str]:
+    """The working-set lines a move's text output adds (receipt or refusal).
+
+    ``mistyped``: the refusal answered a digest the user passed by hand, so its lead
+    line says the digest does not match rather than "the files changed" (U8)."""
+    from local_operator.network import workset_text
+
+    block = result.get("working_set")
+    if not isinstance(block, dict):
+        return []
+    if result.get("ok"):
+        sender = result.get("from_device")
+        source: dict[str, Any] = sender if isinstance(sender, dict) else {}
+        return workset_text.receipt_lines(
+            block, source=str(source.get("name") or source.get("device_id") or "")
+        )
+    code = str(result.get("code") or "")
+    lines = workset_text.summary_lines(block, session=session_id, device=to)
+    if mistyped:
+        lines.insert(0, render_resolved(_wsh.digest_mismatch()))
+    if code in ("working_set_unconfirmed", "working_set_changed"):
+        digest = str(block.get("scope_digest") or "")
+        keeper = workset_text.source_label(block, "?")
+        lines.append(render_resolved(_wsh.needs_confirmation(source=keeper, digest=digest)))
+    return lines
 
 
 def sessions_sync_command(args: argparse.Namespace) -> int:
@@ -7741,6 +8655,41 @@ def sessions_sync_command(args: argparse.Namespace) -> int:
         f"({result.get('bytes')} bytes, {result.get('mode')} of the transcript)."
     )
     return 0
+
+
+def sessions_notifications_command(args: argparse.Namespace) -> int:
+    """Explicit operator-authorized local notification policy; JSON control output.
+
+    No spawn/profile field or agent registration calls this operation. Like other
+    local operator controls it may be executed by an assistant only when the
+    operator actually authorized this routing change, not on its own initiative.
+    This is not an authenticated-human or same-uid security boundary.
+    """
+    import json
+
+    from local_operator.notifications.authority import granted, read_decision, set_grant
+    from local_operator.session.cleanup import resolve_session_reference
+
+    root = config_dir() / "sessions"
+    session_id, candidates = resolve_session_reference(root, str(args.session))
+    if session_id is None:
+        print(json.dumps({"error": "ambiguous_session" if candidates else "session_not_found"}))
+        return 2
+    directory = root / session_id
+    try:
+        if args.grant or args.revoke:
+            decision = set_grant(directory, allow=bool(args.grant), reason=str(args.reason))
+        else:
+            decision = read_decision(directory)
+        print(
+            json.dumps(
+                {"session_id": session_id, "granted": granted(directory), "decision": decision}
+            )
+        )
+        return 0
+    except (OSError, ValueError) as exc:
+        print(json.dumps({"error": str(exc), "session_id": session_id}))
+        return 2
 
 
 def sessions_hold_command(args: argparse.Namespace) -> int:
@@ -7934,6 +8883,9 @@ def sessions_command(args: argparse.Namespace) -> int:
     if getattr(args, "sessions_command", None) == "cleanup":
         return sessions_cleanup_command(args)
 
+    if getattr(args, "sessions_command", None) == "notifications":
+        return sessions_notifications_command(args)
+
     if getattr(args, "sessions_command", None) == "hold":
         return sessions_hold_command(args)
 
@@ -7957,6 +8909,9 @@ def sessions_command(args: argparse.Namespace) -> int:
 
     if getattr(args, "sessions_command", None) == "sync":
         return sessions_sync_command(args)
+
+    if getattr(args, "sessions_command", None) == "setup-deps":
+        return sessions_setup_deps_command(args)
 
     # The row shape lives in ``info.collect`` and is shared with ``/info``,
     # which needs the same "which sessions exist and what do they cost" answer
@@ -11172,6 +12127,15 @@ def mobile_command(args: argparse.Namespace) -> int:
                 )
             )
         print(f"healthy:      {'yes' if result['healthy'] else 'no'}{files_note}")
+        # A healthy daemon on an OLD BUILD reads as fine above; after an upgrade
+        # that is exactly what kept a phone on old code (2026-11-18).
+        from local_operator.services import stale_daemon_status_line
+
+        stale_build = stale_daemon_status_line("mobile", "lop mobile restart")
+        if stale_build:
+            # Bare: the line is keyed copy, and a label here would be the one
+            # untranslated word on it.
+            print(stale_build)
         # A healthy daemon with no bundle serves a 503 to every authenticated GET
         # ("mobile web bundle not built"), so `healthy: yes` on its own reads as
         # fine while the phone has no UI at all — the state generations
@@ -11922,6 +12886,121 @@ def adopt_serve_socket(fd: int, host: str) -> socket.socket:
     return listener
 
 
+#: Exit status of a ``--listener-fd`` serve whose boot missed its deadline.
+#: 69 is ``EX_UNAVAILABLE`` from sysexits.h: distinct from the plain ``1`` every
+#: other serve refusal uses (so a log or ``systemctl status`` names THIS failure),
+#: non-zero so the systemd unit's ``Restart=on-failure`` cold-starts its
+#: ``ExecStart`` (which carries ``--port``, never ``--listener-fd``), and not
+#: ``75``, which other units list in ``RestartPreventExitStatus``.
+SERVE_ADOPT_BOOT_DEADLINE_EXIT = 69
+
+#: Overrides the adopted-listener boot deadline, in seconds. ``LOCAL_OPERATOR_``
+#: prefixed and read per call like the other runtime knobs
+#: (``LOCAL_OPERATOR_RADIENT_PREVIEW_TIMEOUT_SECONDS``): ``lop`` runs from a uv-tool
+#: install, so an import-time constant would need a rebuild to change.
+SERVE_ADOPT_BOOT_DEADLINE_ENV = "LOCAL_OPERATOR_SERVE_ADOPT_BOOT_DEADLINE_SECONDS"
+
+#: Default boot deadline. A healthy adopt finishes its app import and lifespan
+#: startup in seconds; 90 s leaves an order of magnitude of headroom for a loaded
+#: host while still bounding the outage a wedged boot causes.
+SERVE_ADOPT_BOOT_DEADLINE_DEFAULT_SECONDS = 90.0
+
+
+def resolve_adopt_boot_deadline_seconds() -> float:
+    """The adopted-listener boot deadline, resolved at call time.
+
+    Precedence: :data:`SERVE_ADOPT_BOOT_DEADLINE_ENV` > the default. Anything that
+    is not a positive finite number (a typo, an empty export, ``0``) falls back to
+    the default rather than disabling the deadline: an unbounded adopt is exactly
+    the wedge this deadline exists to end, so it is not a setting to reach by typo.
+    """
+    raw = os.environ.get(SERVE_ADOPT_BOOT_DEADLINE_ENV)
+    if raw is None or not raw.strip():
+        return SERVE_ADOPT_BOOT_DEADLINE_DEFAULT_SECONDS
+    try:
+        seconds = float(raw)
+    except ValueError:
+        return SERVE_ADOPT_BOOT_DEADLINE_DEFAULT_SECONDS
+    if not math.isfinite(seconds) or seconds <= 0:
+        return SERVE_ADOPT_BOOT_DEADLINE_DEFAULT_SECONDS
+    return seconds
+
+
+def _exit_missed_adopt_boot(code: int) -> None:
+    """Leave the process NOW. ``os._exit`` because the main thread is the one that
+    is wedged: ``sys.exit`` from this watchdog thread would only end the watchdog,
+    and an orderly interpreter shutdown would wait on the very lifespan that hung.
+    A seam of its own so tests can observe the exit without dying."""
+    os._exit(code)
+
+
+def arm_adopted_boot_deadline(
+    *,
+    fd: int,
+    port: int,
+    is_ready: Callable[[], bool],
+    sockets: Callable[[], "list[socket.socket]"],
+    deadline_s: float | None = None,
+    poll_s: float = 0.25,
+) -> "threading.Event":
+    """Bound how long an ADOPTED listener may sit un-served while this image boots.
+
+    WHY ONLY THE ADOPT PATH (node2 incident). A reload ``execve``s this process with
+    the bound socket inherited as ``--listener-fd``. If the new image then stalls
+    in boot -- an import, a lock wait, a lifespan startup that never returns -- the
+    kernel keeps the port in LISTEN on a descriptor nothing will ever ``accept``
+    from: clients queue or are refused, the old image is gone (same pid, replaced),
+    and anything probing the port sees it taken. A FRESH bind has no such trap: its
+    failed boot releases the port and the supervisor's retry re-binds it. So only
+    an adopt is armed, and ``--reload`` (which never adopts) is untouched.
+
+    WHAT FIRING DOES. One stderr line naming the fd, port and elapsed time; every
+    socket ``sockets()`` returns at that moment is closed (the adopted listener and
+    the handoff owner's dup -- either alone keeps the port in LISTEN); then the
+    process exits :data:`SERVE_ADOPT_BOOT_DEADLINE_EXIT`. The fd lives only in this
+    process, so nothing can re-adopt it: the systemd unit's ``Restart=on-failure``
+    runs its ``ExecStart``, which binds ``--port`` cold.
+
+    READY is ``is_ready()`` -- uvicorn's ``Server.started``, set only after the
+    lifespan startup completed and the sockets are accepting. Returns an event the
+    caller sets once serving has ended, so a clean shutdown never trips the exit.
+    """
+    import threading
+
+    budget = resolve_adopt_boot_deadline_seconds() if deadline_s is None else deadline_s
+    done = threading.Event()
+    started = time.monotonic()
+
+    def watch() -> None:
+        while not done.wait(poll_s):
+            if is_ready():
+                return
+            elapsed = time.monotonic() - started
+            if elapsed < budget:
+                continue
+            # Flushed explicitly: ``os._exit`` skips the interpreter's buffer flush,
+            # and this line is the only record of why the daemon left.
+            print(  # i18n: ignore serve daemon stderr log line; English-only
+                f"serve: adopted listener fd {fd} on port {port} not serving after "
+                f"{elapsed:.1f}s (boot deadline {budget:g}s); closing it and exiting "
+                f"{SERVE_ADOPT_BOOT_DEADLINE_EXIT} so a cold start can re-bind the port",
+                file=sys.stderr,
+                flush=True,
+            )
+            for sock in sockets():
+                try:
+                    sock.close()
+                except OSError:  # pragma: no cover — already closed is the goal
+                    pass
+            _exit_missed_adopt_boot(SERVE_ADOPT_BOOT_DEADLINE_EXIT)
+            return
+
+    # Daemon: a serve that finished (or crashed) on the main thread must not be
+    # held open by its own watchdog.
+    threading.Thread(target=watch, name="serve-adopt-boot-deadline", daemon=True).start()
+    return done
+
+
 def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None = None) -> int:
     # Install before importing the server or uvicorn: startup diagnostics must
     # not inherit the CLI's synchronous stderr handler. No other CLI changes.
@@ -12018,6 +13097,10 @@ def _serve_command(host: str, port: int, reload: bool, *, listener_fd: int | Non
 
     listener: socket.socket | None = None
     resolved_port = port
+    # Filled in as the adopt path's boot proceeds, so its deadline watchdog can
+    # read readiness and close the owner's dup; unused on every other path.
+    serve_ref: dict[str, Any] = {}
+    boot_deadline_done: Any = None
     if listener_fd is not None and reload:
         # Both at once is a contradiction rather than a precedence rule: a
         # ``--reload`` child's port belongs to uvicorn's supervisor, which is
@@ -12056,6 +13139,21 @@ def _serve_command(host: str, port: int, reload: bool, *, listener_fd: int | Non
             )
             return 1
         resolved_port = listener.getsockname()[1]
+        # Armed HERE, before the app import below, because that import and the
+        # lifespan are exactly where an adopted boot has been seen to wedge with
+        # the port held (see ``arm_adopted_boot_deadline``). The fresh-bind and
+        # ``--reload`` paths are deliberately never armed.
+        adopted_listener = listener
+        boot_deadline_done = arm_adopted_boot_deadline(
+            fd=listener_fd,
+            port=resolved_port,
+            is_ready=lambda: bool(getattr(serve_ref.get("server"), "started", False)),
+            sockets=lambda: [
+                s
+                for s in (adopted_listener, getattr(serve_ref.get("owner"), "socket", None))
+                if s is not None
+            ],
+        )
     elif not reload:
         try:
             listener = _bind_serve_socket(host, port)
@@ -12106,9 +13204,24 @@ def _serve_command(host: str, port: int, reload: bool, *, listener_fd: int | Non
         from local_operator.server import reload as serve_reload
 
         serve_reload.bind_listener_fd(asgi_app, listener.fileno())
+        # Same-OS-user check on every loopback connection (follow-up D,
+        # ``server/peer_check.py``): started now, in a background thread, so its
+        # self-probe overlaps app start-up instead of delaying it; connections
+        # that arrive first wait, paused, for the verdict. ``http=`` is the
+        # whole wiring -- ``tests/unit/test_cli_serve.py`` pins it, because a
+        # refactor that drops it silently reopens the cross-user hole.
+        from local_operator.server import peer_check
+
+        peer_check.ensure_resolving()
         # dictConfig otherwise closes ALL existing handlers (including ours)
         # and reinstalls synchronous stderr handlers before startup can run.
-        config = uvicorn.Config(asgi_app, host=host, port=resolved_port, log_config=None)
+        config = uvicorn.Config(
+            asgi_app,
+            host=host,
+            port=resolved_port,
+            log_config=None,
+            http=peer_check.gated_protocol_class(),
+        )
         # Retain the Server object so a ready-successor handoff can pause/resume
         # ACCEPTORS on it without a kill: the listener socket lives in this frame
         # and the handoff runs in the lifespan's loop, so app.state is the one
@@ -12120,6 +13233,8 @@ def _serve_command(host: str, port: int, reload: bool, *, listener_fd: int | Non
         asgi_app.state.listener_owner = service_handoff.ListenerOwner(
             asgi_app, servers=[], listener=listener
         )
+        serve_ref["server"] = server
+        serve_ref["owner"] = asgi_app.state.listener_owner
         # ``KeyboardInterrupt`` caught here because this path replaces
         # ``uvicorn.run``, which catches it around the same call. uvicorn's own
         # signal handling turns Ctrl+C into a clean shutdown while it is
@@ -12130,6 +13245,11 @@ def _serve_command(host: str, port: int, reload: bool, *, listener_fd: int | Non
             server.run(sockets=[listener])
         except KeyboardInterrupt:
             pass
+        finally:
+            # Serving ended on its own terms: a later shutdown, however slow, is
+            # not a missed boot.
+            if boot_deadline_done is not None:
+                boot_deadline_done.set()
     else:
         # The reloader re-imports ``server.app`` in a CHILD process, so the app
         # object cannot be reached above and the inherited environment is the
@@ -12144,6 +13264,9 @@ def _serve_command(host: str, port: int, reload: bool, *, listener_fd: int | Non
             reload=reload,
             reload_excludes=[".venv"],
             log_config=None,
+            # An import string: the reloader re-imports the protocol in its
+            # child, which resolves the peer-uid policy on its first connection.
+            http="local_operator.server.peer_check:PeerCheckedHTTPProtocol",
         )
     return 0
 
@@ -17594,6 +18717,9 @@ def _preflight_api_key(
         import asyncio
 
         from local_operator.network.credentials import build_auth_store
+        from local_operator.providers.bedrock.connection import (
+            configure_invocation_auth,
+        )
         from local_operator.providers.registry import credential_provider_id
 
         # THE STORE THE SESSION WILL USE, not a plain ``AuthStore`` (mesh credentials,
@@ -17605,6 +18731,7 @@ def _preflight_api_key(
         # row for a borrowable key otherwise; either way this stays a presence check
         # with no network call, which is the rule this function's docstring states.
         auth_store = build_auth_store(config_dir)
+        configure_invocation_auth(auth_store, canonical)
         try:
             storage_provider = credential_provider_id(canonical)
             if auth_store.list_credentials(provider=storage_provider):
@@ -17630,6 +18757,14 @@ def _preflight_api_key(
     key_name = env_key_name(canonical)
     credential_hint = f", `local-operator credential update {key_name}`" if key_name else ""
     env_hint = f", or set {key_name} in the environment" if key_name else ""
+    # Bedrock has no single key variable (env_key_name is None) and several
+    # ways to connect; name them (AWS_BEARER_TOKEN_BEDROCK, the ambient switch
+    # for headless workers) from the same catalogued copy the runtime uses.
+    provider_hint = ""
+    if canonical == "bedrock":
+        from local_operator.providers.bedrock.errors import no_credentials_text
+
+        provider_hint = f" {no_credentials_text()}"
 
     if not require_key:
         # Interactive start: name the fact and the remedies, then let the app
@@ -17641,7 +18776,8 @@ def _preflight_api_key(
             paint(
                 f"Warning: no credentials are configured for hosting platform "
                 f"'{hosting}'. Starting anyway — run `/login {canonical}` in the "
-                f"TUI, `local-operator login {canonical}` from a shell{env_hint}.",
+                f"TUI, `local-operator login {canonical}` from a shell{env_hint}."
+                f"{provider_hint}",
                 WARNING,
                 stream=sys.stderr,
             ),
@@ -17656,7 +18792,7 @@ def _preflight_api_key(
         paint(
             f"Error: {subject} is required for hosting platform '{hosting}' but "
             f"is not configured. Set it via `local-operator login {canonical}`"
-            f"{credential_hint}, or the environment.",
+            f"{credential_hint}, or the environment.{provider_hint}",
             ERROR,
             stream=sys.stderr,
         ),
@@ -18749,11 +19885,21 @@ def main() -> int:
             from local_operator.tunnels.cli import main as tunnel_main
 
             return tunnel_main(args)
+        elif args.subcommand == "community":
+            from local_operator.community.cli import main as community_main
+
+            return community_main(args)
         elif args.subcommand == "team-bridge":
             if getattr(args, "team_bridge_command", None) == "avatar":
                 from local_operator.team_bridge.cli import main as team_bridge_avatar
 
                 return team_bridge_avatar(args)
+            if getattr(args, "team_bridge_command", None) == "holds":
+                from local_operator.team_bridge.holds_cli import (
+                    main as team_bridge_holds,
+                )
+
+                return team_bridge_holds(args)
             if getattr(args, "team_bridge_command", None) == "setup":
                 from local_operator.team_bridge.setup_cli import (
                     main as team_bridge_setup,
@@ -18917,7 +20063,30 @@ def main() -> int:
                 # script can tell it from a reclaim that ran — the same shape
                 # `lop stop`'s "turn is in flight" refusal has.
                 return 1 if reclaim.refused else 0
-            print("usage: lop services {status, restart, reclaim}", file=sys.stderr)
+            if command == "heavy":
+                from local_operator import heavy_cli
+
+                heavy = getattr(args, "heavy_command", None)
+                if heavy == "wait":
+                    return heavy_cli.wait_command(getattr(args, "timeout", None))
+                if heavy == "run":
+                    argv = list(getattr(args, "heavy_argv", None) or [])
+                    # REMAINDER keeps the separator when it follows an option.
+                    if argv and argv[0] == "--":
+                        argv = argv[1:]
+                    return heavy_cli.run_command(
+                        argv,
+                        getattr(args, "timeout", None),
+                        start_by=getattr(args, "start_by", None),
+                    )
+                if heavy == "status":
+                    return heavy_cli.status_command()
+                print(
+                    "usage: lop services heavy {wait, run, status}",
+                    file=sys.stderr,  # i18n: ignore usage synopsis: command tokens only
+                )
+                return 2
+            print("usage: lop services {status, restart, reclaim, heavy}", file=sys.stderr)
             return 2
         elif args.subcommand == "install":
             # Same lazy import, same reason. The generation layout's own verbs:

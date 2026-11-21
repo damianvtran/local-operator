@@ -1,0 +1,30 @@
+# mechanical checks at HEAD (mechB.py; the zh/ru receipt_sent 'placeholder' hits are words inside plural arms, a known false positive of this rig — check.py reports 0 catalogue problems)
+rev HEAD
+en cli.sessions_move_workset source sha256 6ba71eab00d799d4ff17af1841bb319a15ec0e9c9d684656144c1b1799ab6050  context da8a381cd58e0c2efb72d3102cbf1ce137021109c2970dc3768d9eee8af928b0
+en wire.settings source sha256 562655dc455f9a7dd09cf27ed53608be9795989669c97e070d071a9c57dacda1  context de060f8b7f0b39a72bb449d4b4d3847bf43da32348e9926e329001bdf91166a7
+fr cli.sessions_move_workset: keys 87/87 target sha256 224786f6570eb964ff7cc34e71988c332a30b1280a8b56c8ef82224132d4d40f plural categories ['one', 'other'] mechanical problems 0 typography: plain-space-before-:;?! 0, U+202F 50, ASCII apostrophe 0, U+2019 49
+fr wire.settings: keys 889/889 target sha256 887445f38b7241b6f4d98fa64ce428ffd46b5ea62bc800ceac8386b846946071 plural categories [] mechanical problems 1 typography: plain-space-before-:;?! 4, U+202F 197, ASCII apostrophe 66, U+2019 385
+    key set/order differs
+es cli.sessions_move_workset: keys 87/87 target sha256 0f878e3ce14298055bcc429b5ce734a0feed11292d05d490f83c7453d0b65b61 plural categories ['one', 'other'] mechanical problems 0
+es wire.settings: keys 889/889 target sha256 f652e763ce904b28067db6a031f102dda63f11f1c560b2844f8e631828a7183d plural categories [] mechanical problems 1
+    key set/order differs
+zh-CN cli.sessions_move_workset: keys 87/87 target sha256 6f2c1a4af67273dd3d1efd2bd967f4a6017a8b44e1e283a9bdc211d65da01bc1 plural categories ['other'] mechanical problems 1 typography: CJK/Latin space junctions 0, single-mark ellipsis 0
+    cli.sessions_move_workset.receipt_sent: placeholders ['count', 'device'] vs ['count', 'device', '已在那里收到']
+zh-CN wire.settings: keys 889/889 target sha256 77cb65f4075ae063a6ec88991a7f1d4b5fba428911bfa1093022273f6c9b4087 plural categories [] mechanical problems 1 typography: CJK/Latin space junctions 3, single-mark ellipsis 6
+    key set/order differs
+ru cli.sessions_move_workset: keys 87/87 target sha256 0c48034b1785df0f1f74d5543d722ea4a0af16acfb91d8a80abaedbdad1fa7f5 plural categories ['few', 'many', 'one', 'other'] mechanical problems 1
+    cli.sessions_move_workset.receipt_sent: placeholders ['count', 'device'] vs ['count', 'device', 'получен', 'получено']
+ru wire.settings: keys 889/889 target sha256 a9b9b080cd06830593ee09e135ab00ec7fd19014be7ade0f5566dd4a39b76fd9 plural categories [] mechanical problems 1
+    key set/order differs
+vi cli.sessions_move_workset: keys 87/87 target sha256 e0f6375b6fe1df8bd0400e31e2d0e188864630ff7a37d334d460f7e0d978c34a plural categories ['other'] mechanical problems 0
+vi wire.settings: keys 889/889 target sha256 d372502dacb6a0de76a2d2e0d42ba26b5fad3eb1578c27aac97b96985fabc885 plural categories [] mechanical problems 1
+    key set/order differs
+ur cli.sessions_move_workset: keys 87/87 target sha256 32d7f97683c25a0103f23e059482f606dba6ea751fd4295c53d8554d7262c112 plural categories ['one', 'other'] mechanical problems 0 typography: Latin/Hindi prose punctuation outside LTR islands 6
+ur wire.settings: keys 889/889 target sha256 167dcbba61fde9feb128a005fac5e5b6d3613b76943e49ace915aaf5a31ee858 plural categories [] mechanical problems 1 typography: Latin/Hindi prose punctuation outside LTR islands 61
+    key set/order differs
+hi cli.sessions_move_workset: keys 87/87 target sha256 c88840be4aafce014c7d91ccf7451a825ca94eba3cf6ca97be0a4077415e203a plural categories ['one', 'other'] mechanical problems 0
+hi wire.settings: keys 889/889 target sha256 d2bd83636903d7aeabab744f57fa2af83da033432432a26a27065d2a5ad83090 plural categories [] mechanical problems 1
+    key set/order differs
+
+# product ICU runtime render (renderB.py)
+rendered 826 messages without MessageError

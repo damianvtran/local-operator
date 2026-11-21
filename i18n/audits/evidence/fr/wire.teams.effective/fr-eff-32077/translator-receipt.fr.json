@@ -1,0 +1,67 @@
+{
+  "locale": "fr",
+  "namespace": "wire.teams.effective",
+  "status": "translated",
+  "key_count": 9,
+  "date": "2026-11-19T18:43:22.329429+00:00",
+  "frozen_worktree": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons",
+  "frozen_commit": "e70bc818b8553dca1fad007705257817be49ee37",
+  "translator": {
+    "agent": "i18n-translator",
+    "task": "effective-reasons-fr",
+    "session": "34a8703ccbff",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host session-state Model field",
+    "fallback_used": false,
+    "method": "LLM translation by this session; no translation API, SDK, MT service or website"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "style": {
+      "path": "i18n/style-guides/fr.md",
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  },
+  "output": {
+    "path": "/Users/damian/.local-operator/sessions/34a8703ccbff/scratchpad/wire.teams.effective.fr.json",
+    "sha256": "9c7ffd5f52a5ad10267d739074e19c56c90f532b6c79b15314e2256655038226"
+  },
+  "contextual_choices": [
+    "Professional vous register; imperative Vérifiez; complete actionable reasons without raw exception details or any implication of launch.",
+    "Preserved subagents.models.{tier}, provider/model, model, effort and every placeholder exactly. Other prose is French.",
+    "Model mapping rendered as objet de configuration de modèle: context explicitly defines a configuration object, not a translation table.",
+    "Optional effort rendered si nécessaire; model remains mandatory in the instruction.",
+    "Model resolution rendered déterminer le modèle correspondant à {selector}: readable French retaining selector-to-model resolution semantics.",
+    "Existing French wire.errors.desktop and wire.settings catalogues use effort de raisonnement, retained here.",
+    "Curly U+2019 apostrophes; no French punctuation requiring U+202F occurs in these sentences."
+  ],
+  "glossary_proposals": {
+    "model selector": "sélecteur de modèle",
+    "model mapping": "objet de configuration de modèle",
+    "reasoning effort": "effort de raisonnement (already present in French catalogue)"
+  },
+  "cldr": "No plural or select expressions in these nine source keys; no plural arms added. French categories one/many/other would apply to future plural messages.",
+  "rtl": "French is LTR; no bidi controls inserted. Technical identifiers remain in logical order.",
+  "width": "English sidecar specifies natural wrapping, no fixed cell-width limit; no invented width constraint.",
+  "validation": {
+    "mechanical_packaging": "JSON readback, exact source key order and placeholder parity asserted successfully in this session. This is not an audit.",
+    "repository_validator": "Not run: task explicitly forbids test/build/install and limits output to scratch. Independent auditor/integrator must run repository validation after integration.",
+    "rendered_evidence": "Not performed; independent client review follows."
+  },
+  "audit": {
+    "performed": false,
+    "status": "pending independent auditor"
+  },
+  "repository_changes": "None; no source/generated/ledger edits, commit, PR or push."
+}

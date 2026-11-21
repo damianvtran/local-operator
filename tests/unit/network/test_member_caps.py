@@ -363,7 +363,12 @@ def test_a_grant_opens_the_move_op_on_an_already_open_link(
     blocked it before)."""
     server_a, server_b, host, port = devices
     record, _host, _port = _pair(devices, monkeypatch, role="drive")
-    link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link is not None, reason
     try:
         frame = {"op": "net_session_move", "phase": "status", "locality": "remote"}
@@ -442,6 +447,147 @@ def test_a_peers_rotation_does_not_undo_a_local_grant() -> None:
     )
 
 
+def test_a_rotation_carrying_a_workset_import_grant_applies() -> None:
+    """#4245 agent review round 3, B1: ``admin`` no longer holds ``workset_import``
+    (a receive-side grant), and the rotation's row check used the ADMIN set as the
+    vocabulary — so a rotator that had granted it saw its frame refused as
+    ``member_capability_unknown`` by every member and cut itself off. Rows are
+    checked against the whole vocabulary now."""
+    me, rotator = "d_" + "a" * 32, "d_" + "b" * 32
+    record = types.NetworkRecord(network_id="n_rot", name="rot", self_device_id=me, epoch=1)
+    for device, role in ((me, "admin"), (PEER, "drive"), (rotator, "admin")):
+        relay.admit(
+            record,
+            device_id=device,
+            public_key="k" + device[-4:],
+            name=device[:6],
+            role=role,
+            added_by=me,
+            persist=False,
+        )
+    theirs = types.NetworkRecord.from_json(record.to_json())
+    theirs.self_device_id = rotator
+    relay.set_member_capabilities(theirs, device_id=PEER, grant=["workset_import"])
+    frame = {
+        "epoch": 2,
+        "rotation_id": rotator,
+        "members": [row.to_json() for row in theirs.members],
+        "secret": "new-secret",
+    }
+    state = types.SecretState(network_id="n_rot", epoch=1, secret="old-secret")
+    outcome = relay.apply_epoch(record, state, frame, sender_device_id=rotator, persist=False)
+    assert outcome.applied, outcome
+    # A name outside the vocabulary is still refused.
+    frame["epoch"] = 3
+    frame["members"][1]["capabilities"] = ["no_such_capability"]
+    refused = relay.apply_epoch(record, state, frame, sender_device_id=rotator, persist=False)
+    assert not refused.applied
+
+
+def test_a_peer_table_never_brings_a_receiver_local_grant() -> None:
+    """#4245 security round 3, S15: ``workset_import`` is decided on the receiver.
+    An admin introducing a new device (a pull) or a rotation frame carrying a row
+    this device does not hold keeps every other capability, never that one."""
+    me, admin, newcomer = "d_" + "a" * 32, "d_" + "b" * 32, "d_" + "e" * 32
+    record = types.NetworkRecord(network_id="n_rot", name="rot", self_device_id=me, epoch=1)
+    for device, role in ((me, "drive"), (admin, "admin")):
+        relay.admit(
+            record,
+            device_id=device,
+            public_key="k" + device[-4:],
+            name=device[:6],
+            role=role,
+            added_by=me,
+            persist=False,
+        )
+    row = types.MemberRecord(
+        device_id=newcomer,
+        public_key="knew",
+        name="new",
+        role="drive",
+        capabilities=["list", "view", "workset_import"],
+        added_via="invite",
+    ).to_json()
+
+    # Verified supplier: an unverified one is refused outright, which would make the
+    # "no receiver-local grant" check pass vacuously; this is about a VERIFIED admin's table.
+    changed, added = relay.adopt_members(
+        record, [row], sender_device_id=admin, allow_new=True, supplier_verified=True
+    )
+
+    assert changed and added == [newcomer]
+    adopted = record.member(newcomer)
+    assert adopted is not None and sorted(adopted.capabilities) == ["list", "view"]
+
+    # The rotation path: a row this device does not hold, taken from the frame.
+    other = "d_" + "f" * 32
+    theirs = types.NetworkRecord.from_json(record.to_json())
+    theirs.members.append(
+        types.MemberRecord(
+            device_id=other,
+            public_key="kother",
+            name="oth",
+            role="drive",
+            capabilities=["list", "workset_import"],
+            added_via="invite",
+        )
+    )
+    frame = {
+        "epoch": 2,
+        "rotation_id": admin,
+        "members": [m.to_json() for m in theirs.members],
+        "secret": "new-secret",
+    }
+    state = types.SecretState(network_id="n_rot", epoch=1, secret="old-secret")
+    outcome = relay.apply_epoch(record, state, frame, sender_device_id=admin, persist=False)
+    assert outcome.applied, outcome
+    rotated_in = record.member(other)
+    assert rotated_in is not None and rotated_in.capabilities == ["list"]
+
+
+def test_a_join_never_adopts_a_receiver_local_grant(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4245 security round 4, S17 (probe_s15_join): the join-path sibling of S15.
+    The inviter's admission table names ``d_x`` with ``workset_import``; the fresh
+    joiner has granted nothing, so the row lands without it and ``import_granted``
+    stays false. Every other capability on the row is kept."""
+    from types import SimpleNamespace
+
+    from local_operator.network import workset_move
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    me, inviter, other = "d_" + "a" * 32, "d_" + "b" * 32, "d_" + "e" * 32
+    rows = [
+        types.MemberRecord(device_id=me, name="me", role="drive", capabilities=["list"]),
+        types.MemberRecord(device_id=inviter, name="inv", role="admin", capabilities=["list"]),
+        types.MemberRecord(
+            device_id=other,
+            name="x",
+            role="drive",
+            capabilities=["list", "view", "workset_import"],
+        ),
+    ]
+    answer = {
+        "network": {"network_id": "n_join", "name": "join", "epoch": 1},
+        "secret": "s3cret",
+        "members": [row.to_json() for row in rows],
+    }
+    envelope = SimpleNamespace(
+        inviter_device_id=inviter,
+        inviter_name="inv",
+        network_id="n_join",
+        network_name="join",
+        epoch=1,
+    )
+
+    net_cli._persist_join(answer, envelope, SimpleNamespace(device_id=me), "127.0.0.1", store)
+
+    joined = store.load("n_join", root).member(other)
+    assert joined is not None and joined.capabilities == ["list", "view"]
+    assert not workset_move.import_granted(root, other)
+
+
 # ---------------------------------------------------------------------------
 # F7 — the deciding device records its own decision (the onboarding scopes)
 # ---------------------------------------------------------------------------
@@ -452,7 +598,9 @@ def test_the_self_decided_set_is_exactly_the_onboarding_scopes_and_update() -> N
     # the two onboarding scopes AND `update` (S1 of the mesh rolling updates, whose
     # decision governs this device's own install — RU §2) are grantable-only, and
     # the set is exactly the three.
-    assert types.SELF_DECIDED_SCOPES == frozenset({"approve", "unattended", "update"})
+    assert types.SELF_DECIDED_SCOPES == frozenset(
+        {"approve", "unattended", "update", "workset_import"}
+    )
     assert types.SELF_DECIDED_SCOPES <= types.GRANTABLE_CAPABILITIES
 
 
@@ -501,6 +649,27 @@ def test_the_deciding_device_may_grant_and_revoke_the_onboarding_scopes(
         assert records[0]["actor"] == server.identity.device_id
         assert records[0]["detail"]["added"] == ["approve", "unattended"]
         assert records[1]["detail"]["removed"] == ["unattended"]
+    finally:
+        server.stop()
+
+
+def test_a_drive_device_records_a_workset_import_grant_for_a_peer(root: Path) -> None:
+    """#4245 round 2 (security-lead ruling): ``workset_import`` is the RECEIVING
+    device's decision ("may this peer send working files into my home"), so a
+    non-admin device records it in the peer's row of its own record, like ``update``."""
+    server = _server(root)
+    try:
+        record = _with_peer(server, role="drive")
+        assert "workset_import" not in _caps(root, record.network_id)
+
+        granted = server.control_dispatch(
+            "net_member_caps",
+            {"req": 1, "network": record.name, "device_id": PEER, "grant": ["workset_import"]},
+        )
+
+        assert granted["op"] == "ack", granted
+        assert granted["detail"]["added"] == ["workset_import"]
+        assert "workset_import" in _caps(root, record.network_id)
     finally:
         server.stop()
 
@@ -628,7 +797,12 @@ def test_the_onboarding_grant_opens_a_full_auto_create_on_an_already_open_link(
         fresh.self_role = "drive"
         fresh.self_capabilities = sorted(types.capabilities_for_role("drive"))
         store.save(fresh, server_a.root)
-    link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link is not None, reason
     try:
         frame = {"op": "net_session_create", "req": 71, "cwd": "", "yolo": True}

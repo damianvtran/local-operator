@@ -1,0 +1,218 @@
+{
+  "locale": "ru",
+  "namespace": "tui.session_sidebar",
+  "date": "2026-11-20",
+  "source_sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": null,
+    "provenance_source": "Delegation brief; translator identity not independently observed"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "807cdc0b4222",
+    "date": "2026-11-20",
+    "result": "passed",
+    "findings": 0
+  },
+  "status": "passed",
+  "verdict": "clean-with-findings",
+  "files": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-tui-sidebar/local_operator/i18n/catalogues/en/tui.session_sidebar.json",
+      "sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a"
+    },
+    "target": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-tui-sidebar/local_operator/i18n/catalogues/ru/tui.session_sidebar.json",
+      "sha256": "f118294f998241da1a561015bc99dfdf1938063c3fb908799c22956eaf0f26fa"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-tui-sidebar/local_operator/i18n/catalogues/en/tui.session_sidebar.context.json",
+      "sha256": "698e8f0e151fee53d52a533bc51d7edcc600ce6964d74cdb024888238161f6e0"
+    }
+  },
+  "findings_by_severity": {
+    "blocker": [],
+    "major": [],
+    "minor": [
+      {
+        "id": "R1",
+        "severity": "minor",
+        "key": "tui.session_sidebar.footer.asks_note",
+        "line": 2,
+        "current": "вопросы: {count}",
+        "proposed": "вопр.: {count}",
+        "reason": "Measures 10/10/11/11 cells at 0/9/10/99 against maxCells 10; conventional вопр. preserves the question meaning and measures 8/8/9/9, so the budget is feasible without widening it."
+      },
+      {
+        "id": "R2",
+        "severity": "minor",
+        "key": "tui.session_sidebar.pinned_overflow",
+        "line": 6,
+        "current": "other {+{shown} закреплённых — прокрутите}",
+        "proposed": "other {+{shown} закреплённой — прокрутите}",
+        "reason": "Russian fractional counts take genitive singular (1,5 закреплённой [сессии]), not genitive plural. render_message reproduces the wrong other branch at 1.5. Current caller sums rows to an integer (session_sidebar.py:964-975), so this is a latent grammar issue, not a reachable major."
+      }
+    ],
+    "nit": []
+  },
+  "keys_read": 21,
+  "checks": {
+    "key_parity": true,
+    "argument_parity": true,
+    "required_plural_categories": [
+      "few",
+      "many",
+      "one",
+      "other"
+    ],
+    "actual_plural_selectors": [
+      [
+        "one",
+        "few",
+        "many",
+        "other"
+      ]
+    ],
+    "counts_measured": [
+      0,
+      9,
+      10,
+      99
+    ],
+    "widths": {
+      "tui.session_sidebar.footer.asks_note": {
+        "budget": 10,
+        "cells": [
+          10,
+          10,
+          11,
+          11
+        ]
+      },
+      "tui.session_sidebar.footer.hub_note": {
+        "budget": 10,
+        "cells": [
+          6,
+          6,
+          7,
+          7
+        ]
+      },
+      "tui.session_sidebar.footer.opening": {
+        "budget": 29,
+        "cells": [
+          9,
+          9,
+          9,
+          9
+        ]
+      },
+      "tui.session_sidebar.footer.refresh_failed": {
+        "budget": 29,
+        "cells": [
+          19,
+          19,
+          19,
+          19
+        ]
+      },
+      "tui.session_sidebar.pinned_overflow": {
+        "budget": 29,
+        "cells": [
+          28,
+          28,
+          29,
+          29
+        ]
+      },
+      "tui.session_sidebar.row.untitled": {
+        "budget": 20,
+        "cells": [
+          19,
+          19,
+          19,
+          19
+        ]
+      },
+      "tui.session_sidebar.section.active": {
+        "budget": 29,
+        "cells": [
+          15,
+          15,
+          15,
+          15
+        ]
+      },
+      "tui.session_sidebar.section.pinned": {
+        "budget": 27,
+        "cells": [
+          12,
+          12,
+          12,
+          12
+        ]
+      },
+      "tui.session_sidebar.section.previous": {
+        "budget": 29,
+        "cells": [
+          14,
+          14,
+          14,
+          14
+        ]
+      },
+      "tui.session_sidebar.section.subagent": {
+        "budget": 27,
+        "cells": [
+          18,
+          18,
+          18,
+          18
+        ]
+      },
+      "tui.session_sidebar.state.empty": {
+        "budget": 29,
+        "cells": [
+          14,
+          14,
+          14,
+          14
+        ]
+      },
+      "tui.session_sidebar.state.error": {
+        "budget": 29,
+        "cells": [
+          27,
+          27,
+          27,
+          27
+        ]
+      },
+      "tui.session_sidebar.state.loading": {
+        "budget": 27,
+        "cells": [
+          15,
+          15,
+          15,
+          15
+        ]
+      },
+      "tui.session_sidebar.title": {
+        "budget": 29,
+        "cells": [
+          6,
+          6,
+          6,
+          6
+        ]
+      }
+    },
+    "literal_command_output": "Нет активности · если сессия и дальше молчит — lop stop",
+    "manual_bidi_controls": false,
+    "rendered_widget_evidence": "Not captured; actual runtime string rendering and Rich cell measurements only."
+  },
+  "note": "Independent read-only audit of all 21 English/Russian/context keys at c8343f3a608785b5064e61307c7333a2473126ae; no repo edits. 0 unresolved blocker/major, 2 minor follow-ups. сессия agrees with glossary.md:56 and ru.md:31 and relay.shell.list.section.active/previous; субагент agrees with glossary.md:61 and tui.small.subagents.title; беседа agrees with relay.chrome.list.search_label and relay.chrome.session.loading; вопрос agrees with tui.small.ask_queue.question_waiting. хаб is ordinary Cyrillic Russian borrowing, not retained Latin hub: glossary.md:19-30,118-127 and ru.md:20-27,82-83 do not sanction Latin hub, and none is present. Existing разговор in tui.small.session_picker.all_archived is pre-existing, not introduced drift. Other copy is accurate and idiomatic; formal прокрутите matches ru.md:8-16. Pinned overflow fits 29 cells, including 21/22 branches, and retains instruction; all other budgeted keys fit except R1. RTL not applicable. No markup/date/number skeletons in source."
+}

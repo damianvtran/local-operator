@@ -20,7 +20,11 @@ import pytest
 
 from local_operator.library import indexer, service
 from local_operator.library.metadata import MetadataStore
-from local_operator.library.store import IndexUnavailable, LibraryStore
+from local_operator.library.store import (
+    STATE_LAST_RECONCILE,
+    IndexUnavailable,
+    LibraryStore,
+)
 from local_operator.session.attachments import cache_media
 
 from ._fixtures import (
@@ -380,6 +384,42 @@ def test_a_deleted_session_leaves_the_library_immediately(tmp_path, monkeypatch)
     state = indexer.index_state(root)
     assert state["total"] == 1
     assert store.counts("all")["category"] == {"document": 1}
+
+
+def test_stop_reports_a_worker_that_outlived_the_join(tmp_path, monkeypatch, caplog) -> None:
+    """Negative control: workers that ignore the stop flag must not look stopped.
+
+    ``stop`` used to join with a bound, never look at ``is_alive`` afterwards and
+    return ``None``, so a worker still writing under the config root was
+    indistinguishable from a clean stop; the caller (server lifespan, then a
+    test's ``rmtree``) carried on as if the root were quiet. Both threads here
+    block on an event the stop flag does not touch. Mutant: the old ``stop``
+    returns ``None`` and logs nothing.
+    """
+    release = threading.Event()
+    monkeypatch.setattr(indexer.LibraryIndexer, "_run", lambda self: release.wait(30))
+    monkeypatch.setattr(indexer.LibraryIndexer, "_run_thumbnails", lambda self: release.wait(30))
+    root = config_root(monkeypatch, tmp_path)
+    instance = indexer.LibraryIndexer(root)
+    try:
+        instance.start()
+        with caplog.at_level(logging.WARNING, logger=indexer.logger.name):
+            assert instance.stop(timeout=0.05) is False
+        warned = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("library-indexer" in m and "library-thumbs" in m for m in warned), warned
+    finally:
+        release.set()
+        for thread in (instance._thread, instance._thumb_thread):
+            if thread is not None:
+                thread.join(5)
+
+
+def test_stop_reports_clean_when_both_workers_exit(tmp_path, monkeypatch) -> None:
+    root = config_root(monkeypatch, tmp_path)
+    instance = indexer.LibraryIndexer(root)
+    instance.start()
+    assert instance.stop() is True
+    assert instance._thread is not None and not instance._thread.is_alive()
 
 
 def test_a_reader_only_process_takes_over_when_the_writer_stops(tmp_path, monkeypatch) -> None:
@@ -781,24 +821,70 @@ def test_a_batch_pauses_while_a_paint_hold_is_live_and_indexes_the_same(
     assert len(held) == 400 and held == control, "pausing changed the index"
 
 
+class _CountedSleeps:
+    """Stand-in for the ``time`` module INSIDE ``transcript_index`` only.
+
+    WHY. These three tests pin how long the batch path yields to a paint hold.
+    They used to time the whole batch against a hard-coded wall bound
+    (``wall < 2.0``), which is a statement about the host, not the property: it
+    read 3.9 s on a loaded CI runner (main job 136576331466) with no yield
+    misbehaving at all. The property is "how much did the batch PAUSE", so we
+    record every pause and run the pause budget on a fake clock: a pause
+    advances the clock by exactly what it asked for, which makes the budget
+    arithmetic exact (budget / slice sleeps) however slow the host is. Real
+    sleeping also stops, so the tests are faster. Only ``monotonic`` and
+    ``sleep`` are faked; every other ``time`` attribute is the real one.
+    """
+
+    def __init__(self) -> None:
+        self.slept: list[float] = []
+        self._offset = 0.0
+
+    def monotonic(self) -> float:
+        return time.monotonic() + self._offset
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self._offset += seconds
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
+
+
+def _counted_sleeps(monkeypatch) -> _CountedSleeps:
+    from local_operator.session import transcript_index as ti
+
+    fake = _CountedSleeps()
+    monkeypatch.setattr(ti, "time", fake)
+    return fake
+
+
 def test_a_leaked_hold_costs_one_batch_at_most_the_budget(tmp_path, monkeypatch) -> None:
     from local_operator.session import transcript_index as ti
 
     monkeypatch.setattr(ti, "_YIELD_BUDGET_S", 0.2)
+    fake = _counted_sleeps(monkeypatch)
     root = config_root(monkeypatch, tmp_path)
     _big_session(root)
-    wall, scanned = _held(lambda: _batch(root))
-    assert scanned == 1 and wall < 2.0
+    _wall, scanned = _held(lambda: _batch(root))
+    assert scanned == 1
+    # It did yield (the hold was live) ...
+    assert fake.slept and set(fake.slept) == {ti._YIELD_SLICE_S}, fake.slept[:5]
+    # ... and a leaked hold cost the batch at most the budget: the pause loop
+    # stops once the cumulative sleep reaches it, so at most budget/slice (+1
+    # for the sleep that crosses the line) sleeps, never one per file.
+    assert len(fake.slept) <= round(ti._YIELD_BUDGET_S / ti._YIELD_SLICE_S) + 1, len(fake.slept)
 
 
 def test_a_stale_hold_is_not_yielded_to(tmp_path, monkeypatch) -> None:
     from local_operator.session import transcript_index as ti
 
     monkeypatch.setattr(ti, "_YIELD_BUDGET_S", 30.0)
+    fake = _counted_sleeps(monkeypatch)
     root = config_root(monkeypatch, tmp_path)
     _big_session(root)
-    wall, scanned = _held(lambda: _batch(root), stale=True)
-    assert scanned == 1 and wall < 3.0
+    _wall, scanned = _held(lambda: _batch(root), stale=True)
+    assert scanned == 1 and fake.slept == [], "a stale hold was yielded to"
 
 
 def test_a_synchronous_rebuild_never_pauses(tmp_path, monkeypatch) -> None:
@@ -807,10 +893,11 @@ def test_a_synchronous_rebuild_never_pauses(tmp_path, monkeypatch) -> None:
     from local_operator.session import transcript_index as ti
 
     monkeypatch.setattr(ti, "_YIELD_BUDGET_S", 30.0)
+    fake = _counted_sleeps(monkeypatch)
     root = config_root(monkeypatch, tmp_path)
     _big_session(root)
-    wall, scanned = _held(lambda: indexer.LibraryIndexer(root).rebuild())
-    assert scanned == 1 and wall < 3.0
+    _wall, scanned = _held(lambda: indexer.LibraryIndexer(root).rebuild())
+    assert scanned == 1 and fake.slept == [], "a synchronous rebuild paused"
 
 
 def test_reconcile_over_a_replaced_index_heals_without_a_warning(
@@ -1084,3 +1171,50 @@ def test_a_rescan_that_finds_nothing_new_rewrites_no_catalog_row(tmp_path, monke
     assert LibraryStore(root).revision() > revision
     assert set(before["occurrences"]) < set(after["occurrences"])
     assert names(root) == {f"f{number}.txt" for number in range(6)} | {"new.txt"}
+
+
+@pytest.mark.parametrize("on_worker", [True, False])
+def test_a_stopped_worker_leaves_reconcile_between_sessions(
+    tmp_path, monkeypatch, on_worker: bool
+) -> None:
+    """``stop`` must interrupt a reconcile, but only on the worker it joins.
+
+    WHY: ``stop`` joins the daemon threads for at most 5 s. A backfill over
+    thousands of journals ran longer, so the worker outlived its owner's
+    teardown and kept opening the database under a config dir the owner (a test)
+    then deleted — the directory was recreated and a fresh WAL file opened beside
+    live connections to the old one (SIGBUS in CI). The flag is honoured between
+    sessions on the worker thread. A synchronous caller on its own thread keeps
+    the old contract and runs the whole pass (the ``on_worker=False`` arm).
+    """
+    root = config_root(monkeypatch, tmp_path)
+    for sid in (SESSION, OTHER, SECOND):
+        session(root, sid, [user_row("u1", 1.0, "hello")])
+    index = indexer.LibraryIndexer(root)
+    index.store.ensure_schema()
+    real_signature = indexer.library_index._signature
+    stats: list[Path] = []
+
+    def signature_then_stop(session_dir: Path) -> Any:
+        stats.append(session_dir)
+        # The stop lands mid-reconcile, after the first unit of work.
+        index._stop.set()
+        return real_signature(session_dir)
+
+    monkeypatch.setattr(indexer.library_index, "_signature", signature_then_stop)
+    monkeypatch.setattr(index, "_mark_dirty", lambda _sid: None)
+    worker = threading.Thread(target=index.reconcile, name="library-indexer-under-test")
+    if on_worker:
+        # ``reconcile`` asks whether it runs on THIS indexer's worker.
+        index._thread = worker
+    worker.start()
+    worker.join(10.0)
+    assert not worker.is_alive()
+
+    if on_worker:
+        assert len(stats) == 1, "the worker kept stat'ing journals after stop"
+        assert STATE_LAST_RECONCILE not in index.store.state(), "an interrupted pass wrote state"
+    else:
+        # Distinct dirs: the denominator count (``_scannable``) stats each again.
+        assert len(set(stats)) == 3
+        assert STATE_LAST_RECONCILE in index.store.state()

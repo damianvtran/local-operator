@@ -7,6 +7,7 @@ identity. Keep ordinary conversational agents outside this catalogue.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from local_operator.action_class import normalize as normalize_action_class
@@ -21,6 +22,11 @@ from local_operator.agent_profiles import (
     seed_origin,
 )
 from local_operator.hub_sync.definition import definition_revision
+from local_operator.i18n.keys import wire_teams_effective
+from local_operator.i18n.messages import Msg
+from local_operator.i18n.resolve import resolve_language
+
+logger = logging.getLogger(__name__)
 
 
 def profile_detail(
@@ -140,7 +146,9 @@ def team_catalogue(registry: Any) -> list[dict[str, Any]]:
     ]
 
 
-def team_effective(agents: Any, teams: Any, name: str) -> dict[str, Any]:
+def team_effective(
+    agents: Any, teams: Any, name: str, *, locale: str | None = None
+) -> dict[str, Any]:
     """What every slot of ``name`` would launch on, and WHICH layer chose it.
 
     The read the desktop team editor renders as "effective + source" (design §4):
@@ -155,8 +163,8 @@ def team_effective(agents: Any, teams: Any, name: str) -> dict[str, Any]:
     ``server.app``, and the boot cost of pulling the harness for one route is
     paid at the route, not at startup.
 
-    Every refusal is reported as DATA (``available: false`` plus the launch's own
-    reason text) rather than raised, and ``available: true`` is verified by
+    Every refusal is reported as DATA (``available: false`` plus localized
+    display text) rather than raised, and ``available: true`` is verified by
     actually building the spec the launch would build -- an editor showing a
     broken tier is more useful than an editor showing an error page.
 
@@ -167,6 +175,8 @@ def team_effective(agents: Any, teams: Any, name: str) -> dict[str, Any]:
     """
     from local_operator.harness.subagent import resolve_member_model
 
+    # Freeze one language for all members without mutating the TUI's locale.
+    locale = resolve_language() if locale is None else locale
     team = teams.get_team_by_name(name)
     if team is None:
         raise KeyError(name)
@@ -182,7 +192,11 @@ def team_effective(agents: Any, teams: Any, name: str) -> dict[str, Any]:
             # the manager, exactly as the launch does it.
             sub = teams.get_team_by_name(role)
             if sub is None:
-                members.append(_effective_member(member, None, f"no team named {role!r}"))
+                members.append(
+                    _effective_member(
+                        member, None, wire_teams_effective.team_missing(role=role), locale=locale
+                    )
+                )
                 continue
             slot_role = role
             role = str(sub.manager)
@@ -195,17 +209,25 @@ def team_effective(agents: Any, teams: Any, name: str) -> dict[str, Any]:
                 agent_registry=agents,
             )
         except Exception as exc:  # noqa: BLE001 — reported, never raised
-            reason = f"the agent registry could not be read ({exc})"
-            members.append(_effective_member(member, None, reason))
+            # Exception prose may contain English or private configuration. Log
+            # only its category here; it is never a translated UI parameter.
+            logger.warning("Team member resolution failed (%s)", type(exc).__name__)
+            members.append(
+                _effective_member(
+                    member, None, wire_teams_effective.registry_unreadable(), locale=locale
+                )
+            )
             continue
-        members.append(_effective_member(member, resolution, ""))
+        members.append(_effective_member(member, resolution, None, locale=locale))
     return {"team": team.name, "members": members}
 
 
-def _effective_member(member: Any, resolution: Any, reason: str) -> dict[str, Any]:
+def _effective_member(
+    member: Any, resolution: Any, reason: Msg | None, *, locale: str
+) -> dict[str, Any]:
     """One slot's effective row -- the frozen shape P3 keys on.
 
-    ``reason`` non-empty means the resolution itself failed (an unreadable
+    ``reason`` present means the resolution itself failed (an unreadable
     registry, an unknown sub-team); otherwise ``resolution.unavailable`` decides
     availability, and the MODEL is only reported once it has been built, for the
     same reason a launch builds it: a tier that cannot produce a spec is not
@@ -224,7 +246,23 @@ def _effective_member(member: Any, resolution: Any, reason: str) -> dict[str, An
     ``value ?? requested`` fallback renders.
     """
     if resolution is not None and resolution.unavailable:
-        reason = resolution.unavailable
+        # Classification originates in the shared resolver; do not parse or
+        # translate its English launch/model-facing diagnostic string.
+        kind = getattr(resolution, "unavailable_kind", None)
+        tier = str(resolution.tier or "")
+        if kind == "config_unreadable":
+            reason = wire_teams_effective.config_unreadable()
+        elif kind == "tier_invalid_value":
+            reason = wire_teams_effective.tier_invalid_value(tier=tier)
+        elif kind == "tier_invalid_mapping":
+            reason = wire_teams_effective.tier_invalid_mapping(tier=tier)
+        elif kind == "tier_unconfigured":
+            reason = wire_teams_effective.tier_unconfigured(tier=tier)
+        elif kind == "tier_invalid_selector":
+            reason = wire_teams_effective.tier_invalid_selector(tier=tier)
+        else:
+            reason = wire_teams_effective.unavailable()
+    envelope = None if reason is None else reason.envelope(locale=locale)
     requested = None if resolution is None else resolution.effort
     # ``model.source`` answers "which layer chose the model". A tier the operator
     # WROTE chose it, even when nothing is configured at it or it points at the
@@ -245,10 +283,12 @@ def _effective_member(member: Any, resolution: Any, reason: str) -> dict[str, An
             "requested": requested,
             "source": "model_default" if resolution is None else resolution.effort_source,
         },
-        "available": not reason,
-        "reason": reason,
+        "available": reason is None,
+        "reason": "" if envelope is None else envelope["text"],
     }
-    if reason or resolution is None or resolution.selector is None:
+    if envelope is not None:
+        entry["reason_message"] = envelope
+    if reason is not None or resolution is None or resolution.selector is None:
         # ``selector is None`` with no failure means "no tier anywhere": the
         # child inherits the launching session's model, which a SERVER cannot
         # name. That is why ``model.value`` is null here rather than a guess.
@@ -267,8 +307,13 @@ def _effective_member(member: Any, resolution: Any, reason: str) -> dict[str, An
 
         spec = build_model_spec(provider, model_id)
     except Exception as exc:  # noqa: BLE001 — a reason, not a crash
+        logger.warning("Team member model could not be resolved (%s)", type(exc).__name__)
+        envelope = wire_teams_effective.model_unresolvable(selector=str(selector)).envelope(
+            locale=locale
+        )
         entry["available"] = False
-        entry["reason"] = f"{selector!r} could not be resolved ({exc})"
+        entry["reason"] = envelope["text"]
+        entry["reason_message"] = envelope
         return entry
     entry["model"] = {"value": f"{provider}/{model_id}", "source": "tier"}
     if requested is None:
@@ -303,28 +348,77 @@ def _clamped_effort(spec: Any, requested: str) -> str | None:
     return clamped if clamped is not None else spec.reasoning_effort
 
 
+class UnresolvedTarget(KeyError):
+    """A launch target, or one name in its roster, resolves to nothing attachable.
+
+    A ``KeyError`` on purpose: every caller (``errors()`` on the desktop routes,
+    the session create path) already maps ``KeyError`` to its 404 contract, and
+    that status must not change. What a bare ``KeyError('iac-engineer')`` lost
+    was WHICH team and WHICH slot failed — a new chat on a hub team showed only
+    "model was not resolved", with nothing in the response or the log naming the
+    roster member behind it. This carries both, as data (``team``, ``member``,
+    ``slot``) for a machine reader and as a developer-facing sentence for logs.
+    """
+
+    def __init__(self, member: str, *, team: str | None = None, slot: str = "target") -> None:
+        super().__init__(member)
+        self.member = member
+        self.team = team
+        self.slot = slot
+
+    def __str__(self) -> str:
+        # i18n: ignore developer-facing log/exception text; the wire sentence is catalogued.
+        if self.team is None:
+            return f"{self.slot} {self.member!r} is not an installed role, specialist or team"
+        return (
+            f"team {self.team!r} {self.slot} {self.member!r} "
+            "is not an installed role, specialist or team"
+        )
+
+    def wire_fields(self) -> dict[str, Any]:
+        """Additive, machine-readable fields for a refusal envelope."""
+        return {"unresolved": {"team": self.team, "slot": self.slot, "member": self.member}}
+
+
 def validate_target(agents: Any, teams: Any, kind: str, name: str) -> str:
     """Validate the complete declared launch graph without installing anything.
 
     Delegation stays lazy. Validation prevents the first manager prompt from
     claiming a roster that cannot resolve, without spawning that roster here.
+
+    Raises :class:`UnresolvedTarget` (a ``KeyError``) naming the first name that
+    does not resolve and, for a team, the team and slot it sits in.
     """
     if kind == "agent":
-        return str(profile_detail(agents, name, detail=False)["name"])
+        try:
+            return str(profile_detail(agents, name, detail=False)["name"])
+        except UnresolvedTarget:
+            raise
+        except KeyError:
+            raise UnresolvedTarget(name, slot="agent") from None
     from local_operator.teams import MAX_ORG_DEPTH
+
+    def resolve(team_name: str, slot: str, role: str) -> None:
+        try:
+            profile_detail(agents, role, detail=False)
+        except UnresolvedTarget:
+            raise
+        except KeyError:
+            raise UnresolvedTarget(role, team=team_name, slot=slot) from None
 
     def visit(candidate: str, ancestors: tuple[str, ...]) -> str:
         team = teams.get_team_by_name(candidate)
         if team is None:
-            raise KeyError(candidate)
+            parent = ancestors[-1] if ancestors else None
+            raise UnresolvedTarget(candidate, team=parent, slot="member" if parent else "team")
         if team.name in ancestors or len(ancestors) >= MAX_ORG_DEPTH:
             raise ValueError("The team roster contains a cycle or exceeds the nesting limit")
-        profile_detail(agents, team.manager, detail=False)
+        resolve(team.name, "manager", team.manager)
         for member in team.members:
             if member.kind == "team":
                 visit(member.role, (*ancestors, team.name))
             else:
-                profile_detail(agents, member.role, detail=False)
+                resolve(team.name, "member", member.role)
         return team.name
 
     return visit(name, ())

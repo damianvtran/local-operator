@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "network.pairing",
+  "history_sha256": "e8e971499ab7bbaa410eb24e3d6e28d59be5e674e02d82e352791ca0bfbbaa39",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "network.pairing",
+      "source_sha256": "6123f0baa49766e49cbb4a944c262c55000b4d781384aedd1247a51a71c86e57",
+      "translator": {
+        "agent": "coder agent (lopdev team, PR #4259 author, session 3c037a152aaa) for the round-1 text; network.pairing.refusal.answered by a fresh lopdev coder remediation child in ca9ef25853052dd2a5bc6a3867c29bbbc46d7c76 (PR comment 6996617695; session id not stated there)",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed (round-1/2 receipts and PR comment 6996617695 record anthropic/claude-opus-5-5)",
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": "i18n auditor (lopdev team, reviewer role, session 9b68088ca215; independent of every translator above, of the round-1/2 auditors and of the PR author)",
+        "session": "9b68088ca215",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "i18n audit round 3 (delta) of PR #4259 at ca9ef25853052dd2a5bc6a3867c29bbbc46d7c76, 2026-11-19, scope 87a3040a..ca9ef258. Target ru/network.pairing.json sha256 d2f2b459cf6d3c70364d5d43d7705e1ea53936e0742381a0996f3cb427faff6b (6/6 keys; en source sha256 6123f0baa49766e49cbb4a944c262c55000b4d781384aedd1247a51a71c86e57, en context sha256 5fd675b08c47d1459b2771fcd526ba6b77aa54b07e929969c27f1ea8980900c8). The delta adds one key, network.pairing.refusal.answered, with 0 deleted lines (git diff --numstat 1/0); the other five values are byte-unchanged from the round 1 audit (comment 6994496694), whose reasoning is retained. Semantic read of refusal.answered against en and its context row (outcome-neutral second-answer refusal): it says the pairing is no longer open and this answer was not recorded, makes no claim that anything was or was not approved, names no command, and reuses the approved .expired terminology. Rendered with Msg.envelope(locale) from the PR worktree (source-origin and wrong-tree checks done); check.py --catalogues-only reported 0 problems. No findings. Any byte change to this file or to en/network.pairing.json needs a delta audit and a new receipt before merge, because this receipt certifies the target sha256 above only. Single independent audit on the same model family as the translator; no second, cross-model or native-speaker audit claimed. Comment: https://github.com/damianvtran/local-operator/pull/4259#issuecomment-6996727447"
+    }
+  ]
+}

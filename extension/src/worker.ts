@@ -9,6 +9,7 @@ import {
 import { close, goto, open, status, tabs } from "./commands/nav";
 import { click, typeText } from "./commands/input";
 import { readPage } from "./commands/read";
+import { withSurfaceOriginGate } from "./surface-origin";
 import { screenshot } from "./commands/shot";
 import { snapshot } from "./commands/snapshot";
 import { scroll } from "./commands/scroll";
@@ -25,7 +26,7 @@ import { BridgeCommandError, releaseAllSurfaces } from "./cdp";
 import { clearAllAccessGrants, revokeExactOrigin, revokeLoopbackHost, revokeSiteGrant } from "./access-grants";
 import { ACCESS_EXPIRY_ALARM, allowAllPending } from "./approval-store";
 import { expireAccessRequest, resolveOrigin, restoreAccessQueue, setPendingObserver } from "./origins";
-import { DEFAULT_PORT, getLocal, isRedactedToken, touchSurface } from "./state";
+import { DEFAULT_PORT, forgetAdmittedOrigin, getLocal, isRedactedToken, touchSurface } from "./state";
 import { pairFromManagedPolicy } from "./managed-pairing";
 import { reconcileCommandTab, retitle } from "./tab-groups";
 import { reclaimRemovedTab } from "./tab-lifecycle";
@@ -405,8 +406,13 @@ async function dispatch(
     if (request.method !== "open" && request.method !== "retitle" && request.method !== "owner_inspect") {
       await reconcileCommandTab(request.params);
     }
+    // The current-document origin gate runs INSIDE the ownership lane, after
+    // its fence, so a foreign handle still gets `owner_refused` first; it is
+    // the single choke point that keeps a page the tab navigated to on its own
+    // from reaching any page-touching handler (surface-origin.ts).
     const result = await withOwnership(request.method, request.params,
-      () => handler(request.params, request.id), close);
+      () => withSurfaceOriginGate(request.method, request.params, request.id,
+        () => handler(request.params, request.id)), close);
     // Push the driven page so the daemon (and the Connected popup) can show
     // the human what the agent is on (finding U3).
     if (typeof result.url === "string" && result.url) {
@@ -977,6 +983,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // decision for a prompt that was replaced after the popup drew it.
   if (message?.event === "origin_grant_revoke") {
     revokeExactOrigin(String(message.origin))
+      // A revoke also ends any allow-once admission a live tab still holds.
+      .then(async (applied) => { await forgetAdmittedOrigin(String(message.origin)); return applied; })
       .then((applied) => sendResponse({ applied }))
       .catch(() => sendResponse({ applied: false }));
     return true;

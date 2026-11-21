@@ -517,9 +517,16 @@ class OSWorldV2Adapter:
         # is always False and calling it a check. Requiredness is enforced in
         # reset_start, after the task loads and still before allocation.
         provisioning.validate_proxy_config_file(params.infra_values, enable_proxy=False)
+        # The artifact root is not known until ``reset_start``; the workspace
+        # is, so the tool path is judged against it here and against the
+        # episode's root there (still before allocation).
+        tool_path = provisioning.resolve_evaluator_tool_path(
+            params.infra_values, forbidden_roots=(str(self._workspace_root),)
+        )
         self._refs = cleanup_mod.CleanupRefs.mint(params.episode_id)
         self._infra_values = params.infra_values
         vendor_bridge.inject_infra_environment(params.infra_values)
+        vendor_bridge.inject_evaluator_tool_path(tool_path)
         self._action_settle_policy = action_settle_policy
         if self._task is not None:
             self._plan = provisioning.resolve(
@@ -636,15 +643,36 @@ class OSWorldV2Adapter:
             secret_refs=params.secrets,
             infra_values=self._infra_values,
         )
+        # The artifact root is first known here. Revalidate the declared search
+        # path before any host-tool probe can use a directory inside that root.
+        artifact_root = Path(params.artifact_root)
+        tool_directories = provisioning.resolve_evaluator_tool_path(
+            self._infra_values,
+            forbidden_roots=(str(self._workspace_root), str(artifact_root)),
+        )
         if self._provider_factory is None and self._read_provider_config().get("provider") in (
             None,
             "aws",
         ):
-            # Tasks are first named here. Check packaging before constructing a
-            # cloud provider; importing the task itself could run arbitrary code.
+            # Tasks are first named here. Check packaging and verified host
+            # dependencies without importing the task or building a provider.
             from lop_osworld_v2_adapter.dependencies import validate_task_dependencies
+            from lop_osworld_v2_adapter.evaluator_dependencies import (
+                validate_evaluator_dependencies,
+            )
 
-            validate_task_dependencies(self._load_task_source(params.task_id))
+            source = self._load_task_source(params.task_id)
+            validate_task_dependencies(source)
+            inputs_root = Path(
+                os.path.expanduser(self._infra("OSWORLD_INPUTS_ROOT") or _DEFAULT_INPUTS_ROOT)
+            )
+            validate_evaluator_dependencies(
+                task_id=params.task_id,
+                source=source,
+                workspace_root=self._workspace_root,
+                tool_directories=tool_directories,
+                forbidden_roots=(self._workspace_root, artifact_root, inputs_root),
+            )
         self._plan = provisioning.resolve(
             self._task,
             episode_id=params.episode_id,
@@ -659,7 +687,7 @@ class OSWorldV2Adapter:
         # into it, not into the workspace. The cwd moves there too, in the
         # same breath and for the same reason: allocate is where upstream
         # first runs, so a relative write is possible from that call onward.
-        cache_root = _episode_cache_root(Path(params.artifact_root), params.episode_id)
+        cache_root = _episode_cache_root(artifact_root, params.episode_id)
         _enter_episode_scratch(cache_root)
         await provider.allocate(self._plan, self._task, cache_root=cache_root)
         self._provider = provider

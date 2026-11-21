@@ -42,6 +42,7 @@ from local_operator.network.credentials import offers
 from local_operator.network.handshake import (
     PAIR_OFFER_WAIT_S,
     Credential,
+    DialerExpectation,
     Handshake,
     pair_abort_frame,
     pair_ready_frame,
@@ -50,6 +51,7 @@ from local_operator.network.handshake import (
 )
 from tests.unit.network import conftest as net_fixtures
 from tests.unit.network.test_join_park import _minted, _park_args, _wait_for_parked
+from tests.unit.network.test_pairing_confirm import _live_relay
 from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures by import
     _answer_confirmation,
     _init_network,
@@ -976,6 +978,9 @@ def _pending_with_offer(
         ),
         offer=list(items if items is not None else _OWNER_ITEMS),
         offer_state="sent",
+        # Stamped like every relay park: a call is a fresh ceremony, which is what
+        # lets the owner-receipt cell answer the same invite more than once.
+        ceremony=types.new_pairing_nonce(),
     )
     store.save_pending_pairing(pending, root)
     return pending
@@ -997,7 +1002,9 @@ def test_confirm_screen_shows_the_offer_and_a_reduction_lands_in_the_decision(
         return next(answers)
 
     monkeypatch.setattr("builtins.input", _answer)
-    assert net_cli._cmd_confirm(_confirm_args()) == 0  # noqa: SLF001
+    # Only a live relay records an answer (S-R3-1), so the CLI talks to one.
+    with _live_relay(root):
+        assert net_cli._cmd_confirm(_confirm_args()) == 0  # noqa: SLF001
     out = capsys.readouterr().out
     assert "openai (OAuth, d***@example.com)   will be served" in out
     assert any("t to remove what will be served" in prompt for prompt in prompts)
@@ -1026,7 +1033,8 @@ def test_confirm_refuses_an_unoffered_addition_by_name(
     monkeypatch.setattr(net_cli, "_has_terminal", lambda: True)
     answers = iter(["t", "t", "ghost-key", "openai", "y"])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
-    assert net_cli._cmd_confirm(_confirm_args()) == 0  # noqa: SLF001
+    with _live_relay(root):
+        assert net_cli._cmd_confirm(_confirm_args()) == 0  # noqa: SLF001
     out = capsys.readouterr().out
     # U8 (round 2): a stray `t` answered here is the prompt's own word, not a key
     # — it must not be pointed at `credential share t`.
@@ -1074,43 +1082,47 @@ def test_the_owner_receipt_names_what_it_served(
     monkeypatch.setattr(net_cli, "_has_terminal", lambda: True)
     joiner = "d_" + "b" * 32
 
-    # Run A: keep openai, stop anthropic -> "— serving: openai".
-    answers = iter(["t", "anthropic", "y"])
-    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
-    assert net_cli._cmd_confirm(_confirm_args(json=False)) == 0  # noqa: SLF001
-    out = capsys.readouterr().out
-    assert f"admitted {joiner} to home-net — serving: openai" in out
+    with _live_relay(root):
+        # Run A: keep openai, stop anthropic -> "— serving: openai".
+        answers = iter(["t", "anthropic", "y"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+        assert net_cli._cmd_confirm(_confirm_args(json=False)) == 0  # noqa: SLF001
+        out = capsys.readouterr().out
+        assert f"admitted {joiner} to home-net — serving: openai" in out
 
-    # Run B: stop both -> "— serving nothing".
-    answers = iter(["t", "openai anthropic", "y"])
-    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
-    assert net_cli._cmd_confirm(_confirm_args(json=False)) == 0  # noqa: SLF001
-    out = capsys.readouterr().out
-    assert f"admitted {joiner} to home-net — serving nothing" in out
+        # Run B: stop both -> "— serving nothing". A decision is terminal for its
+        # ceremony (S-R1-2), so this run answers a fresh park of the same invite.
+        _pending_with_offer(root)
+        answers = iter(["t", "openai anthropic", "y"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+        assert net_cli._cmd_confirm(_confirm_args(json=False)) == 0  # noqa: SLF001
+        out = capsys.readouterr().out
+        assert f"admitted {joiner} to home-net — serving nothing" in out
 
-    # Run C: no offer sent (an older peer) -> the line is unchanged.
-    skipped = types.PendingPairing(
-        invite_id="i_offer1",
-        network_id="n_0123456789abcdef01234567",
-        network_name="home-net",
-        joiner_device_id=joiner,
-        joiner_name="laptop",
-        sas="481926",
-        fingerprint="K7QM-3XPD-4WZ9-8NRB",
-        transcribed="481926",
-        peer_addr="127.0.0.1:4097",
-        expires_at=time.time() + 120,
-        prompt="no share list travelled here.",
-        offer=[],
-        offer_state="skipped_peer_unsupported",
-    )
-    store.save_pending_pairing(skipped, root)
-    answers = iter(["y"])
-    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
-    assert net_cli._cmd_confirm(_confirm_args(json=False)) == 0  # noqa: SLF001
-    out = capsys.readouterr().out
-    assert f"admitted {joiner} to home-net" in out
-    assert "— serving" not in out
+        # Run C: no offer sent (an older peer) -> the line is unchanged.
+        skipped = types.PendingPairing(
+            invite_id="i_offer1",
+            network_id="n_0123456789abcdef01234567",
+            network_name="home-net",
+            joiner_device_id=joiner,
+            joiner_name="laptop",
+            sas="481926",
+            fingerprint="K7QM-3XPD-4WZ9-8NRB",
+            transcribed="481926",
+            peer_addr="127.0.0.1:4097",
+            expires_at=time.time() + 120,
+            prompt="no share list travelled here.",
+            offer=[],
+            offer_state="skipped_peer_unsupported",
+            ceremony=types.new_pairing_nonce(),
+        )
+        store.save_pending_pairing(skipped, root)
+        answers = iter(["y"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+        assert net_cli._cmd_confirm(_confirm_args(json=False)) == 0  # noqa: SLF001
+        out = capsys.readouterr().out
+        assert f"admitted {joiner} to home-net" in out
+        assert "— serving" not in out
 
 
 def test_the_tool_finished_receipt_mounts_the_same_delta_lines() -> None:
@@ -1416,7 +1428,12 @@ def test_a_new_owner_sends_nothing_to_an_old_joiner(
             ),
         )
         handshake.send_auth(sock, credential)
-        handshake.read_welcome(reader, wire.deadline_in(30))
+        # Pinned to the token's inviter, exactly as `_join_one` pins it.
+        handshake.read_welcome(
+            reader,
+            wire.deadline_in(30),
+            DialerExpectation(device_id=minted.envelope.inviter_device_id),
+        )
         result = handshake.establish()
         codec = handshake.codec()
         sock.sendall(codec.seal(pair_ready_frame(req=1, typed_sas=result.sas)))

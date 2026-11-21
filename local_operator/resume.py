@@ -22,7 +22,7 @@ import os
 import re
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -1010,6 +1010,28 @@ def write_session_attachment(session_dir: Path, *, team: str, agent: str, goal: 
             os.utime(session_dir, (previous, previous))
     except (OSError, TypeError, ValueError):
         return
+
+
+def bind_session_attachment(session_dir: Path, *, agent: str, team: str) -> bool:
+    """Bind a NEW session to a profile or team before anything runs in it.
+
+    ``write_session_attachment`` is best-effort by contract (an attach mid-session
+    must never fail its turn), but a CREATE that names a target is a different
+    promise: the caller is about to tell a user "this chat runs as lopdev". So the
+    write is read back, and ``False`` means "do not start this session" -- the
+    alternative is a conversation that silently runs the default agent while
+    the surface that started it shows the chosen one.
+
+    ONE helper for every creator (desktop ``DesktopSessions.create`` and the
+    relay's ``POST /api/sessions/start``) so the two cannot drift on the bytes,
+    the empty ``goal`` or what counts as "landed". It must run BEFORE the
+    session's runtime is constructed: ``Session.__init__`` restores the sidecar
+    unconditionally, which is what binds the manager role, the briefs and the
+    roster on the first turn rather than after it.
+    """
+    write_session_attachment(session_dir, agent=agent, team=team, goal="")
+    stored = read_session_attachment(session_dir)
+    return stored is not None and stored.agent == agent and stored.team == team
 
 
 def read_goal_record(session_dir: Path) -> dict[str, Any] | None:
@@ -2830,6 +2852,12 @@ class SessionRow(NamedTuple):
     #: The owner could not read this session's ask log (``PeerRow.asks_unknown``),
     #: so the origin retires no forwarded ask on this row (PR #3934 R1-2).
     remote_asks_unknown: bool = False
+    #: The human name of the device whose AGENT started this remote session, or
+    #: ``""``. Set only when the row's stamp ``origin.kind`` is ``agent`` AND this
+    #: device can name ``origin.source_device`` from its own identity or peer
+    #: catalogue (``peer_rows._agent_starter_label``); display-only — it labels a
+    #: forwarded ask's body and decides no routing. Appended last and defaulted.
+    remote_started_by_agent_on: str = ""
 
     @property
     def is_remote(self) -> bool:
@@ -3084,7 +3112,80 @@ PEER_REASON_WORDS: dict[str, str] = {
     # / ``rm`` state).
     "secrets_missing": "this device's network secret is unusable",
     "no_network_secret": "this device no longer holds that network's secret",
+    # THE DIALER'S REFUSALS OF A LISTENER (mesh-listener-auth): ``relay.dial`` returns
+    # these codes when the device that answered could not prove it is the member this
+    # device meant to reach. ``listener_unproven`` is the expected answer of a member
+    # on a build from before listener proofs (the remedy is updating it), and also of
+    # an impostor — the words claim neither; ``peer_identity_mismatch`` is a positive
+    # wrong answer, usually a stale or redirected address. ``meshupdate.update_peer``
+    # appends this gloss to its "unreachable" sentence.
+    "listener_unproven": (
+        "it answered but could not prove its identity (an older build, or not that "
+        "device); update it with `lop network update`, or, if it cannot connect to "
+        "this device, run `lop update` on that device itself"
+    ),
+    "peer_identity_mismatch": (
+        "a different device answered at its address; the stored address is stale or redirected"
+    ),
 }
+
+
+def listener_unproven_sentence(
+    name: str,
+    proof: Mapping[str, Any] | None,
+    *,
+    device_id: str = "",
+    with_remedy: bool = True,
+) -> str:
+    """The ONE sentence ``peers`` and ``doctor`` print for an unproven listener.
+
+    ``proof`` is a ``peers()`` row's ``listener_proof`` block. The build is said as
+    "runs" only when it came from a hello this device's listener verified, and as
+    "reports" when it came from the unauthenticated challenge, because that is all
+    a challenge is; never "older", since the version is a claim nobody compared
+    (UX U4). Only ``version`` is ever rendered — never a source path. One function
+    so the listing and the doctor cannot drift into two wordings.
+
+    THE REASSURANCE IS PART OF THE FACT (UX U4): only the connections THIS device
+    opens are refused, so the sentence says the member's own connections still work
+    instead of reading as "this device is cut off" under a ``reachable`` row.
+
+    ``with_remedy=False`` is doctor's form, whose remedies are their own bullets
+    (UX U5). The remedy names BOTH routes (security S-4): the mesh roll rides a link
+    the member opens, so a member that cannot connect here needs ``lop update`` on
+    itself. The command's argument is shell-quoted (UX U3; ``readiness`` quotes peer
+    facts the same way), or the device id when the member has no name.
+    """
+    block = proof if isinstance(proof, Mapping) else {}
+    build = block.get("build")
+    version = str(build.get("version") or "") if isinstance(build, Mapping) else ""
+    verb = "runs" if block.get("build_source") == "hello" else "reports"
+    build_words = f"{verb} build {version}, which" if version else f"{verb} a build that"
+    sentence = (
+        f"{name} {build_words} cannot prove its identity when this device connects to "
+        "it, so this device no longer opens connections to it. Connections it opens to "
+        "this device still work."
+    )
+    if not with_remedy:
+        return sentence
+    here, itself = listener_unproven_remedies(name, device_id=device_id)
+    return f"{sentence} Update it: {here}, {itself}."
+
+
+def listener_unproven_remedies(name: str, *, device_id: str = "") -> tuple[str, str]:
+    """The two remedies for an unproven listener, shared by ``peers`` and ``doctor``.
+
+    Quoted with ``shlex.quote`` so a name like ``Bo's Mac mini`` pastes into a shell
+    as one argument (UX U3); an unnamed member is addressed by its device id.
+    """
+    import shlex
+
+    named = bool(name) and name != UNNAMED_DEVICE
+    target = shlex.quote(name) if named else (device_id or shlex.quote(name))
+    return (
+        f"run `lop network update {target}` from this device",
+        f"or, if {name} cannot connect to this device, run `lop update` on {name} itself",
+    )
 
 
 def _carries_wire_tokens(tail: str) -> bool:
@@ -3400,6 +3501,22 @@ DOCTOR_DETAIL_WORDS: dict[str, str] = {
     # not say "the link was refused" about a fault on this machine.
     "secrets_missing": PEER_REASON_WORDS["secrets_missing"],
     "no_network_secret": PEER_REASON_WORDS["no_network_secret"],
+    # Per-ADDRESS readings of the dialer's listener refusals: the row is about the one
+    # endpoint that answered, so these say what that address did, not the member.
+    "listener_unproven": (
+        "this address answered but could not prove it is that device (an older build, "
+        "or not that device; see the listener_proof warning below)"
+    ),
+    # Nothing is sent before the challenge is checked (``refuse_unexpected_peer``),
+    # and an unauthenticated answer never deletes the address (review M1), so the
+    # row says both: what was protected, and that this is an ordering change only.
+    # "ANY OTHER ADDRESS" (review n2-1): this detail is rendered without the member's
+    # address count, and a member with a single address keeps being dialled there
+    # alone, so the sentence must hold whether or not other addresses exist.
+    "peer_identity_mismatch": (
+        "a different device answered at this address; nothing was sent to it, and this "
+        "device now dials this address only after any other address the member has"
+    ),
 }
 
 

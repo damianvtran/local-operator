@@ -1,0 +1,38 @@
+{
+  "locale": "es",
+  "namespace": "tui.tool_card.extra",
+  "source_sha256": "a89883a2ea4462b720f39ec853b5569904920da2a7ca72f98855d28f19f8bd2c",
+  "context_sha256": "ef227e6333498cd9cfb4a82a1e4e8038e716264040cf0da0440b7721f5911b45",
+  "target_sha256": "9edf60cb3d6bd6fc907dfdfd7b6ddc0f6b79865cc4b58738b3c53eda9b824421",
+  "translator": {
+    "agent": "translator (lopdev task subagent, profile 'translator')",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-21",
+    "provenance": "identity and model as supplied in the auditor's delegation brief; translator instance not independently observed"
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev independent auditor subagent, task extra-audit-es), not the translator; did not edit values",
+    "session": "6ecb08a20e61",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-21",
+    "result": "clean-with-findings",
+    "findings": 1,
+    "unresolved_blocker_major": 0,
+    "severity_counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 1,
+      "nit": 0
+    },
+    "finding_ids": [
+      "ES-EXTRA-01"
+    ],
+    "fallback_used": true,
+    "fallback_detail": "session pinned openai/gpt-6.1-sol; quota HTTP 429 at the first tool call, cross-vendor descent to anthropic/claude-opus-5-5, which performed the audit judgement. Same model as the translator (different agent instance).",
+    "independent_from_translator": true,
+    "actual_model_source": "harness model-switch notices in this session"
+  },
+  "status": "passed",
+  "note": "Independent full audit of new namespace tui.tool_card.extra (16/16 keys) at worktree HEAD 37892ab97f46, target uncommitted. check.py --catalogues-only: 0 problems; message_arguments parity and order identical on all 16 keys; render_message es samples rendered for every key incl. plural counts 1,2,5,1000000,1500000. Width (rich.cells.cell_len): send.mode.wake 'despertar' 9 > maxCells 8 (ES-EXTRA-01, minor, keep value — glossary wake→despertar and status.send.wake_unconfirmed 'despertar sin confirmar'; marker leads a right-truncated ' · '-joined row, no fixed slot; record a width exception in i18n/style-guides/es.md). many-branch '1000000 de intentos' 19 > 16 is the style-guide-mandated form at an unrealistic count, not a finding. Native-speaker review and rendered-frame certification not claimed.",
+  "round": "ex1"
+}

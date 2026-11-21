@@ -41,12 +41,15 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 import socket
 import subprocess
 import sys
 import time
+from collections.abc import Collection
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from local_operator.procstate import detached_popen_kwargs
 from local_operator.secrets.errors import (
@@ -58,12 +61,15 @@ from local_operator.secrets.errors import (
 from local_operator.secrets.peer import PEER_AUTHENTICATION_SUPPORTED
 from local_operator.secrets.protocol import (
     PROTOCOL_VERSION,
+    ROLL_WAIT_S,
     ProtocolError,
+    _arm,
     decode_bytes,
     encode_bytes,
     ensure_runtime_dir,
     lock_path,
     recv_frame,
+    rolling_path,
     send_frame,
     socket_path,
 )
@@ -82,6 +88,12 @@ REQUEST_TIMEOUT_S = 10.0
 
 #: How long to wait for a just-spawned broker to start listening.
 STARTUP_TIMEOUT_S = 5.0
+
+#: How long :func:`stop_spawned_broker` waits for the daemon's socket to stop
+#: answering after SIGTERM. The SAME bound ``lop secret broker stop`` uses for
+#: the same wait (``handlers._BROKER_STOP_TIMEOUT_S``), for the same reason:
+#: the broker drains in-flight requests before exiting (§13).
+SPAWNED_BROKER_STOP_TIMEOUT_S = 10.0
 
 #: Non-blocking lock retry cadence during lazy start. Ten sessions racing to
 #: start a broker must produce ONE broker, and the losers must poll for the
@@ -129,9 +141,14 @@ def request(
     base: Path | None = None,
     *,
     connection: socket.socket | None = None,
+    deadline: float | None = None,
     **fields: Any,
 ) -> dict[str, Any]:
     """Send one request and return the reply, raising on a refusal.
+
+    ``deadline`` (``time.monotonic``) re-arms the socket timeout before the
+    send and before EACH receive of the reply (#4389 S5/CR9), and a phase that
+    would begin after it never begins; ``None`` is the unclipped request.
 
     Opens its own connection unless one is supplied, because peer
     authentication happens per connection and a shared one would attribute
@@ -146,8 +163,9 @@ def request(
     owned = connection is None
     link = connection if connection is not None else _connect(socket_path(base))
     try:
+        _arm(link, deadline)
         send_frame(link, {"version": PROTOCOL_VERSION, "op": operation, **fields})
-        reply = recv_frame(link)
+        reply = recv_frame(link, deadline)
     except (OSError, ProtocolError, socket.timeout) as exc:
         raise BrokerUnavailable(f"the secret broker did not answer: {exc}") from exc
     finally:
@@ -196,8 +214,62 @@ class BrokerLocked(SecretStoreError):
     """The store is hardened and this boot has not been unlocked yet."""
 
 
-def is_running(base: Path | None = None) -> bool:
+class BrokerRolling(SecretStoreError):
+    """A broker roll is in progress and the retrieval could not be served in time.
+
+    Deliberately NOT a :class:`BrokerUnavailable` or :class:`BrokerDenied`
+    subclass: those two are exactly what ``access.retrieve_secret`` catches to
+    fall back to the UNNOTIFIED local decrypt, and a roll window must never
+    reach that fallback (security R1). This class propagates instead.
+    """
+
+
+# ``ROLL_WAIT_S`` (imported from ``protocol`` above, re-exported here for its
+# historical callers) is the ceiling on how long a retrieval waits out a roll
+# before failing closed, and the ONE client-side budget (review S5): every
+# phase is clipped to what remains of it. The successor's hold
+# (``broker.ROLL_GRACE_S``) is derived from it with a margin for the redaction
+# notice and scheduling (#4389 R3-2), pinned by
+# ``test_broker_roll.py::test_hold_plus_notice_fits_the_client_timeout``.
+
+
+def _expired(deadline: float | None) -> bool:
+    """Has a caller's ``time.monotonic`` budget run out? ``None`` never expires."""
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def _pause(seconds: float, deadline: float | None) -> None:
+    """Sleep ``seconds``, but never past a caller's deadline (#4389 S5/CR9)."""
+    if deadline is not None:
+        seconds = min(seconds, deadline - time.monotonic())
+    if seconds > 0:
+        time.sleep(seconds)
+
+
+def rolling_in_progress(base: Path | None = None) -> bool:
+    """Is a broker roll under way for this store right now?
+
+    The sentinel carries its own deadline, so one left behind by a roller that
+    died does not hold retrievals hostage: past its deadline it is ignored.
+    Unreadable or malformed counts as NOT rolling — the sentinel can only make
+    a caller wait, so ignoring a bad one restores today's behaviour, never a
+    looser one.
+    """
+    import json
+
+    try:
+        payload = json.loads(rolling_path(base).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    deadline = payload.get("deadline") if isinstance(payload, dict) else None
+    return isinstance(deadline, (int, float)) and time.time() < deadline
+
+
+def is_running(base: Path | None = None, *, deadline: float | None = None) -> bool:
     """Is a USABLE broker listening right now? Never raises, never blocks long.
+
+    ``deadline`` (``time.monotonic``) clips the ping to a caller's total budget;
+    see :func:`_bounded_request`.
 
     **A version-incompatible broker propagates rather than reporting False
     (Q4).** It is listening, so answering ``False`` — the same answer given for
@@ -210,12 +282,50 @@ def is_running(base: Path | None = None) -> bool:
     :class:`BrokerIncompatible` themselves, where the choice is visible.
     """
     try:
-        request("ping", base)
+        _bounded_request("ping", base, deadline)
     except BrokerIncompatible:
         raise
     except SecretStoreError:
         return False
     return True
+
+
+def _bounded_request(
+    operation: str, base: Path | None, deadline: float | None, **fields: Any
+) -> dict[str, Any]:
+    """:func:`request`, with connect AND reply clipped to a ``time.monotonic`` deadline.
+
+    **Why (QA Q2, #4388 R1).** A caller with a total budget — a retrieval inside
+    a session, or one that met a roll — must not hand a silent broker a fresh
+    :data:`REQUEST_TIMEOUT_S` per round trip: QA measured a read stall 14 s
+    behind a successor that went quiet after the rename, all of it in the
+    liveness ``ping`` that ran before any budget started. ``None`` keeps the
+    ordinary unclipped request.
+
+    **No work after expiry (#4389 S5/CR9).** An exhausted budget is refused
+    BEFORE the connect, as :class:`BrokerUnavailable` (what every caller already
+    handles for "no answer"); the earlier 100 ms floor turned an exhausted
+    budget into one more attempt per phase. The connect gets what remains, and
+    :func:`request` re-arms the remainder before the send and each receive, so a
+    reply split across several receives cannot spend the budget once per
+    receive.
+    """
+    if deadline is None:
+        return request(operation, base, **fields)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise BrokerUnavailable(
+            f"the time allowed for the secret broker ran out before {operation!r} could be sent"
+        )
+    link = _connect(socket_path(base), timeout=min(CONNECT_TIMEOUT_S, remaining))
+    try:
+        link.settimeout(REQUEST_TIMEOUT_S)
+        return request(operation, base, connection=link, deadline=deadline, **fields)
+    finally:
+        try:
+            link.close()
+        except OSError:  # pragma: no cover
+            pass
 
 
 def broker_status(base: Path | None = None) -> dict[str, Any] | None:
@@ -238,8 +348,26 @@ def broker_status(base: Path | None = None) -> dict[str, Any] | None:
         return None
 
 
-def ensure_broker(base: Path | None = None, *, timeout: float = STARTUP_TIMEOUT_S) -> bool:
+def _alive(base: Path | None, deadline: float | None) -> bool:
+    # The deadline is passed only when there is one, so the many test doubles
+    # (and any embedder) that stand in for ``is_running(base)`` keep working.
+    if deadline is None:
+        return is_running(base)
+    return is_running(base, deadline=deadline)
+
+
+def ensure_broker(
+    base: Path | None = None,
+    *,
+    timeout: float = STARTUP_TIMEOUT_S,
+    deadline: float | None = None,
+) -> bool:
     """Start a broker if none is listening. Returns True when one is up.
+
+    ``deadline`` (``time.monotonic``) bounds every liveness ping and the spawn
+    poll by a caller's TOTAL budget (QA Q2): without it the first ping alone
+    could spend :data:`REQUEST_TIMEOUT_S` against a broker that accepts and
+    never answers. ``None`` is today's behaviour.
 
     **The lock is non-blocking, deliberately (#401).** Ten sessions may reach
     this at once and exactly one must spawn a daemon. A blocking ``flock``
@@ -270,8 +398,13 @@ def ensure_broker(base: Path | None = None, *, timeout: float = STARTUP_TIMEOUT_
     rather than deep inside a spawn is what keeps the failure early and free of
     side effects.
     """
-    if is_running(base):
+    if _alive(base, deadline):
         return True
+    # #4389 S5/CR9: a first ping that spent the whole budget (a silent broker
+    # holds it for every second it has) must not be followed by a re-ping, a
+    # spawn and a poll the caller has no time left for.
+    if _expired(deadline):
+        return False
 
     if not PEER_AUTHENTICATION_SUPPORTED:
         logger.debug(
@@ -300,7 +433,9 @@ def ensure_broker(base: Path | None = None, *, timeout: float = STARTUP_TIMEOUT_
     # ours before a lock file is opened inside it.
     if lock_file.parent != secrets_dir(base):
         ensure_runtime_dir(lock_file.parent)
-    deadline = time.monotonic() + timeout
+    poll_until = time.monotonic() + timeout
+    if deadline is not None:
+        poll_until = min(poll_until, deadline)
     handle = os.open(lock_file, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         try:
@@ -308,20 +443,25 @@ def ensure_broker(base: Path | None = None, *, timeout: float = STARTUP_TIMEOUT_
         except OSError:
             # Someone else is starting one. Poll for their socket instead of
             # waiting on the lock.
-            while time.monotonic() < deadline:
-                if is_running(base):
+            while time.monotonic() < poll_until:
+                if _alive(base, deadline):
                     return True
-                time.sleep(_LOCK_POLL_S)
+                _pause(_LOCK_POLL_S, poll_until)
             return False
         # Won the race. Re-check: the previous holder may have started one
         # between our ping and our lock acquisition.
-        if is_running(base):
+        if _alive(base, deadline):
             return True
-        _spawn_broker(base)
-        while time.monotonic() < deadline:
-            if is_running(base):
+        # Never SPAWN once the budget is gone (#4389 S5/CR9): the re-check above
+        # can itself spend what was left, and a daemon started for a caller
+        # that has already given up is a side effect nobody waits for.
+        if _expired(deadline):
+            return False
+        _record_spawn(base, _spawn_broker(base))
+        while time.monotonic() < poll_until:
+            if _alive(base, deadline):
                 return True
-            time.sleep(_LOCK_POLL_S)
+            _pause(_LOCK_POLL_S, poll_until)
         return False
     finally:
         try:
@@ -330,7 +470,216 @@ def ensure_broker(base: Path | None = None, *, timeout: float = STARTUP_TIMEOUT_
             os.close(handle)
 
 
-def _spawn_broker(base: Path | None) -> None:
+@dataclass(frozen=True)
+class SpawnedBroker:
+    """A broker THIS process started: which daemon, for which store."""
+
+    #: The MOST RECENT spawn for this store. Kept for callers that name "the
+    #: broker" in a log; ownership is decided on :attr:`pids`, never on this.
+    pid: int
+    base: Path | None
+    #: The pid of the process that did the spawning. ``fork`` copies the
+    #: registry below into the child, and a copied entry must not make the
+    #: child an owner (it would let two processes each believe the daemon is
+    #: theirs to stop), so ownership is re-checked against ``os.getpid()``.
+    spawner_pid: int
+    #: EVERY daemon this process spawned for this store and has not settled,
+    #: oldest first (``pid`` is the last). More than one is normal, not an
+    #: error: ``ensure_broker`` gives a spawn a bounded wait, and a daemon
+    #: slower than that wait (a loaded campaign host) makes the next call
+    #: spawn again. Whichever of them binds the socket is still one this
+    #: process started -- typically the FIRST, with the later one exiting on
+    #: the bind. Remembering only the latest made the owner disown the very
+    #: daemon it leaked (PR #4236 QA Q1: ``replaced``, first spawn left
+    #: listening with ppid 1).
+    pids: tuple[int, ...] = ()
+
+
+#: Brokers this process started, keyed by socket path (one daemon per store).
+#:
+#: A PASSIVE record: nothing in an ordinary session reads it, so recording a
+#: spawn changes no behaviour there -- the broker still outlives its starter,
+#: which is its whole purpose for an operator's store. It exists for the one
+#: caller that must take a broker's lifetime back (:func:`stop_spawned_broker`,
+#: used by an evaluation episode over its scratch store), and it is what makes
+#: that caller's rule checkable: "started by me" is a fact recorded at the
+#: spawn, never an inference from "nothing was listening a moment ago", which
+#: two processes racing the same lazy start would both conclude.
+_SPAWNED_BROKERS: dict[str, SpawnedBroker] = {}
+
+
+def _record_spawn(base: Path | None, pid: int | None) -> None:
+    # ``pid`` is None only for a spawn seam that reports nothing (a test
+    # double); an unrecorded spawn is simply one nobody may stop.
+    if isinstance(pid, int):
+        key = str(socket_path(base))
+        me = os.getpid()
+        earlier = _SPAWNED_BROKERS.get(key)
+        # A re-spawn for the same store EXTENDS the record (see
+        # ``SpawnedBroker.pids``). An entry a ``fork`` copied in is another
+        # process's history and is replaced, not extended.
+        history = earlier.pids if earlier is not None and earlier.spawner_pid == me else ()
+        _SPAWNED_BROKERS[key] = SpawnedBroker(
+            pid=pid, base=base, spawner_pid=me, pids=(*history, pid)
+        )
+
+
+def spawned_brokers() -> dict[str, SpawnedBroker]:
+    """The brokers THIS process started and has not yet settled, by socket path.
+
+    A snapshot: a caller that wants "the brokers started during my scope"
+    diffs two of these (``evaluation.runner.host_secrets.owned_broker_scope``).
+    Entries a ``fork`` copied in from a parent are not this process's and are
+    left out.
+    """
+
+    me = os.getpid()
+    return {key: entry for key, entry in _SPAWNED_BROKERS.items() if entry.spawner_pid == me}
+
+
+class SpawnedBrokerStop(NamedTuple):
+    """What :func:`settle_spawned_broker` decided, and about which daemon."""
+
+    #: The token documented on :func:`settle_spawned_broker`.
+    outcome: str
+    #: The pid of THIS process's daemon the outcome is about: the one the
+    #: socket's holder just reported, when that is one this process spawned
+    #: (``stopped`` / ``timeout`` / ``in-use`` / ``holds-unlock``, and a
+    #: ``not-spawned-here`` narrowed out by ``owned_pids``). ``None`` when no
+    #: daemon of ours holds the socket (never spawned, ``already-gone``,
+    #: ``replaced``) -- a foreign or dead pid is deliberately not reported as
+    #: "ours", so a log line built from this can never name the wrong process.
+    pid: int | None
+
+
+def stop_spawned_broker(
+    base: Path | None = None, *, timeout: float = SPAWNED_BROKER_STOP_TIMEOUT_S
+) -> str:
+    """:func:`settle_spawned_broker`, for a caller that wants only the token."""
+
+    return settle_spawned_broker(base, timeout=timeout).outcome
+
+
+def settle_spawned_broker(
+    base: Path | None = None,
+    *,
+    timeout: float = SPAWNED_BROKER_STOP_TIMEOUT_S,
+    owned_pids: Collection[int] | None = None,
+) -> SpawnedBrokerStop:
+    """Stop the broker THIS process started for ``base`` -- and only that one.
+
+    WHY THIS EXISTS. The broker is detached and idles for 30 minutes on
+    purpose: an operator's sessions share it. An evaluation episode resolves
+    its secrets against a per-episode SCRATCH store, so that same laziness
+    left one ``secrets.brokerd`` per episode behind (measured on v0.107.2),
+    each holding a socket for a store nothing would ever read again. This is
+    the primitive that lets the starter end what it started; it is never
+    called by an ordinary session.
+
+    ``owned_pids`` narrows the claim to some of this process's spawns: a scope
+    that opened after an earlier spawn for the same store owns only the
+    daemons started inside it, and must not stop its outer owner's. ``None``
+    claims every spawn on record.
+
+    It refuses far more readily than it stops. The outcome token is returned
+    verbatim (with the pid it is about) so the caller can record the reason:
+
+    - ``"not-spawned-here"`` -- this process did not start a broker for
+      ``base``, or the one holding the socket is a spawn of this process that
+      ``owned_pids`` leaves out. A broker it merely ATTACHED to (the operator's
+      own, another episode's) is never signalled, whatever its state.
+    - ``"already-gone"`` -- ours no longer answers (idle timer, crash, an
+      operator's ``broker stop``). No signal: its pid may be anything by now.
+    - ``"replaced"`` -- a broker answers on the socket but reports a pid this
+      process NEVER spawned: ours exited and someone else's took the path. The
+      live ``status`` read is what makes the kill exact -- the pid signalled is
+      always the one the daemon holding this socket just reported, and only
+      when that pid is on this process's own spawn record
+      (``SpawnedBroker.pids``: any of its spawns may be the one that bound,
+      not just the latest). A remembered number is never signalled.
+    - ``"in-use"`` -- a session other than this process registered with it, or
+      the daemon could not say who has (a version-skewed daemon answers with
+      no ``sessions`` list at all; "unknown" is not "nobody"). Started here,
+      then adopted (an operator opened a session on the same store): stopping
+      it would cut a live session off, so it keeps the ordinary idle lifetime
+      instead.
+    - ``"holds-unlock"`` -- the store is in the passphrase tier, where the
+      broker's memory is the ONLY copy of the operator's unlock. Nothing here
+      can recreate that, so such a broker is never stopped.
+    - ``"stopped"`` / ``"timeout"`` -- SIGTERM was sent (the daemon's clean
+      path: ``brokerd`` turns it into the Ctrl-C shutdown and removes its
+      socket); the socket then stopped answering, or did not within
+      ``timeout``. A timeout is reported, never escalated to SIGKILL: a broker
+      draining a request is still the store's only notifier.
+
+    A concurrent client that was mid-request when the daemon exits sees an
+    unreachable broker, which ``access.retrieve_secret`` already treats as an
+    outage (it restarts one lazily, or reads locally in the keyfile tier).
+    """
+
+    key = str(socket_path(base))
+    entry = spawned_brokers().get(key)
+    if entry is None:
+        return SpawnedBrokerStop("not-spawned-here", None)
+    try:
+        status = broker_status(base)
+    except SecretStoreError:
+        status = None
+    if status is None:
+        _SPAWNED_BROKERS.pop(key, None)
+        return SpawnedBrokerStop("already-gone", None)
+    live = status.get("pid")
+    # ``pids`` is empty only for an entry built without it (a hand-made record);
+    # such an entry owns exactly its ``pid``.
+    spawned_here = entry.pids or (entry.pid,)
+    if not isinstance(live, int) or live not in spawned_here:
+        # Settled either way: no daemon we started holds the socket any more.
+        _SPAWNED_BROKERS.pop(key, None)
+        return SpawnedBrokerStop("replaced", None)
+    if owned_pids is not None and live not in owned_pids:
+        # Ours as a process, not this caller's: the record stays for its owner.
+        return SpawnedBrokerStop("not-spawned-here", live)
+    sessions = status.get("sessions")
+    if not isinstance(sessions, list):
+        # FAIL CLOSED. ``broker_status`` answers for a version-skewed daemon
+        # with a synthesised ``{"pid", "incompatible": True}`` that carries no
+        # ``sessions``; reading that as an empty list would SIGTERM a broker
+        # without knowing who registered with it (PR #4236 review m1).
+        return SpawnedBrokerStop("in-use", live)
+    if any(pid != os.getpid() for pid in sessions):
+        return SpawnedBrokerStop("in-use", live)
+    from local_operator.secrets.keys import key_mode
+
+    try:
+        if key_mode(base) == "passphrase":
+            return SpawnedBrokerStop("holds-unlock", live)
+    except (SecretStoreError, OSError, ValueError):
+        # A tier that cannot be read cannot be shown to be the recreatable one.
+        return SpawnedBrokerStop("holds-unlock", live)
+    try:
+        os.kill(live, signal.SIGTERM)
+    except ProcessLookupError:
+        _SPAWNED_BROKERS.pop(key, None)
+        return SpawnedBrokerStop("already-gone", None)
+
+    # ``is_running`` propagates a version refusal; here the only question is
+    # whether the socket still answers AT ALL (the ``_stop_broker`` rule).
+    def still_up() -> bool:
+        try:
+            return is_running(base)
+        except SecretStoreError:
+            return True
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and still_up():
+        time.sleep(_LOCK_POLL_S)
+    if still_up():
+        return SpawnedBrokerStop("timeout", live)
+    _SPAWNED_BROKERS.pop(key, None)
+    return SpawnedBrokerStop("stopped", live)
+
+
+def _spawn_broker(base: Path | None, extra_args: tuple[str, ...] = ()) -> int:
     """Launch a detached broker process.
 
     ``start_new_session`` detaches it from this process group so the daemon
@@ -380,7 +729,7 @@ def _spawn_broker(base: Path | None) -> None:
         environment[CONFIG_DIR_ENV] = str(base)
     argv0, executable = _broker_identity(base)
     with open(os.devnull, "rb") as devnull_in, open(os.devnull, "wb") as devnull_out:
-        subprocess.Popen(
+        process = subprocess.Popen(
             # ``argv0``/``executable`` are the two independent name axes of
             # :mod:`local_operator.procname`, resolved as a PAIR by
             # ``_broker_identity`` and passed straight through. Never re-decorate
@@ -388,7 +737,9 @@ def _spawn_broker(base: Path | None) -> None:
             # with costs the child its ``sys.executable`` on Linux (the #1162
             # blocker, measured — see ``_broker_identity``), and ``executable=``
             # is the only thing that lets ``argv[0]`` stop being a path at all.
-            [argv0, "-m", "local_operator.secrets.brokerd"],
+            # ``extra_args`` is the roller's successor switches (``secrets.roll``);
+            # empty for every ordinary lazy start.
+            [argv0, "-m", "local_operator.secrets.brokerd", *extra_args],
             executable=executable,
             stdin=devnull_in,
             stdout=devnull_out,
@@ -403,6 +754,10 @@ def _spawn_broker(base: Path | None) -> None:
             env=environment,
             close_fds=True,
         )
+    # The pid is the spawn's receipt (``_record_spawn``). The ``Popen`` object
+    # itself is still dropped, exactly as before: the daemon is detached and
+    # is never waited on by its starter.
+    return process.pid
 
 
 def _broker_identity(base: Path | None) -> tuple[str, str | None]:
@@ -465,16 +820,27 @@ def _broker_identity(base: Path | None) -> tuple[str, str | None]:
         return sys.executable, None
 
 
-def fetch_master_key(base: Path | None = None) -> bytes:
-    """Ask the broker for the master key, for a caller it has authorized."""
-    reply = request("key", base)
+def fetch_master_key(base: Path | None = None, *, deadline: float | None = None) -> bytes:
+    """Ask the broker for the master key, for a caller it has authorized.
+
+    ``deadline`` clips connect, send and every receive to a caller's budget
+    (#4389 Q4); ``None`` is the ordinary request.
+    """
+    reply = _bounded_request("key", base, deadline)
     key = reply.get("key")
     if not isinstance(key, str):
         raise SecretStoreError("the broker returned no key material")
     return decode_bytes(key)
 
 
-def retrieve(name: str, base: Path | None = None, *, role: str = "agent") -> bytes:
+def retrieve(
+    name: str,
+    base: Path | None = None,
+    *,
+    role: str = "agent",
+    deadline: float | None = None,
+    observed_roll: bool = False,
+) -> bytes:
     """Fetch one secret's value through the broker.
 
     Routed through the broker rather than decrypted locally so the §6
@@ -487,12 +853,83 @@ def retrieve(name: str, base: Path | None = None, *, role: str = "agent") -> byt
     check on ITS side too: the broker is the process that holds the key, so a
     check that lived only in the client would be decoration for anyone who
     spoke the protocol directly.
+
+    ``deadline`` (``time.monotonic``) is a caller's TOTAL budget: every connect
+    and reply is clipped to it, and a roll is waited out only within it. The
+    fail-closed path inside a session passes one so its whole wait stays one
+    bound (#4388 R1); ``None`` keeps today's behaviour outside a roll.
+
+    ``observed_roll`` says the CALLER already saw the roll sentinel (#4389 S8):
+    a sentinel that expires between that observation and this call must not
+    reset the "a roll was seen" bit, or a silence would again fall open.
     """
-    reply = request("retrieve", base, name=name, role=role)
+    reply = _retrieve_through_roll(
+        name, base, role=role, deadline=deadline, observed_roll=observed_roll
+    )
     value = reply.get("value")
     if not isinstance(value, str):
         raise SecretStoreError("the broker returned no value")
     return decode_bytes(value)
+
+
+def _retrieve_through_roll(
+    name: str,
+    base: Path | None,
+    *,
+    role: str,
+    deadline: float | None = None,
+    observed_roll: bool = False,
+) -> dict[str, Any]:
+    """One ``retrieve`` request that WAITS OUT a broker roll instead of failing open.
+
+    **Why (security R1).** During a roll a descendant can meet a broker that
+    does not yet know its session (it has not re-registered) or, at worst, no
+    answer at all. Either becomes ``BrokerDenied``/``BrokerUnavailable``, and
+    ``access.retrieve_secret`` turns both into an UNNOTIFIED local decrypt in
+    the keyfile tier — the transcript leak §6 exists to prevent. So while
+    the roll sentinel is present the request is retried for up to
+    :data:`ROLL_WAIT_S`. Once a roll has been SEEN — by the caller or by any
+    attempt here — a denial or a silence is retried until that budget runs
+    out and then answered with :class:`BrokerRolling`, which no fallback
+    catches; only a served value or a structural refusal ends the wait early.
+    Outside a roll and without a caller ``deadline`` this is exactly one
+    ``request`` — no behaviour change.
+    """
+    # **One budget, and silence never falls open once a roll was seen (review
+    # S5/CR1, S8/CR8/CR9).** `seen_roll` is seeded BEFORE the first attempt (one
+    # small file read): a held first attempt that overran the hold used to time
+    # out after the sentinel expired with `seen_roll` still False, and that
+    # `BrokerUnavailable` reached the fallback. Seeded, the first attempt is
+    # also clipped like every retry, so a retrieval that meets a roll costs at
+    # most ~ROLL_WAIT_S in total, not REQUEST_TIMEOUT_S plus retries. A
+    # `BrokerUnavailable` raised once a roll was observed is answered with
+    # `BrokerRolling`, never re-raised into the fallback. **So is a DENIAL
+    # (#4389 S8, security r4).** The successor's hold only protects lineages it
+    # EXPECTS; a late, unmarked lineage (roll.py's S6 tail) is denied once the
+    # hold ends, and a re-raised denial is exactly what `access.retrieve_secret`
+    # turns into an unnotified keyfile decrypt. A denial after a seen roll
+    # therefore does not prove a local decrypt is safe: it is retried within
+    # the same budget (the session may still re-register) and then refused.
+    # Only a call that saw NO roll re-raises, keeping §8's keyfile fallback.
+    seen_roll = observed_roll or rolling_in_progress(base)
+    if deadline is None and seen_roll:
+        deadline = time.monotonic() + ROLL_WAIT_S
+    while True:
+        try:
+            return _bounded_request("retrieve", base, deadline, name=name, role=role)
+        except (BrokerUnavailable, BrokerDenied) as exc:
+            rolling = rolling_in_progress(base)
+            seen_roll = seen_roll or rolling
+            if not seen_roll:
+                raise
+            if deadline is None:
+                deadline = time.monotonic() + ROLL_WAIT_S
+            if time.monotonic() >= deadline:
+                raise BrokerRolling(
+                    "the secret broker is being replaced by an update and did not finish "
+                    f"within {ROLL_WAIT_S:g}s; retry in a moment"
+                ) from exc
+            _pause(0.1, deadline)
 
 
 def unlock(passphrase: str, base: Path | None = None) -> None:
@@ -500,10 +937,36 @@ def unlock(passphrase: str, base: Path | None = None) -> None:
     request("unlock", base, passphrase=passphrase)
 
 
+#: What this client declares at registration (see ``broker.KNOWN_CAPS``).
+#: ``reroll``: :class:`~local_operator.secrets.session.SessionRegistration`
+#: re-registers with a successor broker on its own when its channel closes.
+REGISTRATION_CAPS = ("reroll",)
+
+
 def register_session(
     base: Path | None = None, *, session_id: str | None = None
 ) -> socket.socket | None:
     """Register this process as a live lop session; returns the channel.
+
+    The channel-only form, kept for callers that do not re-register; see
+    :func:`register_session_channel` for the full contract.
+    """
+    # S2/CR5: this form hands back a bare channel that NOTHING re-registers, so
+    # it must not advertise ``reroll`` — otherwise a roller counts it as
+    # capable, rolls, and the session is silently stranded instead of being
+    # named in the deferral (security R7).
+    registered = register_session_channel(base, session_id=session_id, caps=())
+    return registered[0] if registered is not None else None
+
+
+def register_session_channel(
+    base: Path | None = None,
+    *,
+    session_id: str | None = None,
+    ensure: bool = True,
+    caps: tuple[str, ...] = REGISTRATION_CAPS,
+) -> tuple[socket.socket, int | None] | None:
+    """Register this process as a live lop session; returns ``(channel, broker pid)``.
 
     The returned socket is the session's notification channel and MUST be kept
     open: closing it deregisters the session, at which point its descendants
@@ -517,8 +980,16 @@ def register_session(
     presented here; a caller that cannot read it is not entitled to register
     (review R1). Failing to read it returns ``None`` for the same reason a
     missing broker does: no store this boot, but the session still starts.
+
+    The second element is the answering broker's pid (``None`` from a broker
+    too old to report it), which is how a re-registering session tells a
+    successor from the broker that revoked it.
+
+    ``ensure=False`` is the RE-registration path: it never starts a broker, so
+    ``lop secret broker stop`` still means stop — a session whose broker was
+    stopped on purpose must not resurrect one.
     """
-    if not ensure_broker(base):
+    if ensure and not ensure_broker(base):
         return None
     try:
         from local_operator.secrets.keys import registration_ticket
@@ -538,6 +1009,7 @@ def register_session(
                 "op": "register",
                 "session_id": session_id,
                 "ticket": encode_bytes(ticket),
+                "caps": list(caps),
             },
         )
         reply = recv_frame(connection)
@@ -573,7 +1045,8 @@ def register_session(
     # No timeout on the channel afterwards: it is long-lived and mostly idle,
     # and a timeout here would tear down a healthy session's registration.
     connection.settimeout(None)
-    return connection
+    pid = reply.get("pid")
+    return connection, pid if isinstance(pid, int) else None
 
 
 def read_notification(connection: socket.socket) -> tuple[str, bytes] | None:
@@ -608,6 +1081,7 @@ def acknowledge(connection: socket.socket) -> None:
 __all__ = [
     "BrokerDenied",
     "BrokerLocked",
+    "BrokerRolling",
     "BrokerUnavailable",
     "acknowledge",
     "broker_status",
@@ -616,6 +1090,11 @@ __all__ = [
     "is_running",
     "read_notification",
     "register_session",
+    "register_session_channel",
+    "rolling_in_progress",
     "retrieve",
+    "settle_spawned_broker",
+    "spawned_brokers",
+    "stop_spawned_broker",
     "unlock",
 ]

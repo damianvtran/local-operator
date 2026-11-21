@@ -38,7 +38,10 @@ import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from local_operator.harness.message_types import BRIDGE_RECEIVER_RULES
+from local_operator.harness.message_types import (
+    BRIDGE_CHANNEL_PARTICIPATION_RULE,
+    BRIDGE_RECEIVER_RULES,
+)
 
 __all__ = [
     "BodyFrameRefused",
@@ -62,6 +65,17 @@ MAX_BODY_BYTES = 16 * 1024
 #: placeholder: an older backend omits the field and the frame must then say it
 #: does not know, rather than infer a kind from a display label.
 SENDER_KINDS = ("human", "agent", "unknown")
+
+#: The hub's closed conversation kinds (``conversation_kind`` on the body read;
+#: pinned by ``tests/fixtures/team_bridge/conversation-body-response.json``).
+#: ``None`` means an older hub that did not say.
+CONVERSATION_KINDS = ("dm", "group", "channel")
+
+#: Kinds whose frame carries :data:`BRIDGE_CHANNEL_PARTICIPATION_RULE`. A DM is
+#: addressed to this agent by construction, and an UNKNOWN kind (older hub)
+#: keeps the pre-rule frame: telling an agent to stay silent on what may be a
+#: DM would cost a real answer, which is worse than one surplus reply.
+_PARTICIPATION_KINDS = frozenset({"group", "channel"})
 
 #: Escaped INSIDE JSON strings only (see the module docstring). ``\u`` spellings
 #: are ordinary JSON escapes, so ``json.loads`` restores the original character.
@@ -134,6 +148,10 @@ class ConversationBodyFrame:
     sender_kind: str
     mention: bool
     conversation_seq: int
+    #: The hub's conversation kind from the body read (never the reservation
+    #: row, which is contentless). Decides only whether the channel
+    #: participation line rides the frame; ``None`` = the hub did not say.
+    conversation_kind: str | None = None
 
     def validated(self) -> "ConversationBodyFrame":
         """Refuse an incomplete or malformed source. No field is inferred."""
@@ -171,6 +189,10 @@ class ConversationBodyFrame:
             # 1-based, matching ``ConversationFeedRef``: a sequence is a
             # position, and 0 is the sentinel the hub uses for "no cursor".
             raise BodyFrameRefused("source_conversation_seq_invalid")
+        if self.conversation_kind is not None and self.conversation_kind not in CONVERSATION_KINDS:
+            # Closed like ``sender_kind``: it selects trusted-head text, so a
+            # value outside the hub's enum is refused rather than guessed at.
+            raise BodyFrameRefused("source_conversation_kind_invalid")
         return self
 
 
@@ -216,12 +238,48 @@ def _untrusted_object(values: Mapping[str, Any]) -> str:
     return "{" + ", ".join(parts) + "}"
 
 
+#: The one closed ``delivery:`` value a frame's VERIFIED SOURCE may carry. Only
+#: an ambient-digest member of a multi-frame turn sets it: the model must be
+#: able to tell "shown for context, nobody asked you" from a woken message by a
+#: TRUSTED line, never by inferring it from the untrusted body or its position.
+DELIVERY_AMBIENT_DIGEST = "ambient_digest"
+_DELIVERIES = frozenset({DELIVERY_AMBIENT_DIGEST})
+
+
+def frame_rules_head(*, participation: bool, omitted_ambient: int = 0) -> list[str]:
+    """The trusted head lines a rule-carrying frame starts with.
+
+    ONE source for :func:`build_body_frame` and for the multi-frame turn's
+    capacity reservation (``pending_turn.PendingTurnBatch``), which must count
+    these bytes once for the whole block before it knows which member will
+    carry them.
+    """
+
+    head = [BRIDGE_RECEIVER_RULES]
+    if participation:
+        head.append(BRIDGE_CHANNEL_PARTICIPATION_RULE)
+    if omitted_ambient > 0:
+        # A count, never content: the dropped rows are still readable through
+        # the bridge's own history read, which the model can choose to call.
+        # "more", not "older": the count is every scanned digest row this
+        # request does not show (row cap, byte cap, or a failed read/claim/
+        # fetch), and a row dropped for bytes can be newer than one shown.
+        count = int(omitted_ambient)
+        noun = "message" if count == 1 else "messages"
+        head.append(f"{count} more ambient {noun} not shown; channel_history reads them.")
+    return head
+
+
 def build_body_frame(
     source: ConversationBodyFrame,
     *,
     conversation_label: str,
     sender_label: str,
     body: str,
+    with_rules: bool = True,
+    participation: bool | None = None,
+    delivery: str | None = None,
+    omitted_ambient: int = 0,
 ) -> str:
     """Render the WHOLE admitted message as one primary-request block.
 
@@ -255,8 +313,27 @@ def build_body_frame(
     # (``decode_untrusted_object`` is unaffected). Being part of the frame text,
     # its bytes are counted by ``request_size``/``frame_within_capacity`` and by
     # the turn's cached bytes, so capacity can never under-measure it.
+    #
+    # MULTI-FRAME TURNS (``with_rules=False``): a turn carrying K frames prints
+    # the rules ONCE, on its first frame, and the rest start at VERIFIED SOURCE
+    # (~790 B saved per extra frame, billed on every tool step of the turn).
+    # ``participation`` lets that first frame carry the channel rule when ANY
+    # member is a group/channel post; ``None`` derives it from this source.
+    if delivery is not None and delivery not in _DELIVERIES:
+        raise BodyFrameRefused("delivery_invalid")
+    if participation is None:
+        # Channel/group only: the participation discipline (no_reply by
+        # default, no ack/thanks chains, one threaded substantive reply). Same
+        # trusted-head placement and byte accounting as the receiver rules,
+        # and its own line (no blank line) so ``_bridge_json_tail`` is unaffected.
+        participation = source.conversation_kind in _PARTICIPATION_KINDS
+    head = (
+        frame_rules_head(participation=participation, omitted_ambient=omitted_ambient)
+        if with_rules
+        else []
+    )
     lines = [
-        BRIDGE_RECEIVER_RULES,
+        *head,
         _SOURCE_MARKER,
         f"tenant_id: {source.tenant_id}",
         f"conversation_id: {source.conversation_id}",
@@ -264,6 +341,7 @@ def build_body_frame(
         f"sender_kind: {source.sender_kind}",
         mention_line,
         f"conversation_seq: {source.conversation_seq}",
+        *([f"delivery: {delivery}"] if delivery is not None else []),
         f"body_representation: {_BODY_REPRESENTATION}",
         _OBJECT_MARKER,
         _untrusted_object(

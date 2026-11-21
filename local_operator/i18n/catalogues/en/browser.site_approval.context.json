@@ -34,6 +34,11 @@
     "tone": "plain, calm, operator-facing; URLs and product names verbatim",
     "note": "toast when the node's browser extension could not be contacted"
   },
+  "browser.site_approval.refused_outcome_unknown": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "toast when the node's browser may have applied the answer but its confirmation was lost; `await_access` and `lop browser sites` are literal command names"
+  },
   "browser.site_approval.card_title": {
     "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
     "tone": "plain, calm, operator-facing; URLs and product names verbatim",

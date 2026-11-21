@@ -1,0 +1,222 @@
+{
+  "locale": "es",
+  "namespace": "tui.session_sidebar",
+  "date": "2026-11-20",
+  "agent": "translation-auditor",
+  "model": "openai/gpt-6.1-sol",
+  "instance": "1d8bf6e4183b",
+  "source_commit": "c8343f3a608785b5064e61307c7333a2473126ae",
+  "source_sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a",
+  "files": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-tui-sidebar/local_operator/i18n/catalogues/en/tui.session_sidebar.json",
+      "sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a"
+    },
+    "target": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-tui-sidebar/local_operator/i18n/catalogues/es/tui.session_sidebar.json",
+      "sha256": "af6bd9533d04f9d904f238852de06c6b61ef224bab117dee65a1abef976a0ee2"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-tui-sidebar/local_operator/i18n/catalogues/en/tui.session_sidebar.context.json",
+      "sha256": "698e8f0e151fee53d52a533bc51d7edcc600ce6964d74cdb024888238161f6e0"
+    }
+  },
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": null,
+    "provenance": "Delegator-supplied identity; translator receipt not independently read."
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "1d8bf6e4183b",
+    "date": "2026-11-20",
+    "result": "failed",
+    "findings": 1
+  },
+  "status": "failed",
+  "verdict": "fail",
+  "keys_read": 21,
+  "findings": {
+    "blocker": [],
+    "major": [
+      {
+        "id": "ES-1",
+        "key": "tui.session_sidebar.footer.hub_note",
+        "severity": "major",
+        "current": "hub: {count}",
+        "proposed": "vínc.: {count}",
+        "reason": "The visible generic counter retains English hub without an explicit keep-English decision, contrary to the requested fully localized interface; the context says this counter counts configured Agent Hub links, whose prescribed Spanish noun is vínculo.",
+        "evidence": [
+          "local_operator/i18n/catalogues/es/tui.session_sidebar.json:3",
+          "local_operator/i18n/catalogues/en/tui.session_sidebar.context.json:footer.hub_note",
+          "i18n/glossary.md:19-30 (kept product names), 118-127 (kept-English technical set)",
+          "i18n/style-guides/es.md:20-29 (kept-English list), 56-59 (configured link = vínculo)",
+          "Existing wire.settings.hub.title = Agent Hub and guide lines 91-92 use hub, but neither explicitly sanctions the new lower-case generic counter; not asserting an audit of those pre-existing keys."
+        ],
+        "proposed_widths_at_counts_0_9_10_99": [
+          8,
+          8,
+          9,
+          9
+        ]
+      }
+    ],
+    "minor": [],
+    "nit": []
+  },
+  "checks": {
+    "key_parity": "21/21",
+    "argument_parity": "21/21 via runtime.message_arguments",
+    "plural_categories": [
+      "many",
+      "one",
+      "other"
+    ],
+    "plural_selectors": "one/many/other, complete; no =N selectors",
+    "rendering": "runtime.render_message, all 21 keys at counts 0,9,10,99; pinned also at 1 and 1000000",
+    "literal_command": "Sin actividad · lop stop si sigue en silencio",
+    "width_method": "rich.cells.cell_len; every maxCells-bearing key at counts 0,9,10,99",
+    "over_budget_keys": [],
+    "widths": {
+      "tui.session_sidebar.footer.asks_note": [
+        8,
+        8,
+        9,
+        9
+      ],
+      "tui.session_sidebar.footer.hub_note": [
+        6,
+        6,
+        7,
+        7
+      ],
+      "tui.session_sidebar.footer.opening": [
+        9,
+        9,
+        9,
+        9
+      ],
+      "tui.session_sidebar.footer.refresh_failed": [
+        19,
+        19,
+        19,
+        19
+      ],
+      "tui.session_sidebar.pinned_overflow": [
+        27,
+        27,
+        28,
+        28
+      ],
+      "tui.session_sidebar.row.untitled": [
+        10,
+        10,
+        10,
+        10
+      ],
+      "tui.session_sidebar.section.active": [
+        16,
+        16,
+        16,
+        16
+      ],
+      "tui.session_sidebar.section.pinned": [
+        7,
+        7,
+        7,
+        7
+      ],
+      "tui.session_sidebar.section.previous": [
+        19,
+        19,
+        19,
+        19
+      ],
+      "tui.session_sidebar.section.subagent": [
+        25,
+        25,
+        25,
+        25
+      ],
+      "tui.session_sidebar.state.empty": [
+        25,
+        25,
+        25,
+        25
+      ],
+      "tui.session_sidebar.state.error": [
+        26,
+        26,
+        26,
+        26
+      ],
+      "tui.session_sidebar.state.loading": [
+        24,
+        24,
+        24,
+        24
+      ],
+      "tui.session_sidebar.title": [
+        8,
+        8,
+        8,
+        8
+      ],
+      "tui.session_sidebar.tooltip.location": [
+        11,
+        11,
+        11,
+        11
+      ],
+      "tui.session_sidebar.tooltip.location_network": [
+        18,
+        18,
+        18,
+        18
+      ],
+      "tui.session_sidebar.tooltip.location_network_stale": [
+        43,
+        43,
+        43,
+        43
+      ],
+      "tui.session_sidebar.tooltip.location_stale": [
+        36,
+        36,
+        36,
+        36
+      ],
+      "tui.session_sidebar.tooltip.status_wedged": [
+        45,
+        45,
+        45,
+        45
+      ],
+      "tui.session_sidebar.tooltip.unnamed_device": [
+        22,
+        22,
+        22,
+        22
+      ],
+      "tui.session_sidebar.tooltip.unreachable": [
+        26,
+        26,
+        26,
+        26
+      ]
+    },
+    "rtl": "Not applicable to es; no RTL completion claimed.",
+    "visual_evidence": "No terminal screenshot captured in this read-only catalogue audit; runtime string rendering and cell measurement only."
+  },
+  "terminology_references": [
+    "tui.small.session.resume_hint: sesión",
+    "tui.small.subagents.title: Subagentes",
+    "tui.small.ask_queue.question_waiting and tui.small.session_sidebar.asks_suffix: pregunta/preguntas",
+    "relay.chrome.drawer.conversations: Conversaciones",
+    "relay.chrome.list.section.pinned: Fijadas",
+    "relay.shell.usage.refresh_failed: actualizar / último uso conocido"
+  ],
+  "note": "Independent semantic audit of all 21 source/target/context entries. All placeholders, condition of wedged remedy, terse tú register and width budgets pass; blocker=0, major=1. Footer asks widths 8/8/9/9; hub 6/6/7/7; proposed vínc. 8/8/9/9. No budget relaxation needed for es. No repo edits; one scratch receipt only. No model fallback."
+}

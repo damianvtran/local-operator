@@ -60,7 +60,12 @@ def broker_pair(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch)
             by=owner_device,
         )
         doc.grant(PROVIDER, peer_device, scope="session", by=owner_device)
-    link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link is not None, reason
     try:
         yield type(

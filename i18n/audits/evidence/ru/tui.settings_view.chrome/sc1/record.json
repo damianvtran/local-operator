@@ -1,0 +1,107 @@
+{
+ "locale": "ru",
+ "namespace": "tui.settings_view.chrome",
+ "worktree": "/Users/damian/local-operator/.worktrees/i18n-settings-leftovers",
+ "head": "3c1b6a24f035",
+ "target_state": "uncommitted (untracked)",
+ "source_sha256": "2e04f79550d0b09cd262c32850a31c20d5dec2b88b09facd2369d967bd5ee930",
+ "context_sha256": "33a29a836b8de99019887c9025e98e2d9382b8799a8bfe9e4f189cbc86d0df7d",
+ "target_sha256": "a82fb14a35089c4d766cff201d62f54ded39cec01b78b0689fbceb6ed64a18d8",
+ "translator": {
+  "agent": "translator",
+  "model": "anthropic/claude-opus-5-5",
+  "provenance": "as stated in the audit brief; not independently observed"
+ },
+ "auditor": {
+  "agent": "translation-auditor (lopdev, chrome-audit-ru), session 6daebc40bb12; did not edit values",
+  "model": "anthropic/claude-opus-5-5",
+  "fallback_used": true,
+  "fallback_note": "pinned openai/gpt-6.1-sol hit quota HTTP 429; the harness fell back to anthropic/claude-opus-5-5, the same model as the translator. The auditor is a separate agent instance, but it is not model-diverse.",
+  "date": "2026-11-21",
+  "result": "fail",
+  "keys_read": 49,
+  "findings": 5,
+  "unresolved_blocker_major": 2,
+  "severity_counts": {
+   "blocker": 0,
+   "major": 2,
+   "minor": 1,
+   "nit": 2
+  },
+  "independent_from_translator": true
+ },
+ "checks": {
+  "key_parity": "49/49",
+  "message_arguments_parity": "pass (ordered; check.py --catalogues-only reports no ru problem)",
+  "plural_categories": "one/few/many/other on all 3 plural keys, no =N",
+  "render_message": "all 49 keys rendered in ru with realistic args at counts 0,1,2,3,5,11,12,21,22,25,101,1.5",
+  "maxCells": "no declared cap exceeded; confirm.contract_short at cap 26/26 (last ladder rung, acceptable); undeclared overflow: RUC2",
+  "unsanctioned_english": "none outside placeholders",
+  "style_guide": "вы imperative, lower-case chrome, «ёлочки», spaced em dash: consistent",
+  "consistency": "звено/цепочка/каскад, выкл, сохранить/отмена, подсказки/дополнить match shipped tui.settings_view/tui.small/wire.settings"
+ },
+ "findings": [
+  {
+   "id": "RUC1",
+   "severity": "major",
+   "keys": [
+    "tui.settings_view.chrome.hotkey.desktop_detail",
+    "tui.settings_view.chrome.hotkey.hold_detail",
+    "tui.settings_view.chrome.hotkey.hold_refusal"
+   ],
+   "current": [
+    "Глобальное сочетание приложения — нажмите клавиши, доступные терминалу, или задайте в нём.",
+    "Глобальное сочетание приложения — задаётся только в нём.",
+    "клавиши удержания задаются в приложении — терминал не видит зажатый модификатор"
+   ],
+   "proposed": [
+    "Глобальное сочетание — нажмите доступные терминалу клавиши или задайте в настольном приложении. (95/96)",
+    "Глобальное сочетание — задаётся в настольном приложении. (56/60)",
+    "клавиши удержания задаются в настольном приложении — терминал их не видит (73/80)"
+   ],
+   "reason": "'desktop' is dropped, leaving bare 'приложение', which a terminal user reads as lop itself; on desktop-scope rows this sentence replaces the registry help (settings_view.py ~L233, 'sentence first' ladder ~L5222), so it is the only place the row says where to set the key; the shipped ru term is 'настольное приложение' (wire.settings.keymap.push_to_talk/start_recording.help)."
+  },
+  {
+   "id": "RUC2",
+   "severity": "major",
+   "keys": [
+    "tui.settings_view.chrome.clause.would_remove"
+   ],
+   "current": "{count, plural, one {удалит {shown} сессию при следующем запуске} … } · предпросмотр: {command}",
+   "proposed": "{count, plural, one {с перезапуска удалит {shown} сессию} few {с перезапуска удалит {shown} сессии} many {с перезапуска удалит {shown} сессий} other {с перезапуска удалит {shown} сессии}} · проверка: {command}",
+   "reason": "Renders 84 cells for a 1-digit count (en 71) against the 74-cell detail width at 80x24; the 'elif clause' ladder (settings_view.py L5268-5275) then sheds every clause rung, so at the default terminal size the ru page never shows how many sessions cleanup will delete; the proposal measures 74 at a 3-digit count and reuses the shipped 'с перезапуска' (tui.settings_view.scope.new_launch). Derived from code and cell_len, not from a rendered frame."
+  },
+  {
+   "id": "RUC3",
+   "severity": "minor",
+   "keys": [
+    "tui.settings_view.chrome.gate_kept.long"
+   ],
+   "current": "сохранено, но сессия спрашивает — ослабить: {command}",
+   "proposed": "сохранено; эта сессия спрашивает — ослабить: {command} (60/61)",
+   "reason": "'this' is load-bearing: only this running session keeps its stricter gate, and bare 'сессия' reads as sessions in general."
+  },
+  {
+   "id": "RUC4",
+   "severity": "nit",
+   "keys": [
+    "tui.settings_view.chrome.error.unexpected_structure"
+   ],
+   "current": "не удалось сохранить — у {path} неожиданная структура, возможно, файл нужно исправить ({error})",
+   "proposed": "не удалось сохранить — файл {path} имеет неожиданную структуру и, возможно, требует исправления ({error})",
+   "reason": "'у' plus an undeclinable path is awkward; naming 'файл' before the path is the natural construction."
+  },
+  {
+   "id": "RUC5",
+   "severity": "nit",
+   "keys": [
+    "tui.settings_view.chrome.error.retired"
+   ],
+   "current": "эта настройка упразднена и не может быть изменена",
+   "proposed": "эта настройка устарела и не может быть изменена",
+   "reason": "'упразднена' is bureaucratic register; 'устарела' is the usual UI word for a retired setting."
+  }
+ ],
+ "status": "failed",
+ "note": "Not certified by a native speaker; widths derived from cell_len plus consumer ladder reading, no rendered frame."
+}

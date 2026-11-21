@@ -1,0 +1,8 @@
+{"case": "candidate", "expected_rejection": false, "issues": [], "result": "PASS"}
+{"case": "missing_key", "expected_rejection": true, "issues": ["vi/wire.teams.effective: missing key 'wire.teams.effective.team_missing'"], "result": "PASS"}
+{"case": "placeholder_rename", "expected_rejection": true, "issues": ["vi/wire.teams.effective: wire.teams.effective.team_missing: arguments (('name', 'simple'),) != en's (('role', 'simple'),): argument 1 is 'name', en's is 'role' (renamed or reordered)"], "result": "PASS"}
+{"case": "placeholder_type", "expected_rejection": true, "issues": ["vi/wire.teams.effective: wire.teams.effective.team_missing: arguments (('role', 'number'),) != en's (('role', 'simple'),): argument 'role' changed kind 'simple' -> 'number'"], "result": "PASS"}
+{"case": "technical_token", "expected_rejection": true, "issues": ["wire.teams.effective.tier_invalid_selector: changed token provider/model"], "result": "PASS"}
+{"case": "nfc", "expected_rejection": true, "issues": ["wire.teams.effective.team_missing: non-NFC"], "result": "PASS"}
+{"case": "restored_candidate", "expected_rejection": false, "issues": [], "result": "PASS"}
+ALL PASS: 9 keys; exact hashes; repository validator; 5 rejecting negative controls; restored positive control; NFC and literal checks. No build/install/test suite or ledger apply.

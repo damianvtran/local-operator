@@ -1446,7 +1446,11 @@ class HostClient:
     async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         current = self._read()
         if current is None:
-            raise BridgeUnreachable(self.copy_for().no_state)
+            # Typed pre-delivery (60334 R4 MINOR-1): with no state file nothing
+            # was sent, so a site decision that hits this is provably
+            # undelivered and its card reopens rather than going ``unknown``.
+            # A subclass of BridgeUnreachable, so every existing handler holds.
+            raise HostPreDeliveryFailure(self.copy_for().no_state)
         return await self.call_once(current, method, params)
 
     async def call_once(

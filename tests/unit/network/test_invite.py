@@ -276,7 +276,9 @@ def _printed_window(prompt: str) -> int:
     return int(match.group(1))
 
 
-def test_the_prompt_promises_the_window_the_joiner_actually_gets() -> None:
+def test_the_prompt_promises_the_window_the_joiner_actually_gets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """An AGED token: the number printed is what is LEFT, not what was minted.
 
     Measured through these same functions on the pre-fix code at 480 s of invite age:
@@ -311,6 +313,11 @@ def test_the_prompt_promises_the_window_the_joiner_actually_gets() -> None:
 
     # A FRESH token still promises the full confirm budget: the fix must not shorten the
     # ordinary window, only stop the prompt from promising more than remains.
+    # The clock is pinned to the mint instant: now that the ceiling
+    # (``PAIR_PARK_CEILING_S``, 600 s) EQUALS the default TTL, any elapsed time between
+    # the mint and the prompt is visible in the printed number, where the old 180 s cap
+    # hid it.
+    monkeypatch.setattr(invite_mod.time, "time", lambda: minted.envelope.issued_at)
     fresh = _printed_window(invite_mod.joiner_prompt(minted.envelope, "481926", "K7QM-3XPD"))
     assert fresh == int(pair_timeout_seconds(600.0)), fresh
 

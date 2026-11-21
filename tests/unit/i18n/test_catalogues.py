@@ -65,6 +65,15 @@ def test_shipped_wire_namespaces_exist() -> None:
         # the frame still inherits that one English sentence mid-sentence.
         "wire.errors.hosting",
         "wire.errors.media",
+        # Amazon Bedrock connect/credential refusals (`providers/bedrock/errors.py`),
+        # rendered verbatim by the desktop's provider-connect surface.
+        "wire.errors.bedrock",
+        # The Bedrock sign-in flow's progress/prompt copy (`providers/bedrock/login.py`,
+        # `sso_login.py`) shown by `lop login bedrock`, the TUI and desktop connect.
+        "wire.login.bedrock",
+        # A refused-for-good OAuth sign-in (Google Cloud session control): the
+        # failover notice and the `lop login-status` state words. DEFERRED.
+        "wire.providers.reauth",
         # Agent profile pictures: the refusals `PUT /v1/agents/{id}/avatar` returns
         # (unsupported_type, too_large, too_many_pixels, undecodable, not_found,
         # imaging_unavailable, empty_body), rendered by the desktop and phone
@@ -156,6 +165,11 @@ def test_shipped_wire_namespaces_exist() -> None:
         # the suspended-grant notice and the refused `approvals auto` receipt.
         # Its own namespace so no audited catalogue's hash moves.
         "wire.bridge_taint",
+        # A chief of staff's community post approval card (RFC v2.4 §5.9,
+        # `community/agent_ops.py`): raised by the runtime, painted on every
+        # surface. Its own namespace so no audited catalogue's hash moves;
+        # English-only (coverage allowance) while the community ships dark.
+        "wire.community",
         # The reply guard's skipped double send (#3377 follow-up, design D1/D2):
         # a dedicated verb and expanded sentence as a CHILD of the bridge rows,
         # so the 85 audited `wire.tool_rows.bridge` bytes and their ledger
@@ -184,6 +198,13 @@ def test_shipped_wire_namespaces_exist() -> None:
         # Its own namespace so no audited catalogue's hash moves; its seven
         # locales ride the same PR with their own ledger rows.
         "wire.github",
+        # Effective-team provenance reasons are an approved populated child,
+        # not a stub or a prefix-wide exemption from the exact inventory.
+        "wire.teams.effective",
+        # Per-session voice mode: its route refusals, spoken phrases and its
+        # settings section. Its own namespace so no audited catalogue's hash
+        # moves; all seven locales carry it, each with its own audit ledger rows.
+        "wire.voice",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}
@@ -200,6 +221,7 @@ def test_shipped_wire_namespaces_exist() -> None:
     # below still reject undeclared additions, removals and emptied namespaces.
     assert catalogues.load_catalogue("en", "wire.settings.hub_defaults") != {}
     assert catalogues.load_catalogue("en", "wire.settings.account_policy") != {}
+    assert catalogues.load_catalogue("en", "wire.teams.effective") != {}
     assert catalogues.load_catalogue("en", "wire.slash") != {}
     assert catalogues.load_catalogue("en", "wire.slash.library") != {}
     assert catalogues.load_catalogue("en", "wire.errors.notifications") != {}
@@ -219,7 +241,12 @@ def test_shipped_wire_namespaces_exist() -> None:
 
 @pytest.mark.parametrize(
     "target_namespace",
-    ["wire.errors.files", "wire.errors.sdk_spec", "wire.settings.account_policy"],
+    [
+        "wire.errors.files",
+        "wire.errors.sdk_spec",
+        "wire.settings.account_policy",
+        "wire.teams.effective",
+    ],
 )
 @pytest.mark.parametrize("mutation", ["unexpected-namespace", "missing-declared", "empty-declared"])
 def test_exact_wire_namespace_contract_rejects_mutations(

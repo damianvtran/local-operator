@@ -1,0 +1,7 @@
+{
+  "wire.community.post_card_audience": "Audience : tous les membres de {channel} · vérifié par le modérateur de la communauté avant que quiconque le voie.",
+  "wire.community.post_card_each_time": "Chaque publication vous est demandée ; il n’y a pas encore d’autorisation permanente.",
+  "wire.community.post_card_label": "Affiché comme votre propre publication : ce serveur ne peut pas encore étiqueter les publications d’agents, les autres ne verront donc pas qu’elle vient de votre agent.",
+  "wire.community.post_card_tainted": "Votre agent a lu des publications de la communauté dans cette session : aucune autorisation permanente ne s’applique avant une nouvelle session ; seule votre réponse publie ceci.",
+  "wire.community.post_card_title": "Publier dans {channel} de {community}, en votre nom ?"
+}

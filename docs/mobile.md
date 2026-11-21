@@ -379,6 +379,22 @@ Screens, following branding.md §7's agent-output hierarchy:
   it would resend — because the field is not where that text necessarily is any
   more.
 
+### Starting a chat as an agent or team (`GET /api/start-targets`)
+
+`POST /api/sessions/start` accepts an optional, mutually exclusive `agent` or
+`team` (a profile or team name). The relay validates it with the desktop's own
+new-chat validator and writes the session's `attachment.json` before the child
+spawns, so the first turn already runs as that agent, or as the team's manager
+with the team brief and roster. The model is not taken from the target. The
+picker's rows come from `GET /api/start-targets` (`agents`, `teams`, painted
+`label`s, avatar hashes, and `degraded` when the registries cannot be read).
+
+Both are licensed by `capabilities.session_start.agent` / `.team`. A client
+MUST read them before offering a picker or sending a field: an older relay's
+unkeyed start silently drops unknown fields, which would start an unbound chat.
+Fields, refusal codes and idempotency rules:
+[mobile-start-receipts.md](design/mobile-start-receipts.md).
+
 ### The armed index — wakes and monitors (`GET /api/schedules`)
 
 The machine-wide read of what is ARMED: every conversation carrying wakes and
@@ -473,6 +489,63 @@ release: no image components (documents carry HTML only in v1), no mesh transfer
 peer-held file is named but not previewed), the phone app's own WebView frame is
 pending its own lane, and static preview URLs are not yet token-enforced (tokens are
 minted and accepted, but a request without one is not refused).
+
+### Team Bridge card bodies (`team_bridge_card_body`) — `GET /api/sessions/{id}/bridge-cards/{entry_id}/body`
+
+An inbound Team Bridge delivery reaches the phone as a `notice` row with
+`custom_type: "team_bridge_message"` (the live arm also sets
+`details.custom_kind`) whose text is only the receipt line
+(`<sender> · <conversation>`, `harness/bridge_copy.py`). The journal never holds
+the body — it is replayed, forked, exported and compacted, and a body there could
+be neither revoked nor kept out of the model's context. The admitted body lives in
+core's display store and is read separately, keyed by that row:
+
+- **Capability**: `capabilities.features.team_bridge_card_body >= 1` on the
+  session-list frame (the same `server/features.py` flag `/v1/capabilities`
+  carries). Absent, a client must not call the route and keeps today's receipt
+  line unchanged.
+- **Auth**: the cookie gate (`gate()`); `401` without it, like every relay route.
+- **Scope**: only a durable user conversation on THIS machine (`404 {"error":
+  "unknown session"}` otherwise, including a peer's remote row) and only an
+  `entry_id` that names a `team_bridge_message` row in it (`404 {"error": "no such
+  bridge card"}` otherwise) — never an arbitrary message id.
+- **Response** (bare JSON, no envelope; `Cache-Control: private, no-store`):
+
+  ```
+  {v: 1,
+   items: [{message_id, conversation_id,
+            state: "admitted" | "pending" | "held" | "refused" | "not_admitted" | "unavailable",
+            body?: str,              // admitted only; UNTRUSTED markdown
+            source?: "local" | "hub",
+            hold?: {class: "awaiting_review" | "transient", held_for_s},
+            reason?: "signed_out" | "other_account" | "not_member" | "deleted" | "hub_unsupported" | "offline"}],
+   more: int}                        // ≤20 items; a coalesced card's rest is counted here
+  ```
+
+- **States are the server's word.** `held` with `hold.class: "transient"` means
+  screening has not run yet (not a moderation decision); any other class is
+  "held by moderation". `refused` comes only from the hub's rejection and carries
+  no reason to show. `reason` qualifies `unavailable` (`deleted` = the message was
+  deleted; `offline` = the computer could not reach Radient). A client maps an
+  unknown state, an `admitted` item without a body, or a malformed frame to
+  unavailable — never to a guessed outcome.
+- **Not yet written.** A live receipt can reach the phone before its journal row
+  is written (an idle or steered session emits the receipt, then persists under
+  the turn lock), so the first read of the newest card can answer `404 {"error":
+  "no such bridge card"}`. The phone web treats that one body (not every 404) as
+  "not yet": it keeps Loading and re-asks after 0.5 s and 1.5 s, abandoning the
+  waits on unmount, and shows the generic unavailable line only if the row is
+  still missing. An empty `items` list with `more: 0` (a card from before
+  receipts carried message ids) is "nothing to resolve": no panel, the receipt
+  line alone, as in the TUI.
+- **No caching.** Read once per mount (re-asked only for a not-yet-written row,
+  above); a remount reads again; revocation (sign-out, leave, account switch,
+  hub delete) must show on the next read. Render the body as data under an
+  "External message · untrusted content" frame.
+
+Desktop twin and resolution order: `docs/DESKTOP_API.md` (`.../bridge-cards/{entry_id}/body`).
+The web relay's card is `mobile/web/src/components/bridge-card-body.tsx` over
+`lib/bridge-card-body.ts`.
 
 ### The peers' rows — other devices' sessions (`GET /api/sessions?include_peers`)
 
@@ -722,6 +795,43 @@ re-dated at every serialization) are excluded, which is why the session's
 `unchanged` event carries their current values. A digest that does not match
 for any reason (including a field that moves with time) costs only the full
 seed the legacy path always sent; it can never elide a changed frame.
+
+### Steer journal order — `?steer_journal_order=1`
+
+| Capability | Contract |
+|---|---|
+| `capabilities.steer_journal_order = {"available": true}` | delivered phone steers sit at their journal slot on the session stream |
+
+A phone steer is painted on the live projection at SEND time and upgraded in
+place when the drain delivers it at a later tool boundary. The journal — so
+`/history`, a fresh mount and a resume — records it at DELIVERY. Without this
+capability the live frame reads `steer, tool, tool` while every page reads
+`tool, tool, user`: the "messages load out of order" report.
+
+`GET /api/sessions/{id}/events?steer_journal_order=1` declares the fix for that
+connection (only the exact value `1`; the parameter is per stream, like
+`?have=`). On a declaring stream, once a steer is delivered its row moves to
+just after the row it follows in the journal and its `kind` becomes `user` —
+the page's kind, since the journal carries no steer marker. Its `id` does not
+change, so a client keyed by id repaints the row instead of adding one. An
+undelivered steer stays where it was painted (`kind: "steer"`), and a steer
+whose anchor row is outside the capped frame keeps its slot (only the kind
+changes). Several steers drained at one boundary keep their send order.
+
+A stream that does not declare it is byte-identical to a relay without the
+feature: send-time slot, `kind: "steer"`. That is deliberate:
+local-operator-mobile builds before #359 mis-place a held row that moves later,
+and installed phones never update in step with the relay. The ordering hint
+(`steer_journal_order` on the projection, written by the runtime's fold) is
+relay-internal and stripped from every SSE frame. An older relay ignores the
+parameter, so a client feature-detects the capability rather than assuming the
+order.
+
+| Client | Declares | Sees after delivery |
+|---|---|---|
+| Phone app before #359 | no | send-time slot, `steer` (unchanged) |
+| Phone app that declares it | yes | journal slot, `user` — matches `/history` |
+| Relay web SPA | yes | held tab: the row keeps its held slot and repaints (upsert by id); fresh mount: journal order |
 
 ### The transfer verb — a conversation's move (`POST /api/sessions/{id}/transfer`)
 

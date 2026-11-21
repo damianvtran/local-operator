@@ -1,0 +1,27 @@
+{
+  "keys": 9,
+  "key_order": "PASS",
+  "ICU_argument_and_placeholder_parity": "PASS",
+  "technical_tokens": "PASS",
+  "no_plural_select_or_manual_bidi_controls": "PASS",
+  "repo_validator": "scripts.i18n.check.check_catalogues() on scratch en/hi fixture",
+  "validator_problems": [],
+  "negative_control_missing_role": [
+    "hi/wire.teams.effective: wire.teams.effective.team_missing: arguments () != en's (('role', 'simple'),): en has 1 argument(s), translation has 0"
+  ],
+  "source_target_context_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "target": {
+      "path": "/Users/damian/.local-operator/sessions/47e37aebb87c/scratchpad/effective-reasons-hi/catalogues/hi/wire.teams.effective.json",
+      "sha256": "e2a1d7d25325c08db1f414105c75609e7c3a4f65d8a877169064974a9d5f1d92"
+    }
+  },
+  "scope": "Mechanical only; not a linguistic self-audit or rendered/runtime proof"
+}

@@ -1,0 +1,18 @@
+{
+  "cli.services_heavy.heavy": "Wait for, or run a command holding, the machine-wide heavy-job slot",
+  "cli.services_heavy.heavy_description": "Heavy builds and test runs share a few slots per machine so that parallel builds cannot exhaust its memory. 'wait' blocks until a slot is free without taking it; 'run' takes a slot, runs one command while holding it and frees it when the command exits; 'status' lists who holds each slot. Use these instead of polling for another process by name.",
+  "cli.services_heavy.wait": "Block until a heavy-job slot is free, without taking it",
+  "cli.services_heavy.run": "Run one command while holding a heavy-job slot, and free the slot when it exits",
+  "cli.services_heavy.status": "Show the heavy-job slots and each holder's pid, age and command",
+  "cli.services_heavy.timeout": "Longest to queue for a slot, in seconds (default: the machine's queue limit, {wait_seconds}s unless {env_name} sets another)",
+  "cli.services_heavy.command": "The command to run, after `--`",
+  "cli.services_heavy.holder": "  slot {slot}: {holder}, running {age}: {command}",
+  "cli.services_heavy.no_command": "Nothing to run: put the command after `--`, for example `lop services heavy run -- make test`",
+  "cli.services_heavy.events_header": "  recent lease events (log: {path}):",
+  "cli.services_heavy.event_line": "    {time} {record}",
+  "cli.services_heavy.no_events": "  no lease events recorded yet (log: {path})",
+  "cli.services_heavy.audit_row": "heavy jobs audit: last {record}, {age} ago (log: {path})",
+  "cli.services_heavy.start_by": "Latest time the command may start: epoch seconds or ISO-8601 with an offset or Z (e.g. 2026-11-19T08:05:00Z). Checked after the queue wait, just before the command starts; if it has passed, the command is not run and the exit status is 79",
+  "cli.services_heavy.late_start": "late start: start-by {start_by} passed (now {now}, {late}s late); command not started",
+  "cli.services_heavy.not_start_by": "{value} is not epoch seconds or an ISO-8601 time with an offset or Z"
+}

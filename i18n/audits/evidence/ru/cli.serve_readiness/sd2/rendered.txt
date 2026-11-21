@@ -1,0 +1,193 @@
+# Rendered catalogue text — ru / cli.serve_readiness / sd2
+
+Production runtime.render_message with explicit locale; raw text, no shipped-eligibility override.
+These are offline catalogue renders, not screenshots or full readiness integration.
+
+## cli.serve_readiness.unproven | count=1 | CLDR=n/a
+
+зарегистрирован, но идентичность его процесса не может быть подтверждена (не удалось сравнить отметку времени запуска)
+
+## cli.serve_readiness.not_reporting | count=1 | CLDR=n/a
+
+зарегистрирован, но не отвечает (его пульс перестал поступать)
+
+## cli.serve_readiness.not_this_daemon | count=1 | CLDR=n/a
+
+зарегистрирован, но этот PID теперь принадлежит другому процессу
+
+## cli.serve_readiness.unknown_state | count=1 | CLDR=n/a
+
+зарегистрирован в неизвестном состоянии
+
+## cli.serve_readiness.install_unknown | count=1 | CLDR=n/a
+
+использует сборку, которую нельзя сравнить с установленной
+
+## cli.serve_readiness.cgroup_unknown | count=1 | CLDR=n/a
+
+работает в cgroup, положение которой эта проверка не может определить
+
+## cli.serve_readiness.recorded_gap | count=1 | CLDR=n/a
+
+сборка в записи v0.99.0+recorded, установленная сборка v0.99.2+installed (идентичность процесса не подтверждена)
+
+## cli.serve_readiness.unknown | count=0 | CLDR=many
+
+демоны `lop serve` на host-sd2: pid 4101: зарегистрирован, но идентичность его процесса не может быть подтверждена (не удалось сравнить отметку времени запуска), поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+
+## cli.serve_readiness.unknown | count=1 | CLDR=one
+
+демон `lop serve` на host-sd2: pid 4101: зарегистрирован, но идентичность его процесса не может быть подтверждена (не удалось сравнить отметку времени запуска), поэтому неизвестно, соответствует ли он установленной сборке и находится ли под управлением
+
+## cli.serve_readiness.unknown | count=2 | CLDR=few
+
+демоны `lop serve` на host-sd2: pid 4101: зарегистрирован, но идентичность его процесса не может быть подтверждена (не удалось сравнить отметку времени запуска), поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+
+## cli.serve_readiness.unknown | count=3 | CLDR=few
+
+демоны `lop serve` на host-sd2: pid 4101: зарегистрирован, но идентичность его процесса не может быть подтверждена (не удалось сравнить отметку времени запуска), поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+
+## cli.serve_readiness.unknown | count=4 | CLDR=few
+
+демоны `lop serve` на host-sd2: pid 4101: зарегистрирован, но идентичность его процесса не может быть подтверждена (не удалось сравнить отметку времени запуска), поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+
+## cli.serve_readiness.unknown | count=5 | CLDR=many
+
+демоны `lop serve` на host-sd2: pid 4101: зарегистрирован, но идентичность его процесса не может быть подтверждена (не удалось сравнить отметку времени запуска), поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+
+## cli.serve_readiness.unknown | count=11 | CLDR=many
+
+демоны `lop serve` на host-sd2: pid 4101: зарегистрирован, но идентичность его процесса не может быть подтверждена (не удалось сравнить отметку времени запуска), поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+
+## cli.serve_readiness.unknown | count=21 | CLDR=one
+
+демон `lop serve` на host-sd2: pid 4101: зарегистрирован, но идентичность его процесса не может быть подтверждена (не удалось сравнить отметку времени запуска), поэтому неизвестно, соответствует ли он установленной сборке и находится ли под управлением
+
+## cli.serve_readiness.unknown | count=22 | CLDR=few
+
+демоны `lop serve` на host-sd2: pid 4101: зарегистрирован, но идентичность его процесса не может быть подтверждена (не удалось сравнить отметку времени запуска), поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+
+## cli.serve_readiness.unknown | count=25 | CLDR=many
+
+демоны `lop serve` на host-sd2: pid 4101: зарегистрирован, но идентичность его процесса не может быть подтверждена (не удалось сравнить отметку времени запуска), поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+
+## cli.serve_readiness.unknown | count=1.5 | CLDR=other
+
+демоны `lop serve` на host-sd2: pid 4101: зарегистрирован, но идентичность его процесса не может быть подтверждена (не удалось сравнить отметку времени запуска), поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+
+## cli.serve_readiness.unknown | count=1000000 | CLDR=many
+
+демоны `lop serve` на host-sd2: pid 4101: зарегистрирован, но идентичность его процесса не может быть подтверждена (не удалось сравнить отметку времени запуска), поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+
+## cli.serve_readiness.unknown | count=1500000 | CLDR=many
+
+демоны `lop serve` на host-sd2: pid 4101: зарегистрирован, но идентичность его процесса не может быть подтверждена (не удалось сравнить отметку времени запуска), поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+
+## cli.serve_readiness.stale | count=0 | CLDR=many
+
+демоны `lop serve` на host-sd2 (4101, 4102) используют v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на них удалённые сессии используют те другие сборки
+
+## cli.serve_readiness.stale | count=1 | CLDR=one
+
+демон `lop serve` на host-sd2 (4101, 4102) использует v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на нём удалённые сессии используют ту другую сборку
+
+## cli.serve_readiness.stale | count=2 | CLDR=few
+
+демоны `lop serve` на host-sd2 (4101, 4102) используют v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на них удалённые сессии используют те другие сборки
+
+## cli.serve_readiness.stale | count=3 | CLDR=few
+
+демоны `lop serve` на host-sd2 (4101, 4102) используют v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на них удалённые сессии используют те другие сборки
+
+## cli.serve_readiness.stale | count=4 | CLDR=few
+
+демоны `lop serve` на host-sd2 (4101, 4102) используют v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на них удалённые сессии используют те другие сборки
+
+## cli.serve_readiness.stale | count=5 | CLDR=many
+
+демоны `lop serve` на host-sd2 (4101, 4102) используют v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на них удалённые сессии используют те другие сборки
+
+## cli.serve_readiness.stale | count=11 | CLDR=many
+
+демоны `lop serve` на host-sd2 (4101, 4102) используют v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на них удалённые сессии используют те другие сборки
+
+## cli.serve_readiness.stale | count=21 | CLDR=one
+
+демон `lop serve` на host-sd2 (4101, 4102) использует v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на нём удалённые сессии используют ту другую сборку
+
+## cli.serve_readiness.stale | count=22 | CLDR=few
+
+демоны `lop serve` на host-sd2 (4101, 4102) используют v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на них удалённые сессии используют те другие сборки
+
+## cli.serve_readiness.stale | count=25 | CLDR=many
+
+демоны `lop serve` на host-sd2 (4101, 4102) используют v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на них удалённые сессии используют те другие сборки
+
+## cli.serve_readiness.stale | count=1.5 | CLDR=other
+
+демоны `lop serve` на host-sd2 (4101, 4102) используют v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на них удалённые сессии используют те другие сборки
+
+## cli.serve_readiness.stale | count=1000000 | CLDR=many
+
+демоны `lop serve` на host-sd2 (4101, 4102) используют v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на них удалённые сессии используют те другие сборки
+
+## cli.serve_readiness.stale | count=1500000 | CLDR=many
+
+демоны `lop serve` на host-sd2 (4101, 4102) используют v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на них удалённые сессии используют те другие сборки
+
+## cli.serve_readiness.other_unit | count=0 | CLDR=many
+
+демоны `lop serve` на host-sd2 находятся под управлением других служб (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.other_unit | count=1 | CLDR=one
+
+демон `lop serve` на host-sd2 находится под управлением другой службы (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.other_unit | count=2 | CLDR=few
+
+демоны `lop serve` на host-sd2 находятся под управлением других служб (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.other_unit | count=3 | CLDR=few
+
+демоны `lop serve` на host-sd2 находятся под управлением других служб (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.other_unit | count=4 | CLDR=few
+
+демоны `lop serve` на host-sd2 находятся под управлением других служб (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.other_unit | count=5 | CLDR=many
+
+демоны `lop serve` на host-sd2 находятся под управлением других служб (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.other_unit | count=11 | CLDR=many
+
+демоны `lop serve` на host-sd2 находятся под управлением других служб (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.other_unit | count=21 | CLDR=one
+
+демон `lop serve` на host-sd2 находится под управлением другой службы (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.other_unit | count=22 | CLDR=few
+
+демоны `lop serve` на host-sd2 находятся под управлением других служб (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.other_unit | count=25 | CLDR=many
+
+демоны `lop serve` на host-sd2 находятся под управлением других служб (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.other_unit | count=1.5 | CLDR=other
+
+демоны `lop serve` на host-sd2 находятся под управлением других служб (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.other_unit | count=1000000 | CLDR=many
+
+демоны `lop serve` на host-sd2 находятся под управлением других служб (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.other_unit | count=1500000 | CLDR=many
+
+демоны `lop serve` на host-sd2 находятся под управлением других служб (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.identity_restart | count=1 | CLDR=n/a
+
+на host-sd2 выполните `lop services status`, чтобы проверить записи, затем `lop services restart` для записи данных об идентичности процессов; перед действием перезапуск проверяет каждый демон
+

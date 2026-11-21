@@ -1083,3 +1083,141 @@ async def test_create_transcription_uses_the_live_settings_default(
     result = response.json()["result"]
     assert result["text"] == "Uh, so I think."
     assert result["cleanup"] == "none"
+
+
+# --- Upload naming -----------------------------------------------------------
+#
+# The multipart filename is client-controlled, so the route must choose the
+# temp file's name itself: whatever the client declares, the bytes land inside
+# the route's own mkdtemp directory (and that directory is removed afterwards).
+# Only the extension survives, because the upstream providers key decoding off
+# the part's filename suffix.
+
+
+async def _post_named_upload(test_app_client, tmp_path, monkeypatch, filename: str):
+    """POST one upload declaring ``filename``; return (response, seen paths, scratch).
+
+    ``tempfile.tempdir`` is redirected so every directory the route creates is
+    observable, and the stub client records the path it was handed while the
+    file still exists (the route removes it once the call returns).
+    """
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    seen: list[tuple[str, bytes]] = []
+
+    def fake_create_transcription(**kwargs):
+        path = kwargs["file_path"]
+        with open(path, "rb") as handle:
+            seen.append((path, handle.read()))
+        return RadientTranscriptionResponseData(text="ok", provider="openai", status="completed")
+
+    client = MagicMock()
+    client.api_key = "placeholder-key"
+    client.create_transcription.side_effect = fake_create_transcription
+    app.dependency_overrides[get_radient_client] = lambda: client
+    try:
+        response = await test_app_client.post(
+            "/v1/transcriptions",
+            files={"file": (filename, SAMPLE_AUDIO_CONTENT, "audio/webm")},
+        )
+    finally:
+        del app.dependency_overrides[get_radient_client]
+    return response, seen, scratch
+
+
+def _assert_contained(seen, scratch, expected_name: str) -> None:
+    assert len(seen) == 1
+    path, body = seen[0]
+    assert body == SAMPLE_AUDIO_CONTENT
+    # Exactly one level below the redirected tempdir: <scratch>/<mkdtemp>/<name>.
+    parent = os.path.dirname(os.path.realpath(path))
+    assert os.path.dirname(parent) == os.path.realpath(str(scratch))
+    assert os.path.basename(path) == expected_name
+    # And the route cleaned up after itself.
+    assert list(scratch.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_an_absolute_upload_filename_cannot_choose_the_write_path(
+    test_app_client, tmp_path, monkeypatch
+):
+    target = tmp_path / "outside" / "sentinel.webm"
+    target.parent.mkdir()
+    response, seen, scratch = await _post_named_upload(
+        test_app_client, tmp_path, monkeypatch, str(target)
+    )
+    assert response.status_code == 200
+    assert not target.exists()
+    _assert_contained(seen, scratch, "upload.webm")
+
+
+@pytest.mark.asyncio
+async def test_a_dotdot_upload_filename_cannot_leave_the_temp_dir(
+    test_app_client, tmp_path, monkeypatch
+):
+    target = tmp_path / "outside" / "dotdot.webm"
+    target.parent.mkdir()
+    # Enough ``..`` to climb out of any mkdtemp location, then back down.
+    name = "../" * 32 + str(target).lstrip("/")
+    response, seen, scratch = await _post_named_upload(test_app_client, tmp_path, monkeypatch, name)
+    assert response.status_code == 200
+    assert not target.exists()
+    _assert_contained(seen, scratch, "upload.webm")
+
+
+@pytest.mark.asyncio
+async def test_a_windows_style_upload_filename_keeps_only_its_extension(
+    test_app_client, tmp_path, monkeypatch
+):
+    response, seen, scratch = await _post_named_upload(
+        test_app_client, tmp_path, monkeypatch, "..\\..\\Users\\x\\clip.webm"
+    )
+    assert response.status_code == 200
+    _assert_contained(seen, scratch, "upload.webm")
+
+
+@pytest.mark.asyncio
+async def test_an_upload_without_a_usable_name_falls_back_to_tmp(
+    test_app_client, tmp_path, monkeypatch
+):
+    # httpx omits the filename parameter for an empty name, so FastAPI would
+    # not see a file at all; a name with no extension exercises the same
+    # fallback branch that an empty filename reaches.
+    response, seen, scratch = await _post_named_upload(
+        test_app_client, tmp_path, monkeypatch, "clip"
+    )
+    assert response.status_code == 200
+    _assert_contained(seen, scratch, "upload.tmp")
+
+
+@pytest.mark.asyncio
+async def test_a_normal_upload_still_transcribes_with_its_suffix(
+    test_app_client, tmp_path, monkeypatch
+):
+    response, seen, scratch = await _post_named_upload(
+        test_app_client, tmp_path, monkeypatch, "clip.webm"
+    )
+    assert response.status_code == 200
+    assert response.json()["result"]["text"] == "ok"
+    _assert_contained(seen, scratch, "upload.webm")
+
+
+@pytest.mark.parametrize(
+    "filename, expected",
+    [
+        (None, "upload.tmp"),
+        ("", "upload.tmp"),
+        ("clip.webm", "upload.webm"),
+        ("/etc/x.mp3", "upload.mp3"),
+        ("C:\\a\\b.m4a", "upload.m4a"),
+        ("a.we/bm", "upload.tmp"),
+        ("a." + "x" * 17, "upload.tmp"),
+        ("a.w\x00ebm", "upload.tmp"),
+    ],
+)
+def test_upload_temp_path_is_always_server_named(tmp_path, filename, expected):
+    from local_operator.server.routes.transcription import _upload_temp_path
+
+    path = _upload_temp_path(str(tmp_path), filename)
+    assert path == os.path.join(str(tmp_path), expected)

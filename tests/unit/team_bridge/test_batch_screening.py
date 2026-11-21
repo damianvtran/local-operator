@@ -1420,3 +1420,66 @@ def test_a_receipt_damaged_between_hit_and_copy_holds_as_damaged_proof(
     assert hold is not None and hold["hold_code"] == "proof_corrupt"
     assert store.receipt_for_message(owner, "bmsg_2") is None
     assert len(runner.calls) == 1
+
+
+class _RouteDown(Exception):
+    """A dispatch failure the chain tagged as every hop failing on a ROUTE failure."""
+
+    tb_cascade_exhausted = True
+
+
+def test_a_failed_multi_message_batch_splits_into_single_screens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #4212 round 3, S-10: one poisoned batch-mate can fail every hop for the
+    whole call, so a failed MULTI-message call is no evidence about any one
+    message. Each is held ``batch_unresolved`` (re-screened ALONE next pass), the
+    breaker does not advance, and nothing ever ages from it — even hours later."""
+
+    store, owner = _setup(tmp_path)
+    clock = SimpleNamespace(now=time.time())
+    monkeypatch.setattr(time, "time", lambda: clock.now)
+
+    def down(prompt: str, *, default_model: str, images=None) -> Any:
+        raise _RouteDown("every hop unreachable")
+
+    items = _items("a", "b")
+    for minutes in (0, 31, 180):
+        clock.now += minutes * 60
+        results = _batch(owner, tmp_path, down, items)
+        assert [r.hold_code for r in results] == ["batch_unresolved"] * 2, minutes
+        assert [store.work_scope_decision(owner, f"bmsg_{i}") for i in (1, 2)] == [None, None]
+    assert store.screening_breaker_state(owner) is None, "not route evidence"
+
+    # Alone, the benign one screens and is admitted on its own verdict.
+    alone = _single(owner, tmp_path, Runner(reply="VERDICT: deliver\nREASON: ordinary."), items[1])
+    assert alone.disposition == "deliver"
+
+
+def test_an_aged_route_failed_single_batch_converts_to_owner_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #4212 R1-m1: the batch path meets the same aged-hold exit as the single
+    path. A ONE-message call is that message's own dispatch (S-10 splits only
+    multi-message calls); with the route canary failing too it is an outage."""
+
+    store, owner = _setup(tmp_path)
+    clock = SimpleNamespace(now=time.time())
+    monkeypatch.setattr(time, "time", lambda: clock.now)
+
+    def down(prompt: str, *, default_model: str, images=None) -> Any:
+        raise _RouteDown("every hop unreachable")
+
+    items = _items("a")
+    first = _batch(owner, tmp_path, down, items)
+    assert [r.hold_code for r in first] == ["screening_model_unavailable"]
+    assert store.screening_route_evidence(owner)["canary_failed_at"] is not None
+
+    clock.now += 31 * 60  # past the 30-minute default
+    aged = _batch(owner, tmp_path, down, items)
+    assert [r.hold_code for r in aged] == ["model_hold"]
+    decision = store.work_scope_decision(owner, "bmsg_1")
+    assert decision is not None and decision["eligible"]
+    # S-1: nothing answered, so the row names no screener.
+    assert decision["screener_model"] == "" and decision["screener_verdict"] == ""
+    assert store.receipt_for_message(owner, "bmsg_1") is None

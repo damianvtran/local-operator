@@ -420,6 +420,21 @@ _CREATE_SUPERSEDE_LOG = (
     "seq INTEGER PRIMARY KEY AUTOINCREMENT, conversation TEXT NOT NULL)"
 )
 _SUPERSEDE_LOG_RETENTION = 256
+
+#: The ADDITIVE columns of `completions`, in the order they shipped, with the
+#: DDL each is added with. ONE list feeds BOTH `_additive_migrations_pending`
+#: (the gate) and `_apply_additive_migrations` (the ALTERs): the gate once
+#: named only reason/cause/notify while the ALTERs also added origin and
+#: needs_user, so every pre-0.107 database was judged CURRENT, never altered,
+#: and every completion INSERT failed with "no column named origin". A column
+#: added here is therefore gated and migrated together or not at all.
+_ADDITIVE_COMPLETION_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("reason", "TEXT NOT NULL DEFAULT ''"),
+    ("cause", "TEXT NOT NULL DEFAULT ''"),
+    ("notify", "INTEGER NOT NULL DEFAULT 1"),
+    ("origin", "TEXT NOT NULL DEFAULT ''"),
+    ("needs_user", "INTEGER NOT NULL DEFAULT 0"),
+)
 _APPEND_SUPERSEDE = "INSERT INTO supersede_log(conversation) VALUES(?)"
 _PRUNE_SUPERSEDE_LOG = (
     "DELETE FROM supersede_log WHERE seq <= " "(SELECT COALESCE(MAX(seq),0) FROM supersede_log) - ?"
@@ -1537,9 +1552,10 @@ class AttentionStore:
         The fast path's price is a handful of schema reads; the apply itself is
         re-checked per statement inside the write transaction, because between
         this read and that transaction another process may have run the very
-        migration. ``deliveries``/``mutations``/``supersede_log`` and the three
-        columns are all ADDITIVE: a database that already has them is CURRENT,
-        and one that lacks any of them gets the atomic upgrade.
+        migration. ``deliveries``/``mutations``/``supersede_log`` and every column
+        in :data:`_ADDITIVE_COMPLETION_COLUMNS` are ADDITIVE: a database that
+        already has them is CURRENT, and one that lacks any gets the atomic
+        upgrade.
         """
         for name in ("deliveries", "mutations", "supersede_log"):
             if not conn.execute(
@@ -1547,7 +1563,7 @@ class AttentionStore:
             ).fetchone():
                 return True
         columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(completions)")}
-        return not {"reason", "cause", "notify"} <= columns
+        return not {name for name, _ in _ADDITIVE_COMPLETION_COLUMNS} <= columns
 
     @staticmethod
     def _apply_additive_migrations(conn: sqlite3.Connection) -> None:
@@ -1600,36 +1616,20 @@ class AttentionStore:
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='supersede_log'"
         ).fetchone():
             conn.execute(_CREATE_SUPERSEDE_LOG)
-        # ``reason``/``cause`` are ADDITIVE and stay out of the probe above for
-        # the reason the two tables do: every database written before the
-        # cut-off taxonomy legitimately lacks them, and naming them in the
-        # probe would read all of them as corrupt. ``DEFAULT ''`` rather than a
-        # nullable column keeps the readers one shape: an old row's reason is
-        # the empty string, i.e. "no reason was recorded", which is exactly
-        # what it is -- never a claim that there was none to record.
+        # The completion columns are ADDITIVE and stay out of the probe above:
+        # every database written before a column shipped legitimately lacks it,
+        # and naming it in the probe would read all of them as corrupt. The
+        # ``DEFAULT`` on each keeps the readers one shape -- an old row reads as
+        # "no reason/cause recorded" (``''``), as notifying exactly as it always
+        # did (``notify`` ``1``; ``0`` is always a row some build explicitly
+        # decided to keep quiet), as ``origin`` ``''`` = ``unknown`` (routes as
+        # non-mobile, errs quiet), and as ``needs_user`` ``0`` = "no ask opened
+        # in the run's window". The list is shared with the gate; see
+        # :data:`_ADDITIVE_COMPLETION_COLUMNS`.
         columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(completions)")}
-        if "reason" not in columns:
-            conn.execute("ALTER TABLE completions ADD COLUMN reason TEXT NOT NULL DEFAULT ''")
-        if "cause" not in columns:
-            conn.execute("ALTER TABLE completions ADD COLUMN cause TEXT NOT NULL DEFAULT ''")
-        # ``notify`` (§14's origin-aware notification flag) is ADDITIVE for the
-        # same reason the two columns above are, and stays out of the probe
-        # above for the same reason: every database written before the field
-        # legitimately lacks it, and naming it in the probe would read all of
-        # them as corrupt. ``DEFAULT 1`` rather than a nullable column keeps
-        # the readers one shape -- an old row notifies exactly as it always
-        # did, and ``0`` is always a row some build explicitly decided to keep
-        # quiet.
-        if "notify" not in columns:
-            conn.execute("ALTER TABLE completions ADD COLUMN notify INTEGER NOT NULL DEFAULT 1")
-        # ADR 0009 routing columns, ADDITIVE and out of the probe for the same
-        # reason as ``notify``. ``origin`` ``''`` reads as ``unknown`` (routes as
-        # non-mobile, errs quiet); ``needs_user`` ``0`` is "no ask opened in the
-        # run's window", which is what every older row was.
-        if "origin" not in columns:
-            conn.execute("ALTER TABLE completions ADD COLUMN origin TEXT NOT NULL DEFAULT ''")
-        if "needs_user" not in columns:
-            conn.execute("ALTER TABLE completions ADD COLUMN needs_user INTEGER NOT NULL DEFAULT 0")
+        for name, ddl in _ADDITIVE_COMPLETION_COLUMNS:
+            if name not in columns:
+                conn.execute(f"ALTER TABLE completions ADD COLUMN {name} {ddl}")
 
     def _connect_read_only(self) -> sqlite3.Connection:
         """A ``mode=ro`` connection that waits as long as the write path does.

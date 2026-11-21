@@ -1,0 +1,63 @@
+# cli.daemon_build audit r1-6236 — actual command output (i18n-auditor session 623609b4ac65, 2026-11-18T07:05:39Z)
+# worktree HEAD 2cc53faf08f6e5a7295b5e3b6a512f3b5a6ecbb3; origin/main be41377709929e1582351492ed3ee80fae158f6b
+$ .venv/bin/python audit_checks.py   (retained as audit_checks.py.txt)
+en d2eca6d6879fb63e6433032158af8ba12186fdc2be7d371a40a17ecfdbcc1c93 context a35175034f8cee80d9e80aef3deaf4d27809bf48e0ccea0b5d30246aed436c14 keys 5
+[parity] fr sha=01adf9492f5f29dbede128d73176893883886151c403b53628b5f3105e95528d keys=5 added=[] dropped=[] placeholder/backtick mismatches=[]
+[parity] es sha=6aa98888bf43bb7079896f8186e73087b2fa255e69498eda48945a575295e867 keys=5 added=[] dropped=[] placeholder/backtick mismatches=[]
+[parity] zh-CN sha=3e77cd3e3e045eb2881646802348a775fe396fadf74b8648d380002f17bc9d1e keys=5 added=[] dropped=[] placeholder/backtick mismatches=[]
+[parity] ru sha=383542a05637ccec8fb7acf03eed99ed9bbefe09d78b66a766c345b240319dc6 keys=5 added=[] dropped=[] placeholder/backtick mismatches=[]
+[parity] vi sha=25a16759c836da885dd3a19eaf5da076e591f4d88f02df0178508a81440ab195 keys=5 added=[] dropped=[] placeholder/backtick mismatches=[]
+[parity] ur sha=4de7f5cc118091618652e8b632c5b7a03343a33117d0a6e3640e04cefa826980 keys=5 added=[] dropped=[] placeholder/backtick mismatches=[]
+[parity] hi sha=80fb6466f4b26a52ffb84f93c9ead967aba778a3f70fa40364683a69cdda0773 keys=5 added=[] dropped=[] placeholder/backtick mismatches=[]
+[term] en keys (outside cli.daemon_build) containing 'build': 33
+[term] fr established(build keys)={'build': 23, 'version': 12} new cli.daemon_build={'version': 5}
+[term] es established(build keys)={'compilaci': 26, 'versi': 8} new cli.daemon_build={'versi': 5}
+[term] zh-CN established(build keys)={'构建': 28, '版本': 8} new cli.daemon_build={'版本': 5}
+[term] ru established(build keys)={'сборк': 30, 'верси': 3} new cli.daemon_build={'сборк': 5}
+[term] vi established(build keys)={'bản dựng': 23, 'phiên bản': 2} new cli.daemon_build={'bản dựng': 5}
+[term] ur established(build keys)={'بلڈ': 32} new cli.daemon_build={'بِلڈ': 5}
+[term] hi established(build keys)={'बिल्ड': 29, 'संस्करण': 6} new cli.daemon_build={'बिल्ड': 5}
+[term] fr cli.services_help.services: Amener les services non-runtime de cette machine (daemons lop serve et daemons supervisés)
+[term] fr cli.services_help.status: Signaler chaque service non-runtime, le build qu’il sert et le build sur lequel est l’inst
+[term] fr cli.services_help.status_description: Lecture seule. Nomme le build sur lequel est l’installation et, pour chaque daemon `lop se
+[term] es cli.services_help.services: Pasar a la compilación actual los servicios de esta máquina que no son runtimes (daemons s
+[term] es cli.services_help.status: Mostrar cada servicio que no es runtime, la compilación que está sirviendo y la de la inst
+[term] es cli.services_help.status_description: Solo lectura. Indica la compilación de la instalación y, para cada daemon `lop serve`, la 
+[term] zh-CN cli.services_help.services: 将此机器的非运行时服务（serve守护进程和受监督的守护进程）切换至当前构建，不停止任何运行中的对话
+[term] zh-CN cli.services_help.status: 报告每个非运行时服务、其提供服务的构建，以及当前安装的构建
+[term] zh-CN cli.services_help.status_description: 只读。显示当前安装的构建，以及每个`lop serve`守护进程实际提供服务的构建，完整呈现比较双方，因为此机器常见的偏差是同版本重建，仅凭版本号无法发现守护进程落后。
+[typo] fr catalogue U+202F before ';' = 410, plain space before ';' = 42
+[typo] fr cli.daemon_build.install_restart_failed: char before ';' = U+0020
+[typo] fr cli.daemon_build.install_unconfirmed: char before ';' = U+0020
+[typo] fr cli.daemon_build.status_stale: char before ';' = U+0020
+[typo] zh-CN catalogue CJK+space+'{' = 25, CJK+'{' = 459; CJK+space+'`' = 5, CJK+'`' = 103
+[typo] zh-CN cli.daemon_build.install_restarted: spaced tokens = ['行 {']
+[typo] zh-CN cli.daemon_build.install_restarted_unconfirmed: spaced tokens = []
+[typo] zh-CN cli.daemon_build.install_restart_failed: spaced tokens = ['行 `', '` 将']
+[typo] zh-CN cli.daemon_build.install_unconfirmed: spaced tokens = ['行 `']
+[typo] zh-CN cli.daemon_build.status_stale: spaced tokens = ['行 `', '` 将']
+[ur] cli.daemon_build.install_restarted: zer(U+0650)=1 bidi-controls=[] urdu-semicolon=0 latin-semicolon=0
+[ur] cli.daemon_build.install_restarted_unconfirmed: zer(U+0650)=1 bidi-controls=[] urdu-semicolon=0 latin-semicolon=0
+[ur] cli.daemon_build.install_restart_failed: zer(U+0650)=1 bidi-controls=[] urdu-semicolon=1 latin-semicolon=0
+[ur] cli.daemon_build.install_unconfirmed: zer(U+0650)=1 bidi-controls=[] urdu-semicolon=1 latin-semicolon=0
+[ur] cli.daemon_build.status_stale: zer(U+0650)=2 bidi-controls=[] urdu-semicolon=1 latin-semicolon=0
+exit=0
+$ .venv/bin/python scripts/run_bounded.py --contract command-status --timeout 600 -- .venv/bin/python scripts/i18n/check.py --audit-base origin/main  (pre-append; advisory lines filtered to the summary)
+[run_bounded] memory budget 4432 MiB (inherited); sampled owned child group and escaped descendants
+check.py: ok — 232 file(s) scanned, 2692 literal(s) at or below the baseline, catalogues consistent; 103 advisory finding(s) (report-only until activated)
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=c9a7fc223d8649bcb0ac7912befdb562 completion=~/.local-operator/sessions/623609b4ac65/scratchpad/run-bounded-runs/c9a7fc223d8649bcb0ac7912befdb562.completion.json
+$ .venv/bin/python scripts/run_bounded.py --contract command-status --timeout 600 -- .venv/bin/python scripts/i18n/generate.py --check  (pre-append)
+[run_bounded] memory budget 4432 MiB (inherited); sampled owned child group and escaped descendants
+generate.py --check: committed artifacts are stale — regenerate with
+  .venv/bin/python scripts/i18n/generate.py
+(the emitter is pinned to Node 24 — CI's setup-node major — and its output is normalised to be node-major stable; see the note in scripts/i18n/emit.mjs)
+  changed: local_operator/i18n/data/shipped.json
+  changed: local_operator/mobile/web/src/i18n/bundled.gen.ts
+  orphaned: local_operator/mobile/web/src/i18n/bundled.es.gen.ts
+  orphaned: local_operator/mobile/web/src/i18n/bundled.fr.gen.ts
+  orphaned: local_operator/mobile/web/src/i18n/bundled.hi.gen.ts
+  orphaned: local_operator/mobile/web/src/i18n/bundled.ru.gen.ts
+  orphaned: local_operator/mobile/web/src/i18n/bundled.ur.gen.ts
+  orphaned: local_operator/mobile/web/src/i18n/bundled.vi.gen.ts
+  orphaned: local_operator/mobile/web/src/i18n/bundled.zh-CN.gen.ts
+[run_bounded] contract=command-status rc=1 cause=child-exit cleanup=unknown invocation_id=c57340eae4d7411b9e6f03d77840d364 completion=~/.local-operator/sessions/623609b4ac65/scratchpad/run-bounded-runs/c57340eae4d7411b9e6f03d77840d364.completion.json

@@ -1,0 +1,9 @@
+{
+  "record.json": "5d9411db6ce7355bf7ad8810ecff06df00fa537e13a068805ff95ca3c5eebcd5",
+  "receipt.json": "0a216563d36ff67ba55c0ab686647ba2bdd278ca92eb1c625eb192756ffe1b1e",
+  "report.json": "a1cd0cc1e0d6c5aba20ce2c0ae46fdd1aa8cf17e1ab1003084311e9a432335bc",
+  "mechanical.json": "20902ec153d831d000ea3178076530c0c0f6f8953762978debf03736f5fc2800",
+  "audit.log": "d9f22e2fcc3def774dd0e8853c50c96952b9f08546c12aa08e776f55bbaa36dc",
+  "receipt-validation.log": "b6fe4f421716a00239c43b2a1aded15b99302fe2a75688ba8d390344b47695be",
+  "validate.py": "fe7db3275743eb5422a67ac9f399d3b34eebec342c9a5517326908d05cb10447"
+}

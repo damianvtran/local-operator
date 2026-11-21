@@ -1,0 +1,94 @@
+{
+  "locale": "fr",
+  "namespace": "wire.session_status",
+  "date": "2026-11-20",
+  "source_path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+  "source_sha256": "deb0b332d1fb3a868a481f2cd0ac030d918fb6ece3cb5dfbc9c75a8b0055a71e",
+  "context_path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+  "context_sha256": "632f70add6369a00a75ac86bc6ee5987e6bdf615bb3a5643bf9602d7ae4bbd20",
+  "target_path": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/catalogues/fr/wire.session_status.json",
+  "target_sha256": "8e28af9d575f293f463bb7cbf6e9d72b6ca1e09842b61458da2a6f1c6eeaa943",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "provenance": "Task-provided attribution, not independently verified"
+  },
+  "auditor": {
+    "agent": "translation-auditor (live-status-audit-fr)",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "c077690d8eb5",
+    "session": "c077690d8eb5",
+    "date": "2026-11-20",
+    "fallback": "none"
+  },
+  "result": "fail",
+  "status": "fail",
+  "findings_count": {
+    "blocker": 0,
+    "major": 1,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 1,
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "major",
+      "key": "wire.session_status.wedged_heartbeat",
+      "current_text": "Ne répond pas · processus actif (dernier heartbeat il y a {duration})",
+      "problem": "Untranslated English heartbeat remains in high-visibility copy despite the explicit no-English acceptance criterion.",
+      "evidence": "The catalogue bytes and render_message(...,{\"duration\":\"4m\"},\"fr\") retain heartbeat. This matches existing tui.small.info_panel.last_heartbeat_ago and cli.browser.heartbeat_stale, so it is not glossary drift; however heartbeat is absent from the French style guide kept-English list and is prose, not an identifier or command. Existing usage does not satisfy this request’s stricter acceptance criterion.",
+      "suggested_wording": "Ne répond pas · processus actif (dernier signal de vie il y a {duration})"
+    },
+    {
+      "id": "F2",
+      "severity": "minor",
+      "key": "wire.session_status.delegating_queued_addend",
+      "current_text": "{count, plural, one {# en file d’attente} many {# en file d’attente} other {# en file d’attente}}",
+      "problem": "Material expansion on compact row segments requires rendered fit verification; no overflow is claimed from strings alone.",
+      "evidence": "At count 2: queued addend 19 vs 8 English characters (+138%); delegating_queued 31 vs 18 (+72%); exec_headless 31 vs 23 (+35%); waiting 22 vs 17 (+29%); approval_needed 20 vs 15 (+33%); attached 7 vs 4 (+75%). English context states one logical line, no fixed cell cap. No rendered surface was exercised in this catalogue-only audit.",
+      "suggested_wording": "Optional shorter addend: {count, plural, one {# en attente} many {# en attente} other {# en attente}}; optional queued segment: {count, plural, one {# sous-agent en attente} many {# de sous-agents en attente} other {# sous-agents en attente}}. Retain the other idiomatic labels and verify all six expanded labels on narrow desktop/TUI/mobile rows.",
+      "affected_keys": [
+        "wire.session_status.delegating_queued_addend",
+        "wire.session_status.delegating_queued",
+        "wire.session_status.exec_headless",
+        "wire.session_status.waiting",
+        "wire.session_status.approval_needed",
+        "wire.session_status.attached"
+      ]
+    }
+  ],
+  "keys_read": 31,
+  "new_keys_read": 14,
+  "preexisting_keys_byte_unchanged": 17,
+  "checks": {
+    "argument_parity": "31/31 pass via runtime.message_arguments",
+    "plural_categories": "runtime.fmt.plural_categories(fr) = many, one, other; all 8 plural arguments across namespace contain precisely these categories; no =N substitutions",
+    "render_counts": [
+      0,
+      1,
+      2,
+      5,
+      21,
+      1000000
+    ],
+    "runtime_module": "/Users/damian/local-operator/.worktrees/i18n-catalog-live-status/local_operator/i18n/runtime.py",
+    "joiner": "Exact space-middle-dot-space count parity in all 14 new keys",
+    "exec": "Literal exec preserved in parentheses",
+    "agreement": "Ouverte/Prête agree with feminine session; tâches and sous-agents count forms correct; no address-form mismatch",
+    "terminology_references": [
+      "tui.chrome.banners.body_approval",
+      "tui.chrome.banners.body_ask",
+      "tui.analytics.table.subagent_suffix",
+      "wire.sessions.park_self_refused_busy",
+      "wire.login.bedrock.no_tty",
+      "tui.small.info_panel.last_heartbeat_ago"
+    ],
+    "rendered_fit": "Not exercised; F2 is a fit-check request, not an observed truncation",
+    "rtl": "Not applicable to fr"
+  },
+  "evidence_path": "/Users/damian/.local-operator/sessions/c077690d8eb5/scratchpad/fr-runtime-evidence.txt",
+  "evidence_sha256": "301d253a74b80fcba7e39a1a389f8c302d4e22d202fee0a45dccd4c660214489",
+  "head": "514d51243ce3fd88ddd215aac473d9b8c0646806",
+  "notes": "Read-only audit; no catalogue, code, tests or ledger edits. First probe failed because wcwidth is not installed; successful probe used Unicode character counts (not pixel measurements), with no dependencies installed."
+}

@@ -20,9 +20,11 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -30,11 +32,13 @@ import pytest
 from local_operator.guardrails import provenance as prov
 from local_operator.guardrails.check import CallContext, GuardSettings, check_tool_call
 from local_operator.guardrails.classify import Risk, classify_bash
+from local_operator.guardrails.preview import BUILTIN_PASS, preview_tool_call
 from local_operator.harness.message_types import (
     ASK_RESPONSE_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,
 )
 from local_operator.harness.types import CustomMessage
+from local_operator.session.runtime import registry
 
 ME = "aaaaaaaaaaa1"  # the cleaning session
 DONE = "bbbbbbbbbbb2"  # the ended session that made the tree / rig
@@ -42,6 +46,7 @@ LIVE = "ccccccccccc3"  # a session still running
 #: The real scan, kept before the ``home`` fixture stubs it (section 4 restores it).
 _REAL_LIVE_CWD_INSIDE = prov._live_cwd_inside
 _REAL_CWD_HOLDERS = prov.cwd_holders
+_REAL_RUNNING_OWNERS = prov._running_owners
 
 
 def _git(*args: str, cwd: Path) -> str:
@@ -103,6 +108,7 @@ def repo(home: Path) -> Path:
     _git("init", "-q", "-b", "main", str(repo), cwd=home)
     (repo / ".gitignore").write_text(".worktrees/\n")
     (repo / "a.txt").write_text("a\n")
+    (repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
     _git("add", ".", cwd=repo)
     _git("commit", "-qm", "init", cwd=repo)
     _git("remote", "add", "origin", str(origin), cwd=repo)
@@ -165,6 +171,393 @@ async def _check(home: Path, command: str, judge: _Judge, operator: Any = None) 
     return await check_tool_call(
         "bash", {"command": command}, ctx, judge=judge, settings=GuardSettings(), forked_judge=judge
     )
+
+
+@pytest.mark.asyncio
+async def test_plain_own_checkout_without_origin_keeps_legacy_checkpoint(
+    home: Path, repo: Path
+) -> None:
+    wt = _branch_tree(home, repo, "plain-local")
+    _record(home, wt, creator=ME)
+    _git("remote", "remove", "origin", cwd=repo)
+    command = f"git -C {repo} worktree remove -- {wt}"
+    args = {"command": command}
+    context = CallContext(cwd=str(home), env=_env(home), scratchpad=None, session_id=ME)
+    report = preview_tool_call("bash", args, context, settings=GuardSettings())
+    judge = _Judge()
+    result = await _check(home, command, judge)
+    assert report.builtin_effect == BUILTIN_PASS, report.render()
+    assert not result.blocked and not judge.prompts, result
+
+    # Ordinary uncommitted edits still use the legacy judge path.
+    (wt / "a.txt").write_text("uncommitted\n")
+    report = preview_tool_call("bash", args, context, settings=GuardSettings())
+    result = await _check(home, command, judge)
+    assert result.blocked and len(judge.prompts) == 1, result
+    assert report.builtin_effect != BUILTIN_PASS, report.render()
+    assert "linked worktree state: dirty" in report.render()
+    assert (wt / "a.txt").read_text() == "uncommitted\n"
+
+
+PRESERVATION_TAIL = (
+    "These are preservation steps, not permission to re-issue or reroute this removal. "
+    "The standing two refusal exceptions still apply."
+)
+
+
+@pytest.mark.asyncio
+async def test_open_pr_refusal_stays_critical_and_distinct_from_ignored_hold(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The #4359 field case before merge: same tree, open PR -> CRITICAL, old words."""
+    wt = _branch_tree(home, repo, "open-pr")
+    _git("remote", "remove", "origin", cwd=repo)
+    _git("config", "core.excludesFile", str(home / "excludes"), cwd=repo)
+    (home / "excludes").write_text(".env\n")
+    (wt / ".env").write_text("synthetic local data\n")
+    _record(home, wt, creator=ME)
+    monkeypatch.setattr(
+        prov,
+        "worktree_activity",
+        lambda *_: prov.WorktreeActivity("fix/open-pr", "open", pr_number=4359),
+    )
+    command = f"git -C {repo} worktree remove -- {wt}"
+    ranked = _rank(home, command)
+    assert ranked.risk is Risk.CRITICAL and not ranked.targets[0].cleanup_hold, ranked.reasons
+    assert "branch fix/open-pr has open PR #4359; finish or close it first" in (
+        ranked.targets[0].reason
+    )
+    result = await _check(home, command, _Judge())
+    assert result.blocked and result.risk == "critical", result
+    assert "(critical): this command would delete, move or overwrite" in result.text
+    assert "ignored files" not in result.text and PRESERVATION_TAIL not in result.text
+
+
+def test_unconditioned_cleanup_hold_keeps_general_guidance() -> None:
+    """Holds with no recorded condition (dirty, protected, tracked deletions) keep their text."""
+    from local_operator.guardrails.check import cleanup_hold_text
+    from local_operator.guardrails.classify import RankedTarget, Verdict
+    from local_operator.guardrails.resolve import Target
+
+    target = RankedTarget(
+        Target(path="/synthetic/wt", op="delete", program="git"),
+        Risk.HIGH,
+        "linked worktree state: tracked deletions remain",
+        cleanup_hold=True,
+    )
+    text = cleanup_hold_text(Verdict(Risk.HIGH, [target]))
+    assert (
+        "Preserve unknown files outside the checkout; commit or stash edits, push commits "
+        "that need to survive, and verify the exact path and Git registration. " + PRESERVATION_TAIL
+    ) in text
+    assert "ignored files" not in text
+
+
+def test_plain_exact_own_checkout_accepts_shared_link_witness(home: Path, repo: Path) -> None:
+    wt = _branch_tree(home, repo, "plain-shared-link")
+    _git("remote", "remove", "origin", cwd=repo)
+    _git("config", "core.excludesFile", str(home / "excludes"), cwd=repo)
+    (home / "excludes").write_text("node_modules\n")
+    (repo / "node_modules").mkdir()
+    (wt / "node_modules").symlink_to("../../node_modules")
+    _record(home, wt, creator=ME)
+    command = f"git -C {repo} worktree remove -- {wt}"
+    assert _rank(home, command).risk is Risk.LOW
+
+    (repo / "pnpm-lock.yaml").write_text("lockfileVersion: '8.0'\n")
+    ranked = _rank(home, command)
+    assert ranked.risk is Risk.HIGH and ranked.targets[0].cleanup_hold, ranked.reasons
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", ["ignored", "ignored-and-edit", "unknown"])
+async def test_plain_exact_own_checkout_holds_unverified_payload(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, payload: str
+) -> None:
+    wt = _branch_tree(home, repo, "plain-preserve")
+    _git("remote", "remove", "origin", cwd=repo)
+    _git("config", "core.excludesFile", str(home / "excludes"), cwd=repo)
+    (home / "excludes").write_text(".env\n")
+    marker = wt / ".env"
+    if payload != "unknown":
+        marker.write_text("synthetic local data\n")
+    if payload == "ignored-and-edit":
+        (wt / "a.txt").write_text("uncommitted\n")
+    _record(home, wt, creator=ME)
+    if payload == "unknown":
+        original = prov._git_quiet
+        monkeypatch.setattr(
+            prov,
+            "_git_quiet",
+            lambda args, cwd: None if "--ignored=matching" in args else original(args, cwd),
+        )
+    command = f"git -C {repo} worktree remove -- {wt}"
+    ranked = _rank(home, command)
+    context = CallContext(cwd=str(home), env=_env(home), scratchpad=None, session_id=ME)
+    report = preview_tool_call("bash", {"command": command}, context, settings=GuardSettings())
+    judge = _Judge("ALLOW: synthetic judge")
+    result = await _check(home, command, judge)
+    assert ranked.risk is Risk.HIGH and ranked.targets[0].cleanup_hold, ranked.reasons
+    assert report.builtin_effect != BUILTIN_PASS, report.render()
+    assert result.blocked and not judge.prompts, result
+    assert result.risk == "high", result
+    assert wt.is_dir()
+    if payload != "unknown":
+        assert marker.read_text() == "synthetic local data\n"
+    # Operator follow-up 2026-11-21: the refusal names the condition that
+    # failed; an ignored-only hold must not read like unpushed work.
+    text = result.text
+    assert report.builtin_text == text, report.render()
+    assert PRESERVATION_TAIL in text
+    if payload == "ignored":
+        assert "1 ignored entry the guard cannot prove regenerable" in text
+        assert "ignored files (build output, caches, environments)" in text
+        assert "not an open PR or unpushed work" in text
+        assert "commit or stash" not in text and "push commits" not in text
+        assert ".env" not in text  # counted, never listed
+    elif payload == "ignored-and-edit":
+        assert "1 ignored entry" in text and "1 tracked or untracked change" in text
+        assert "ignored files (build output" in text and "commit or stash edits" in text
+        assert "not an open PR or unpushed work" not in text
+    else:
+        assert "could not verify ignored files" in text
+        assert "could not verify the worktree's ignored files" in text
+        assert "commit or stash" not in text and "push commits" not in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("creator", [ME, DONE])
+@pytest.mark.parametrize("shared_link", [False, True])
+async def test_interrupted_finished_tree_skips_unavailable_judge(
+    home: Path, repo: Path, creator: str, shared_link: bool
+) -> None:
+    wt = _branch_tree(home, repo, "interrupted", repo / ".worktrees" / "interrupted checkout")
+    _git("merge", "--ff-only", "fix/interrupted", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+    _git("config", "core.excludesFile", str(home / "excludes"), cwd=repo)
+    (home / "excludes").write_text("node_modules\n")
+    if shared_link:
+        (repo / "node_modules").mkdir()
+        (repo / "node_modules" / "cache.js").write_text("generated\n")
+        (wt / "node_modules").symlink_to("../../node_modules")
+    (wt / "a.txt").unlink()
+    _record(home, wt, creator=creator)
+    command = f"git -C {repo} worktree remove --force -- {shlex.quote(str(wt))}"
+    context = CallContext(cwd=str(home), env=_env(home), scratchpad=None, session_id=ME)
+    report = preview_tool_call("bash", {"command": command}, context, settings=GuardSettings())
+    assert report.builtin_effect == BUILTIN_PASS, report.render()
+    judge = _Judge("BLOCK: judge unavailable")
+    result = await _check(home, command, judge)
+    assert not judge.prompts, result
+    assert not result.blocked, result
+    assert _git("status", "--porcelain", "--ignored", cwd=wt).splitlines() == (
+        [" D a.txt", "!! node_modules"] if shared_link else [" D a.txt"]
+    )
+    _git("worktree", "remove", "--force", "--", str(wt), cwd=repo)
+    assert not wt.exists()
+    assert str(wt) not in _git("worktree", "list", "--porcelain", cwd=repo)
+    if shared_link:
+        assert (repo / "node_modules" / "cache.js").read_text() == "generated\n"
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_finished_proof_keeps_state_flags_separate_from_ledger_owner(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, interrupted: bool
+) -> None:
+    wt = _branch_tree(home, repo, "ledger-owner")
+    _git("merge", "--ff-only", "fix/ledger-owner", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+    if interrupted:
+        (wt / "a.txt").unlink()
+        # Removing a root entry changes the directory ctime used as Linux's ledger stamp.
+        _record(home, wt)
+    real = os.path.realpath(wt)
+    identity = prov.cleanup_identity(real)
+    assert identity is not None
+    assert prov.worktree_creators(real, strict=True) == {DONE}
+    # Isolate process discovery but exercise the real ledger lookup and caller exclusion.
+    monkeypatch.setattr(
+        registry,
+        "scan",
+        lambda *a, **kw: [(SimpleNamespace(session_id=DONE, cwd=str(home)), "live")],
+    )
+    calls: list[tuple[object, ...]] = []
+    read_state = prov.worktree_state
+
+    def state(
+        path: str,
+        *,
+        facts: dict[str, bool],
+        own: bool = False,
+        session_id: str = "",
+        hidden_blocks: bool = False,
+        interrupted_cleanup: bool = False,
+    ) -> str:
+        assert path == real
+        calls.append(("state", own, session_id, hidden_blocks, interrupted_cleanup))
+        return read_state(
+            path,
+            facts=facts,
+            own=own,
+            session_id=session_id,
+            hidden_blocks=hidden_blocks,
+            interrupted_cleanup=interrupted_cleanup,
+        )
+
+    def owners(path: str, session_id: str, *, strict: bool = False) -> tuple[str, ...]:
+        assert path == real
+        calls.append(("owners", session_id, strict))
+        return _REAL_RUNNING_OWNERS(path, session_id, strict=strict)
+
+    monkeypatch.setattr(prov, "worktree_state", state)
+    monkeypatch.setattr(prov, "_running_owners", owners)
+    state_call = ("state", False, "", True, interrupted)
+    unrelated = prov.finished_foreign_worktree(
+        real, ME, interrupted_cleanup=interrupted, identity=identity
+    )
+    assert not unrelated.safe and unrelated.reasons == ("owner-running",)
+    assert calls == [state_call, ("owners", ME, True)]
+
+    calls.clear()
+    owner = prov.finished_foreign_worktree(
+        real, DONE, interrupted_cleanup=interrupted, identity=identity
+    )
+    assert owner.safe, owner.reasons
+    assert owner.state == ("deletions-only" if interrupted else "clean")
+    assert calls == [state_call, ("owners", DONE, True), ("owners", DONE, False), state_call]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "obstacle",
+    [
+        "modified",
+        "unpushed",
+        "nested",
+        "locked",
+        "primary",
+        "residue",
+        "ignored",
+        "foreign-ignored",
+        "stale-link",
+        "missing-force",
+    ],
+)
+async def test_exact_cleanup_preserves_unverified_work(
+    home: Path, repo: Path, obstacle: str
+) -> None:
+    wt = _branch_tree(home, repo, "preserve", repo / ".worktrees" / "preserve this")
+    if obstacle != "unpushed":
+        _git("merge", "--ff-only", "fix/preserve", cwd=repo)
+        _git("push", "-q", "origin", "main", cwd=repo)
+    if obstacle == "modified":
+        (wt / "a.txt").write_text("uncommitted\n")
+    elif obstacle == "unpushed":
+        # A closed PR does not prove that the branch's HEAD was pushed.
+        (wt / "a.txt").unlink()
+    elif obstacle == "nested":
+        (wt / "node_modules").mkdir()
+        with (repo / ".git" / "info" / "exclude").open("a") as exclude:
+            exclude.write("node_modules/\n")
+        _git("init", "-q", "--bare", str(wt / "node_modules" / "archive"), cwd=wt)
+    elif obstacle == "locked":
+        _git("worktree", "lock", str(wt), cwd=repo)
+    elif obstacle in ("ignored", "foreign-ignored", "stale-link"):
+        (home / "excludes").write_text("build/\nnode_modules\n")
+        _git("config", "core.excludesFile", str(home / "excludes"), cwd=repo)
+        (wt / "a.txt").unlink()
+        if obstacle == "stale-link":
+            (repo / "node_modules").mkdir()
+            (wt / "node_modules").symlink_to("../../node_modules")
+            (repo / "pnpm-lock.yaml").write_text("different bytes\n")
+        else:
+            (wt / "build").mkdir()
+            (wt / "build" / "notes.txt").write_text("keep this local note\n")
+    elif obstacle == "missing-force":
+        (wt / "a.txt").unlink()
+    if obstacle != "foreign-ignored":
+        _record(home, wt, creator=ME)
+    target = repo if obstacle == "primary" else wt
+    if obstacle == "residue":
+        target = repo / ".worktrees" / "unregistered residue"
+        target.mkdir()
+        (target / "local-note.txt").write_text("unregistered\n")
+    opts = "--" if obstacle == "missing-force" else "--force --"
+    command = f'git -C "{repo}" worktree remove {opts} "{target}"'
+    context = CallContext(cwd=str(home), env=_env(home), scratchpad=None, session_id=ME)
+    report = preview_tool_call("bash", {"command": command}, context, settings=GuardSettings())
+    judge = _Judge("ALLOW ledger")
+    outcome = await _check(home, command, judge)
+    assert outcome.blocked and not judge.prompts
+    assert report.builtin_effect == "hold-cleanup", report.render()
+    assert report.builtin_text == outcome.text
+    assert "Nothing was run." in report.render()
+    assert "not permission to re-issue or reroute" in outcome.text
+    if obstacle == "residue":
+        assert "excludes unregistered residue" in outcome.text
+    if obstacle == "missing-force":
+        assert "preview" in outcome.text and "--force" in outcome.text
+    assert target.exists()
+
+
+@pytest.mark.parametrize("change", ["branch", "registration", "edit", "owner", "activity"])
+def test_exact_cleanup_rechecks_state_after_remote_proof(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    wt = _branch_tree(home, repo, "changing")
+    _git("merge", "--ff-only", "fix/changing", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+    (wt / "a.txt").unlink()
+    _record(home, wt, creator=ME)
+    check_origin = prov.pushed_worktree_head
+    head_before = _git("rev-parse", "HEAD", cwd=wt)
+
+    def change_during_proof(real: str, head: str, ref: str | None) -> bool:
+        assert check_origin(real, head, ref)
+        if change == "branch":
+            _git("switch", "-qc", "fix/same-commit", cwd=wt)
+        elif change == "registration":
+            old = repo / ".worktrees" / "original-changing"
+            _git("worktree", "move", str(wt), str(old), cwd=repo)
+            _git("worktree", "add", "-qb", "fix/replacement", str(wt), "main", cwd=repo)
+            (wt / "a.txt").unlink()
+            _record(home, wt, creator=ME)
+        elif change == "edit":
+            (wt / "changing.txt").write_text("new work\n")
+        elif change == "owner":
+            _record(home, wt, creator=LIVE)
+        elif change == "activity":
+            monkeypatch.setattr(
+                prov,
+                "worktree_activity",
+                lambda *_: prov.WorktreeActivity("fix/changing", "unknown"),
+            )
+        assert _git("rev-parse", "HEAD", cwd=wt) == head_before
+        return True
+
+    monkeypatch.setattr(prov, "pushed_worktree_head", change_during_proof)
+    result = _rank(home, f"git -C {repo} worktree remove --force -- {wt}")
+    assert result.risk is Risk.HIGH and result.targets[0].cleanup_hold, result.reasons
+    assert "changed" in result.targets[0].reason
+    assert wt.exists()
+
+
+def test_exact_cleanup_holds_when_git_path_inventory_is_undecodable(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wt = _branch_tree(home, repo, "undecodable")
+    _record(home, wt, creator=ME)
+    run = subprocess.run
+
+    def undecodable(args: list[str], *args2: Any, **kwargs: Any) -> Any:
+        if "status" in args and "--ignored=matching" in args:
+            raise UnicodeDecodeError("utf-8", bytes([255]), 0, 1, "invalid path byte")
+        return run(args, *args2, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", undecodable)
+    result = _rank(home, f"git -C {repo} worktree remove --force -- {wt}")
+    assert result.risk is Risk.HIGH and result.targets[0].cleanup_hold, result.reasons
+    assert "could not verify the checkout" in result.targets[0].reason
 
 
 # -- 1. merge proof without gh ------------------------------------------------------------

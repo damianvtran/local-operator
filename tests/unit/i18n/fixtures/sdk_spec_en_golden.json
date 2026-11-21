@@ -8,6 +8,7 @@
   "output_retries_requires_format": "output_retries requires output_format",
   "output_retries_range": "output_retries must be between 0 and 5",
   "world_root_empty": "world_root must be a non-empty path when set",
+  "mcp_ready_timeout_invalid": "mcp_ready_timeout_s: timeout_s must be a finite number >= 0",
   "approval_declared_tools_empty": "ApprovalPolicy.declared() must name at least one tool; use ApprovalPolicy.refuse() for an undeclared bound session",
   "approval_tools_wrong_mode": "ApprovalPolicy.tools is only meaningful for mode 'declared', not 'refuse'",
   "approval_callback_gate_required": "ApprovalPolicy.callback() requires a callable gate",

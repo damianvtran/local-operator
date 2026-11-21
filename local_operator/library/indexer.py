@@ -216,6 +216,38 @@ def ensure_started(config_dir: str | Path) -> "LibraryIndexer":
     return instance
 
 
+def is_running(config_dir: str | Path) -> bool:
+    """Whether this process already runs an indexer for ``config_dir``.
+
+    The server lifespan asks BEFORE :func:`ensure_started` so its teardown stops
+    only an indexer that boot started, never one a lazy read or a caller owns.
+    """
+    key = str(Path(config_dir).resolve())
+    with _INSTANCES_LOCK:
+        instance = _INSTANCES.get(key)
+    return instance is not None and instance.running
+
+
+def stop_started(instance: "LibraryIndexer") -> bool:
+    """Stop an indexer :func:`ensure_started` returned and forget it.
+
+    WHY IT EXISTS: the worker threads are daemons, so an in-process owner that
+    exits (a server lifespan, every ``with TestClient(app)``) otherwise leaves
+    them running against a config dir that may then be deleted — the database
+    layer recreates the directory and opens a fresh WAL file beside the old
+    file's live connections (a SIGBUS in CI). Evicting the cache entry lets the
+    next boot of the same root start a fresh instance, and the held idle
+    connection for THIS root's database is closed too, leaving other roots'.
+    Returns :meth:`LibraryIndexer.stop`'s ``stopped_cleanly``.
+    """
+    stopped_cleanly = instance.stop()
+    with _INSTANCES_LOCK:
+        if _INSTANCES.get(str(instance.config_dir)) is instance:
+            del _INSTANCES[str(instance.config_dir)]
+    release_keepers(Path(instance.store._key))
+    return stopped_cleanly
+
+
 def reset_for_tests() -> None:
     """Stop every indexer this process started, cached or not. Tests own the lifetime."""
     with _INSTANCES_LOCK:
@@ -501,15 +533,38 @@ class LibraryIndexer:
             )
             self._thumb_thread.start()
 
-    def stop(self, timeout: float = 5.0) -> None:
+    def stop(self, timeout: float = 5.0) -> bool:
+        """Ask both workers to stop and wait for them; return whether they did.
+
+        Returns ``stopped_cleanly``: ``True`` only when neither worker thread is
+        alive after the join. WHY A RESULT: the join is bounded (a worker stuck
+        in a long unit of work must not hold a shutdown forever) but it used to
+        be silent, so a worker that outlived the bound looked exactly like a
+        clean stop while it could still write ``-wal``/``-shm``/db files under
+        the config root. A caller that is about to delete or reuse that root
+        (the server lifespan, a test's ``rmtree``) needs to know the root is
+        not yet quiet. The remaining teardown (observer, writer lock, registry)
+        still runs either way: a stuck worker is reported, never allowed to
+        wedge the exit, and the daemon threads cannot outlive the process.
+        """
         self._stop.set()
         # Unblock both queue waits without inventing work.
         self._queue.put("")
         # Same unblock, in the queue's own item type; the worker skips an empty id.
         self._thumb_queue.put(("", 0))
+        survivors: list[str] = []
         for thread in (self._thread, self._thumb_thread):
             if thread is not None and thread.is_alive():
                 thread.join(timeout)
+                if thread.is_alive():
+                    survivors.append(thread.name)
+        if survivors:
+            logger.warning(
+                "library: %s still running %.1f s after stop; it may write under %s",
+                " and ".join(survivors),
+                timeout,
+                self.config_dir,
+            )
         self._stop_observer()
         # Another process may now take over. The lock is also released by the
         # kernel on exit, which is why a crashed run cannot wedge the next one.
@@ -519,6 +574,7 @@ class LibraryIndexer:
         # instance still owns work.
         with _INSTANCES_LOCK:
             _LIVE.discard(self)
+        return not survivors
 
     def _stop_observer(self) -> None:
         observer = self._observer
@@ -555,6 +611,10 @@ class LibraryIndexer:
             self.reconcile()
         except Exception as error:  # noqa: BLE001 - a first reconcile is best effort
             _log_worker_failure("initial reconcile failed", error, self.store)
+        if self._stop.is_set():
+            # Stopped mid-reconcile: an observer started now would outlive the
+            # ``stop`` that already ran its teardown.
+            return
         self._start_observer()
         try:
             while not self._stop.is_set():
@@ -595,6 +655,17 @@ class LibraryIndexer:
                         logger.warning("library: wake reconcile failed", exc_info=True)
         finally:
             self._stop_observer()
+
+    def _interrupted(self) -> bool:
+        """Whether THIS indexer's worker thread has been asked to stop.
+
+        Scoped to the worker thread on purpose: ``stop`` exists to end the
+        daemon before its owner tears the config dir down, so only the loop
+        ``stop`` joins needs to bail out. A synchronous caller on its own thread
+        (``reconcile`` from a test or a diagnostic) keeps running to completion
+        and keeps its errors, whatever the flag says.
+        """
+        return self._stop.is_set() and threading.current_thread() is self._thread
 
     def wake(self) -> None:
         """Ask a parked worker to reconcile immediately. Never blocks."""
@@ -677,7 +748,8 @@ class LibraryIndexer:
             )
             watch.start()
         except Exception as error:  # noqa: BLE001 - fall back to the timer, never to a crash
-            # ``start`` already closed its fd, so nothing it took is held.
+            # ``start`` closes its inotify fd and wake pipe on every failure
+            # path, late ones included, so nothing it took is held.
             self._session_watch_failed(error)
             return
         self._observer = watch
@@ -691,26 +763,37 @@ class LibraryIndexer:
         watch has already released every descriptor, and one warning names the
         limit and the remedy; repeating it per session would only flood the log
         of a host that is already short on watches.
+
+        ``observer_failed`` is set LAST, in ``finally``: readers (status
+        surfaces, and the tests that wait on it before inspecting the log)
+        treat the flag as "the failure is fully reported". Setting it first
+        let a reader on another thread see the flag while the warning was
+        still being built (``budget_limit`` runs inside its arguments), and
+        read a log with no warning in it. ``finally`` keeps the flag set on
+        the already-warned early return and if logging itself raises.
         """
-        self.observer_failed = True
-        if self._watch_warned:
-            return
-        self._watch_warned = True
-        if getattr(error, "errno", None) in session_watch.BUDGET_ERRNOS:
-            logger.warning(
-                "library: inotify limit reached (%s); journal watch off, using the timed "
-                "reconcile. Raise fs.inotify.max_user_watches / max_user_instances, or "
-                "find the holder with `lop mobile doctor`.",
-                error,
-            )
-        else:
-            # A non-OSError is a bug or a broken libc, not a budget: keep its
-            # traceback (an OSError's message already says everything).
-            logger.warning(
-                "library: journal watch stopped (%s); using the timed reconcile",
-                error,
-                exc_info=None if isinstance(error, OSError) else error,
-            )
+        try:
+            if self._watch_warned:
+                return
+            self._watch_warned = True
+            code = getattr(error, "errno", None)
+            if code in session_watch.BUDGET_ERRNOS:
+                logger.warning(
+                    "library: inotify limit reached (%s); journal watch off, using the timed "
+                    "reconcile. Raise %s, or find the holder with `lop mobile doctor`.",
+                    error,
+                    session_watch.budget_limit(code),
+                )
+            else:
+                # A non-OSError is a bug or a broken libc, not a budget: keep its
+                # traceback (an OSError's message already says everything).
+                logger.warning(
+                    "library: journal watch stopped (%s); using the timed reconcile",
+                    error,
+                    exc_info=None if isinstance(error, OSError) else error,
+                )
+        finally:
+            self.observer_failed = True
 
     def _mark_dirty(self, session_id: str) -> None:
         if session_id:
@@ -984,6 +1067,10 @@ class LibraryIndexer:
         writes it, a complete-checkpoint count against it, and no pending work.
         """
         state = self.store.state()
+        if self._interrupted():
+            # ``stop`` must return inside its join bound; a finish check is
+            # recomputed by the next run, so skipping it loses nothing.
+            return
         if state.get(STATE_BACKFILL_DONE) == "1":
             return
         if self.store.incomplete_sessions():
@@ -1046,11 +1133,19 @@ class LibraryIndexer:
         # A PEER session's rows are the remote feeder's (``library/remote.py``): it has
         # no directory here by definition, so "not visible" must not forget it.
         vanished = {sid for sid, row in known.items() if not row.get("origin_device")} - live
+        # THE STOP FLAG IS CHECKED BETWEEN SESSIONS: a backfill over thousands of
+        # journals otherwise outran ``stop``'s 5 s join, and the daemon thread
+        # kept writing into a config dir its owner (a test) was about to delete.
+        # An interrupted reconcile writes nothing more; the next one redoes it.
         for session_id in vanished:
+            if self._interrupted():
+                return
             self._forget(session_id)
             self._cwd_cache.pop(session_id, None)
         dirty = 0
         for session_id, _mtime, _title, _flag in visible:
+            if self._interrupted():
+                return
             session_dir = self.config_dir / "sessions" / session_id
             signature = library_index._signature(session_dir)
             if signature is None:
@@ -1060,6 +1155,8 @@ class LibraryIndexer:
                 continue
             self._mark_dirty(session_id)
             dirty += 1
+        if self._interrupted():
+            return
         with self.store.write() as connection:
             self.store.set_state(
                 connection,
@@ -1125,6 +1222,9 @@ class LibraryIndexer:
         # demand when a surface asks for it.
         try:
             for asset_id, width in self.store.thumbnail_candidates(width=THUMB_MAX_WIDTH):
+                if self._stop.is_set():
+                    # Same join bound as the reconcile loop: no sweep past stop.
+                    return
                 self._queue_thumb(asset_id, width)
         except Exception:  # noqa: BLE001 - a startup miss is retried per session
             logger.debug("library: thumbnail sweep failed", exc_info=True)

@@ -1,0 +1,70 @@
+{
+  "locale": "vi",
+  "namespace": "tui.session_sidebar",
+  "date": "2026-11-20",
+  "source_sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": null,
+    "provenance": "Identity supplied by manager task; not independently observed."
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "779b05eb4e26",
+    "date": "2026-11-20",
+    "result": "failed",
+    "findings": 1
+  },
+  "status": "failed",
+  "verdict": "fail",
+  "files": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.session_sidebar.json",
+      "sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/vi/tui.session_sidebar.json",
+      "sha256": "3db8099a780b691bf1bbeaef99b0f0bcc5507281adcb0e8c745557f3d3c9926a"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.session_sidebar.context.json",
+      "sha256": "698e8f0e151fee53d52a533bc51d7edcc600ce6964d74cdb024888238161f6e0"
+    }
+  },
+  "findings": {
+    "blocker": [],
+    "major": [
+      {
+        "id": "VI-01",
+        "key": "tui.session_sidebar.footer.hub_note",
+        "current": "hub: {count}",
+        "proposed": "nguồn: {count}",
+        "reason": "Untranslated hub is not sanctioned in glossary.md lines 19–30, 118–126 or vi style-guide kept-English lists (lines 19–28, 71–116). Context identifies a count of shared agent/skill sources, so nguồn is an accurate compact label; 8/8/9/9 cells."
+      }
+    ],
+    "minor": [
+      {
+        "id": "VI-02",
+        "key": "tui.session_sidebar.footer.asks_note",
+        "current": "câu hỏi: {count}",
+        "proposed": "{count} câu hỏi",
+        "reason": "Renders 10/10/11/11 cells at 0/9/10/99, exceeding maxCells=10 for two-digit counts. Natural count-first Vietnamese preserves shipped câu hỏi terminology while fitting 9/9/10/10 cells; the budget is achievable."
+      }
+    ],
+    "nit": []
+  },
+  "keys_read": 21,
+  "checks": {
+    "key_argument_parity": "21/21 PASS using runtime.message_arguments",
+    "CLDR": "vi other-only; sole plural message other-only; no =N selectors",
+    "runtime_render": "All 21 keys rendered at counts 0,9,10,99 using runtime.render_message",
+    "width": "All bounded keys pass except footer.asks_note at 10 and 99; footer.hub_note 6/6/7/7, proposed nguồn 8/8/9/9",
+    "NFC": "21/21 PASS",
+    "manual_bidi_controls": "none; Vietnamese LTR",
+    "command_literal": "Rendered đang chạy · chạy lop stop nếu phiên vẫn im lặng; command argument preserved",
+    "consistency": "tui.small.subagents.title=Tác nhân con; tui.small.ask_queue.question_waiting uses câu hỏi; relay.shell.list.empty uses phiên; relay.chrome.drawer.conversations and relay.chrome.list.empty use cuộc trò chuyện; relay.chrome.session.loading agrees exactly."
+  },
+  "note": "Independent read-only audit of complete namespace against English/context at c8343f3a608785b5064e61307c7333a2473126ae. No repository edits. Remaining copy accurate, idiomatic and consistent. Material expansion fits sidecar budgets or unbounded wrapping tooltips; no rendered app screenshot was taken. One major untranslated-English finding and one minor width finding."
+}

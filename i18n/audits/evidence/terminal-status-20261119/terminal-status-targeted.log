@@ -1,0 +1,3 @@
+[run_bounded] memory budget 4080 MiB (inherited); sampled owned child group and escaped descendants
+[run_bounded] refused before spawn: cleanup-required cannot certify owned-group cleanup on darwin (this instrument cannot certify coverage on this installed OS). Run this gate on Linux/CI, or pass --contract=command-status if the command's own status is enough (it enforces the memory grant but never certifies cleanup)
+[run_bounded] contract=cleanup-required rc=125 cause=unsupported-backend cleanup=unknown spawned=no invocation_id=3c9f48a8231b4ba6b612f44161ab0af1 completion=/Users/damian/.local-operator/sessions/94b02891afc5/scratchpad/run-bounded-runs/3c9f48a8231b4ba6b612f44161ab0af1.completion.json

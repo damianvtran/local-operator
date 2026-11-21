@@ -1,0 +1,36 @@
+{
+  "audit": "chrome-r2-vi",
+  "round": 2,
+  "namespace": "tui.settings_view.chrome",
+  "locale": "vi",
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-settings-leftovers",
+  "head": "183ed01e92cc",
+  "target_tracked": false,
+  "sha256": {
+    "en": "2e04f79550d0b09cd262c32850a31c20d5dec2b88b09facd2369d967bd5ee930",
+    "en_context": "4d981004bb67852a6b4f8420ecb6eabba2f6c2c3d2328780830bcb4313dc8b40",
+    "vi": "85a73f531d674aefd6d6fc88e1e282e1542ea3354295d2d4ec4bcb28b061bfcd"
+  },
+  "keys_read": 49,
+  "check_py_catalogues_only": "0 problem(s); no vi lines",
+  "width_rows_over_cap": [
+    "error.config_unreadable (inserted {error}; cut with … by design, en also over)",
+    "error.unexpected_structure (inserted {path}/{error}; cut by design, en also over)"
+  ],
+  "findings": [
+    {
+      "id": "V1",
+      "severity": "minor",
+      "key": "clause.would_remove",
+      "issue": "launch -> 'chạy' here vs 'khởi động' in the same row's help (wire.settings session cleanup); fix 'lúc khởi động sẽ xóa {shown} phiên' costs +1 cell (75 at 1000+, dropped) — defer acceptable"
+    },
+    {
+      "id": "V2",
+      "severity": "nit",
+      "key": "hotkey.hold_detail",
+      "issue": "'đặt tại ứng dụng' vs 'đặt trong ứng dụng' in desktop_detail; proposed 60/60 cells"
+    }
+  ],
+  "verdict": "clean-with-findings",
+  "model": "anthropic/claude-opus-5-5 (fallback from openai/gpt-6.1-sol after HTTP 429)"
+}

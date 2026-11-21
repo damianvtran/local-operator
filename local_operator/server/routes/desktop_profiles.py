@@ -405,7 +405,16 @@ async def team_effective_report(name: str, request: Request):
 
     def read() -> dict[str, Any]:
         agents, teams = registries(request)
-        return team_effective(agents, teams, name)
+        from local_operator.config import read_config_values
+        from local_operator.i18n.resolve import resolve_language
+
+        # Read the request root, not the process-global config (tests and
+        # embedded servers can inject another manager). A missing/torn snapshot
+        # follows the normal env/OS chain, without constructing a new manager.
+        values = read_config_values(request.app.state.config_manager.config_dir) or {}
+        language = values.get("language")
+        locale = resolve_language(language if isinstance(language, str) else "auto")
+        return team_effective(agents, teams, name, locale=locale)
 
     async with errors(request):
         return reply(await asyncio.to_thread(read))

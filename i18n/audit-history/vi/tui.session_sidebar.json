@@ -1,0 +1,85 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "tui.session_sidebar",
+  "history_sha256": "a3381190385b92b03f2556484ebe6b9b18df933d6316b8fcc60a2fca8ff4f3d3",
+  "entries": [
+    {
+      "locale": "vi",
+      "namespace": "tui.session_sidebar",
+      "source_sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a",
+      "context_sha256": "698e8f0e151fee53d52a533bc51d7edcc600ce6964d74cdb024888238161f6e0",
+      "target_sha256": "3db8099a780b691bf1bbeaef99b0f0bcc5507281adcb0e8c745557f3d3c9926a",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator')",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "779b05eb4e26",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-20",
+        "result": "fail",
+        "findings": 2,
+        "unresolved_blocker_major": 1,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 1,
+          "minor": 1,
+          "nit": 0
+        },
+        "finding_ids": [
+          "VI-01",
+          "VI-02"
+        ],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)"
+      },
+      "status": "failed",
+      "note": "Independent full audit (round 1) of the new tui.session_sidebar namespace (21 keys), source commit c8343f3a6087. Auditor 779b05eb4e26 (openai/gpt-6.1-sol) verdict fail: 0 blocker, 1 major, 1 minor, 0 nit (VI-01, VI-02). Superseded: target_sha256 is the round-1 file; the translator then revised it and a round-2 audit (row sb2) covers the current bytes. Record: i18n/audits/evidence/vi/tui.session_sidebar/sb1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/vi/tui.session_sidebar/sb1/record.json",
+      "round": "sb1"
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.session_sidebar",
+      "source_sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a",
+      "context_sha256": "698e8f0e151fee53d52a533bc51d7edcc600ce6964d74cdb024888238161f6e0",
+      "target_sha256": "6b2466d96e782ed936dfd7e9817a91b6024158bd1ce41ea5017934ad6658630d",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator')",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "5ec315c949b3",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-20",
+        "result": "clean-with-findings",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "nit": 0
+        },
+        "finding_ids": [
+          "VI-R2-1"
+        ],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)"
+      },
+      "status": "passed",
+      "note": "Independent full audit (round 2 (delta re-audit after the round-1 fixes)) of the new tui.session_sidebar namespace (21 keys), source commit c8343f3a6087. Auditor 5ec315c949b3 (openai/gpt-6.1-sol) verdict clean-with-findings: 0 blocker, 0 major, 1 minor, 0 nit (VI-R2-1). VI-R2-1 (hub_note abbreviation l.kết vs LK) deferred by the manager: LK is a bare initialism and less recognisable; tracked in the PR thread. Record: i18n/audits/evidence/vi/tui.session_sidebar/sb2/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/vi/tui.session_sidebar/sb2/record.json",
+      "round": "sb2"
+    }
+  ]
+}

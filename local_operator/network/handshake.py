@@ -8,8 +8,16 @@ implementations that can disagree.
     hello      dialer  → listener   (ephemeral public, nonce, device claim)
     challenge  listener → dialer    (same, plus a salt)
     auth       dialer  → listener   (sig over the transcript, MAC over the same)
-    welcome    listener → dialer    (the LAST plaintext frame; phase + nets)
+    welcome    listener → dialer    (the LAST plaintext frame; phase + nets, and the
+                                     listener's ``proof`` over the transcript + welcome)
     …then AEAD records for everything else, including the pair ceremony
+
+BOTH SIDES PROVE THEMSELVES. The dialer's ``auth`` is checked by the listener
+(:meth:`Handshake.verify_auth`); the listener's ``welcome.proof`` is checked by the
+dialer (:meth:`Handshake.verify_welcome`) BEFORE any welcome field is read — see
+``docs/design/mesh-listener-auth.md``. Until that check existed the dialer copied the
+listener's claimed id out of the unsigned ``challenge`` and anyone who answered the
+dial became that member (mesh trust audit G1).
 
 MEMBER MODE differs from JOIN mode only in which key verifies the MAC: the
 current (or previous) epoch key, or the invite key. Everything else — the
@@ -44,6 +52,7 @@ from __future__ import annotations
 
 import hmac
 import socket
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from secrets import token_bytes
 from typing import Any, Literal, Protocol, cast
@@ -89,9 +98,18 @@ HANDSHAKE_TIMEOUT_S = 10.0
 
 TRANSCRIPT_PREFIX = b"lop-mesh-v1\x00"
 
-#: How long both humans have to compare and confirm. Bounded also by the
-#: invite's own ``ttl_s``; whichever fires first consumes the invite.
-PAIR_CONFIRM_TIMEOUT_S = 180.0
+#: The longest a person may take to compare and confirm, as a ceiling on the
+#: invite's own remaining life (``pair_timeout_seconds``). It was 180 s: a pairing
+#: answered from the app's Mesh approvals routinely needs the person to walk to
+#: the other device, and the old cap lapsed under the operator while the invite
+#: itself still had minutes left. 600 s equals the default invite TTL
+#: (``invite.DEFAULT_TTL_S``), so a default invite now gets its whole life, while a
+#: ``--expires 24h`` token still cannot hold a pre-admission sealed socket open for
+#: hours. The anti-grind property rests on the 3-attempt budget
+#: (``invite.PAIRING_MAX_FORGIVEN_FAILURES``), not on this time — a longer window
+#: buys no extra guesses. Rename from ``PAIR_CONFIRM_TIMEOUT_S`` keeps ONE owner:
+#: every wait that involves a person reads ``pair_timeout_seconds``.
+PAIR_PARK_CEILING_S = 600.0
 
 #: How long the JOINER waits for the share list before it shows its screens
 #: without one (``handshake.pair_offer_frame``). The owner sends the offer
@@ -118,6 +136,51 @@ REASON_MAC = "bad_mac"
 REASON_INVITE = "invite_invalid"
 REASON_INVITE_EPOCH = "invite_epoch_stale"
 REASON_INVITE_DEVICE = "invite_device_mismatch"
+#: The DIALER's refusals of a listener (``verify_welcome``). ``listener_unproven``
+#: is a welcome with no proof at all: an old build, or an impostor that cannot make
+#: one. ``peer_identity_mismatch`` is a listener answering as a different device
+#: than the one this device meant to reach. ``invite_wrong_inviter`` is the join
+#: spelling of the same thing (``invite.REASON_INVITER``, kept identical on purpose).
+REASON_LISTENER_UNPROVEN = "listener_unproven"
+REASON_PEER_IDENTITY = "peer_identity_mismatch"
+REASON_INVITE_INVITER = "invite_wrong_inviter"
+
+#: Domain-separation labels for the listener's welcome proof. THREE labels, none of
+#: them the dialer's (``lop-mesh-auth-v1`` / ``lop-mesh-mac-v1``): the dialer's own
+#: auth sig/MAC replayed as a ``proof`` must never verify (reflection), and the
+#: digest label keeps the proof's input disjoint from the auth digest even though
+#: both are built from the same transcript.
+ACCEPT_DIGEST_LABEL = b"lop-mesh-accept-v1\x00"
+ACCEPT_SIG_LABEL = b"lop-mesh-accept-sig-v1\x00"
+ACCEPT_MAC_LABEL = b"lop-mesh-accept-mac-v1\x00"
+
+#: THE "MEMBERSHIP ENDED" NOTICE (G9-B). A member removed while it was OFFLINE
+#: never receives the rotation frame that names it, and every later handshake it
+#: makes is refused SILENTLY (the no-oracle rule below), which it cannot tell from
+#: an owner that is asleep — so it kept serving borrowed bearers from its offline
+#: hold for up to the hold's length. The notice ends that, under four bounds:
+#:
+#: * it is sent ONLY to a dialer that has just signed THIS handshake's transcript
+#:   with the exact key stored on its tombstoned row (``Handshake.removal_proven``);
+#:   every other dialer gets the same silent close as before, on the same code
+#:   path (see ``Handshake._probe_tombstone``);
+#: * it is bound to that transcript (both nonces), the network id, the removed
+#:   device's id and the listener's epoch, and signed by the listener's device key
+#:   under its own labels — so it never verifies on another handshake and can never
+#:   be reflected as an auth or welcome signature (nor they as it);
+#: * its content is fixed: no reason, no remover, no member list;
+#: * the dialer acts on it only when the signer is a CURRENT member in its own
+#:   record (``Handshake.verify_removal_notice``), and acting only ever REMOVES
+#:   authority on the dialer.
+#:
+#: There is no MAC: the dialer no longer shares the rotated epoch secret, which is
+#: the point of a removal, so the stored device key is the only proof available.
+REMOVED_DIGEST_LABEL = b"lop-mesh-removed-v1\x00"
+REMOVED_SIG_LABEL = b"lop-mesh-removed-sig-v1\x00"
+#: The dialer's refusal code once a notice VERIFIED. Never on the wire.
+REASON_MEMBERSHIP_ENDED = "membership_ended"
+#: The notice's exact field set; anything more or less is not a notice.
+REMOVAL_NOTICE_FIELDS = frozenset({"net", "v", "epoch", "sig"})
 
 
 def lp(chunk: bytes) -> bytes:
@@ -164,6 +227,116 @@ def transcript(hello: dict[str, Any], challenge: dict[str, Any], auth_core: Any)
 
 def transcript_digest(transcript_bytes: bytes) -> bytes:
     return sha256(transcript_bytes)
+
+
+def welcome_core(frame: dict[str, Any]) -> dict[str, Any]:
+    """``W``: the welcome frame minus its ``proof`` — what the proof commits to.
+
+    EVERY other field is covered, ``endpoints``/``phase``/``inviter``/``nets``
+    included, so an on-path rewrite of any of them breaks the proof (G4). Computed
+    from the PARSED frame on the dialer side and from the built dict on the
+    listener side; ``canonical_json`` makes the two byte-identical because every
+    welcome value is a str/int/list/dict (no floats).
+    """
+    return {key: value for key, value in frame.items() if key != "proof"}
+
+
+def accept_digest(transcript_bytes: bytes, welcome: dict[str, Any]) -> bytes:
+    """``digest_L = sha256(label + lp(T) + lp(W))`` — the listener proof's input.
+
+    T is the full transcript (both hellos' worth of nonces, ephemerals, ids, epochs,
+    caps, builds and the auth core), so a recorded proof never verifies on a new
+    handshake: the dialer's nonce and ephemeral are fresh every time. Never cached.
+    """
+    return sha256(
+        ACCEPT_DIGEST_LABEL + lp(transcript_bytes) + lp(canonical_json(welcome_core(welcome)))
+    )
+
+
+def removal_digest(
+    transcript_bytes: bytes, *, network_id: str, removed_device_id: str, epoch: int
+) -> bytes:
+    """What the "membership ended" notice signs: transcript + network + device + epoch.
+
+    ``T`` carries both sides' fresh nonces and ephemerals, so a notice recorded from
+    one handshake never verifies on another (replay); ``network_id`` and the removed
+    device's id pin it to the one membership it ends. The digest label keeps the
+    input disjoint from ``accept_digest`` even though both start from ``T``.
+    """
+    return sha256(
+        REMOVED_DIGEST_LABEL
+        + lp(transcript_bytes)
+        + lp(network_id.encode("utf-8"))
+        + lp(removed_device_id.encode("utf-8"))
+        + lp(str(int(epoch)).encode("ascii"))
+    )
+
+
+class MembershipEnded(HandshakeRefusal):
+    """The dialer VERIFIED a listener's "membership ended" notice for this device.
+
+    A refusal (the dial does not link) carrying the one fact the notice states: the
+    listener's epoch at the time it answered. Raised only by
+    :meth:`Handshake.verify_removal_notice` after every check passed; the relay's
+    dial path turns it into the local, authority-reducing apply.
+    """
+
+    def __init__(self, sentence: str, *, epoch: int, signer: str) -> None:
+        super().__init__(REASON_MEMBERSHIP_ENDED, sentence)
+        self.epoch = epoch
+        self.signer = signer
+
+
+def _mint_dummy_public_key() -> str:
+    """A fresh Ed25519 public key whose private half is dropped on return."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    raw = Ed25519PrivateKey.generate().public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    return b64u(raw)
+
+
+#: Minted at IMPORT, not on first use (review R1-5): a lazy mint made the first
+#: non-tombstone probe in each process pay for a keygen the tombstoned path never
+#: pays — a one-time timing difference between the two classes ``_probe_tombstone``
+#: exists to make indistinguishable. Import happens before any listener accepts.
+_DUMMY_PUBLIC_KEY: str = _mint_dummy_public_key()
+
+
+def _dummy_public_key() -> str:
+    """A real Ed25519 public key whose private half was discarded at creation.
+
+    Used by ``Handshake._probe_tombstone`` when no notice-eligible tombstone
+    matches, so an unknown id, a never-member and a tombstoned id with a random key
+    all run one signature verification and all fail it. Nobody holds the private
+    key (it is minted once per process at import and dropped), so this can never
+    verify.
+    """
+    return _DUMMY_PUBLIC_KEY
+
+
+def welcome_proof(
+    identity: DeviceIdentity,
+    credential: Credential,
+    transcript_bytes: bytes,
+    welcome: dict[str, Any],
+) -> dict[str, str]:
+    """The listener's ``proof``: Ed25519 over ``digest_L`` + HMAC under the dialer's key.
+
+    The signature proves the listener holds the device key on its member row; the
+    MAC proves it holds the SAME epoch (or invite) key the dialer MACed with — so a
+    removed device still holding its own Ed25519 key fails once the network has
+    rotated, which is the revocation property. The MAC is deliberately NOT under a
+    derived link key: the signature already binds the link keys (``th`` and both
+    ephemerals are inside T), and mixing a transport key into an identity proof is a
+    key-confusion risk. One helper for the relay, the CLI and test fixtures, so no
+    hand-built welcome grows its own spelling of the proof.
+    """
+    digest = accept_digest(transcript_bytes, welcome)
+    return {
+        "sig": b64u(identity.sign(ACCEPT_SIG_LABEL + digest)),
+        "mac": b64u(hmac.new(credential.key, ACCEPT_MAC_LABEL + digest, "sha256").digest()),
+    }
 
 
 def _send_frame(sock: socket.socket, frame: dict[str, Any]) -> None:
@@ -289,6 +462,7 @@ def build_challenge(
     capabilities: list[str],
     build: dict[str, Any],
 ) -> dict[str, Any]:
+    # A rotated listener's ``rotation`` statement is added by ``send_challenge``.
     return {
         "net": "challenge",
         "v": LINK_VERSION,
@@ -370,6 +544,8 @@ class StaticPolicy:
     networks: dict[str, bool] = field(default_factory=dict)  # network_id -> trust active
     epoch_keys: dict[tuple[str, int], bytes] = field(default_factory=dict)
     members: dict[tuple[str, str], str] = field(default_factory=dict)  # (net, device) -> pubkey
+    #: Notice-eligible tombstones, (net, device) -> stored pubkey (G9-B).
+    removed: dict[tuple[str, str], str] = field(default_factory=dict)
 
     @property
     def current_epoch(self) -> int:
@@ -390,6 +566,26 @@ class StaticPolicy:
 
     def active_member_public_key(self, network_id: str, device_id: str) -> str | None:
         return self.members.get((network_id, device_id))
+
+    def removed_member_public_key(self, network_id: str, device_id: str) -> str | None:
+        return self.removed.get((network_id, device_id))
+
+
+@dataclass(frozen=True)
+class DialerExpectation:
+    """Who the DIALER meant to reach, and where it reads that device's key from.
+
+    WHY THIS EXISTS: a dialer that learns the peer's id from the peer is a dialer
+    anyone can answer (G1). ``device_id`` is this device's OWN record of the target
+    (the member row it is dialling, or the invite token's ``inviter_device_id``),
+    and ``public_key_for`` reads the ACTIVE member row's stored key — never a key
+    from a frame. Join mode leaves ``public_key_for`` unset: the joiner has no
+    member table yet, so the key comes from ``welcome.inviter.public_key`` and is
+    accepted only when its fingerprint equals ``device_id`` (the token's inviter).
+    """
+
+    device_id: str
+    public_key_for: Callable[[str], str | None] | None = None
 
 
 LINK_VERSION = MESH_PROTOCOL_VERSION
@@ -433,10 +629,14 @@ class Handshake:
     shared: bytes = b""
     peer_device_id: str = ""
 
-    #: True once :meth:`verify_auth` has matched the peer's MAC — i.e. once the id in
-    #: ``peer_device_id`` is PROVEN rather than declared. Read by the refusal audit
-    #: (``relay._audit_handshake_refusal``), which may not name a device as the actor
-    #: on the strength of a claim: an attacker chooses the id it declares.
+    #: True once the PEER has proved the id in ``peer_device_id`` rather than declared
+    #: it: on the listener, :meth:`verify_auth` matched the dialer's sig and MAC; on the
+    #: dialer, :meth:`verify_welcome` matched the listener's welcome proof against the
+    #: stored key of the device it meant to reach. It becomes
+    #: ``HandshakeResult.peer_verified``, which ``_admit_link`` requires. Also read by
+    #: the refusal audit (``relay._audit_handshake_refusal``), which may not name a
+    #: device as the actor on the strength of a claim: an attacker chooses the id it
+    #: declares.
     auth_verified: bool = False
     peer_instance_id: str = ""
     peer_public_key: str = ""
@@ -454,6 +654,27 @@ class Handshake:
     join_block: dict[str, Any] = field(default_factory=dict)
     #: The typed SAS, for the joining side's transcription step only.
     typed_sas: str = ""
+    #: The welcome frame as verified (dialer side only; ``{}`` until
+    #: :meth:`verify_welcome` passes). Join callers read ``inviter``/``network``
+    #: from here rather than a second parse of an unverified copy.
+    welcome: dict[str, Any] = field(default_factory=dict)
+    #: LISTENER: this device's own rotation statement (``MemberRecord.rotation_proof``
+    #: on its self row, signed by its PREVIOUS key), sent in the challenge so a dialer
+    #: still holding the pre-rotation row can follow the hop (mesh-listener-auth §6.1,
+    #: G1D-1). ``{}`` for a device that never rotated, and on join.
+    self_rotation: dict[str, Any] = field(default_factory=dict)
+    #: DIALER: the listener's rotation statement once :meth:`refuse_unexpected_peer`
+    #: VERIFIED it against the stored key of the device this dial meant to reach.
+    #: ``{}`` unless that check passed. Read by :meth:`verify_welcome` (the key the
+    #: proof must verify under) and by ``RelayServer.dial`` (which applies the hop
+    #: through ``apply_device_rotation``, the ``net_identity_rotate`` code path).
+    peer_rotation: dict[str, Any] = field(default_factory=dict)
+    #: LISTENER (G9-B): True only when the refused dialer's auth signature verified
+    #: against the key stored on its TOMBSTONED row (``_probe_tombstone``). It does
+    #: NOT make the dialer a member — ``auth_verified`` stays False and the refusal
+    #: is raised exactly as before — it only licenses the relay to answer with the
+    #: fixed "membership ended" notice instead of silence.
+    removal_proven: bool = False
 
     # -- construction -------------------------------------------------------
 
@@ -554,9 +775,203 @@ class Handshake:
         _send_frame(sock, frame)
         return frame
 
-    def read_welcome(self, reader: FrameReader, deadline: float) -> dict[str, Any]:
-        """Read ``welcome`` — the last plaintext frame — and finish the handshake."""
+    def read_welcome(
+        self, reader: FrameReader, deadline: float, expect: DialerExpectation
+    ) -> dict[str, Any]:
+        """Read ``welcome`` — the last plaintext frame — VERIFY it, then finish.
+
+        ``expect`` is REQUIRED, with no default: a dialer that does not say who it
+        meant to reach cannot verify who answered, and an optional argument is how
+        a new call site would quietly reopen G1.
+        """
         frame = reader.read_line(deadline)
+        if frame.get("net") == "removed":
+            # Never returns: a verified notice raises ``MembershipEnded``, anything
+            # else a plain refusal; both stop the dial before ``establish``.
+            self.verify_removal_notice(frame, expect)
+        self.verify_welcome(frame, expect)
+        return frame
+
+    def verify_removal_notice(self, frame: dict[str, Any], expect: DialerExpectation) -> None:
+        """Verify a listener's "membership ended" notice; raise ``MembershipEnded`` if real.
+
+        A forged notice is an attack on THIS device's authority (it would make it
+        drop its borrowed credentials), so the notice is believed only when it is
+        exactly what an honest current member would send on THIS handshake:
+
+        1. member mode, after our auth frame (the transcript must be complete);
+        2. exactly the fixed field set and a well-formed 64-byte signature;
+        3. the speaker is the device this dial meant to reach — no rotation hop is
+           followed for a notice, because a hop is itself a claim to verify;
+        4. that device is an ACTIVE member in this device's own record
+           (``expect.public_key_for``): a removed or unknown signer has no key here;
+        5. the signature verifies under that stored key over ``removal_digest``,
+           which binds both nonces, the network, this device's id and the epoch —
+           so a notice replayed from another handshake fails here;
+        6. the epoch is NEWER than the one this device holds: a removal cannot
+           predate the epoch at which this device last knew itself a member.
+
+        Any failure is an ordinary ``HandshakeRefusal`` (the dial ends exactly as a
+        silent refusal would, nothing is dropped).
+        """
+        if self.mode != "member" or self.credential is None or not self.auth_core:
+            raise HandshakeRefusal(
+                REASON_FRAME, "a removal notice arrived outside a member handshake"
+            )
+        sig_bytes = b""
+        if set(frame) == REMOVAL_NOTICE_FIELDS:
+            try:
+                sig_bytes = unb64u(str(frame.get("sig") or ""))
+            except ValueError:
+                sig_bytes = b""
+        epoch = frame.get("epoch")
+        if len(sig_bytes) != 64 or not isinstance(epoch, int) or isinstance(epoch, bool):
+            raise HandshakeRefusal(REASON_FRAME, "the removal notice is malformed")
+        claimed = str(self.challenge.get("device_id") or "")
+        if not claimed or claimed != expect.device_id or claimed == self.self_device_id:
+            raise HandshakeRefusal(
+                REASON_PEER_IDENTITY,
+                "the removal notice came from a device this dial did not mean to reach",
+            )
+        stored = expect.public_key_for(claimed) if expect.public_key_for else None
+        if not stored:
+            raise HandshakeRefusal(
+                REASON_MEMBER,
+                "the removal notice came from a device that is not an active member here",
+            )
+        digest = removal_digest(
+            self.transcript_bytes,
+            network_id=self.network_id,
+            removed_device_id=self.self_device_id,
+            epoch=epoch,
+        )
+        _verify_signature(
+            stored,
+            b64u(sig_bytes),
+            digest,
+            label=REMOVED_SIG_LABEL,
+            sentence=(
+                "the removal notice's signature does not verify against the public key "
+                "on the sender's member record"
+            ),
+        )
+        if epoch <= self.epoch:
+            raise HandshakeRefusal(
+                REASON_EPOCH, "the removal notice names an epoch this device already holds"
+            )
+        raise MembershipEnded(
+            f"{claimed} says this device was removed from the network",
+            epoch=epoch,
+            signer=claimed,
+        )
+
+    def refuse_unexpected_peer(self, expect: DialerExpectation) -> None:
+        """Refuse BEFORE ``send_auth`` when the challenge names another device.
+
+        The challenge is unauthenticated, so a match here proves nothing (that is
+        :meth:`verify_welcome`'s job), but a MISMATCH is decisive: an honest listener
+        names its own id, so either the address is stale or the peer is lying, and
+        this device would refuse at step 5 anyway. Refusing here, before the auth
+        frame, matters for the honest case: a listener that receives a valid auth
+        completes its side and registers the link, and its duplicate fence
+        (``register_link``, newest wins) then EVICTS the real, older link from this
+        device — so a stale address pointing at member C would cost the working
+        link to C. It also keeps this device's auth tag away from the wrong party.
+        """
+        claimed = str(self.challenge.get("device_id") or "")
+        if expect.device_id and claimed == expect.device_id:
+            return
+        if self._accept_rotation_hop(claimed, expect):
+            return
+        if self.mode == "join":
+            raise HandshakeRefusal(
+                REASON_INVITE_INVITER,
+                "the device that answered is not the one that issued this invite",
+            )
+        raise HandshakeRefusal(
+            REASON_PEER_IDENTITY,
+            f"the device that answered as {claimed or 'unknown'} is not "
+            f"{expect.device_id or 'the device this dial meant to reach'}; the address "
+            "on that member row is stale or redirected. No link was made",
+        )
+
+    def _accept_rotation_hop(self, claimed: str, expect: DialerExpectation) -> bool:
+        """Whether the challenge's mismatched id is the PROVEN successor of the target.
+
+        WHY (G1D-1): a member that rotated its device key while this device was
+        offline answers at its old address under its NEW id. Refusing that as a
+        wrong device split the mesh for good — the queued ``net_identity_rotate``
+        rides a link that could now never form. The listener therefore carries its
+        rotation statement in the challenge, and this lets the dial continue to
+        ``send_auth`` only when ALL of these hold, each against what THIS device
+        already holds rather than the frame:
+
+        * member mode with a stored-key reader (a joiner has no member table);
+        * ``old_device_id`` is the device this dial meant to reach and
+          ``new_device_id`` is the id the challenge names;
+        * the statement names this network (signed inside the body);
+        * ``verify_rotation_statement`` passes against the STORED key of the target
+          (the old id is that key's fingerprint, the new id the carried key's, and
+          ``sig_old`` verifies).
+
+        WHY SENDING AUTH IS SAFE HERE: the statement is public (it rides on every
+        copy of the member table), so passing this check proves nothing about who
+        is answering — exactly as a matching id proves nothing. It only lets the
+        handshake reach :meth:`verify_welcome`, which then requires the proof to
+        verify under the statement's ``new_public_key`` and the MAC under this
+        side's credential. A party that replays the statement gets the same auth
+        frame an impostor claiming the target's own id already gets, and fails at
+        step 7 (``bad_signature``), which demotes nothing (``_note_listener_refusal``).
+        One hop only: the self row carries the LAST statement, so a device that
+        rotated twice while this one was offline still needs the table route.
+        """
+        from local_operator.network.identity import verify_rotation_statement
+
+        statement = self.challenge.get("rotation")
+        if (
+            self.mode != "member"
+            or not isinstance(statement, dict)
+            or not expect.device_id
+            or expect.public_key_for is None
+            or not claimed
+            or claimed == self.self_device_id
+        ):
+            return False
+        if (
+            statement.get("old_device_id") != expect.device_id
+            or statement.get("new_device_id") != claimed
+            or statement.get("network_id") != self.network_id
+        ):
+            return False
+        stored = expect.public_key_for(expect.device_id)
+        if not stored:
+            return False
+        try:
+            verify_rotation_statement(statement, stored)
+        except (HandshakeRefusal, KeyError, TypeError, ValueError):
+            return False
+        self.peer_rotation = dict(statement)
+        return True
+
+    def verify_welcome(self, frame: dict[str, Any], expect: DialerExpectation) -> None:
+        """The dialer's half of mutual authentication: steps 1-9, in this order.
+
+        THREAT: whoever answers a dial — an on-path attacker, a poisoned endpoint, a
+        removed device, or an honest member at a stale address — would otherwise
+        become the member this device meant to reach, and receive the member-table
+        pull (G2), the rotated epoch secret (G3) and a durable endpoint redirect
+        (G4). Every check runs against what THIS device already holds: the stored
+        member key (or, for a join, the token's inviter fingerprint) and the
+        credential it MACed with. Nothing from the frame is trusted until step 9,
+        and each failure raises before ``establish`` derives link keys.
+
+        NO-DOWNGRADE WITHOUT A VERSION BUMP: the proof is required unconditionally
+        on every welcome, whatever the challenge advertises, so there is nothing to
+        negotiate and nothing to strip. ``MESH_PROTOCOL_VERSION`` stays 1 so an OLD
+        dialer still links to a NEW listener (it ignores the unknown ``proof`` key)
+        — that inbound link is how a not-yet-updated member receives its update.
+        """
+        # STEP 1: frame name and link version (as before).
         if frame.get("net") != "welcome":
             raise HandshakeRefusal(
                 REASON_FRAME, "the other device did not answer with a welcome frame"
@@ -565,26 +980,128 @@ class Handshake:
         # unknown version is a refusal AFTER authentication instead of an oracle
         # any stranger can pull.
         check_link_version(frame.get("v"), mine=LINK_VERSION)
+        claimed = str(self.challenge.get("device_id") or "")
+        # STEP 2: a proof is present and decodes. Absent = an old listener or an
+        # impostor that cannot make one; the dialer cannot tell which, and refuses
+        # both — the reason names the build the challenge REPORTED (a claim).
+        proof = frame.get("proof")
+        sig_bytes = mac_bytes = b""
+        if isinstance(proof, dict):
+            try:
+                sig_bytes = unb64u(str(proof.get("sig") or ""))
+                mac_bytes = unb64u(str(proof.get("mac") or ""))
+            except ValueError:
+                sig_bytes = mac_bytes = b""
+        if len(sig_bytes) != 64 or len(mac_bytes) != 32:
+            version = str((self.challenge.get("build") or {}).get("version") or "unknown")
+            if self.mode == "join":
+                # A JOINER IS NOT A MEMBER: it cannot run `lop network update`, and a
+                # fresh token from the same not-yet-updated inviter fails the same way,
+                # so the only way forward is updating the INVITER (review N2, UX U2).
+                # The build is the challenge's claim, so it is "reports", never "older".
+                raise HandshakeRefusal(
+                    REASON_LISTENER_UNPROVEN,
+                    f"the inviting device reports build {version} and could not prove its "
+                    "identity, so this device stopped before joining; nothing was shared. "
+                    "On the inviting device, run `lop update`, then mint a new invite there "
+                    "with `lop network invite` and join again",
+                )
+            # No literal ``<name>`` (N-2): this layer knows only the claimed id, so the
+            # sentence names both remedies without one; ``peers``/``doctor`` name it.
+            raise HandshakeRefusal(
+                REASON_LISTENER_UNPROVEN,
+                f"{claimed or 'the other device'} did not prove its identity: its welcome "
+                f"carried no valid signature. It reports build {version}, or it is not the "
+                "device it claims to be. This device no longer links to peers it cannot "
+                "verify; update it from a member (`lop network update`), or run "
+                "`lop update` on that device",
+            )
+        # STEP 3: the welcome agrees with the challenge about who is speaking.
+        if str(frame.get("device_id") or "") != claimed or not isinstance(frame.get("epoch"), int):
+            raise HandshakeRefusal(
+                REASON_FRAME, "the welcome frame names a different device than the challenge"
+            )
+        # STEP 4: never link to ourselves.
+        if claimed == self.self_device_id:
+            raise HandshakeRefusal(REASON_SELF, "the other end of this dial is this device")
+        # STEP 5: the claimed id only SELECTS which stored key to verify against; it
+        # must be the device this side meant to reach. The evidence is step 7.
+        # The ONE exception is a rotation hop :meth:`refuse_unexpected_peer` already
+        # verified against the target's stored key (G1D-1); the proof below must then
+        # verify under that statement's new key, so nothing is taken on trust.
+        rotated = bool(self.peer_rotation) and claimed == self.peer_rotation.get("new_device_id")
+        if (claimed != expect.device_id and not rotated) or not expect.device_id:
+            if self.mode == "join":
+                raise HandshakeRefusal(
+                    REASON_INVITE_INVITER,
+                    "the device that answered is not the one that issued this invite",
+                )
+            raise HandshakeRefusal(
+                REASON_PEER_IDENTITY,
+                f"the device that answered as {claimed or 'unknown'} is not "
+                f"{expect.device_id or 'the device this dial meant to reach'}; the address "
+                "on that member row is stale or redirected. No link was made",
+            )
+        # STEP 6: the verification key, from THIS device's own record — never the frame
+        # (join: the frame's key, accepted ONLY because its fingerprint is the token's).
+        if self.mode == "join":
+            inviter = frame.get("inviter")
+            key = str(inviter.get("public_key") or "") if isinstance(inviter, dict) else ""
+            try:
+                fingerprint_ok = bool(key) and _derived_id(key) == expect.device_id
+            except ValueError:
+                fingerprint_ok = False
+            if not fingerprint_ok:
+                raise HandshakeRefusal(
+                    REASON_INVITE_DEVICE,
+                    "the inviter's key is not the one this invite was issued by",
+                )
+        elif rotated:
+            # The successor's key, bound to ``claimed`` by fingerprint and to the
+            # target's STORED key by ``sig_old`` (both checked before our auth left).
+            key = str(self.peer_rotation.get("new_public_key") or "")
+        else:
+            stored = expect.public_key_for(claimed) if expect.public_key_for else None
+            if not stored:
+                raise HandshakeRefusal(
+                    REASON_MEMBER, "the other device is not an active member of this network"
+                )
+            key = stored
+        digest = accept_digest(self.transcript_bytes, frame)
+        # STEP 7: the listener's signature against that key.
+        _verify_signature(
+            key,
+            b64u(sig_bytes),
+            digest,
+            label=ACCEPT_SIG_LABEL,
+            sentence=(
+                "the listener's signature over the handshake transcript does not verify "
+                "against the public key on its member record"
+            ),
+        )
+        # STEP 8: the MAC under the SAME credential this side MACed its auth with —
+        # constant-time, so the comparison leaks nothing about the expected tag.
+        # A refusal, not an ``assert``: ``python -O`` strips asserts, and a mis-ordered
+        # call must still end as a named refusal rather than an AttributeError (N1).
+        if self.credential is None:
+            raise HandshakeRefusal(
+                REASON_FRAME, "the welcome arrived before this device sent its auth frame"
+            )
+        expected_mac = hmac.new(self.credential.key, ACCEPT_MAC_LABEL + digest, "sha256").digest()
+        if not hmac.compare_digest(expected_mac, mac_bytes):
+            raise HandshakeRefusal(
+                REASON_MAC,
+                "the listener could not prove it holds this network's current secret",
+            )
+        # STEP 9: only now is anything read from the frame.
+        self.auth_verified = True
+        self.peer_public_key = key
+        self.welcome = dict(frame)
         self.phase = cast(LinkPhase, str(frame.get("phase", "member")))
-        self.peer_public_key = self._peer_key_from_welcome(frame)
-        # The listener's ``welcome`` is where the DIALER learns where the peer can
-        # be reached. ``welcome`` is the last plaintext frame and is OUTSIDE the
-        # transcript (only hello/challenge/auth are hashed), so this field cannot
-        # perturb the SAS the two humans compare.
+        # Where the peer can be reached — now under the listener's signature and
+        # MAC, so a rewritten endpoint fails step 7/8 instead of being persisted.
         self.peer_endpoints = clean_endpoints(frame.get("endpoints"))
         self.establish()
-        return frame
-
-    def _peer_key_from_welcome(self, frame: dict[str, Any]) -> str:
-        """What the dialer can know about the listener's key from ``welcome``.
-
-        The listener's public key is NOT in ``welcome``: the dialer already
-        verified the listener's identity by the fact that it could produce a valid
-        ``auth``-verified transcript and, in member mode, a MAC under the network
-        epoch key. It is left empty on purpose rather than filled with an
-        unverified value that a later reader might treat as evidence.
-        """
-        return ""
 
     # -- listener steps -----------------------------------------------------
 
@@ -666,6 +1183,14 @@ class Handshake:
             self.phase = "pair"
         else:
             if self.epoch not in (policy.current_epoch, policy.previous_epoch):
+                # KNOWN BOUND OF THE G9-B NOTICE (security P3 ruling, review R1-1/S2):
+                # this refusal runs BEFORE the tombstone probe, so a removed device
+                # that is two or more rotations behind (``member rm`` it, then any
+                # other rotation — a second removal, a ``leave``, a ``panic`` — inside
+                # the notice window) is refused here and gets SILENCE, exactly as
+                # before G9-B, until its offline hold ends. Probing every stale member
+                # hello uniformly changes the pre-challenge contract for live stale
+                # members, so it is a security-reviewed follow-up, not a patch here.
                 raise HandshakeRefusal(
                     REASON_EPOCH,
                     "the other device is at an epoch this one no longer accepts; it must "
@@ -682,6 +1207,12 @@ class Handshake:
             capabilities=self.capabilities,
             build=self.build,
         )
+        if self.mode == "member" and self.self_rotation:
+            # Our rotation statement, for a dialer that still holds our previous row
+            # (G1D-1; ``Handshake._accept_rotation_hop``). INSIDE the transcript, so
+            # the welcome proof commits to it, and harmless to an old dialer, which
+            # hashes the parsed challenge as it arrived and ignores unknown keys.
+            self.challenge["rotation"] = dict(self.self_rotation)
         _send_frame(sock, self.challenge)
         return self.challenge
 
@@ -722,6 +1253,11 @@ class Handshake:
         if self.mode == "member":
             public_key = policy.active_member_public_key(self.network_id, self.peer_device_id)
             if public_key is None:
+                # Every non-member walks this ONE path: one signature check (against
+                # the tombstone's stored key, or a key nobody holds), then the same
+                # refusal as before. Only its outcome flag differs, and the relay
+                # reads that flag after the refusal (G9-B).
+                self._probe_tombstone(policy, str(signature))
                 raise HandshakeRefusal(
                     REASON_MEMBER, "the other device is not a member of this network"
                 )
@@ -787,6 +1323,66 @@ class Handshake:
         self.establish()
         return frame
 
+    def _probe_tombstone(self, policy: ListenerPolicy, signature: str) -> None:
+        """Set ``removal_proven`` iff the dialer signed with its tombstoned row's key.
+
+        NO-ORACLE, KEPT: until the signature verifies, a tombstoned id, an unknown
+        id and a never-member are indistinguishable — each costs one lookup and one
+        Ed25519 verification (a discarded key stands in when no tombstone matches)
+        and each ends in the same ``not_a_member`` refusal with nothing sent. Only a
+        dialer that holds the exact stored key learns anything, and it learns only
+        what it already knew it might be: removed.
+
+        SIGNATURE ONLY, NO EPOCH MAC — DELIBERATELY (security S1): a live member
+        also passes the step-8 epoch MAC, but here the signature over ``T`` (which
+        carries this listener's fresh nonce) is the identity proof; the MAC would
+        only show a prior-epoch secret every former member shares, and checking it
+        would give the tombstoned path a branch the dummy path lacks, breaking the
+        equal-timing property above.
+
+        ``removed_member_public_key`` is optional on a policy: a policy without it
+        (an older test double, a doctor probe) simply never proves a removal.
+        """
+        lookup = getattr(policy, "removed_member_public_key", None)
+        tombstone = lookup(self.network_id, self.peer_device_id) if callable(lookup) else None
+        key = str(tombstone) if tombstone else _dummy_public_key()
+        digest = transcript_digest(transcript(self.hello, self.challenge, self.auth_core))
+        try:
+            _verify_signature(key, signature, digest)
+        except HandshakeRefusal:
+            return
+        self.removal_proven = bool(tombstone)
+
+    def removal_notice(self, epoch: int) -> dict[str, Any]:
+        """The listener's fixed "membership ended" frame, or ``{}`` when not licensed.
+
+        Only after ``_probe_tombstone`` proved the dialer's key. Fixed content: the
+        frame kind, the link version, this device's epoch and the signature — no
+        reason, no remover, no member list (the dialer already knows whom it dialled).
+        """
+        if self.role != "listener" or not self.removal_proven or self.mode != "member":
+            return {}
+        digest = removal_digest(
+            self.transcript_bytes,
+            network_id=self.network_id,
+            removed_device_id=self.peer_device_id,
+            epoch=epoch,
+        )
+        return {
+            "net": "removed",
+            "v": LINK_VERSION,
+            "epoch": int(epoch),
+            "sig": b64u(self.identity.sign(REMOVED_SIG_LABEL + digest)),
+        }
+
+    def send_removal_notice(self, sock: socket.socket, epoch: int) -> bool:
+        """Send :meth:`removal_notice` if licensed; whether a frame was written."""
+        frame = self.removal_notice(epoch)
+        if not frame:
+            return False
+        _send_frame(sock, frame)
+        return True
+
     # -- shared -------------------------------------------------------------
 
     def establish(self) -> HandshakeResult:
@@ -831,6 +1427,11 @@ class Handshake:
             peer_build=self.peer_build,
             peer_capabilities=self.peer_capabilities,
             local_capabilities=list(self.capabilities),
+            # Listener: set by ``verify_auth`` (sig + MAC against the stored key).
+            # Dialer: set by ``verify_welcome`` (the listener's proof against the
+            # stored key, and peer == expected). ``_admit_link`` refuses False.
+            # Reported, never re-derived, so this field cannot disagree with it.
+            peer_verified=self.auth_verified,
         )
 
     @property
@@ -880,14 +1481,29 @@ class Handshake:
             frame["capabilities"] = capabilities
         if phase == "pair":
             frame["network"] = {"network_id": self.network_id, "name": network_name}
-            frame["inviter"] = {"device_id": self.self_device_id, "name": self.identity.name}
+            # ``public_key`` lets the JOINER verify the proof: it has no member table
+            # yet, and accepts this key only because its fingerprint is the token's
+            # ``inviter_device_id`` (design §5). An old joiner ignores the extra key.
+            frame["inviter"] = {
+                "device_id": self.self_device_id,
+                "name": self.identity.name,
+                "public_key": self.identity.public_key,
+            }
         if endpoints:
-            # How the dialer learns where to reach US. Sent here rather than in
-            # the challenge because ``welcome`` is outside the transcript, so a
-            # build that does not know this key reads it as decoration.
+            # How the dialer learns where to reach US. Outside the transcript (so the
+            # SAS is unaffected) but INSIDE the proof below, so a rewrite fails.
+            # A build that does not know this key reads it as decoration.
             frame["endpoints"] = list(endpoints)
         if nets is not None:
             frame["nets"] = nets
+        # THE LISTENER'S PROOF, last, over the transcript and every field above. Only
+        # a listener that has VERIFIED the dialer's auth holds the matched credential
+        # to MAC with; any other caller (a test impostor, a mis-ordered call) sends
+        # no proof and a current dialer refuses it ``listener_unproven``.
+        if self.role == "listener" and self.auth_verified and self.credential is not None:
+            frame["proof"] = welcome_proof(
+                self.identity, self.credential, self.transcript_bytes, frame
+            )
         return frame
 
 
@@ -902,20 +1518,32 @@ def _derived_id(public_key_b64: str) -> str:
     return device_id_for(unb64u(public_key_b64))
 
 
-def _verify_signature(public_key_b64: str, signature_b64: str, digest: bytes) -> None:
+def _verify_signature(
+    public_key_b64: str,
+    signature_b64: str,
+    digest: bytes,
+    *,
+    label: bytes = b"lop-mesh-auth-v1\x00",
+    sentence: str = (
+        "the other device's signature over the handshake transcript does not verify "
+        "against the public key on its member record"
+    ),
+) -> None:
+    """Ed25519 verify under ``label``; a decode error is a refusal, never a crash.
+
+    ``label`` defaults to the DIALER's auth label; the listener's welcome proof
+    passes ``ACCEPT_SIG_LABEL`` so neither side's signature can be reflected as the
+    other's.
+    """
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
     try:
         Ed25519PublicKey.from_public_bytes(unb64u(public_key_b64)).verify(
-            unb64u(signature_b64), b"lop-mesh-auth-v1\x00" + digest
+            unb64u(signature_b64), label + digest
         )
     except (InvalidSignature, ValueError) as exc:
-        raise HandshakeRefusal(
-            REASON_SIGNATURE,
-            "the other device's signature over the handshake transcript does not verify "
-            "against the public key on its member record",
-        ) from exc
+        raise HandshakeRefusal(REASON_SIGNATURE, sentence) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -933,7 +1561,9 @@ def pair_ready_frame(*, req: int, typed_sas: str) -> dict[str, Any]:
     return {"op": "net_pair_ready", "req": req, "sas": typed_sas}
 
 
-def pair_abort_frame(*, req: int, reason: str, detail: str = "") -> dict[str, Any]:
+def pair_abort_frame(
+    *, req: int, reason: str, detail: str = "", spent: bool = False
+) -> dict[str, Any]:
     """The inviter's refusal of a pairing, with the SENTENCE it refused with.
 
     ``reason`` is the machine code and stays the contract; ``detail`` is the refusing
@@ -951,6 +1581,12 @@ def pair_abort_frame(*, req: int, reason: str, detail: str = "") -> dict[str, An
     text = " ".join(str(detail or "").split())[:PAIR_ABORT_DETAIL_MAX]
     if text:
         frame["detail"] = text
+    if spent:
+        # ADDITIVE, AND ONLY WHEN TRUE (QA round 1, Q3): the refusing device consumed
+        # the invite, so the joiner's remedy must not say "run it again with the SAME
+        # token". ``reason`` stays the contract an older joiner keys on; a build that
+        # does not know this key keeps its old (retry) sentence.
+        frame["spent"] = True
     return frame
 
 
@@ -1090,7 +1726,55 @@ def pair_timeout_seconds(remaining_s: float) -> float:
     parameter named ``ttl_s`` invited a reader to assume the MINTED duration was still
     being passed, which is exactly the confusion that produced the overstated prompt.
     """
-    return min(remaining_s, PAIR_CONFIRM_TIMEOUT_S)
+    return min(remaining_s, PAIR_PARK_CEILING_S)
+
+
+#: TCP keepalive timing for a socket a pairing ceremony parks on (see
+#: :func:`set_pair_keepalive`): first probe after 60 s idle, then every 20 s.
+PAIR_KEEPALIVE_IDLE_S = 60
+PAIR_KEEPALIVE_INTERVAL_S = 20
+PAIR_KEEPALIVE_PROBES = 3
+
+
+def set_pair_keepalive(sock: Any) -> bool:
+    """Turn on ``SO_KEEPALIVE`` (idle 60 s / interval 20 s where supported) for a pair socket.
+
+    WHY. A pairing answered from the app's Mesh approvals can park its sealed socket
+    for up to :data:`PAIR_PARK_CEILING_S` while a person walks between devices, and
+    NAT / tunnel idle timers on the path routinely drop a silent flow well inside ten
+    minutes. Kernel keepalive probes keep the mapping warm without putting anything
+    on the wire protocol.
+
+    WHY NOT AN APP-LEVEL HEARTBEAT FRAME. An inviter running an older build reads
+    the first sealed frame after its offer as ``net_pair_ready`` and treats any other
+    op as ``protocol_error`` — which CONSUMES the invite. Keepalive is invisible to
+    the peer's code, so it is the only liveness signal that is safe across versions.
+
+    GUARDED PER PLATFORM: ``TCP_KEEPIDLE`` is Linux (and newer macOS), macOS spells
+    the idle knob ``TCP_KEEPALIVE``; a platform or socket type that refuses one of
+    them still gets whatever it accepted. Never raises: a missing knob must not be
+    the reason a pairing fails. Returns whether ``SO_KEEPALIVE`` itself was set.
+    """
+    socket_mod = socket
+    try:
+        sock.setsockopt(socket_mod.SOL_SOCKET, socket_mod.SO_KEEPALIVE, 1)
+    except (OSError, AttributeError, TypeError, ValueError):
+        return False
+    idle_opt = getattr(socket_mod, "TCP_KEEPIDLE", None) or getattr(
+        socket_mod, "TCP_KEEPALIVE", None
+    )
+    for option, value in (
+        (idle_opt, PAIR_KEEPALIVE_IDLE_S),
+        (getattr(socket_mod, "TCP_KEEPINTVL", None), PAIR_KEEPALIVE_INTERVAL_S),
+        (getattr(socket_mod, "TCP_KEEPCNT", None), PAIR_KEEPALIVE_PROBES),
+    ):
+        if option is None:
+            continue
+        try:
+            sock.setsockopt(socket_mod.IPPROTO_TCP, option, value)
+        except (OSError, AttributeError, TypeError, ValueError):
+            continue
+    return True
 
 
 #: How much of a refusing device's own sentence travels in ``net_pair_abort``. The
@@ -1164,7 +1848,16 @@ PAIRING_REMEDIES: dict[str, str] = {
 }
 
 
-def refusal_from_pairing(reason: str, *, detail: str = "") -> PairingRefusal:
+#: The remedy when the refusing device says the invite is SPENT (``spent`` on the
+#: abort frame): the SAME-token advice of ``sas_mismatch``/``timeout`` would send the
+#: person round a loop the inviter has already closed.
+PAIRING_SPENT_REMEDY = (
+    "this invitation is used up: mint a fresh invite on the inviting device and pair "
+    "with that one"
+)
+
+
+def refusal_from_pairing(reason: str, *, detail: str = "", spent: bool = False) -> PairingRefusal:
     """Map a pair-phase abort reason onto a refusal a CLI can print.
 
     The sentence is composed from three things, in this order: what the refusing
@@ -1190,6 +1883,8 @@ def refusal_from_pairing(reason: str, *, detail: str = "") -> PairingRefusal:
     if remote and remote not in base:
         base = f"{base} — {remote}"
     remedy = PAIRING_REMEDIES.get(reason, "")
+    if spent and reason in ("sas_mismatch", "timeout"):
+        remedy = PAIRING_SPENT_REMEDY
     return PairingRefusal(reason, f"{base}. {remedy}" if remedy else base)
 
 

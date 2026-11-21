@@ -1,0 +1,16 @@
+$ python3 -B i18n/audits/evidence/fr/cli.serve_readiness/sd4r/verify.py.txt
+cwd=/home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade
+python=3.9.25 (main, Jul 15 2026, 00:00:00) 
+[GCC 11.5.0 20240719 (Red Hat 11.5.0-5)]
+date=2026-11-16T05:25:37.919093+00:00
+HEAD=1fc11dab96954dcc4c31abcc695c696baf2ead8c
+Scope: one PID-reuse key plus direct grouped neighbors freshly checked; 14 exact prior values retain sd4 semantic coverage; 15-key mechanics.
+PASS fr: exact old target SHA reconstruction proves 14 unchanged values+formatting; 15 keys; 87 renders; 87 opaque; 5 grouped samples; CLDR=['many', 'one', 'other']; PID-reuse fragment once/group
+PASS es: exact old target SHA reconstruction proves 14 unchanged values+formatting; 15 keys; 87 renders; 87 opaque; 5 grouped samples; CLDR=['many', 'one', 'other']; PID-reuse fragment once/group
+PASS ru: exact old target SHA reconstruction proves 14 unchanged values+formatting; 15 keys; 87 renders; 87 opaque; 5 grouped samples; CLDR=['few', 'many', 'one', 'other']; PID-reuse fragment once/group
+PASS vi: exact old target SHA reconstruction proves 14 unchanged values+formatting; 15 keys; 87 renders; 87 opaque; 5 grouped samples; CLDR=['other']; PID-reuse fragment once/group
+PASS hi: exact old target SHA reconstruction proves 14 unchanged values+formatting; 15 keys; 87 renders; 87 opaque; 5 grouped samples; CLDR=['one', 'other']; PID-reuse fragment once/group
+PASS ur: exact old target SHA reconstruction proves 14 unchanged values+formatting; 15 keys; 87 renders; 87 opaque; 5 grouped samples; CLDR=['one', 'other']; PID-reuse fragment once/group
+PASS zh-CN: exact old target SHA reconstruction proves 14 unchanged values+formatting; 15 keys; 87 renders; 87 opaque; 5 grouped samples; CLDR=['other']; PID-reuse fragment once/group
+PASS 7 current targets; 15/15 per locale; 1 fresh +14 exact retained; all inputs stable and sd4 preserved.
+EXIT_CODE=0

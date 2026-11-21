@@ -1,0 +1,41 @@
+"""Final single-key re-audit: prove 14 unchanged members and reuse full mechanical checks."""
+import hashlib
+import json
+import runpy
+import sys
+from pathlib import Path
+sys.path.insert(0,str(Path.cwd()))
+from local_operator.i18n import runtime
+prior=Path('i18n/audits/evidence/zh-CN/cli.serve_readiness/sd3')
+r=json.loads((prior/'record.json').read_text())
+key='cli.serve_readiness.not_this_daemon'
+expected={
+ 'en':('recorded, but another process now holds that PID','recorded, but PID reuse was detected'),
+ 'zh-CN':('已有记录，但现在由其他进程占用该PID','已有记录，但检测到PID复用')}
+for locale,(old,new) in expected.items():
+ item=r['input_hashes'][locale];raw=Path(item['path']).read_bytes()
+ assert raw.count(new.encode())==1
+ assert hashlib.sha256(raw.replace(new.encode(),old.encode())).hexdigest()==item['sha256']
+ print('EXACT_ONE_KEY_DELTA',locale,key,'14 retained members; byte-exact entire file after reversing this replacement')
+p=Path(r['input_hashes']['context']['path']);raw=p.read_bytes();context=json.loads(raw)
+new=context[key]['note'];old=context['cli.serve_readiness.unproven']['note']
+assert raw.count(new.encode())==1
+assert hashlib.sha256(raw.replace(new.encode(),old.encode())).hexdigest()==r['input_hashes']['context']['sha256']
+print('CONTEXT_DELTA_PASS: only not_this_daemon note changed')
+for item in r['policy_input_hashes']+[r['caller_input_hash']]+r['artifacts']:
+ assert hashlib.sha256(Path(item['path']).read_bytes()).hexdigest()==item['sha256'],item['path']
+print('PRIOR_ARTIFACT_POLICY_CALLER_HASHES_INTACT')
+# The original helper also reports its older 11-to-15-key baseline. That is
+# historical mechanical coverage, not this round's one-key delta claim.
+runpy.run_path(str(prior/'verify.py.txt'),run_name='__main__')
+zh=json.loads(Path(r['input_hashes']['zh-CN']['path']).read_bytes())
+def render(suffix,**values):return runtime.render_message(zh['cli.serve_readiness.'+suffix],values,'zh-CN')
+reason=zh[key]
+assert reason=='已有记录，但检测到PID复用'
+assert '该PID' not in reason and '运行' not in reason
+for count,pids in ((1,'101'),(2,'101, 102'),(21,'101, 102')):
+ group=render('pid_reason',count=count,pids=pids,reason=reason)
+ text=render('unknown',count=count,device='node-a',reasons=group)
+ assert text.count(reason)==1 and '::' not in text and '：：' not in text
+ print('CURRENT_GROUPED_PID_REUSE',count,text)
+print('PASS sd3r: one number-neutral source/target key changed; context note only; 14 target members retained byte-exact; all 15 keys mechanically revalidated; grouped reuse diagnosis makes no assertion about replacement-process build or identity.')
