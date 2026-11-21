@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "cli.sessions_move_workset",
-  "history_sha256": "50786d653b23f9265faba208c73adeeccd8500f298fc1e768e86a5f91cae938f",
+  "history_sha256": "2690901615ca062e21f11cece3e487b19a0055642099e0464c89aa52f83a2137",
   "entries": [
     {
       "locale": "es",
@@ -171,6 +171,32 @@
         {
           "path": "i18n/audits/evidence/es/cli.sessions_move_workset/mt-secondary/audit.log",
           "sha256": "15cde9155b4197b10215f1422fde146165f06157f1d7057b39a6fd2ddc5bb06f"
+        }
+      ]
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.sessions_move_workset",
+      "source_sha256": "2661ca7de3c547e4b3a84bf4bd5015937109a4e5aa32be58eac2785a9207527f",
+      "translator": {
+        "agent": "lopdev coder: coder session d57574b79887 (277df4c78 rows); coder session 8fbb05fa8dc3, job 4e350825a41f (812c21751 rows)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-21"
+      },
+      "auditor": {
+        "agent": "reviewer (lopdev) session 3e52ab86e193 — independent translation audit, PR #4380 round 3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-21",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent translation audit of PR #4380 (rounds 1-3) at dbfd5a87d (base a805c79b5, main 578826246 merged; no cli.sessions_move_workset paths touched by main): all 6 values changed vs base audited (agent_needs_operator, help_yes, needs_confirmation, plan_not_honoured, yes_carry_unavailable, yes_preflight_failed), target sha256 a249ddb04409064b56599424b5837b818308f4b818c2ce0e37d16ecfc3248a23: PASS, 0 BLOCKER/0 MAJOR; 0 non-gating finding(s) deferred in the PR thread. Other 85 values byte-identical to base, carried by prior receipts. Valid only for these target bytes. Agent-independent only (same model as translators). No native review, no rendered frame. Fallback: none. Evidence: i18n/audits/evidence/es/cli.sessions_move_workset/pr4380-r3-3e52ab86e193/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/es/cli.sessions_move_workset/pr4380-r3-3e52ab86e193/record.json",
+          "sha256": "f3c6ed3e04b36643c422e49f7d06992ff8fe67eaf84639fa0f3bcdc1651c158d"
         }
       ]
     }
