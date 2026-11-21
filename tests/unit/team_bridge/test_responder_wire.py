@@ -328,6 +328,14 @@ async def test_status_line_matches_the_hubs_validator():
         "[::1]",
         "::1",
         "data.evil",
+        # review n-4: format controls (Cf) a renderer may drop before autolinking
+        "evil\u200b.com",
+        "evil.\u200bcom",
+        "evil\u2060.com",
+        "evil\u00ad.com",
+        "evil\u200c.com",
+        "evil\ufeff.com",
+        "evil\u180e.com",
     ],
 )
 async def test_status_line_drops_every_link_shape(shape: str):

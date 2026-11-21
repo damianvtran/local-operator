@@ -796,8 +796,17 @@ BULK_INTO_STATE_REASON = (
     "(it can land the owner's alert responder policy or the guardrail's records)"
 )
 
+#: The reason a bulk write with an UNKNOWABLE landing into an ancestor of a state
+#: root carries (``_bulk_reason``, review S-16): HIGH, so the judge weighs it
+#: against the operator's typed request instead of refusing it outright.
+BULK_INTO_ANCESTOR_REASON = (
+    "extracts or copies an unknown set of files into a directory that contains the "
+    "Local Operator state directory (it could land the owner's alert responder policy "
+    "or the guardrail's records)"
+)
 
-def _bulk_reason(target: Target, prot: _Protected) -> str | None:
+
+def _bulk_reason(target: Target, prot: _Protected) -> tuple[str, Risk] | None:
     """Does a tree-landing write (``Target.bulk``) reach into a state root?
 
     WHY (PR #4383 security round 2, S-12). ``rsync -a ~/forged/ ~/.local-operator/``,
@@ -808,16 +817,27 @@ def _bulk_reason(target: Target, prot: _Protected) -> str | None:
     into the state root, so:
 
     * destination == a state root → CRITICAL, whatever lands;
-    * destination == an ANCESTOR of a state root (``~``, ``/``) → CRITICAL when
-      what lands there is unknowable (contents copies, archives, checkouts) or
-      names the next component toward the state root (``rsync -a
-      ~/x/.local-operator ~``). ``cp -R ~/proj ~/`` stays as it was.
+    * destination == an ANCESTOR of a state root (``~``, ``/``) whose KNOWN
+      landing names the next component toward the state root (``rsync -a
+      ~/x/.local-operator ~``) → CRITICAL;
+    * destination == an ancestor whose landing is UNKNOWABLE (an archive
+      extract, a contents copy ``cp -R x/ ~``, a checkout, a pull, a stash pop)
+      → HIGH with :data:`BULK_INTO_ANCESTOR_REASON` (review S-16). A session's
+      cwd is home by default, so ``tar -xzf ~/Downloads/x.tgz`` or a dotfiles
+      ``git --work-tree=$HOME pull`` is routine; CRITICAL there was refused with
+      no lever but the global override. HIGH lets the judge read the operator's
+      typed request ("extract this into my home" passes, an injected one does
+      not). The residual — a judge-approved plant — is closed structurally by
+      GATE R3-HASH (``team_bridge.responders.runner``), not by this rank;
+    * a known landing that does not name that component (``cp -R ~/proj ~/``)
+      stays as it was.
 
     Every spelling ``_policy_reason`` judges (lexical, realpath, the kernel's
     ``..`` landing) is judged here too, case-folded on a case-insensitive volume.
     """
     if not target.bulk:
         return None
+    unknown: tuple[str, Risk] | None = None
     spellings: set[str] = set()
     for word in (target.path, target.raw_path):
         if not word:
@@ -838,12 +858,17 @@ def _bulk_reason(target: Target, prot: _Protected) -> str | None:
         for spelling in spellings:
             dest = (spelling.casefold() if fold else spelling).rstrip("/") or "/"
             if dest == root:
-                return BULK_INTO_STATE_REASON
+                return BULK_INTO_STATE_REASON, Risk.CRITICAL
             if _under(root, dest):
                 step = os.path.relpath(root, dest).split(os.sep, 1)[0]
-                if names is None or step in names:
-                    return BULK_INTO_STATE_REASON
-    return None
+                if names is None:
+                    unknown = (BULK_INTO_ANCESTOR_REASON, Risk.HIGH)
+                elif step in names:
+                    return BULK_INTO_STATE_REASON, Risk.CRITICAL
+    # A CRITICAL spelling (another state root, or a realpath landing on one)
+    # outranks an unknown-landing HIGH, so the HIGH is returned only after
+    # every spelling of every root has been judged.
+    return unknown
 
 
 def _touch_reason(target: Target, prot: _Protected, *, globstar: bool = False) -> str | None:
@@ -2672,7 +2697,7 @@ def classify_targets(
         for t in writes:
             bulk = _bulk_reason(t, prot)
             if bulk is not None:
-                evidence_hits.append(RankedTarget(t, Risk.CRITICAL, bulk))
+                evidence_hits.append(RankedTarget(t, bulk[1], bulk[0]))
                 continue
             if t.op == "bulk":
                 # A git work tree recorded only for the rule above: the rest of

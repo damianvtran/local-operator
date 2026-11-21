@@ -15,19 +15,31 @@ so is the policy path handed to an unknown program (``python3 -c``). The owner e
 it with their own editor (or, later, the desktop Responder dialog, RFC Phase 4).
 
 A bulk copy, sync, extract or checkout whose DESTINATION is the state root (or an
-ancestor that would land ``team_bridge`` in it) — ``rsync -a ~/forged/ ~/.local-operator/``,
+ancestor whose known landing names it) — ``rsync -a ~/forged/ ~/.local-operator/``,
 ``ditto``, ``cp -R x/``, ``cp --parents``, ``tar -x``/``unzip`` there, ``git checkout``
 in it — is CRITICAL too (``guardrails.classify._bulk_reason``, review S-12), and so
-is ``cp -l``/``--link``/``-al`` with the policy as its source (S-11).
+is ``cp -l``/``--link``/``-al`` with the policy as its source (S-11). An extract,
+contents copy, checkout or pull into an ANCESTOR (``~``) with an unknowable landing
+is HIGH, judge-liftable (S-16).
+
+THIS FENCE IS NOT A SECURITY BOUNDARY (review rounds 3, S-12 residual and S-15).
+The classifier enumerates writers and cannot converge: ``pax -rw``, ``cpio -pd``,
+``7z x -o`` and a hardlink tree of the state root written through and then removed
+(``cp -al ~/.local-operator ~/x`` + a write + ``rm``) all plant a policy at LOW.
+Admitting ANY local policy before the approved-hash gate is therefore not a
+boundary; what closes the class is GATE R3-HASH (``runner`` module comment and the
+PR #4383 description): a wake is admitted only when the sha256 of the bytes read
+equals a hash the owner approved through a human ask and the hub recorded. Until
+that gate lands nothing may start a responder run (a test tripwire enforces it).
 
 What a command classifier CANNOT see: a write whose path is computed at run time
 inside an interpreter or a script file (``python3 x.py`` that builds the path).
 The real boundary for those is the S-41 spawner's OS-level write-deny on the state
 root; until it lands, :func:`load_policy` closes what it can on the descriptor it
 reads (:func:`_read_fenced`): a symlinked file, ``team_bridge`` or state directory,
-a non-regular file, a file with a second name (hardlink, ``st_nlink != 1``), and a
-file or either directory not owned by this user or group/world-writable — each is
-"no policy" (OFF).
+a non-regular file, a file with a STANDING second name (hardlink, ``st_nlink != 1``
+at read time — not a past one, see :func:`_read_fenced`), and a file or either
+directory not owned by this user or group/world-writable — each is "no policy" (OFF).
 
 FAIL CLOSED, DEFAULT OFF. A missing file, an unreadable one, a YAML error, an
 unknown key, a wrong type, an unknown tier or severity — every one of them yields
@@ -463,10 +475,15 @@ def _read_fenced(path: Path) -> bytes:
     * both directories must be owned by this uid and not group/world-writable;
     * the file is opened ``O_NOFOLLOW`` relative to ``team_bridge`` and ``fstat``
       on that fd must show a regular file, owned by this uid, not
-      group/world-writable, and ``st_nlink == 1``. The link count is the S-11
-      closure: a hardlink (``ln``, ``cp -l``, ``cp -al``, ``os.link``) gives the
-      policy inode a second, agent-writable name, and no command classifier can
-      see every way to make one; a policy with another name is not a policy.
+      group/world-writable, and ``st_nlink == 1``. The link count refuses a
+      LIVE second name only: a hardlink (``ln``, ``cp -l``, ``os.link``) still
+      standing when the policy is read. It CANNOT see a past one — link, write
+      through the second name, remove it, and the count is back to 1 (review
+      S-15, measured with ``cp -al <state> ~/x`` + write + ``rm``, three LOW
+      commands). So this check is not the hardlink closure and the loader is
+      not a security boundary; the hardlink class, like every other planted
+      write, is closed by GATE R3-HASH (the approved-hash admission recorded in
+      ``runner``), which must land before anything can start a run.
 
     ``FileNotFoundError`` at any level is "no policy" (OFF); every other refusal
     is :class:`PolicyError` → OFF with a problem the owner can read.

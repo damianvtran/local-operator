@@ -46,6 +46,38 @@ from typing import Awaitable, Callable, Mapping, Protocol
 
 from . import lease as _lease
 from .bridge_scope import RESPONDER_BRIDGE_TOOL, BridgeThreadScope
+
+# MERGE PRECONDITION FOR RESPONDER WIRING. ``admit_alert`` below admits whatever
+# local policy ``load_policy`` read; that admission is NOT a security boundary,
+# because the guardrail classifier cannot see every way to plant the file (PR
+# #4383 security round 3: ``pax -rw``, ``cpio -pd``, ``7z x -o``, and a hardlink
+# tree written through then removed, S-15). Nothing may call this runner until the
+# following gate, copied verbatim from that review, holds. The test tripwire
+# ``test_nothing_wires_the_responder_runner_before_gate_r3_hash`` fails if any
+# non-test module imports ``ResponderRunner``/``Spawner`` from here or calls
+# ``.spawn`` on a responder spawner; the wiring PR removes it together with the
+# hash gate, deliberately.
+#
+# GATE R3-HASH (PR #4383 security round 3; S-12 residual, S-15). No PR may merge
+# if, on its head, any code path can start a responder run (connector wake →
+# ``ResponderRunner`` → ``Spawner.spawn``), unless all of the following hold:
+# - (1) ``admit_alert`` admits a wake only when the sha256 of the exact bytes
+#   ``_read_fenced`` returned equals an approved policy hash.
+# - (2) That hash was approved by the owner through a human ``ask`` on the
+#   owner's own surface. The ask displayed the hash and the effective
+#   projection: channels, tiers, severities, budgets.
+# - (3) The hub recorded that hash, with the approver and the time, through a
+#   route that neither the connector's bearer nor any agent session can call.
+#   The hub refuses ``claim`` for an installation whose reported
+#   ``policy_sha256`` differs from the approved hash.
+# - (4) Any mismatch yields OFF plus a "policy changed — approve?" ask, never a
+#   silent admission or a silent widening.
+# - (5) The PR's security round shows, end to end, that none of these four
+#   plants is admitted: a policy planted by ``pax -rw``, by ``cpio -pd``, by
+#   ``7z x -o``, and by ``cp -al <state> ~/x`` + write + ``rm ~/x/…``.
+#
+# S-41's spawner write-deny is required in addition, for S-2/S-4/S-5. It is not
+# a substitute for this gate.
 from .policy import ChannelPolicy, admit_alert, load_policy
 
 __all__ = [

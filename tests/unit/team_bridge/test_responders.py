@@ -1253,9 +1253,7 @@ _BULK_ROUTES = [
     "git -C ~/.local-operator checkout HEAD -- team_bridge",
     "git --work-tree=$HOME/.local-operator checkout HEAD -- .",
     "cd ~/.local-operator && git stash pop",
-    "rsync -a ~/x/.local-operator ~",
-    "cp -R ~/forged/ ~",
-    "cd ~ && tar -xf ~/x.tar",
+    "rsync -a ~/x/.local-operator ~",  # an ancestor whose KNOWN landing names the state root
     "rsync -a ~/forged/guardrails ~/.local-operator/",  # the ledger, same gap
     # S-11: a hardlink of the policy made by cp
     "cp -l ~/.local-operator/team_bridge/responders.yaml ~/hl",
@@ -1282,6 +1280,188 @@ def test_bulk_writes_into_the_state_root_and_cp_links_are_critical(
     env = {"HOME": str(home), "LOCAL_OPERATOR_CONFIG_DIR": str(state), "PATH": "/usr/bin:/bin"}
     verdict = classify_bash(command, cwd=str(home), env=env, session_id="own", scratchpad=None)
     assert verdict.risk is Risk.CRITICAL, verdict.reasons
+
+
+# Review S-16: an ancestor of the state root (home, ``/``) with an UNKNOWABLE
+# landing. Every row was CRITICAL on d22ec9c1 — refused with no lever but the
+# global override, though a session's cwd is home by default — and LOW on base
+# ad2a5140. HIGH lets the judge weigh the operator's request; GATE R3-HASH
+# (runner) is what makes a judge-approved plant inert.
+_ANCESTOR_UNKNOWN_LANDING = [
+    "tar -xzf ~/Downloads/node.tgz",
+    "unzip ~/Downloads/x.zip",
+    "cd ~ && tar -xf x.tar",
+    "tar -xf ~/x.tar -C ~",
+    "ditto -xk ~/Downloads/x.zip ~",
+    "cp -R ~/proj/ ~",
+    "rsync -a ~/proj/ ~",
+    "git --git-dir=$HOME/.cfg --work-tree=$HOME checkout",
+    "git --git-dir=$HOME/.cfg --work-tree=$HOME pull",
+    "git pull",
+    "git stash pop",
+    "cd / && tar -xf ~/x.tar",
+    "cp -R ~/forged/ ~",
+    "cd ~ && tar -xf ~/x.tar",
+]
+
+
+@pytest.mark.parametrize("command", _ANCESTOR_UNKNOWN_LANDING)
+@pytest.mark.parametrize("layout", ["present", "no_file", "no_dir"])
+def test_unknown_landings_in_an_ancestor_of_the_state_root_are_high_not_critical(
+    tmp_path: Path, command: str, layout: str
+) -> None:
+    from local_operator.guardrails.classify import (
+        BULK_INTO_ANCESTOR_REASON,
+        BULK_INTO_STATE_REASON,
+        Risk,
+        classify_bash,
+    )
+
+    home = tmp_path / "home"
+    state = home / ".local-operator"
+    state.mkdir(parents=True)
+    for sub in ("Downloads", "proj", "forged"):
+        (home / sub).mkdir()
+    if layout != "no_dir":
+        (state / "team_bridge").mkdir()
+    if layout == "present":
+        (state / "team_bridge" / "responders.yaml").write_text("version: 1\n")
+    env = {"HOME": str(home), "LOCAL_OPERATOR_CONFIG_DIR": str(state), "PATH": "/usr/bin:/bin"}
+    verdict = classify_bash(command, cwd=str(home), env=env, session_id="own", scratchpad=None)
+    assert verdict.risk is Risk.HIGH, verdict.reasons
+    assert BULK_INTO_ANCESTOR_REASON in verdict.reasons
+    # The state-root wording would mislead: the destination is the ancestor.
+    assert BULK_INTO_STATE_REASON not in verdict.reasons
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd ~/Downloads && tar -xzf x.tgz",
+        "tar -xf ~/x.tar -C ~/Downloads",
+        "cd ~/proj && git stash pop",
+    ],
+)
+def test_s16_rows_outside_the_ancestor_stay_low(home: Path, command: str) -> None:
+    from local_operator.guardrails.classify import Risk, classify_bash
+
+    for sub in ("Downloads", "proj"):
+        (home / sub).mkdir()
+    state = home / ".local-operator"
+    env = {"HOME": str(home), "LOCAL_OPERATOR_CONFIG_DIR": str(state), "PATH": "/usr/bin:/bin"}
+    verdict = classify_bash(command, cwd=str(home), env=env, session_id="own", scratchpad=None)
+    assert verdict.risk is Risk.LOW, verdict.reasons
+
+
+_RUNNER_MODULE = "local_operator.team_bridge.responders.runner"
+_RESPONDERS_PKG = "local_operator.team_bridge.responders"
+_GATED_NAMES = frozenset({"ResponderRunner", "Spawner", "SpawnRequest", "runner", "*"})
+
+
+def _gate_r3_hash_hits(root: Path) -> list[str]:
+    """Every place under ``root`` (a directory holding the ``local_operator``
+    package) that reaches the responder runner: an import of the runner module or
+    of its gated names (relative imports resolved), a ``ResponderRunner`` name, or
+    a ``.spawner.spawn(...)`` call — the runner module itself excepted."""
+
+    import ast
+
+    hits: list[str] = []
+    for path in sorted((root / "local_operator").rglob("*.py")):
+        rel = path.relative_to(root)
+        parts = list(rel.with_suffix("").parts)
+        if ".".join(parts) == _RUNNER_MODULE:
+            continue
+        package = parts[:-1] if parts[-1] != "__init__" else parts[:-1]
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                if node.level:
+                    base = package[: len(package) - (node.level - 1)]
+                    full = ".".join(base + ([node.module] if node.module else []))
+                else:
+                    full = node.module or ""
+                names = {a.name for a in node.names}
+                if full == _RUNNER_MODULE or (full == _RESPONDERS_PKG and names & _GATED_NAMES):
+                    hits.append(f"{rel}:{node.lineno} imports {sorted(names)} from {full}")
+            elif isinstance(node, ast.Import):
+                hits.extend(
+                    f"{rel}:{node.lineno} imports {a.name}"
+                    for a in node.names
+                    if a.name == _RUNNER_MODULE
+                )
+            elif isinstance(node, ast.Name) and node.id == "ResponderRunner":
+                hits.append(f"{rel}:{node.lineno} names ResponderRunner")
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "spawn"
+                and isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr == "spawner"
+                and ".".join(package).startswith(_RESPONDERS_PKG)
+            ):
+                hits.append(f"{rel}:{node.lineno} calls .spawner.spawn")
+    return hits
+
+
+def test_nothing_wires_the_responder_runner_before_gate_r3_hash() -> None:
+    """TRIPWIRE for GATE R3-HASH (PR #4383 security round 3, S-12 residual + S-15).
+
+    The local policy loader and the guardrail fence are not a security boundary
+    (``pax -rw``, ``cpio -pd``, ``7z x -o`` and a hardlink tree written through
+    then removed all plant a policy at LOW). Only the approved-hash gate recorded
+    in ``responders/runner.py`` closes that, so until it lands no shipping module
+    may reach ``ResponderRunner`` or call a responder ``Spawner.spawn``. The PR
+    that wires the connector to the runner deletes this test TOGETHER with the
+    hash gate and its security round — never on its own.
+    """
+
+    import local_operator
+
+    root = Path(local_operator.__file__).parent.parent
+    hits = _gate_r3_hash_hits(root)
+    assert not hits, "GATE R3-HASH tripwire — responder wiring before the hash gate:\n" + "\n".join(
+        hits
+    )
+
+
+@pytest.mark.parametrize(
+    ("relpath", "source"),
+    [
+        (
+            "local_operator/connector/wake.py",
+            "from local_operator.team_bridge.responders.runner import ResponderRunner\n",
+        ),
+        (
+            "local_operator/connector/wake.py",
+            "import local_operator.team_bridge.responders.runner\n",
+        ),
+        (
+            "local_operator/team_bridge/responders/__init__.py",
+            "from .runner import ResponderRunner\n",
+        ),
+        ("local_operator/team_bridge/responders/wire.py", "from . import runner\n"),
+        ("local_operator/team_bridge/x.py", "from .responders import Spawner\n"),
+        (
+            "local_operator/team_bridge/responders/wire.py",
+            "async def f(s):\n    await s.spawner.spawn(1)\n",
+        ),
+        (
+            "local_operator/x.py",
+            "def f(m):\n    return m.ResponderRunner\n" "ResponderRunner = None\n",
+        ),
+    ],
+)
+def test_the_gate_r3_hash_tripwire_fires(tmp_path: Path, relpath: str, source: str) -> None:
+    """Negative control: the tripwire is not a probe that cannot fail."""
+
+    target = tmp_path / relpath
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(source)
+    clean = tmp_path / "local_operator" / "team_bridge" / "responders" / "runner.py"
+    clean.parent.mkdir(parents=True, exist_ok=True)
+    clean.write_text("async def f(self):\n    await self.spawner.spawn(1)\n")
+    assert _gate_r3_hash_hits(tmp_path), relpath
 
 
 @pytest.mark.parametrize(

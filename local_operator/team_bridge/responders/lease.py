@@ -413,7 +413,12 @@ def sanitize_status_line(text: str) -> str | None:
         before = line
         # Characters first (the hub's markup and control runes), THEN links, so
         # a stripped character can never splice a link back together unseen.
-        line = "".join(ch for ch in line if ch not in _MARKUP and unicodedata.category(ch) != "Cc")
+        # Format controls (``Cf``: zero-width space/joiners, soft hyphen, BOM)
+        # go too: a renderer that drops them before autolinking would show
+        # ``evil\u200b.com`` as ``evil.com`` (review n-4, same rule as S-9).
+        line = "".join(
+            ch for ch in line if ch not in _MARKUP and unicodedata.category(ch) not in ("Cc", "Cf")
+        )
         words = [w for w in line.split() if not _link_shaped(w) and "www." not in w.lower()]
         line = " ".join(words)
         if line == before:
