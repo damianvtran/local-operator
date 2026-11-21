@@ -37,6 +37,13 @@ CAPABILITY = {
     "durable_idempotency": True,
     "receipt_capacity": RECEIPT_CAPACITY,
     "effort": True,
+    # ``agent``/``team`` license BOTH the optional start fields below and
+    # ``GET /api/start-targets``. The gate is not ceremony: the UNKEYED start
+    # path reads fields with ``body.get`` and silently drops unknown ones, so a
+    # phone that sent ``team`` to an older relay would start an UNBOUND chat
+    # while showing the team it picked. Absent flag -> no picker, no field.
+    "agent": True,
+    "team": True,
 }
 
 #: The intent fields every receipt carries, and the one it carries only when
@@ -56,7 +63,13 @@ _INTENT_FIELDS = frozenset({"cwd", "provider", "model_id"})
 #: ``temporary`` (``features.temporary_chats``) follows ``effort``'s rule: stored
 #: only when chosen (as ``"1"``, since a resolved receipt holds non-empty strings),
 #: so a plain start fingerprints to exactly the bytes it did before.
-_OPTIONAL_INTENT_FIELDS = frozenset({"effort", "temporary"})
+#: ``agent``/``team`` (the new chat's launch target) follow the same rule, and
+#: carry the same one-directional rollback cost described above.
+_OPTIONAL_INTENT_FIELDS = frozenset({"effort", "temporary", "agent", "team"})
+
+#: Bound on a start target's name, in code points: the desktop create's
+#: ``SessionTarget.name`` bound, so a name one surface accepts the other does too.
+MAX_TARGET_CHARS = 128
 
 #: Per-field bound on cwd/provider/model_id/effort, in code points.
 MAX_FIELD_CHARS = 4096
@@ -77,17 +90,32 @@ MAX_FIELD_CHARS = 4096
 #: client sends either. It applies to unkeyed callers too, because the route
 #: cannot know whether a body is keyed until it has parsed it; no real legacy
 #: body (a path plus two identifiers) comes near it.
-START_BODY_MAX_BYTES = 3 * MAX_FIELD_CHARS * 12 + 4096
+#:
+#: ``agent``/``team`` add ONE maximal escaped name (128 code points x 12 bytes)
+#: plus 64 bytes for its key and punctuation: the two are mutually exclusive, so
+#: a valid body carries at most one. A body naming BOTH at full length can
+#: therefore draw 413 before the 400 its exclusivity earns -- acceptable, since
+#: either answer refuses it before anything is written.
+START_BODY_MAX_BYTES = 3 * MAX_FIELD_CHARS * 12 + 4096 + MAX_TARGET_CHARS * 12 + 64
 
 
 class StartRefusal(Exception):
     """Machine-readable refusal; clients own localized presentation."""
 
-    def __init__(self, code: str, status: int = 409, session_id: str | None = None):
+    def __init__(
+        self,
+        code: str,
+        status: int = 409,
+        session_id: str | None = None,
+        detail: dict[str, Any] | None = None,
+    ):
         super().__init__(code)
         self.code = code
         self.status = status
         self.session_id = session_id
+        #: Additive machine-readable fields merged into the refusal envelope
+        #: (``unknown_start_target`` carries ``unresolved``).
+        self.detail = detail or {}
 
 
 def canonical_request(body: dict[str, Any]) -> tuple[str, str]:
@@ -125,7 +153,38 @@ def canonical_request(body: dict[str, Any]) -> tuple[str, str]:
         raise StartRefusal("invalid_start_request", 400)
     if temporary:
         intent["temporary"] = "1"
+    # The REQUESTED spelling is fingerprinted (what the caller said); the
+    # canonical name ``validate_target`` returns is frozen under the same key
+    # in the resolution. Present only when chosen: see ``_OPTIONAL_INTENT_FIELDS``.
+    target = start_target(body)
+    if target is not None:
+        intent[target[0]] = target[1]
     return key, json.dumps(intent, sort_keys=True, separators=(",", ":"))
+
+
+def start_target(body: dict[str, Any]) -> tuple[str, str] | None:
+    """A Start request's launch target as ``(kind, name)``; ``None`` means "no target".
+
+    Shape only -- whether the name resolves is ``validate_target``'s question,
+    asked by the route off the event loop. Absent, ``null`` and blank all mean
+    "no choice", so a pre-field request is unchanged. ``agent`` and ``team`` are
+    mutually exclusive, exactly like the desktop's ``target={kind,name}``: a
+    session runs as ONE identity (a team binding already takes the agent slot
+    for its manager), so naming both is a client bug, not a preference order.
+    """
+    chosen: list[tuple[str, str]] = []
+    for kind in ("agent", "team"):
+        value = body.get(kind)
+        if value is None:
+            continue
+        if not isinstance(value, str) or len(value) > MAX_TARGET_CHARS:
+            raise StartRefusal("invalid_start_target", 400)
+        name = value.strip()
+        if name:
+            chosen.append((kind, name))
+    if len(chosen) > 1:
+        raise StartRefusal("invalid_start_target", 400)
+    return chosen[0] if chosen else None
 
 
 def start_effort(value: object) -> str | None:

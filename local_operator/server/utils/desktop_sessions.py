@@ -55,12 +55,12 @@ from local_operator.resume import (
     ORIGIN_AGENT_CONFIG,
     ORIGIN_SUBAGENT,
     SessionRow,
+    bind_session_attachment,
     is_user_session,
     mark_session_origin,
     read_session_attachment,
     session_origin,
     session_preview,
-    write_session_attachment,
 )
 from local_operator.server.models.desktop_sessions import AdmissionStatus, MoveReceipt
 from local_operator.server.retire import RETIRING_MESSAGE, DaemonRetiring
@@ -10029,13 +10029,9 @@ class DesktopSessions:
                         "not created. Retry after checking storage."
                     )
             if target:
-                write_session_attachment(path, **binding, goal="")
-                stored = read_session_attachment(path)
-                if (
-                    stored is None
-                    or stored.agent != binding["agent"]
-                    or stored.team != binding["team"]
-                ):
+                # Shared with the relay's start route (``resume.bind_session_attachment``)
+                # so the two creators cannot disagree on what a bound session is.
+                if not bind_session_attachment(path, agent=binding["agent"], team=binding["team"]):
                     # Never publish desktop.json after a best-effort writer lost
                     # the attachment. No possibly admitted work is deleted.
                     raise ValueError(
