@@ -1,0 +1,6 @@
+{
+  "wire.providers.reauth.sign_in_expired": "आपके {label} साइन-इन की अवधि समाप्त हो गई है और यह अपने-आप नवीनीकृत नहीं हो सकता। फिर से साइन इन करें: ऐप में /login {provider} या टर्मिनल में lop login {provider} चलाएँ।",
+  "wire.providers.reauth.session_policy": "आपके Google Workspace संगठन की नीति के अनुसार {label} में फिर से साइन इन करना ज़रूरी है (Google Cloud session control), इसलिए साइन-इन अपने-आप नवीनीकृत नहीं हो सकता। फिर से साइन इन करें: ऐप में /login {provider} या टर्मिनल में lop login {provider} चलाएँ।",
+  "wire.providers.reauth.status_sign_in_required": "फिर से साइन इन ज़रूरी",
+  "wire.providers.reauth.status_session_policy": "फिर से साइन इन ज़रूरी (Workspace नीति)"
+}
