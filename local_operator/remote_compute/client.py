@@ -42,6 +42,14 @@ cloudflared token and an origin credential; both are returned once, on the
 reads ``run`` and lets the wrapper go out of scope, so there is no value here
 to log, print, cache or serialise by accident — the rule is structural, not a
 redaction step someone has to remember to run.
+
+AN ARTIFACT URL IS A BEARER TOO, AND THIS MODULE DOES BIND IT. A run's artifact
+listing answers a presigned GET per file, which authorises that download for a
+few minutes without any Radient header at all. So the URL is a field of
+:class:`Artifact` that is kept out of its ``repr`` and out of :meth:`Artifact.to_json`:
+the download needs it, every other surface must not have it, and a single filter
+in the type is what makes that true of the CLI, the route and any log line in
+between.
 """
 
 from __future__ import annotations
@@ -61,7 +69,11 @@ from local_operator.providers.auth_store import (
     AuthStoreError,
     CredentialInvalidError,
 )
-from local_operator.remote_compute.config import invalid_override, resolve_api_url
+from local_operator.remote_compute.config import (
+    invalid_override,
+    is_loopback_host,
+    resolve_api_url,
+)
 from local_operator.remote_compute.errors import (
     InvalidIdempotencyKey,
     NetworkMismatch,
@@ -88,6 +100,30 @@ RUNS_PATH = "/v1/remote-compute/runs"
 #: the tiers this deployment can provision answer "can a run be admitted at
 #: all", which a surface asks BEFORE it offers one.
 CAPACITY_PATH = "/v1/remote-compute/capacity"
+
+#: The page size the logs endpoint uses when the caller names none, and the
+#: contract's bound on it.
+#:
+#: THE CONTRACT'S OWN NUMBERS (1-1000, default 200) rather than this build's
+#: preference: a page is the server's answer about how much it will return at
+#: once, and asking for more than the contract admits is a 400 for a request this
+#: client could have sized correctly.
+LOGS_PAGE_DEFAULT = 200
+LOGS_PAGE_MINIMUM = 1
+LOGS_PAGE_MAXIMUM = 1000
+
+#: The keys a log entry may carry.
+#:
+#: A WHITELIST, for the reason :data:`SECRET_RUN_FIELDS` exists in the other
+#: direction: a log entry is republished by a GUI's log panel, so a field the
+#: contract does not name is dropped here rather than passed to a renderer that
+#: would have to remember not to paint it. A TUPLE rather than a set, so the
+#: surviving keys come out in the contract's order on every run instead of in a
+#: hash order a reader would have to check twice.
+LOG_EVENT_KEYS: tuple[str, ...] = ("timestamp", "message")
+
+#: The keys the run's git summary may carry. Whitelisted for the same reason.
+GIT_RESULT_KEYS: tuple[str, ...] = ("branch", "commit", "bundle_present")
 
 #: The keys a run object may carry that are SECRETS when they appear at all.
 #:
@@ -330,6 +366,64 @@ class _Reply:
     status: int
 
 
+@dataclasses.dataclass(frozen=True)
+class Artifact:
+    """One file a run published, and the presigned GET that would fetch it.
+
+    ``url`` IS A BEARER CREDENTIAL. It is kept out of ``repr`` on purpose: the
+    value authorises the download for about five minutes without any Radient
+    header, so an object printed into a log, a traceback or a support paste would
+    hand over the run's results. :meth:`to_json` is the shape a surface may
+    publish, and it has no url — see this module's docstring.
+    """
+
+    name: str
+    size_bytes: int
+    url: str = dataclasses.field(repr=False)
+    expires_at: str | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        """The artifact WITHOUT its url: what a panel or a route may publish."""
+        return {"name": self.name, "size_bytes": self.size_bytes, "expires_at": self.expires_at}
+
+
+@dataclasses.dataclass(frozen=True)
+class RunArtifacts:
+    """What a run produced: its files, its status, and its git summary."""
+
+    run_status: str
+    artifacts: tuple[Artifact, ...]
+    git: dict[str, Any] | None = None
+
+    def artifact(self, name: str) -> Artifact | None:
+        """The artifact with this name, or ``None`` when the run published none."""
+        return next((artifact for artifact in self.artifacts if artifact.name == name), None)
+
+
+@dataclasses.dataclass(frozen=True)
+class LogPage:
+    """One page of a run's logs, as the server returned it.
+
+    ``next_token`` is OPAQUE and run-scoped: it is passed back byte for byte and
+    never parsed. ``None`` means the server sent none, and a follower reads that
+    as "nothing further from this page" rather than as a token to invent.
+    """
+
+    events: tuple[dict[str, Any], ...]
+    next_token: str | None
+    run_status: str
+
+    @property
+    def empty(self) -> bool:
+        """Whether this page carried no lines at all."""
+        return not self.events
+
+    @property
+    def terminal(self) -> bool:
+        """Whether the run will not change again, so an empty page is the end."""
+        return self.run_status in TERMINAL_RUN_STATUSES
+
+
 class RemoteComputeClient:
     """Owner-pinned calls against ``/v1/remote-compute``.
 
@@ -510,6 +604,59 @@ class RemoteComputeClient:
             _confirm_network(run, expected=expected_network)
         return run
 
+    async def run_logs(
+        self, identifier: str, *, next_token: str | None = None, limit: int = LOGS_PAGE_DEFAULT
+    ) -> LogPage:
+        """One page of a run's logs.
+
+        THE TOKEN IS PASSED BACK BYTE FOR BYTE and never inspected: it is opaque
+        and run-scoped, so parsing or normalising it would address a page the
+        server did not mean. An EMPTY token is refused here rather than sent —
+        the endpoint answers 400 for one, and an empty value in a query string is
+        almost always an unset variable the caller meant to leave out (the rule
+        :meth:`list_runs` applies to a blank ``network_id``).
+
+        ``limit`` is bounded locally by the contract's own range, so a page size
+        outside it is a sentence naming the range rather than a 400 for a request
+        this client could have sized correctly.
+
+        A PAGE WITH NO RUN STATUS IS REFUSED. A follower's stop rule is "terminal
+        AND empty", so a page without a status cannot be acted on; reporting its
+        events anyway would leave the follower polling a run that has finished.
+        """
+        if next_token is not None and not next_token.strip():
+            raise ValueError("next_token must be an opaque token or omitted, not an empty string")
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise ValueError("limit must be an integer page size")
+        if not LOGS_PAGE_MINIMUM <= limit <= LOGS_PAGE_MAXIMUM:
+            raise ValueError(
+                f"limit must be from {LOGS_PAGE_MINIMUM} to {LOGS_PAGE_MAXIMUM} log entries"
+            )
+        params: dict[str, Any] = {"limit": limit}
+        if next_token is not None:
+            params["next_token"] = next_token
+        path = RUNS_PATH + _run_path(identifier) + "/logs"
+        reply = await self._request("GET", path, params=params)
+        return _log_page(reply.payload)
+
+    async def run_artifacts(self, identifier: str) -> RunArtifacts:
+        """The files a run published, each with a presigned GET, plus its git summary.
+
+        THE URL IS A BEARER, so it is validated before it is carried: ``https://``
+        only, except on a loopback host — the one exception
+        :func:`~local_operator.remote_compute.config.resolve_api_url` makes, and
+        deliberately the same predicate rather than a second spelling of "this
+        connection stays on the machine". A plaintext host would hand the run's
+        results to anything on the path.
+
+        THE GIT SUMMARY IS WHITELISTED. It is republished by the results route,
+        and ``branch``/``commit``/``bundle_present`` are the whole of what a
+        surface paints: a field the contract does not name is dropped rather than
+        forwarded to a renderer that would have to know not to show it.
+        """
+        reply = await self._request("GET", RUNS_PATH + _run_path(identifier) + "/artifacts")
+        return _run_artifacts(reply.payload)
+
     async def list_runs(
         self,
         *,
@@ -669,6 +816,126 @@ def _tier_mapped_run(payload: dict[str, Any]) -> dict[str, Any]:
     return {**payload, "tier": tier}
 
 
+def _log_page(payload: Any) -> LogPage:
+    """A log page, validated: entries, the opaque next token, and the run's status.
+
+    EVERY REFUSAL HERE IS A FIXED SENTENCE, because this is where a body is
+    interpreted for the first time and the redaction rule applies: nothing from
+    the document beyond the fields this build names may reach a caller.
+    """
+    if not isinstance(payload, dict):
+        raise RemoteComputeError("Radient returned an invalid remote-compute log page.")
+    events = payload.get("events")
+    status = payload.get("run_status")
+    if not isinstance(events, list) or not isinstance(status, str) or not status:
+        raise RemoteComputeError(
+            "Radient returned a remote-compute log page without its events or the run's status."
+        )
+    token = payload.get("next_token")
+    # A BLANK TOKEN IS REFUSED, NOT READ AS "THE END". Sending it back is refused
+    # locally (it would be a 400), and treating it as absent would restart the
+    # paging from the beginning and duplicate every line already reported.
+    if token is not None and (not isinstance(token, str) or not token):
+        raise RemoteComputeError(
+            "Radient returned a remote-compute log page with an unreadable next token."
+        )
+    return LogPage(
+        events=tuple(_log_event(event) for event in events),
+        next_token=token,
+        run_status=status,
+    )
+
+
+def _log_event(event: Any) -> dict[str, Any]:
+    """One log entry, narrowed to the keys the contract names.
+
+    ``message`` IS REQUIRED: an entry with no text is not a line a panel can
+    paint, and dropping it silently would lose the one thing a log exists for.
+    """
+    if not isinstance(event, dict):
+        raise RemoteComputeError("Radient returned a log entry that is not an object.")
+    message = event.get("message")
+    if not isinstance(message, str) or not message:
+        raise RemoteComputeError("Radient returned a log entry without a message.")
+    kept = {key: event[key] for key in LOG_EVENT_KEYS if key in event}
+    timestamp = kept.get("timestamp")
+    if timestamp is not None and not isinstance(timestamp, str):
+        raise RemoteComputeError("Radient returned a log entry with an unreadable timestamp.")
+    return kept
+
+
+def _run_artifacts(payload: Any) -> RunArtifacts:
+    """An artifact listing, validated: the run's status, its files, its git summary."""
+    if not isinstance(payload, dict):
+        raise RemoteComputeError("Radient returned an invalid remote-compute artifact list.")
+    status = payload.get("run_status")
+    rows = payload.get("artifacts")
+    if not isinstance(status, str) or not status:
+        raise RemoteComputeError(
+            "Radient returned a remote-compute artifact list without the run's status."
+        )
+    if not isinstance(rows, list):
+        raise RemoteComputeError(
+            "Radient returned a remote-compute artifact list without its artifacts."
+        )
+    return RunArtifacts(
+        run_status=status,
+        artifacts=tuple(_artifact(row) for row in rows),
+        git=_git_results(payload.get("git")),
+    )
+
+
+def _artifact(row: Any) -> Artifact:
+    """One artifact, validated, with its URL held to :func:`_presigned_url`."""
+    if not isinstance(row, dict):
+        raise RemoteComputeError("Radient returned an artifact that is not an object.")
+    name = row.get("name")
+    size = row.get("size_bytes")
+    url = row.get("url")
+    expires = row.get("expires_at")
+    if not isinstance(name, str) or not name:
+        raise RemoteComputeError("Radient returned an artifact without a name.")
+    # ``bool`` is an ``int`` to ``isinstance`` and ``True`` is not a size.
+    if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+        raise RemoteComputeError("Radient returned an artifact without a readable size.")
+    if not isinstance(url, str) or not url:
+        raise RemoteComputeError("Radient returned an artifact without a download URL.")
+    if expires is not None and not isinstance(expires, str):
+        raise RemoteComputeError("Radient returned an artifact with an unreadable expiry.")
+    return Artifact(name=name, size_bytes=size, url=_presigned_url(url), expires_at=expires)
+
+
+def _presigned_url(url: str) -> str:
+    """The artifact URL, refused unless a bearer may travel to it.
+
+    ``https://`` ONLY, except on a loopback host — the exception
+    :func:`~local_operator.remote_compute.config.resolve_api_url` makes for a local
+    test server, and deliberately its predicate (``is_loopback_host``) rather than
+    a second spelling of "this connection stays on the machine". The URL carries
+    the signature that authorises one GET, so a host that cannot present TLS does
+    not get this run's results.
+    """
+    parts = urllib.parse.urlsplit(url)
+    host = parts.hostname or ""
+    if parts.scheme == "https" and host:
+        return url
+    if parts.scheme == "http" and host and is_loopback_host(host):
+        return url
+    raise RemoteComputeError(
+        "Radient returned an artifact download URL that is not https, so this build will not "
+        "send the request it authorises."
+    )
+
+
+def _git_results(summary: Any) -> dict[str, Any] | None:
+    """The run's git summary, narrowed to the keys the contract names."""
+    if summary is None:
+        return None
+    if not isinstance(summary, dict):
+        raise RemoteComputeError("Radient returned a git summary that is not an object.")
+    return {key: summary[key] for key in GIT_RESULT_KEYS if key in summary}
+
+
 def run_status(payload: dict[str, Any]) -> str:
     """The run's status, or a typed refusal — never an empty string to compare."""
     status = payload.get("status")
@@ -769,14 +1036,22 @@ def run_max_hours(payload: dict[str, Any]) -> float | None:
 
 
 __all__ = [
+    "Artifact",
     "CAPACITY_PATH",
     "CreatedRun",
     "ENVELOPE_KEYS",
+    "GIT_RESULT_KEYS",
     "KNOWN_RUN_OUTCOMES",
     "KNOWN_RUN_STATUSES",
+    "LOG_EVENT_KEYS",
+    "LOGS_PAGE_DEFAULT",
+    "LOGS_PAGE_MAXIMUM",
+    "LOGS_PAGE_MINIMUM",
+    "LogPage",
     "MAX_IDEMPOTENCY_KEY_BYTES",
     "REPLAY_STATUS",
     "RUNS_PATH",
+    "RunArtifacts",
     "SECRET_RUN_FIELDS",
     "TERMINAL_RUN_STATUSES",
     "RemoteComputeClient",
