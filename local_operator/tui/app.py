@@ -44518,7 +44518,9 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — a note is never worth a broken prompt
             logger.debug("the parked approval card could not be annotated", exc_info=True)
 
-    def _system_notice(self, body: str, kind: NoticeKind = "info") -> None:
+    def _system_notice(
+        self, body: str, kind: NoticeKind = "info", *, wrap_atoms: tuple[str, ...] = ()
+    ) -> None:
         """A notice about the HARNESS that leaves the empty state intact.
 
         Separate from :meth:`_notice` because the two answer different questions.
@@ -44534,10 +44536,15 @@ class OperatorApp(App[None]):
         (``NoticeFn``); a caller that must keep the block calls
         :meth:`_system_notice_block` instead.
         """
-        self._system_notice_block(body, kind)
+        self._system_notice_block(body, kind, wrap_atoms=wrap_atoms)
 
     def _system_notice_block(
-        self, body: str, kind: NoticeKind = "info", *, fold_width: int = 0
+        self,
+        body: str,
+        kind: NoticeKind = "info",
+        *,
+        fold_width: int = 0,
+        wrap_atoms: tuple[str, ...] = (),
     ) -> NoticeBlock:
         """The same notice, handing back the block it created.
 
@@ -44558,7 +44565,7 @@ class OperatorApp(App[None]):
         1, Q1 measured it on the real fixture: nine rows at ``[2,1,2,2,1,1,1,2,2]``
         with ``gap-above`` on all of them, then all 1 row with one gap.
         """
-        block = NoticeBlock(body, kind, fold_width=fold_width)
+        block = NoticeBlock(body, kind, fold_width=fold_width, wrap_atoms=wrap_atoms)
         # While the boot CARD is up the notice is part of a centred composition;
         # below the card threshold the input is a full-width bar and the spine is
         # the axis everything shares. `_append_block` recomputes the boot layout
@@ -47879,7 +47886,7 @@ class OperatorApp(App[None]):
             return ""
         return PERSIST_HINT
 
-    def _persist_hint_notice(self) -> str:
+    def _persist_hint_notice(self, *, label: str | None = None) -> str:
         """The line a bare ``/model`` prints above the list.
 
         It says the one thing the picker cannot: that a pick is session-scoped
@@ -48010,8 +48017,9 @@ class OperatorApp(App[None]):
         the primary next step it always was. Pinned by
         `test_the_model_notice_in_dead_end_setup_variants_names_only_settings`.
         """
-        session = self._session
-        label = session.model_label if session is not None else ""
+        if label is None:
+            session = self._session
+            label = session.model_label if session is not None else ""
         # Resolve only this new opening, never historical transcript content.
         # One locale snapshot keeps the clauses and their carrier consistent;
         # the next opening follows a live language change without translating
@@ -49796,7 +49804,11 @@ class OperatorApp(App[None]):
         must both print.
         """
         message.stop()
-        hint = self._persist_hint_notice()
+        # Snapshot opaque identity once for both text and layout metadata. An ID
+        # may itself contain command-looking text; never parse it out of copy.
+        session = self._session
+        label = session.model_label if session is not None else ""
+        hint = self._persist_hint_notice(label=label)
         transcript = self._transcript_view()
         blocks = transcript.blocks()
         pinned = transcript.pinned_tail()
@@ -49804,7 +49816,9 @@ class OperatorApp(App[None]):
         # mid-turn append actually lands.
         last = next((b for b in reversed(blocks) if b is not pinned), None)
         if not (isinstance(last, NoticeBlock) and last.text() == hint):
-            self._system_notice(hint)
+            self._system_notice(
+                hint, wrap_atoms=(label, "/model default", "/model saved", "/settings")
+            )
         self._populate_model_picker()
 
     def _open_model_picker(self) -> None:
