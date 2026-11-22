@@ -72,10 +72,13 @@ __all__ = [
     "state_db_path",
 ]
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 # V7 changes durable key contents, not the table layout. V8 adds the
-# contentless BODY reservation table. Older structural upgrades still
-# validate/build the v6 floor before the atomic key migration.
+# contentless BODY reservation table; V9 adds the contentless TERMINAL hold
+# marker (``hold_terminals``, the one durable "this hold is finished" row, so a
+# hold whose payload can never be loaded again stops being served for ever).
+# Older structural upgrades still validate/build the v6 floor before the atomic
+# key migration.
 _LAYOUT_VERSION = 6
 
 #: Every table a stamped-V3 database must carry. A stamped store missing any
@@ -2096,6 +2099,133 @@ CREATE INDEX IF NOT EXISTS body_reservations_eligible
     ON body_reservations(state, designated_session);
 """
 
+#: The TERMINAL hold marker (v9): one row says this held message is finished.
+#:
+#: WHY A SECOND TABLE rather than a column on ``screening_holds``. That table is
+#: rewritten by every retry (the connector re-upserts on backoff) and its row is
+#: DELETED when a delivery finally hands off, so a marker stored there could be
+#: lost or resurrected by a retry that knows nothing about a disposition — and a
+#: hold whose payload can never be loaded again had NO exit at all: it stayed in
+#: ``list_holds`` and in the nav badge for ever (operator report 2026-11-21,
+#: ``bcmsg_5ac4…``: decision cleared, ``releasable: true``, nothing could settle
+#: it). This row outlives the hold row on purpose: it is the record that this
+#: message was disposed, and it is idempotent by PRIMARY KEY, so the retry loop
+#: can consult it without a second source of truth.
+#:
+#: WHAT IT MAY HOLD, exhaustively: ids, the stored hold code, two CLOSED code
+#: columns (``reason``/``detail``), the closed word, the decision time, the
+#: notice state, the screener's closed verdict word and a JSON object of
+#: booleans/numbers only. No body, excerpt, summary, sender name/email, label,
+#: conversation name, model reason or token has a column here, and ``evidence``
+#: is validated to numbers and booleans alone (see
+#: :func:`_hold_terminal_evidence`), so third-party text cannot be smuggled in
+#: through it either.
+_HOLD_TERMINALS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS hold_terminals (
+    owner_key TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    conversation_id TEXT,
+    hold_code TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    detail TEXT,
+    word TEXT NOT NULL,
+    decided_at REAL NOT NULL,
+    notice_state TEXT NOT NULL,
+    screener_verdict TEXT,
+    evidence TEXT,
+    PRIMARY KEY (owner_key, message_id)
+);
+"""
+
+#: Every column a carrying store must have. A stamped store missing any is
+#: DAMAGED and refuses rather than being re-created empty.
+_HOLD_TERMINAL_COLUMNS = frozenset(
+    {
+        "owner_key",
+        "message_id",
+        "conversation_id",
+        "hold_code",
+        "reason",
+        "detail",
+        "word",
+        "decided_at",
+        "notice_state",
+        "screener_verdict",
+        "evidence",
+    }
+)
+
+#: The CLOSED ``hold_terminals.reason`` vocabulary. Owned HERE, at the store
+#: boundary, so no writer can widen it with free text (the content law is
+#: enforced by refusal, not by convention). One member today: a hold disposed of
+#: because it could never be delivered.
+HOLD_TERMINAL_REASONS = frozenset({"discarded_undeliverable"})
+
+#: The CLOSED ``hold_terminals.detail`` vocabulary: WHY it was undeliverable.
+#: ``deliver_window_passed``: a trusted, eligible decision exists and the Deliver
+#: window it opened has closed. ``no_decision_record``: no decision row was ever
+#: written, so nothing can ever release the message. ``payload_expired``: the
+#: hold is older than ``team_bridge.held_expiry_days`` (the retention backstop).
+HOLD_TERMINAL_DETAILS = frozenset(
+    {"deliver_window_passed", "no_decision_record", "payload_expired"}
+)
+
+#: The CLOSED ``hold_terminals.word`` vocabulary. Only Discard has a local
+#: terminal disposition: Deliver is a signature over a body, so it can never be
+#: recorded from a marker with no payload.
+HOLD_TERMINAL_WORDS = frozenset({"discard"})
+
+#: The CLOSED ``hold_terminals.notice_state`` vocabulary. ``none``: nothing was
+#: sent and nothing ever will be (no resolvable sender); ``queued``: an inbox
+#: item was attempted and refused; ``sent``: one item was written.
+HOLD_TERMINAL_NOTICE_STATES = ("none", "queued", "sent")
+
+#: The screener verdict words a terminal row may record: the reply grammar's own
+#: closed set (``screening._VERDICT_LINE``: ``VERDICT: deliver|hold|bounce``).
+#: Anything else is stored as ``''``, because the column is evidence an auditor
+#: reads, never a place to put a reason — a mistyped or unexpected word must not
+#: become free text.
+_HOLD_SCREENER_VERDICTS = frozenset({"deliver", "hold", "bounce", ""})
+
+#: Keys ``evidence`` may carry: ``[a-z0-9_]``, bounded in count and length, so the
+#: column stays a small closed fact table rather than a free-form blob.
+_EVIDENCE_KEY = re.compile(r"^[a-z0-9_]{1,48}$")
+_EVIDENCE_MAX_KEYS = 24
+
+
+def _hold_terminal_evidence(evidence: Mapping[str, Any] | None) -> str:
+    """``evidence`` as compact JSON of CLOSED, non-text facts only.
+
+    WHY VALUES ARE TYPED, NOT VALIDATED AS STRINGS. The one thing this table must
+    never carry is third-party text (a body, a sender's display name, a
+    conversation label). A value whitelist of booleans and numbers makes that
+    structural: there is no string slot to put one in, so no future writer can
+    smuggle one past a reviewer. An unknown key raises rather than being
+    dropped — a silently discarded fact would make an audit row look complete
+    when it is not.
+    """
+
+    if evidence is None:
+        return "{}"
+    if len(evidence) > _EVIDENCE_MAX_KEYS:
+        raise StoreRefused("invalid_terminal", "too many evidence facts")
+    clean: dict[str, Any] = {}
+    for name, value in evidence.items():
+        if not isinstance(name, str) or _EVIDENCE_KEY.match(name) is None:
+            raise StoreRefused("invalid_terminal", "evidence key is not a closed name")
+        # ``bool`` is checked FIRST: it is an ``int`` to Python, and a caller
+        # passing ``True`` means a flag, which must stay a JSON boolean.
+        if isinstance(value, bool):
+            clean[name] = value
+        elif isinstance(value, (int, float)):
+            clean[name] = value
+        elif value is None:
+            clean[name] = None
+        else:
+            raise StoreRefused("invalid_terminal", "evidence values are booleans and numbers only")
+    return json.dumps(clean, sort_keys=True, separators=(",", ":"))
+
+
 #: Every column a carrying store must have. A stamped store missing any is
 #: DAMAGED and refuses rather than being re-created empty.
 _BODY_RESERVATION_COLUMNS = frozenset(
@@ -2481,6 +2611,7 @@ class Store:
                 raise StoreRefused("schema_unsupported", "unexpected ref migration source")
             self._migrate_conversation_ref_keys(conn)
             self._ensure_body_reservations(conn)
+            self._ensure_hold_terminals(conn)
             conn.execute(
                 "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
                 (str(SCHEMA_VERSION),),
@@ -2613,6 +2744,71 @@ class Store:
         except sqlite3.Error as error:
             raise StoreRefused("state_unreadable", "body reservation DDL failed") from error
 
+    @staticmethod
+    def _validate_hold_terminals(conn: sqlite3.Connection) -> None:
+        """Refuse a marker table whose SHAPE cannot make a disposition idempotent.
+
+        Column names are not enough: the whole point of the table is that a
+        second write for the same message lands on the SAME row (``INSERT OR
+        IGNORE`` under the primary key), so a column-complete table keyed any
+        other way would open and stamp happily and then either duplicate a
+        disposition or refuse the second write with a raw ``ON CONFLICT`` error.
+        A narrower unique index (a single identity column) is refused for the
+        same reason :meth:`_validate_body_reservations` refuses one: it makes a
+        second legitimate row impossible.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(hold_terminals)")}
+        if not _HOLD_TERMINAL_COLUMNS <= columns:
+            raise StoreRefused(
+                "schema_damaged",
+                f"hold_terminals lacks {sorted(_HOLD_TERMINAL_COLUMNS - columns)}",
+            )
+        pk_columns = {row[1] for row in conn.execute("PRAGMA table_info(hold_terminals)") if row[5]}
+        if pk_columns != {"owner_key", "message_id"}:
+            raise StoreRefused(
+                "schema_damaged",
+                f"hold_terminals primary key is {sorted(pk_columns)}",
+            )
+        required = {"owner_key", "message_id"}
+        for index in conn.execute("PRAGMA index_list(hold_terminals)"):
+            # PRAGMA index_list rows are (seq, name, unique, origin, partial);
+            # the third slot is the uniqueness flag (see
+            # ``_validate_body_reservations``, where reading the wrong slot
+            # refused this store's own non-unique index).
+            if not index[2]:
+                continue
+            parts = {part[2] for part in conn.execute(f"PRAGMA index_info({index[1]})")}
+            if not required <= parts:
+                raise StoreRefused(
+                    "schema_damaged",
+                    f"hold_terminals unique index {index[1]} covers {sorted(parts)}, "
+                    "which cannot hold one row per message",
+                )
+
+    @staticmethod
+    def _ensure_hold_terminals(conn: sqlite3.Connection) -> None:
+        """Create the terminal marker additively, or validate a carrying one.
+
+        ``IF NOT EXISTS`` keeps a store that already carries it untouched; an
+        existing table is VALIDATED rather than silently accepted, because a
+        half-built table is damage, not an upgrade. No row of any other table is
+        read or written here, so every existing hold, decision, receipt and
+        enrollment row survives byte-for-byte.
+        """
+
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(hold_terminals)")}
+        if existing:
+            # Validate BEFORE any DDL, like the reservation table: a partial
+            # table is damage and must refuse as a typed error, not raise a raw
+            # sqlite3.OperationalError from the CREATE.
+            Store._validate_hold_terminals(conn)
+            return
+        try:
+            conn.executescript(_HOLD_TERMINALS_SCHEMA)
+        except sqlite3.Error as error:
+            raise StoreRefused("state_unreadable", "hold terminal DDL failed") from error
+
     def _init_layout(self, conn: sqlite3.Connection) -> None:
         """Validate BEFORE any DDL; refuse damage instead of repairing it.
 
@@ -2650,6 +2846,7 @@ class Store:
             except sqlite3.Error as error:
                 raise StoreRefused("state_unreadable", str(error)) from error
             conn.executescript(_BODY_RESERVATIONS_SCHEMA)
+            conn.executescript(_HOLD_TERMINALS_SCHEMA)
             conn.execute(
                 "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -2774,7 +2971,7 @@ class Store:
             )
             return
 
-        if version in (str(_LAYOUT_VERSION), "7", str(SCHEMA_VERSION)):
+        if version in (str(_LAYOUT_VERSION), "7", "8", str(SCHEMA_VERSION)):
             # Stamped V5: VERIFY, never re-create. Missing tables or missing
             # binding/policy columns mean damage — refuse, no DDL at all.
             missing = (_V3_TABLES | _V4_ADDED) - pre_existing
@@ -2819,12 +3016,22 @@ class Store:
                 # Requiring v8 structure here made a genuine v6 store refuse as
                 # "damaged" before it could ever be migrated (B1).
                 return
-            if version == "7":
-                # V7 is fully verified above; the ONLY remaining step is
-                # the additive reservation table (IF NOT EXISTS, so a
-                # carrying store is untouched) plus the stamp, so a v7
-                # store that crashed mid-upgrade simply retries.
-                self._ensure_body_reservations(conn)
+            if version in ("7", "8"):
+                # V7 and V8 are fully verified above; the ONLY remaining step is
+                # the additive terminal marker (IF NOT EXISTS, so a carrying
+                # store is untouched) plus the stamp, so a store that crashed
+                # mid-upgrade simply retries. A v7 store additionally lacks the
+                # reservation table BY CONSTRUCTION and gets it here; a v8 store
+                # was promised it, so a v8 store missing it is DAMAGE — never a
+                # silent empty re-create (the fail-closed law).
+                if version == "7":
+                    self._ensure_body_reservations(conn)
+                elif "body_reservations" not in pre_existing:
+                    raise StoreRefused(
+                        "schema_damaged",
+                        f"stamped-{version} store missing body_reservations",
+                    )
+                self._ensure_hold_terminals(conn)
                 conn.execute(
                     "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
                     (str(SCHEMA_VERSION),),
@@ -2836,6 +3043,15 @@ class Store:
                     f"stamped-{version} store missing body_reservations",
                 )
             self._validate_body_reservations(conn)
+            # A stamped-CURRENT store promised the terminal marker too: it is
+            # required structure, refusable damage when absent, never created
+            # here (re-running DDL is not repair).
+            if "hold_terminals" not in pre_existing:
+                raise StoreRefused(
+                    "schema_damaged",
+                    f"stamped-{version} store missing hold_terminals",
+                )
+            self._validate_hold_terminals(conn)
             return
 
         raise StoreRefused(
@@ -3656,13 +3872,30 @@ class Store:
                 }
             except sqlite3.OperationalError:
                 settled = set()
+            # A TERMINAL disposition (``hold_terminals``, v9) is the second thing
+            # that must leave this count, and for a stronger reason than the two
+            # above: the hold was DISPOSED OF, so an aggregate "long hold" alert
+            # that keeps counting it would stand in the person's inbox for ever
+            # (the badge fix would have left the notification behind). Read here,
+            # in the same snapshot, keyed by bare id like every other exemption.
+            # Its own try so a store that predates the table keeps counting.
+            try:
+                terminals = {
+                    str(r["message_id"])
+                    for r in conn.execute(
+                        "SELECT message_id FROM hold_terminals WHERE owner_key = ?",
+                        (_owner_key(owner),),
+                    ).fetchall()
+                }
+            except sqlite3.OperationalError:
+                terminals = set()
         excluded = {HOLD_OPEN_CHIEF_OF_STAFF, "bridge_off"}
         held: dict[str, float] = {}
         for row in rows:
             if row["hold_code"] in excluded:
                 continue
             bare = screening_hold_message_id(str(row["message_id"]))
-            if bare in noticed or bare in settled:
+            if bare in noticed or bare in settled or bare in terminals:
                 continue
             if not is_conversation_message_id(bare):
                 continue
@@ -10618,6 +10851,196 @@ class Store:
             (_owner_key(owner), WORK_SCOPE_HOLD),
         )
         return int(rows[0]["n"]) if rows else 0
+
+    # -- terminal hold dispositions (the immortal-hold fix) -------------------
+    #
+    # ONE marker table says "this held message is finished", keyed by the BARE
+    # normalised message id (``screening_hold_message_id``'s answer, the same key
+    # every other per-message table uses). WHY BARE AND NOT THE COMPOSITE REF:
+    # a conversation hold is stored under its feed ref
+    # (``conversation:message=<seq>``) while decisions, receipts, releases and
+    # acknowledgements key by the bare ``bcmsg_…`` id, and ``_conversation_rows``
+    # collapses to bare before anything is served — so a marker keyed by the ref
+    # would miss the row it names as soon as the same message is re-stored under
+    # its other spelling. A writer holding a composite ref composes the bare id
+    # with :func:`screening_hold_message_id` rather than re-deriving the rule.
+    #
+    # TOLERATES A VANISHED HOLD ROW. ``screening_holds`` is not strictly
+    # append-only: the retry loop DELETEs a hold row once a delivery finally hands
+    # off and re-upserts it while retrying, so by the time a disposition is
+    # recorded the hold row may be gone. That is "nothing left to dispose", not
+    # an error: these methods never read ``screening_holds`` at all, so a
+    # disposition is written and read back exactly the same either way.
+
+    def record_hold_terminal(
+        self,
+        owner: OwnerSnapshot,
+        message_id: str,
+        conversation_id: str | None,
+        hold_code: str,
+        *,
+        reason: str,
+        detail: str | None = None,
+        screener_verdict: str = "",
+        evidence: Mapping[str, Any] | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Record ONE terminal disposition, idempotently. Returns the stored row.
+
+        The returned mapping is the stored row plus one ADDITIVE key,
+        ``already``: ``False`` when this call wrote it, ``True`` when a row for
+        this message was already there (the caller answered an earlier request,
+        or the expiry pass already swept it). The second call returns the FIRST
+        call's row unchanged — ``decided_at``, ``notice_state`` and ``evidence``
+        are never rewritten — because a disposition is a fact about a moment,
+        and re-stamping it would make an audit row claim a later decision than
+        the one the person's answer justified.
+
+        CLOSED VOCABULARIES, ENFORCED HERE. ``reason``, ``detail``, the stored
+        word and the screener verdict are refused unless they are members of
+        their closed sets, so no path can put free text (or a sender's words) in
+        the table. The content law is a refusal, not a convention.
+        """
+
+        bare = screening_hold_message_id(str(message_id))
+        if not bare:
+            raise StoreRefused("invalid_terminal", "empty message id")
+        if reason not in HOLD_TERMINAL_REASONS:
+            raise StoreRefused("invalid_terminal", "terminal reason is not a closed code")
+        if detail is not None and detail not in HOLD_TERMINAL_DETAILS:
+            raise StoreRefused("invalid_terminal", "terminal detail is not a closed code")
+        verdict = screener_verdict if screener_verdict in _HOLD_SCREENER_VERDICTS else ""
+        stamp = time.time() if now is None else float(now)
+        payload = _hold_terminal_evidence(evidence)
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            inserted = conn.execute(
+                "INSERT OR IGNORE INTO hold_terminals (owner_key, message_id, "
+                "conversation_id, hold_code, reason, detail, word, decided_at, "
+                "notice_state, screener_verdict, evidence) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    _owner_key(owner),
+                    bare,
+                    conversation_id,
+                    str(hold_code),
+                    reason,
+                    detail,
+                    "discard",
+                    stamp,
+                    # A disposition writes NO notice by itself: the caller
+                    # decides whether a sender is resolvable at all, and
+                    # ``none`` records the common case (nothing to tell) rather
+                    # than leaving the column to mean two things.
+                    "none",
+                    verdict,
+                    payload,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM hold_terminals WHERE owner_key = ? AND message_id = ?",
+                (_owner_key(owner), bare),
+            ).fetchone()
+        if row is None:
+            # Unreachable unless the row was deleted between the writes inside
+            # one transaction; a typed refusal beats returning a disposition
+            # that does not exist.
+            raise StoreRefused("state_unreadable", "hold terminal row is absent after write")
+        out = dict(row)
+        out["already"] = inserted.rowcount == 0
+        return out
+
+    def mark_hold_terminal_notice(
+        self, owner: OwnerSnapshot, message_id: str, *, notice_state: str
+    ) -> bool:
+        """Move an EXISTING marker's ``notice_state``; ``False`` when there is none.
+
+        Only ``sent``/``queued`` are accepted, and only from ``none``: the notice
+        is at most ONE, so a later call can never re-open a state that already
+        recorded an attempt (the idempotence of the disposition depends on it).
+        """
+
+        if notice_state not in ("queued", "sent"):
+            raise StoreRefused("invalid_terminal", "notice state is not a closed code")
+        bare = screening_hold_message_id(str(message_id))
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            changed = conn.execute(
+                "UPDATE hold_terminals SET notice_state = ? "
+                "WHERE owner_key = ? AND message_id = ? AND notice_state = 'none'",
+                (notice_state, _owner_key(owner), bare),
+            )
+            return changed.rowcount > 0
+
+    def hold_terminal(self, owner: OwnerSnapshot, message_id: str) -> dict[str, Any] | None:
+        """The terminal marker for one message, or ``None`` — cheap and body-free.
+
+        The read the delivery-repair path calls from its retry loop, so it is
+        READ-ONLY: it never creates, migrates or repairs the store
+        (:meth:`_connect_readonly`), and a store that predates this table answers
+        ``None`` instead of raising. Presence means terminal; the row's
+        ``reason``/``detail`` are closed codes a caller may log verbatim.
+        """
+
+        bare = screening_hold_message_id(str(message_id))
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return None
+            try:
+                row = conn.execute(
+                    "SELECT * FROM hold_terminals WHERE owner_key = ? AND message_id = ?",
+                    (_owner_key(owner), bare),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return None  # a store from before v9 has no marker table
+        return dict(row) if row is not None else None
+
+    def hold_terminals(self, owner: OwnerSnapshot) -> list[dict[str, Any]]:
+        """Every terminal marker for this owner, oldest first (read-only).
+
+        Ordered by ``decided_at`` so a caller printing dispositions gets a stable
+        order; an absent table reads empty rather than raising.
+        """
+
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return []
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM hold_terminals WHERE owner_key = ? "
+                    "ORDER BY decided_at, message_id",
+                    (_owner_key(owner),),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        return [dict(row) for row in rows]
+
+    def clear_hold_terminal(self, owner: OwnerSnapshot, message_id: str) -> bool:
+        """Remove ONE terminal marker (the reversal verb); ``True`` when removed.
+
+        WHAT THIS IS AND IS NOT. It removes the marker only: the hold becomes
+        visible to the list and the badge again, which is exactly what the
+        operator asked for when they reopen a message they disposed of by
+        mistake. It cannot undo a delivery that never happened, and it writes no
+        release, notice or hub call. The hold row itself may well be gone (the
+        retry loop deletes it), so a reopened message may not reappear in the
+        list — that is honest: there is nothing left to show.
+        """
+
+        bare = screening_hold_message_id(str(message_id))
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            removed = conn.execute(
+                "DELETE FROM hold_terminals WHERE owner_key = ? AND message_id = ?",
+                (_owner_key(owner), bare),
+            )
+            return removed.rowcount > 0
 
     def screening_hold_rows(self, owner: OwnerSnapshot) -> list[dict[str, Any]]:
         """Every hold row for the LIVE owner, read-only (the B4b holds list).

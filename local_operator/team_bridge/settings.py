@@ -263,6 +263,32 @@ DEFAULT_REVIEW_HELD = True
 #: ``hold_alert_after_minutes``.
 DEFAULT_SCREENING_HOLD_REVIEW_AFTER_MINUTES = 30
 
+#: ``team_bridge.held_expiry_days`` — how many DAYS a held conversation message
+#: may sit undeliverable before the maintenance pass DISPOSES of it (writes a
+#: ``hold_terminals`` row, so it leaves the holds list, the nav badge and the
+#: long-hold count for good). ``0`` disables the pass; valid range 0..3650.
+#:
+#: WHY (operator report 2026-11-21). A hold whose payload could never be loaded
+#: again had no exit at all: ``list_holds`` served it ``releasable: true`` and the
+#: Approvals badge could never reach zero (``bcmsg_5ac4…``: decision cleared, no
+#: release row, nothing on screen to bind a button to). The explicit discard
+#: verbs settle the rows a person can see; this is the BACKSTOP that bounds the
+#: table when nobody is looking, which is why 14 days — past the 7-day Deliver
+#: window (``hold_release.DELIVER_WINDOW_S``), so it can never take a message the
+#: person could still legitimately deliver, and short enough that the badge
+#: cannot stand for a month.
+#:
+#: NO ``/settings`` ROW, for the same i18n-ledger reason as
+#: ``hold_alert_after_minutes`` and ``screening_hold_review_after_minutes``
+#: above: a public row needs keyed copy in every supported language plus its
+#: independent audit, and this is a backstop, not a knob the person turns.
+DEFAULT_TEAM_BRIDGE_HELD_EXPIRY_DAYS = 14
+
+#: The read's upper bound for :data:`DEFAULT_TEAM_BRIDGE_HELD_EXPIRY_DAYS`, in
+#: days (ten years): a hand edit above it would otherwise put the backstop
+#: somewhere no surface in the product can reach to lower again.
+HELD_EXPIRY_DAYS_MAX = 3650
+
 #: ``team_bridge.share_typing`` — whether this person's composers tell the other
 #: members of a conversation "X is typing" (typing-indicators design §7).
 #:
@@ -390,6 +416,7 @@ MULTI_FRAME_TURNS_PATH = ("team_bridge", "multi_frame_turns")
 HOLD_RELEASE_PATH = ("team_bridge", "hold_release")
 REVIEW_HELD_PATH = ("team_bridge", "review_held")
 SCREENING_HOLD_REVIEW_AFTER_PATH = ("team_bridge", "screening_hold_review_after_minutes")
+HELD_EXPIRY_DAYS_PATH = ("team_bridge", "held_expiry_days")
 SHARE_TYPING_PATH = ("team_bridge", "share_typing")
 #: The SUBTREE the four screening ceilings live under. Readers take this tuple,
 #: so no consumer re-spells "where screening lives" and drifts from the writer.
@@ -677,6 +704,23 @@ def _screening_hold_review_after_minutes(value: Any) -> int:
     return value
 
 
+def _held_expiry_days(value: Any) -> int:
+    """Whole days in 0..3650, else the default (``0`` = the pass is off).
+
+    The same refusal as every sibling reader: ``bool`` is excluded BY NAME (it is
+    an ``int`` to Python, so a hand-edited ``true`` would otherwise read as a
+    one-day backstop nobody asked for), a non-int reads the shipped default, and
+    a value outside the bound reads it too — a torn or hostile read must never
+    make the pass either unbounded or instantaneous.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        return DEFAULT_TEAM_BRIDGE_HELD_EXPIRY_DAYS
+    if not 0 <= value <= HELD_EXPIRY_DAYS_MAX:
+        return DEFAULT_TEAM_BRIDGE_HELD_EXPIRY_DAYS
+    return value
+
+
 @dataclass(frozen=True)
 class ScreeningClamp:
     """One configured ceiling the read path held down, and what it reads as.
@@ -917,6 +961,9 @@ class TeamBridgeSettings:
     #: Minutes a screening-unavailable hold may age before it becomes the
     #: owner's review; ``0`` = never (see the constant).
     screening_hold_review_after_minutes: int = DEFAULT_SCREENING_HOLD_REVIEW_AFTER_MINUTES
+    #: Days a held message may sit UNDELIVERABLE before the maintenance pass
+    #: disposes of it; ``0`` = never (see the constant).
+    held_expiry_days: int = DEFAULT_TEAM_BRIDGE_HELD_EXPIRY_DAYS
     #: Whether this person's composers report "is typing" (sender-side only).
     share_typing: bool = DEFAULT_TEAM_BRIDGE_SHARE_TYPING
     #: Whether ``team_bridge.enabled`` was PRESENT in the document (any value,
@@ -997,6 +1044,9 @@ class TeamBridgeSettings:
             review_held=get(REVIEW_HELD_PATH, DEFAULT_REVIEW_HELD) is not False,
             screening_hold_review_after_minutes=_screening_hold_review_after_minutes(
                 get(SCREENING_HOLD_REVIEW_AFTER_PATH, DEFAULT_SCREENING_HOLD_REVIEW_AFTER_MINUTES)
+            ),
+            held_expiry_days=_held_expiry_days(
+                get(HELD_EXPIRY_DAYS_PATH, DEFAULT_TEAM_BRIDGE_HELD_EXPIRY_DAYS)
             ),
             share_typing=_share_typing(get(SHARE_TYPING_PATH, _MISSING)),
         )

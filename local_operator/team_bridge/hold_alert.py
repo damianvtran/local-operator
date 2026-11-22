@@ -60,6 +60,36 @@ def _key(endpoint_id: str) -> str:
     return f"team-bridge-long-hold:{endpoint_id}"
 
 
+def expire_holds_once(owner: Any, config_dir: Path, now: float | None = None) -> int:
+    """Run the undeliverable-hold retention pass once; closed counts, never raises.
+
+    WHERE THIS IS CALLED FROM, and why there: :func:`tick`, the long-hold alert
+    the connector already drives every 300 s. A hold that can never be delivered
+    used to be IMMORTAL — ``screening_holds`` is re-upserted by every retry and
+    ``list_holds`` served it for ever — so nothing except a background pass can
+    bound it. Do not move this into ``connector/loop.py`` or
+    ``connector/conversation.py``: a parallel change owns those files.
+
+    The reader lives in ``server.utils.desktop_team_bridge_holds`` because that
+    module owns the ONE classification of "provably undeliverable" (a second
+    copy here is how the badge and the pass would come to disagree). That import
+    is lazy and one-way at runtime, and the module pulls no web framework (it is
+    plain stdlib plus ``team_bridge``), so the connector does not acquire
+    ``lop serve``'s boot cost by calling this.
+    """
+
+    from local_operator.server.utils import desktop_team_bridge_holds as holds
+
+    try:
+        disposed = holds.expire_undeliverable_holds(config_dir, owner, now=now)
+    except Exception:  # noqa: BLE001 — chrome; retried on the next tick
+        logger.info("bridge: held expiry code=failed")
+        return 0
+    if disposed:
+        logger.info("bridge: held expiry code=ok disposed=%d", disposed)
+    return disposed
+
+
 def _threshold_minutes(config_dir: Path) -> int | None:
     """The threshold read fresh from disk, or ``None`` when the file cannot be read now.
 
@@ -121,6 +151,17 @@ def _run(owner: Any, config_dir: Path, now: float | None) -> str:
     store = Store(config_dir)
     session_id = store.designated_session_for_readonly(owner)
     notifications = NotificationStore(config_dir)
+    # THE AGE-BASED RETENTION BACKSTOP RUNS ON THIS TICK ON PURPOSE (see
+    # ``team_bridge.held_expiry_days``). This is the one periodic pass the
+    # connector already drives (every :data:`THROTTLE_S`) that reads hold AGE, and
+    # a disposed row has to leave the count this alert keeps, so the two belong to
+    # the same walk. It sits BEFORE every early return below so a threshold of
+    # ``0`` (alert off) or a missing inbox cannot also switch the backstop off,
+    # and it never changes this function's own closed outcome: retention is not
+    # the alert, and a failure there is one log line, not a failed alert.
+    # ``connector/loop.py`` and ``connector/conversation.py`` are deliberately not
+    # touched (another change owns them).
+    expire_holds_once(owner, config_dir, now)
     t = tr("cli.team_bridge_alert")
 
     def clear_standing(shown_minutes: int, *, keep: str | None = None) -> bool:

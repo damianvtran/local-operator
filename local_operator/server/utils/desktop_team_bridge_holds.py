@@ -50,6 +50,35 @@ from local_operator.team_bridge.types import (
     parse_conversation_ref_value,
 )
 
+#: Hold codes whose delivery defect is REPAIRABLE, so NO bulk or age-based pass
+#: may ever dispose of one.
+#:
+#: WHY THIS SET EXISTS AND WHO OWNS IT. A ``conversation_failed`` row has a local
+#: screening receipt of ``allow`` with the body intact at the hub: it is NOT
+#: undeliverable by construction, and the delivery-repair work may well make it
+#: deliverable again. Terminalising one converts a fixable delivery defect into
+#: permanent data loss with an audit row saying it was deliberate. There are 22
+#: such rows on the operator's store today (2026-11-22), and they must survive
+#: ``discard-all`` and the expiry pass untouched.
+#:
+#: THE TRAP THAT MAKES THIS SET NECESSARY: :func:`list_holds` maps any code
+#: outside ``HOLD_CODES`` to the SERVED word ``unknown_hold``, and
+#: ``conversation_failed`` is not in ``HOLD_CODES`` — so every one of those rows
+#: is served as ``unknown_hold``. Classifying on the served value would read them
+#: as "unknown code, no decision record" and eat exactly the rows this set
+#: protects. Eligibility is therefore computed ONLY from the pre-mapping hold row
+#: (``_conversation_rows``) or the stored decision, never from a serialised item.
+#:
+#: MEMBERSHIP IS THE DELIVERY-DEFECT PROGRAMME'S, NOT THIS MODULE'S. Adding a code
+#: here only ever makes this module do LESS; a code may leave this set when that
+#: owner proves the class is no longer repairable.
+RETRYABLE_DELIVERY_CLASS = frozenset({"conversation_failed"})
+
+#: The most rows ONE expiry pass will dispose of, so a large backlog cannot stall
+#: a maintenance tick: the next tick continues where this one stopped, and the
+#: store's insert-or-ignore makes a repeated pass over the same row a no-op.
+EXPIRY_MAX_PER_PASS = 200
+
 #: Hold codes the person is told about as "the screener was unsure / could not
 #: answer"; anything else that is not releasable is "waiting" (infrastructure).
 _SCREENING_KIND = frozenset(
@@ -165,6 +194,70 @@ def _conversation_rows(store: Store, owner: Any) -> dict[str, dict[str, Any]]:
     return rows
 
 
+def _terminal_reason(
+    row: dict[str, Any],
+    decision: dict[str, Any] | None,
+    *,
+    now: float,
+    expiry_days: int,
+) -> str | None:
+    """WHY this hold can be terminally discarded with NO proof, or ``None``.
+
+    ``row`` is the PRE-MAPPING hold row from :func:`_conversation_rows` (its
+    ``hold_code`` is the real stored code — see :data:`RETRYABLE_DELIVERY_CLASS`
+    for the trap of using the served one). ``decision`` is the stored
+    ``work_scope_decisions`` row, if any.
+
+    THE CLOSED ANSWER SET, and why each member is safe:
+
+    ``deliver_window_passed`` — a decision EXISTS, is eligible, passes
+    :func:`hold_release.trusted_decision`, and the Deliver window it opened has
+    closed. Past that window ``decide`` refuses Deliver with ``deliver_expired``
+    for ever, and a receipt-bound Discard already settles locally with no hub
+    call at all, so accepting this with no proof grants NOTHING the receipt path
+    did not already grant: it only removes the dependency on the renderer
+    holding a receipt for a body it cannot load. Deliver stays impossible, which
+    the unchanged ``deliver_expired`` refusal keeps enforcing.
+
+    ``no_decision_record`` — no decision row was ever written AND the HOLD row's
+    own ``created_at`` is past the Deliver window. Without a decision row
+    ``decide`` refuses ``hold_not_releasable`` for ever, so nothing in this build
+    can release or deliver the message and disposal is the only exit that
+    exists. Age-bounded deliberately: an in-flight screener that is about to
+    write a decision must not be raced out from under.
+
+    ``payload_expired`` — the HOLD row is older than the configurable
+    ``team_bridge.held_expiry_days`` retention threshold. The operator-requested
+    backstop, and the only one that can settle a row whose decision exists but
+    can never be acted on.
+
+    AGE IS THE HOLD'S OWN ``created_at``, never ``held_at``: ``held_at`` is the
+    DECISION time, which can be days later, and using it would make a row look
+    younger than it is. ``cleared_at`` is NOT used for anything here: it means
+    "this device retired the OS banner" (``hold_release.retire_review_notices``),
+    not "the hold was settled", and a cleared decision can still be perfectly
+    deliverable (trap pinned by ``test_cleared_but_deliverable_is_not_terminal``).
+    """
+
+    code = str(row["hold_code"])
+    if code in RETRYABLE_DELIVERY_CLASS:
+        return None
+    age = now - float(row["created_at"])
+    if decision is not None:
+        if (
+            decision.get("eligible")
+            and str(decision.get("hold_code") or "") == code
+            and hr.trusted_decision(decision)
+            and now > float(decision.get("created_at") or 0.0) + hr.DELIVER_WINDOW_S
+        ):
+            return "deliver_window_passed"
+    elif age > hr.DELIVER_WINDOW_S:
+        return "no_decision_record"
+    if expiry_days > 0 and age > float(expiry_days) * 86400.0:
+        return "payload_expired"
+    return None
+
+
 def _iso(seconds: float | None) -> str | None:
     if seconds is None:
         return None
@@ -185,6 +278,12 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
     review_on = hr.review_enabled(config_dir)
     work_scope_on = hr.enabled(config_dir)
     decisions = {str(d["message_id"]): d for d in store.work_scope_decisions(owner)}
+    # The ONE terminal marker (``hold_terminals``): a row carrying one was already
+    # disposed of, so it is not held, not listed and NOT counted — that is the
+    # whole fix. Dropping it here (rather than per-surface) is what makes the
+    # badge, the desktop list and ``lop team-bridge holds`` agree by construction.
+    terminals = {str(t["message_id"]) for t in store.hold_terminals(owner)}
+    expiry_days = hr.held_expiry_days(config_dir)
     items: list[dict[str, Any]] = []
     # Oldest hold first, the bare id breaking ties: two holds written in the
     # same instant must not swap places between refreshes (a list that reorders
@@ -193,6 +292,11 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
         _conversation_rows(store, owner).items(),
         key=lambda kv: (kv[1]["created_at"], kv[0]),
     ):
+        if bare in terminals:
+            # Disposed of: see the marker read above. Never re-served, whatever
+            # the hold row still says — the retry loop may not have deleted it
+            # yet, or may re-upsert it while a later attempt is in flight.
+            continue
         code = row["hold_code"]
         decision = decisions.get(bare)
         eligible = bool(
@@ -225,6 +329,17 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
             and conversation_id
             and str(decision.get("conversation_id") or "") == conversation_id
         )
+        # Additive: WHY this row can be disposed of with NO proof at all, or
+        # ``None``. Computed from the REAL hold row (``row``), never from
+        # ``code``, which is the served word below (:func:`_terminal_reason`
+        # explains the trap). A row that can still be delivered is never a
+        # candidate, whatever its age.
+        undeliverable_reason = (
+            None
+            if can_deliver
+            else _terminal_reason(row, decision, now=now, expiry_days=expiry_days)
+        )
+        terminal_discard = bool(undeliverable_reason)
         items.append(
             {
                 "message_id": bare,
@@ -273,6 +388,17 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
                 ),
                 "deliver_until": _iso(deliver_until),
                 "decision": _decision_view(release),
+                # Additive, and the reason this change exists: True when Discard
+                # may be sent with NO proof (no ``body_sha256``, no
+                # ``hold_receipt``) because the row is provably undeliverable —
+                # see :func:`_terminal_reason` for the closed rules. A renderer
+                # arms Discard on this flag; Deliver is never armed by it.
+                "terminal_discard": terminal_discard,
+                # The closed code behind it (one of
+                # ``store.HOLD_TERMINAL_DETAILS``), or null. Never free text, and
+                # never derived from a failed body load, a 404 or a missing
+                # record: only from rows actually read.
+                "undeliverable_reason": undeliverable_reason,
             }
         )
     return {
@@ -469,6 +595,382 @@ def decide(
     except StoreRefused:
         pass
     return _receipt(row)
+
+
+def _evidence(
+    store: Store,
+    owner: Any,
+    *,
+    row: dict[str, Any],
+    decision: dict[str, Any] | None,
+    now: float,
+    expiry_days: int,
+) -> dict[str, Any]:
+    """The corroborating facts an auditor needs, as booleans and numbers only.
+
+    WHY: a disposition must not rest on intent alone. Every fact here was READ
+    from a row, none is inferred, and the store refuses any value that is not a
+    boolean or a number — so no body, sender, label or reason can reach the
+    evidence column. ``allow_receipt`` is the ``screening_receipts`` concept
+    itself (``verdict == 'allow'``, the same closed word the screener writes), and
+    ``body_reservation`` is a real ``body_reservations`` row (``body_card_status``
+    answers ``None`` when there is none).
+
+    A read that fails records ``False`` rather than blocking the disposition: the
+    row is being disposed of BECAUSE it cannot be acted on, so an unreadable
+    supporting table is the expected state, not a stop sign. The fact stays
+    honest — false means "not proven", never "proven absent".
+    """
+
+    deliver_until_passed = bool(
+        decision is not None
+        and now > float(decision.get("created_at") or 0.0) + hr.DELIVER_WINDOW_S
+    )
+    allow_receipt = False
+    try:
+        proof = store.content_proof_readonly(owner, [str(row["message_id"])])
+        receipt = (proof.get(str(row["message_id"])) or {}).get("receipt") or {}
+        allow_receipt = str(receipt.get("verdict") or "") == "allow"
+    except Exception:  # noqa: BLE001 — evidence is a fact, never a gate
+        allow_receipt = False
+    body_reservation = False
+    try:
+        body_reservation = (
+            store.body_card_status(owner, str(row["conversation_id"] or ""), str(row["message_id"]))
+            is not None
+        )
+    except Exception:  # noqa: BLE001 — same law as above
+        body_reservation = False
+    return {
+        "deliver_until_passed": deliver_until_passed,
+        "allow_receipt": allow_receipt,
+        "body_reservation": body_reservation,
+        "hold_age_seconds": int(max(0.0, now - float(row["created_at"]))),
+        "hold_expiry_days": int(expiry_days),
+    }
+
+
+def _notice_undelivered(
+    store: Store,
+    owner: Any,
+    *,
+    config_dir: Path,
+    row: dict[str, Any],
+    decision: dict[str, Any] | None,
+    message_id: str,
+) -> str:
+    """At most ONE "not delivered" inbox item, and only with a RESOLVABLE sender.
+
+    THREE GATES, all of them facts from rows:
+
+    1. a ``deliveries`` row for this message carries both ``sender_account_id``
+       and ``sender_endpoint_id`` (:meth:`Store.reply_target`). If it does not,
+       nothing is sent and the state is ``none`` — never synthesise, guess or
+       copy a sender from another row, and never add a name anywhere: the UI
+       says "Unknown sender" and that is a renderer concern.
+    2. a standing per-message notice was actually recorded (``notified_at``).
+       The item this plane may retire is the one it raised; inventing a fresh
+       lock-screen item for a message the person was never told about would be
+       new noise, not a notice.
+    3. a designated session exists to deliver into.
+
+    CONTENT LAW, inherited verbatim from ``hold_release``'s per-message notice:
+    no body, sender, conversation, category or label in the item, because the
+    phone relay reads ``notifications.db`` and anything in it can reach a lock
+    screen. It reuses the SHIPPED ``discarded`` copy at priority ``low`` — the
+    same keyed update ``hold_release.clear_notice`` writes after a Discard — so
+    no new translatable string is needed and the item reads as retired.
+
+    Returns the closed ``notice_state`` to record: ``none`` | ``queued`` |
+    ``sent``.
+    """
+
+    try:
+        target = store.reply_target(owner, str(message_id))
+    except Exception:  # noqa: BLE001 — no readable row is no resolvable sender
+        return "none"
+    if not target or not str(target.get("sender_account_id") or ""):
+        return "none"
+    if not str(target.get("sender_endpoint_id") or ""):
+        return "none"
+    if decision is None or decision.get("notified_at") is None:
+        return "none"
+    try:
+        session_id = store.designated_session_for_readonly(owner)
+    except Exception:  # noqa: BLE001
+        session_id = None
+    if not session_id:
+        return "none"
+    from local_operator.i18n.keys import cli_team_bridge_hold as _k
+    from local_operator.i18n.text import tr
+    from local_operator.notifications.store import NotificationStore
+
+    t = tr("cli.team_bridge_hold")
+    try:
+        NotificationStore(config_dir).notify(
+            session_id,
+            title=t(_k.discarded_title()),
+            body_md=t(_k.discarded_body()),
+            priority="low",
+            key=hr.notice_key(str(owner.endpoint_id), str(message_id)),
+        )
+    except Exception:  # noqa: BLE001 — chrome; the disposition already stands
+        return "queued"
+    try:
+        # Frees the per-endpoint notice cap exactly as a Deliver/Discard does:
+        # this item is retired, so it must stop counting as standing.
+        store.mark_work_scope_cleared(owner, message_id, now=time.time())
+    except Exception:  # noqa: BLE001 — the item is down; the cap entry is cosmetic
+        pass
+    return "sent"
+
+
+def _dispose(
+    store: Store,
+    owner: Any,
+    *,
+    config_dir: Path,
+    row: dict[str, Any],
+    decision: dict[str, Any] | None,
+    detail: str,
+    now: float,
+    expiry_days: int,
+) -> dict[str, Any]:
+    """Write ONE terminal marker (idempotent), then the at-most-one notice.
+
+    No ``owner_releases`` row and no signature: a release is a signed word over a
+    BODY (``hold_release.release_payload``) and this row has no loadable payload
+    by definition, so inventing one would forge a record of a decision nobody
+    made about bytes nobody saw. The marker is the local record; it grants
+    nothing, and the connector is never told about it.
+    """
+
+    message_id = str(row["message_id"])
+    evidence = _evidence(store, owner, row=row, decision=decision, now=now, expiry_days=expiry_days)
+    terminal = store.record_hold_terminal(
+        owner,
+        message_id,
+        row.get("conversation_id") or None,
+        str(row["hold_code"]),
+        reason="discarded_undeliverable",
+        detail=detail,
+        screener_verdict=str((decision or {}).get("screener_verdict") or ""),
+        evidence=evidence,
+        now=now,
+    )
+    if not terminal.get("already"):
+        state = _notice_undelivered(
+            store,
+            owner,
+            config_dir=config_dir,
+            row=row,
+            decision=decision,
+            message_id=message_id,
+        )
+        if state != "none":
+            store.mark_hold_terminal_notice(owner, message_id, notice_state=state)
+            terminal["notice_state"] = state
+    return terminal
+
+
+def _conversation_decisions(store: Store, owner: Any) -> dict[str, dict[str, Any]]:
+    """The stored work-scope decisions by bare id (the marker's own columns)."""
+
+    return {str(d["message_id"]): d for d in store.work_scope_decisions(owner)}
+
+
+def _disposal_candidates(
+    config_dir: Path, owner: Any, *, store: Store, now: float
+) -> tuple[list[tuple[dict[str, Any], dict[str, Any] | None, str]], int]:
+    """Rows a bulk/age pass MAY dispose of, plus how many are already terminal.
+
+    THE CLASSIFICATION IS :func:`list_holds`'S, deliberately: a second
+    implementation of the same rules is how the badge and the pass would come to
+    disagree. ``list_holds`` computes ``terminal_discard`` from the PRE-MAPPING
+    hold row (see the trap in :data:`RETRYABLE_DELIVERY_CLASS`), so a
+    ``conversation_failed`` row can never reach the list built here.
+
+    The real hold row and the stored decision are read again for the columns the
+    marker needs (the REAL hold code, the hold's own ``created_at``, the
+    decision's verdict), never the served ones.
+    """
+
+    payload = list_holds(config_dir, owner, now=now)
+    rows = _conversation_rows(store, owner)
+    decisions = _conversation_decisions(store, owner)
+    terminals = {str(t["message_id"]) for t in store.hold_terminals(owner)}
+    already = len(terminals & set(rows))
+    candidates: list[tuple[dict[str, Any], dict[str, Any] | None, str]] = []
+    for item in payload["items"]:
+        bare = str(item["message_id"])
+        if not item.get("terminal_discard"):
+            continue
+        row = rows.get(bare)
+        if row is None:
+            continue
+        candidates.append((row, decisions.get(bare), str(item.get("undeliverable_reason") or "")))
+    return candidates, already
+
+
+def discard_undeliverable_hold(
+    config_dir: Path, owner: Any, *, message_id: str, now: float | None = None
+) -> dict[str, Any]:
+    """``POST …/holds/{id}/discard`` with NO proof, for a terminal-discardable row.
+
+    Idempotent twice over: a repeat finds the marker and answers the SAME row
+    (``already`` true, never ``already_decided`` — the stored word is ``discard``,
+    so there is no second word to conflict with), and a message whose hold row has
+    gone away answers "nothing left to dispose" rather than raising.
+
+    ``hold_not_releasable`` (409) is the refusal for a row that is NOT provably
+    undeliverable: identical code to the proof-bearing path, so a forced call
+    learns nothing about why.
+    """
+
+    store = Store(config_dir)
+    now = time.time() if now is None else float(now)
+    expiry_days = hr.held_expiry_days(config_dir)
+    existing = store.hold_terminal(owner, message_id)
+    if existing is not None:
+        return {
+            "message_id": str(existing["message_id"]),
+            "disposed": False,
+            "already": True,
+            "terminal": existing,
+        }
+    row = _conversation_rows(store, owner).get(message_id)
+    if row is None:
+        # Nothing left to dispose: the retry loop deleted the hold row (that is
+        # how a hold ends when a delivery hands off). Not an error, and not a
+        # marker written for a message this store no longer holds.
+        return {"message_id": message_id, "disposed": False, "already": True, "terminal": None}
+    decision = store.work_scope_decision(owner, message_id)
+    reason = _terminal_reason(row, decision, now=now, expiry_days=expiry_days)
+    if reason is None:
+        raise HoldRefused(409, "hold_not_releasable")
+    terminal = _dispose(
+        store,
+        owner,
+        config_dir=config_dir,
+        row=row,
+        decision=decision,
+        detail=reason,
+        now=now,
+        expiry_days=expiry_days,
+    )
+    return {
+        "message_id": str(terminal["message_id"]),
+        "disposed": not terminal.get("already"),
+        "already": bool(terminal.get("already")),
+        "terminal": terminal,
+    }
+
+
+def discard_all_undeliverable(
+    config_dir: Path, owner: Any, *, now: float | None = None
+) -> dict[str, int]:
+    """Dispose of EVERY terminal-discardable row in one pass; closed counts.
+
+    NEVER TOUCHES A DELIVERABLE ROW. ``list_holds`` already refuses to arm a row
+    whose ``can_deliver`` is true, so a deliverable row is counted ``skipped``
+    (it is still held — the person can act on it) and nothing is written for it.
+    ``skipped`` is therefore "rows this pass left alone", not "errors".
+
+    ``already`` counts markers standing over a hold row that is still in the
+    store: the second call of the same batch reports ``discarded: 0``, which is
+    what makes the batch a safe retry.
+    """
+
+    store = Store(config_dir)
+    now = time.time() if now is None else float(now)
+    expiry_days = hr.held_expiry_days(config_dir)
+    candidates, already = _disposal_candidates(config_dir, owner, store=store, now=now)
+    counts = {"discarded": 0, "already": already, "skipped": 0}
+    candidate_ids = {str(row["message_id"]) for row, _, _ in candidates}
+    for row, decision, reason in candidates:
+        terminal = _dispose(
+            store,
+            owner,
+            config_dir=config_dir,
+            row=row,
+            decision=decision,
+            detail=reason,
+            now=now,
+            expiry_days=expiry_days,
+        )
+        if terminal.get("already"):
+            counts["already"] += 1
+        else:
+            counts["discarded"] += 1
+    for item in list_holds(config_dir, owner, now=now)["items"]:
+        if str(item["message_id"]) not in candidate_ids:
+            counts["skipped"] += 1
+    return counts
+
+
+def expire_undeliverable_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> int:
+    """Dispose of holds past ``team_bridge.held_expiry_days``; returns the count.
+
+    THE BACKSTOP. ``discard_all_undeliverable`` settles what a person can see
+    now; this bounds the table when nobody is looking, which is why it exists at
+    all (an undeliverable row had no exit and could stand for ever).
+
+    THREE GUARDS, each load-bearing:
+    * ``held_expiry_days == 0`` disables the pass entirely;
+    * a row in :data:`RETRYABLE_DELIVERY_CLASS` is never a candidate (the
+      classification in ``list_holds`` already excludes it) — the delivery-repair
+      work must be able to fix those rows;
+    * a row whose ``can_deliver`` is true is never a candidate either.
+
+    The AGE is the hold row's own ``created_at``, so a decision written days late
+    cannot make an old hold look young. ``payload_expired`` is recorded as the
+    detail even when the row would also qualify by the Deliver window, because
+    the retention threshold is the authority THIS pass exercises — the evidence
+    column still carries ``deliver_until_passed`` so an auditor sees both.
+
+    BOUNDED and IDEMPOTENT: at most :data:`EXPIRY_MAX_PER_PASS` rows per call, and
+    the store's insert-or-ignore makes a repeated pass over the same row a no-op
+    (it reports ``already``, never a second write).
+    """
+
+    expiry_days = hr.held_expiry_days(config_dir)
+    if expiry_days <= 0:
+        return 0
+    store = Store(config_dir)
+    now = time.time() if now is None else float(now)
+    threshold = now - float(expiry_days) * 86400.0
+    candidates, _already = _disposal_candidates(config_dir, owner, store=store, now=now)
+    disposed = 0
+    for row, decision, reason in candidates:
+        if disposed >= EXPIRY_MAX_PER_PASS:
+            break
+        if float(row["created_at"]) > threshold:
+            continue
+        terminal = _dispose(
+            store,
+            owner,
+            config_dir=config_dir,
+            row=row,
+            decision=decision,
+            detail="payload_expired",
+            now=now,
+            expiry_days=expiry_days,
+        )
+        if not terminal.get("already"):
+            disposed += 1
+    return disposed
+
+
+def reopen_hold(config_dir: Path, owner: Any, *, message_id: str) -> bool:
+    """Remove ONE terminal marker; ``True`` when one was removed.
+
+    WHAT IT DOES NOT DO: it cannot undo a delivery that never happened, and it
+    writes no release, no notice and no hub call. It only puts the hold back in
+    front of the person — which is why it is the reversal verb and not a
+    "restore" one.
+    """
+
+    return Store(config_dir).clear_hold_terminal(owner, message_id)
 
 
 def _owner_key(owner: Any) -> str:

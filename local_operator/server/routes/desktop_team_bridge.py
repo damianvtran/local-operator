@@ -4717,6 +4717,67 @@ class TeamBridgeHoldDecision(_Strict):
         return self
 
 
+class TeamBridgeHoldDiscard(_Strict):
+    """Discard body: AT MOST one binding, so a provably-undeliverable row needs none.
+
+    WHY THIS EXISTS (operator report 2026-11-21, ``bcmsg_5ac4…``). A hold whose
+    payload can never be loaded again cannot be bound to anything the person
+    saw: there is no ``body_sha256`` to send and the renderer may not hold a
+    ``discard_receipt`` either. Such a row was listed ``releasable: true`` with
+    no armed button, so the badge could never reach zero. The list's additive
+    ``terminal_discard`` says when that is the case.
+
+    ``conversation_id`` is optional here because it comes from the STORE on the
+    proof-free path; when a binding IS present it stays required, so the
+    proof-bearing request is validated exactly as before (``decide`` re-checks
+    it, and every existing check still runs).
+    """
+
+    expected_account_id: str = Field(min_length=1, max_length=128)
+    conversation_id: str | None = Field(default=None, min_length=1, max_length=128)
+    body_sha256: str | None = Field(default=None, min_length=64, max_length=64)
+    hold_receipt: str | None = Field(default=None, min_length=64, max_length=64)
+
+    @model_validator(mode="after")
+    def _grammar(self) -> "TeamBridgeHoldDiscard":
+        if not is_account_id(self.expected_account_id):
+            raise ValueError("expected_account_id is outside the accepted grammar")
+        if self.conversation_id is not None and not re.fullmatch(
+            CONVERSATION_ID_PATTERN, self.conversation_id
+        ):
+            raise ValueError("conversation_id is outside the accepted grammar")
+        if self.body_sha256 is not None and self.hold_receipt is not None:
+            raise ValueError("at most one of body_sha256 or hold_receipt is allowed")
+        for value in (self.body_sha256, self.hold_receipt):
+            if value is not None and not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise ValueError("body_sha256 and hold_receipt must be lowercase sha256 hex")
+        # A REQUEST THAT BINDS SOMETHING IS THE OLD REQUEST: it must name the
+        # conversation, exactly as the shared model requires, so a proof-bearing
+        # call cannot lose a check by taking this route.
+        if (self.body_sha256 is not None or self.hold_receipt is not None) and (
+            self.conversation_id is None
+        ):
+            raise ValueError("conversation_id is required with a body hash or hold receipt")
+        return self
+
+
+class TeamBridgeHoldBatchDiscard(_Strict):
+    """``POST …/holds/discard-all`` body: ONE closed scope word.
+
+    An unknown scope is refused by the field's own validator, which FastAPI
+    answers 422 for — this endpoint must never guess what a typo meant.
+    """
+
+    expected_account_id: str = Field(min_length=1, max_length=128)
+    scope: Literal["undeliverable"]
+
+    @model_validator(mode="after")
+    def _grammar(self) -> "TeamBridgeHoldBatchDiscard":
+        if not is_account_id(self.expected_account_id):
+            raise ValueError("expected_account_id is outside the accepted grammar")
+        return self
+
+
 def _raise_hold(code: str) -> NoReturn:
     status, message = _HOLD_REFUSALS.get(code, (409, "the held-message request was refused"))
     raise HTTPException(status, {"code": code, "message": message})
@@ -4820,12 +4881,89 @@ async def discard_hold(
     request: Request,
     response: Response,
     message_id: str,
-    body: TeamBridgeHoldDecision,
+    body: TeamBridgeHoldDiscard,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
-    """Sign the person's Discard: the sender is told it was not delivered."""
+    """Discard a held message, WITH a binding or (terminal rows only) with none.
 
-    return await _decide_hold(request, response, message_id, body, config_manager, "discard")
+    Two paths, one endpoint. A request carrying ``body_sha256`` or
+    ``hold_receipt`` is the shipped path and runs every check it always did
+    (:func:`desktop_team_bridge_holds.decide` still enforces "exactly one
+    binding"). A request carrying NEITHER is accepted only for a row the list
+    itself marks ``terminal_discard`` — provably undeliverable, so there is no
+    body to hash and no receipt the renderer could hold — and the server
+    re-derives that from the rows rather than trusting the flag it sent.
+
+    A message whose hold row has gone away answers 200 "nothing left to
+    dispose": ``screening_holds`` deletes the row when a delivery finally hands
+    off, so absence means the disposition is moot, not that the request was bad.
+    """
+
+    response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
+    _refuse_write_scope(request)
+    if request.query_params or not re.fullmatch(_CONVERSATION_MESSAGE_ID, message_id):
+        _raise_hold("invalid_request")
+    owner = await _hold_owner(config_manager, body.expected_account_id)
+    from local_operator.server.utils import desktop_team_bridge_holds as holds
+
+    if body.body_sha256 is None and body.hold_receipt is None:
+        try:
+            payload = await asyncio.to_thread(
+                holds.discard_undeliverable_hold,
+                config_manager.config_dir,
+                owner,
+                message_id=message_id,
+            )
+        except holds.HoldRefused as refusal:
+            _raise_hold(refusal.code)
+        return reply(payload)
+    try:
+        # Off the loop: the signer may wait for a presence gesture.
+        payload = await asyncio.to_thread(
+            holds.decide,
+            config_manager.config_dir,
+            owner,
+            message_id=message_id,
+            conversation_id=str(body.conversation_id),
+            body_sha256=body.body_sha256,
+            word="discard",
+            account_id=body.expected_account_id,
+            hold_receipt=body.hold_receipt,
+        )
+    except holds.HoldRefused as refusal:
+        _raise_hold(refusal.code)
+    return reply(payload)
+
+
+@router.post("/v1/desktop/team-bridge/holds/discard-all", response_model=CRUDResponse[Any])
+async def discard_all_holds(
+    request: Request,
+    response: Response,
+    body: TeamBridgeHoldBatchDiscard,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Terminally discard EVERY provably-undeliverable hold, in one pass.
+
+    The scope word is closed (``undeliverable``): a bulk write has to say WHAT it
+    is clearing, and an unknown word is a 422 rather than a guess. Rows that can
+    still be delivered are never touched and are reported as ``skipped`` — the
+    person's own Deliver stays available for them.
+    """
+
+    response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
+    _refuse_write_scope(request)
+    if request.query_params:
+        _raise_hold("invalid_request")
+    owner = await _hold_owner(config_manager, body.expected_account_id)
+    from local_operator.server.utils import desktop_team_bridge_holds as holds
+
+    try:
+        payload = await asyncio.to_thread(
+            holds.discard_all_undeliverable, config_manager.config_dir, owner
+        )
+    except holds.HoldRefused as refusal:
+        _raise_hold(refusal.code)
+    return reply(payload)
 
 
 # -- approvals: pending requests, human batch decide, the decision ledger ----

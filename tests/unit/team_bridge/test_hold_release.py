@@ -1512,8 +1512,19 @@ def test_an_expired_unloadable_hold_discards_by_receipt_and_settles(api) -> None
     assert expired.json()["detail"]["code"] == "deliver_expired"
     # Exactly one binding; unauthenticated and wrong-account calls refused.
     assert call("POST", discard, json={**_body(), "hold_receipt": receipt}).status_code == 422
-    neither = {"expected_account_id": "acc_recv", "conversation_id": CONVERSATION_ID}
-    assert call("POST", discard, json=neither).status_code == 422
+    # REQUEST SHAPE, changed by the terminal-disposition slice (2026-11-22): a
+    # binding is no longer REQUIRED when the row is provably undeliverable — an
+    # 8-day-old decision is past its Deliver window, so the list marks it
+    # ``terminal_discard`` and a proof-free Discard settles it (that is the whole
+    # point: the renderer may hold no body and no receipt for such a row). What a
+    # proof-free request can still never do is settle a message this store does
+    # not hold: it answers "nothing left to dispose" and writes NO release row and
+    # NO terminal marker.
+    assert item["terminal_discard"] is True
+    assert item["undeliverable_reason"] == "deliver_window_passed"
+    nowhere = {"expected_account_id": "acc_recv"}
+    assert call("POST", f"{HOLDS}/bcmsg_ffffffff/discard", json=nowhere).status_code == 200
+    assert _count(config_dir, "hold_terminals") == 0
     assert call("POST", discard, json=_receipt_body(receipt), auth=False).status_code == 401
     wrong = call("POST", discard, json=_receipt_body(receipt, expected_account_id="acc_other"))
     assert wrong.json()["detail"]["code"] == "account_mismatch"
