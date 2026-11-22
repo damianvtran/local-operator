@@ -1,0 +1,71 @@
+{
+  "locale": "zh-CN",
+  "namespace": "tui.info",
+  "source_sha256": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+  "translator": {
+    "agent": null,
+    "model": null,
+    "date": null
+  },
+  "auditor": {
+    "agent": "mechanical-integration-control/cb71510262a6",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "result": "not-run",
+    "findings": null
+  },
+  "status": "control-not-a-native-verdict",
+  "note": "CONTROL ONLY: no native audit has been performed by this integration agent. Replace with actual independent auditor verdict before any append. Populate original/changed per-key identities from candidate manifest; never replace retained authorship with remediation actor.",
+  "context_sha256": "aee21715fca769227b3bda5b500a5e81e51763cf86817f741baff8b1a5ef0ae7",
+  "target_sha256": "a3c7fef5c7f39382aad8ee62e2e2d90915344119892a45719531e14115ba8e02",
+  "translation_provenance": {
+    "path": "local_operator/i18n/catalogues/zh-CN/tui.info.json",
+    "before_sha256": "937193f1bfb9552b0d59a86cea9e3185c9db65dabb32d0512640a377f58f2a2d",
+    "target_sha256": "a3c7fef5c7f39382aad8ee62e2e2d90915344119892a45719531e14115ba8e02",
+    "keys": 277,
+    "changed_count": 4,
+    "unchanged_count": 273,
+    "changed_keys": [
+      "tui.info.approval.auto_full",
+      "tui.info.export.build_age",
+      "tui.info.export.uptime",
+      "tui.info.state.stale"
+    ],
+    "changed_key_authors": {
+      "tui.info.approval.auto_full": {
+        "agent": null,
+        "session": "1af53bef9d51",
+        "model": "openai/gpt-6.1-sol"
+      },
+      "tui.info.export.build_age": {
+        "agent": null,
+        "session": "1af53bef9d51",
+        "model": "openai/gpt-6.1-sol"
+      },
+      "tui.info.export.uptime": {
+        "agent": null,
+        "session": "1af53bef9d51",
+        "model": "openai/gpt-6.1-sol"
+      },
+      "tui.info.state.stale": {
+        "agent": null,
+        "session": "1af53bef9d51",
+        "model": "openai/gpt-6.1-sol"
+      }
+    },
+    "retained_key_author": {
+      "agent": "info-translate-zh-CN / session6593cb284c1f",
+      "model": "openai/gpt-6.1-sol",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "date": "2026-11-21",
+      "provenance_source": "/Users/damian/.local-operator/sessions/6593cb284c1f/scratchpad/zh-info-mechanical.json; full target hash independently verified from git show and worktree bytes"
+    },
+    "retained_authority": "i18n/audits/evidence/pr4420-initial-native-zh-CN-r1.json",
+    "authoring_receipt": "i18n/audits/evidence/pr4420-translator-zh-CN-remediation.json"
+  },
+  "review_scope": {
+    "namespace_keys": 277,
+    "retention": "Prior semantic rows retained only with byte/source compatibility; not 277 newly read translations",
+    "delta": "prior failures + changed target keys + all12 changed contexts + 2 source ICU fields"
+  }
+}

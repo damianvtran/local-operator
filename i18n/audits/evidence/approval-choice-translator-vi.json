@@ -1,0 +1,82 @@
+{
+  "locale": "vi",
+  "role": "translator",
+  "agent": "approval-labels-author-vi",
+  "session_id": "a7c4f2fde35e",
+  "actual_authoring_model": "openai/gpt-6.1-sol",
+  "host_reported_fallback": {
+    "from": "anthropic/claude-opus-5-5",
+    "reason": "provider failure: quota",
+    "timing": "Before choosing or authoring target values; initial guidance reads used the original model"
+  },
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+  "frozen_input_head": "69b7e09c9b56924a7fefe561e283a73045b0a845",
+  "target_path": "local_operator/i18n/catalogues/vi/wire.settings.json",
+  "scope": [
+    "wire.settings.tool_approval_mode.choice.ask.label",
+    "wire.settings.tool_approval_mode.choice.auto.label"
+  ],
+  "inputs": {
+    "approved_capture": "i18n/audits/evidence/approval-choice-input-cache.json",
+    "source_pin": "i18n/audits/evidence/approval-choice-source-pin.json",
+    "source_sha256": "298fc1100cb10bfa34909aa245307a735dad318f456e5bbfb5337fbcdb1e8962",
+    "context_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+    "verification": "Computed canonical selected-map digests for EN and vi; matched cache. Computed current original vi full-file SHA against cache and sidecar. Computed source/context full-file SHAs against cache and sidecar. Both selected contexts equal the actual sidecar entries. Original catalogue prose was obtained only from the approved capture; file parsing was for comparison/hash verification, with no raw prose dump.",
+    "style_sources": ["i18n/style-guides/vi.md", "i18n/glossary.md sections 1 and 2"]
+  },
+  "authorship": [
+    {
+      "key": "wire.settings.tool_approval_mode.choice.ask.label",
+      "disposition": "RETAINED unchanged",
+      "before": "hỏi trước",
+      "after": "hỏi trước",
+      "new_bytes_authored_here": false,
+      "prior_author": "unknown; not inferred from the style guide or source pin",
+      "backtranslation": "ask beforehand",
+      "rationale": "Existing concise native wording expressly recorded in the Vietnamese style guide, lines 86–87. Retained its exact case and bytes as requested. It names asking before an action, without adding always/every-tool semantics."
+    },
+    {
+      "key": "wire.settings.tool_approval_mode.choice.auto.label",
+      "disposition": "CHANGED",
+      "before": "auto",
+      "after": "Tự động",
+      "new_bytes_authored_here": true,
+      "author_model": "openai/gpt-6.1-sol",
+      "backtranslation": "Automatic",
+      "rationale": "Standard compact Vietnamese adjective for an automatic mode, sentence case with no punctuation. The style guide's historic retained-auto rule concerns config-token labels; this approved source/context explicitly distinguishes the human display label Automatic from the unchanged machine value auto, so that token exception does not apply. No invented term, borrowed Latin abbreviation, approval verb, or unrestricted-permission promise."
+    }
+  ],
+  "hashes": {
+    "full_file_before_sha256": "df178c2af51d345e5692e2fe68ac3b069907548424efb5bda5b5dc01bcee95f2",
+    "full_file_after_sha256": "830fc55bf9a1df0dfb3d915574800b0aa563b83a95a9ed36caf7ebeb9ecbf28b",
+    "selected_before_canonical_sha256": "fb2f03d6f71f93691856fd6c1d07e6432b1d30e8217d16f538945c879948f0db",
+    "selected_after_canonical_sha256": "94367d26f1ed4d0f23fc9742ed53bd1e7e2a852611e73986bb3293f8aafa3fc8",
+    "canonical_method": "json.dumps(mapping, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')"
+  },
+  "authoring_controls": {
+    "catalogue_key_count_before": 895,
+    "catalogue_key_count_after": 895,
+    "selected_key_count": 2,
+    "changed_key_count": 1,
+    "retained_key_count": 1,
+    "other_894_values_unchanged": true,
+    "key_order_unchanged": true,
+    "formatting_and_all_other_bytes_unchanged": "Read-back equals original bytes with exactly the one auto-label value replacement",
+    "ICU_parser": "local_operator.i18n.runtime.parse_message, message_arguments and plural_arguments",
+    "ICU_result": "Both selected labels parse as text-only nodes; zero arguments and selectors, matching English; plural N/A",
+    "placeholders_unchanged": "Zero before and after in both source and target",
+    "NFC": true,
+    "authored_bidi_controls": 0,
+    "punctuation": "No punctuation in either selected label",
+    "synthetic_width_method": "rich.cells.cell_len; literal-only synthetic pseudo wrapper '[' + label + ' ~~~]'",
+    "widths": [
+      {"label": "hỏi trước", "cells": 9, "english_cells": 3, "synthetic_pseudo": "[hỏi trước ~~~]", "synthetic_cells": 15},
+      {"label": "Tự động", "cells": 7, "english_cells": 9, "synthetic_pseudo": "[Tự động ~~~]", "synthetic_cells": 13}
+    ],
+    "overflow_risk": "Retained hỏi trước is 9 cells versus English Ask at 3; flag for actual-layout validation. New Tự động is shorter than English Automatic. No maxCells provided for these contexts; synthetic cell measurements are not real-fit evidence.",
+    "application_browser_native_tests": "Not run: authoring-only scope explicitly forbids them"
+  },
+  "audit_status": "Authoring receipt only; independent safety auditors and native/rendered validation not performed or claimed by this translator",
+  "wire_values_guardrails_person_only_gates": "Not edited; this task changes only one display-label value",
+  "staging_commit_push": "Not performed"
+}

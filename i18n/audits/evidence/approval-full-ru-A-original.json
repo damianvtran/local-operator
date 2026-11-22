@@ -1,0 +1,1767 @@
+{
+  "locale": "ru",
+  "namespace": "wire.settings",
+  "side": "A",
+  "round": 1,
+  "status": "failed",
+  "source_sha256": "298fc1100cb10bfa34909aa245307a735dad318f456e5bbfb5337fbcdb1e8962",
+  "head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+  "context_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+  "target_sha256": "87ac6464c94f359c7ba6a045fe0e8d0ed1297c653d036d47da0aaedf3b90f4f8",
+  "translator": {
+    "agent": "approval-labels-author-ru",
+    "model": "openai/gpt-6.1-sol",
+    "source": "i18n/audits/evidence/approval-choice-translator-ru.json",
+    "scope": "auto label newly authored; ask retained; authorship of original 893 other keys unknown"
+  },
+  "auditor": {
+    "agent": "translation-auditor / approval-full-ru-A-cached",
+    "session_id": "00c790f37e53",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_evidence": "Host model-switch message: temporary fallback from anthropic/claude-opus-5-5 to openai/gpt-6.1-sol due to provider quota failure, before all catalogue semantic reading. Initial skill/AGENTS reads occurred before switch.",
+    "findings": 33,
+    "minor_count": 47
+  },
+  "inputs": {
+    "english": {
+      "path": "/Users/damian/.local-operator/sessions/6448acb16e8d/scratchpad/approval-full-en-A-approved-capture.json",
+      "envelope_sha256": "9ff37d2efa1d9c367ce7dcc9a01f1fa9f60f74601daf20dbb9d86c85698bf096",
+      "canonical_map_sha256": "f621866fb5e74c1b617e29e17d02008cb42dce6574aa3624ff9a557e1ef2a7b6"
+    },
+    "russian": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-full-inputs/ru-approved-envelope.json",
+      "envelope_sha256": "5456f858a3d0e6313a94516363026f64bea9275ab84f8ff0337fa2e2c77a0efc",
+      "canonical_map_sha256": "8bbe29760a31a538fefbf2848c9f2cf32a52e2fc92bd04e45c464e98071cdc52"
+    },
+    "validation": "Full exact envelope SHA, formatted tool text SHA, 895-key canonical digest, public_copy/repository_verified/root/commit checked. Original product files read as bytes solely for SHA validation, never as prose. Context 104 entries parsed only after full raw SHA match."
+  },
+  "coverage": {
+    "fresh_source_target_pairs_read": 895,
+    "fresh_context_entries_read": 104,
+    "retained_semantic_keys": 0,
+    "all_spill_middle_segments_read": true,
+    "subgroups": [
+      {
+        "range": [
+          1,
+          125
+        ],
+        "count": 125
+      },
+      {
+        "range": [
+          126,
+          195
+        ],
+        "count": 70
+      },
+      {
+        "range": [
+          196,
+          250
+        ],
+        "count": 55
+      },
+      {
+        "range": [
+          251,
+          305
+        ],
+        "count": 55
+      },
+      {
+        "range": [
+          306,
+          360
+        ],
+        "count": 55
+      },
+      {
+        "range": [
+          361,
+          415
+        ],
+        "count": 55
+      },
+      {
+        "range": [
+          416,
+          465
+        ],
+        "count": 50
+      },
+      {
+        "range": [
+          466,
+          515
+        ],
+        "count": 50
+      },
+      {
+        "range": [
+          516,
+          565
+        ],
+        "count": 50
+      },
+      {
+        "range": [
+          566,
+          615
+        ],
+        "count": 50
+      },
+      {
+        "range": [
+          616,
+          665
+        ],
+        "count": 50
+      },
+      {
+        "range": [
+          666,
+          715
+        ],
+        "count": 50
+      },
+      {
+        "range": [
+          716,
+          765
+        ],
+        "count": 50
+      },
+      {
+        "range": [
+          766,
+          815
+        ],
+        "count": 50
+      },
+      {
+        "range": [
+          816,
+          855
+        ],
+        "count": 40
+      },
+      {
+        "range": [
+          856,
+          895
+        ],
+        "count": 40
+      }
+    ]
+  },
+  "new_two_labels": {
+    "status": "passed_semantics",
+    "keys": [
+      "wire.settings.tool_approval_mode.choice.ask.label",
+      "wire.settings.tool_approval_mode.choice.auto.label"
+    ],
+    "reason": "спрашивать is an idiomatic infinitive behaviour label; автоматически is a conventional adverbial mode label. Neither introduces unconditional permission, every-tool prompting, human-only-gate removal or guardrail bypass. Lowercase follows existing choice register. Source Choice.value ask/auto remains distinct and unchanged.",
+    "width": [
+      {
+        "key": "wire.settings.tool_approval_mode.choice.ask.label",
+        "en_cells": 3,
+        "ru_cells": 10,
+        "literal_pseudo": "⟦спрашивать~~~⟧",
+        "pseudo_cells": 15,
+        "synthetic_bidi_roundtrip": "PASS; RLI/PDI plus ABC-123 /path, not rendered RTL evidence"
+      },
+      {
+        "key": "wire.settings.tool_approval_mode.choice.auto.label",
+        "en_cells": 9,
+        "ru_cells": 13,
+        "literal_pseudo": "⟦автоматически~~~~⟧",
+        "pseudo_cells": 19,
+        "synthetic_bidi_roundtrip": "PASS; RLI/PDI plus ABC-123 /path, not rendered RTL evidence"
+      }
+    ],
+    "rendered_fit": "unverified"
+  },
+  "findings": [
+    {
+      "id": "RU-A-M1.01",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.bash_memory_mode.choice.auto.label",
+      "english": "auto",
+      "current": "auto",
+      "proposed": "автоматически",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.02",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.bash_memory_mode.choice.manual.label",
+      "english": "manual",
+      "current": "manual",
+      "proposed": "вручную",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.03",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.classification_vendor.choice.auto.label",
+      "english": "auto",
+      "current": "auto",
+      "proposed": "автоматически",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.04",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.compaction_strategy.choice.auto.label",
+      "english": "auto",
+      "current": "auto",
+      "proposed": "автоматически",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.05",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.display_nerd_icons.choice.none.label",
+      "english": "auto",
+      "current": "auto",
+      "proposed": "автоматически",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.06",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.model_effort.choice.unset.label",
+      "english": "auto",
+      "current": "auto",
+      "proposed": "по умолчанию",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.07",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.network_rollout_on_update.choice.auto.label",
+      "english": "auto",
+      "current": "auto",
+      "proposed": "автоматически",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.08",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+      "english": "false",
+      "current": "false",
+      "proposed": "не переключаться",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.09",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+      "english": "default",
+      "current": "default",
+      "proposed": "по умолчанию",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.10",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "english": "allow",
+      "current": "allow",
+      "proposed": "разрешить",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.11",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "english": "deny",
+      "current": "deny",
+      "proposed": "запретить",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.12",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+      "english": "default",
+      "current": "default",
+      "proposed": "по умолчанию",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.13",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+      "english": "true",
+      "current": "true",
+      "proposed": "включено",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.14",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+      "english": "default",
+      "current": "default",
+      "proposed": "по умолчанию",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.15",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+      "english": "true",
+      "current": "true",
+      "proposed": "включено",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.16",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+      "english": "default",
+      "current": "default",
+      "proposed": "по умолчанию",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.17",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+      "english": "default",
+      "current": "default",
+      "proposed": "по умолчанию",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.18",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+      "english": "true",
+      "current": "true",
+      "proposed": "включено",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.19",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+      "english": "default",
+      "current": "default",
+      "proposed": "по умолчанию",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.20",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "english": "allowlist",
+      "current": "allowlist",
+      "proposed": "разрешённый список",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.21",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+      "english": "inherit",
+      "current": "inherit",
+      "proposed": "наследовать",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.22",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+      "english": "auto",
+      "current": "auto",
+      "proposed": "автоматически",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.23",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+      "english": "client",
+      "current": "client",
+      "proposed": "на клиенте",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.24",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+      "english": "off",
+      "current": "off",
+      "proposed": "отключено",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.25",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+      "english": "provider",
+      "current": "provider",
+      "proposed": "у провайдера",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.26",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.speech_voice_gender.choice.auto.label",
+      "english": "auto",
+      "current": "auto",
+      "proposed": "автоматически",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.27",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.speech_voice_gender.choice.female.label",
+      "english": "female",
+      "current": "female",
+      "proposed": "женский",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.28",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.speech_voice_gender.choice.male.label",
+      "english": "male",
+      "current": "male",
+      "proposed": "мужской",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.29",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.web_fetch_render_backend.choice.auto.label",
+      "english": "auto",
+      "current": "auto",
+      "proposed": "автоматически",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.30",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.web_search_strategy.choice.ordered.label",
+      "english": "ordered",
+      "current": "ordered",
+      "proposed": "по порядку",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M1.31",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+      "english": "round_robin",
+      "current": "round_robin",
+      "proposed": "по кругу",
+      "reason": "Untranslated English enum token is used as an independently localized human-facing Choice.label; the stable Choice.value can and must remain unchanged. This violates the requested no-English human-label acceptance criterion, not the technical-token exception."
+    },
+    {
+      "id": "RU-A-M3",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.team_bridge_session.label",
+      "english": "CoS session",
+      "current": "Сессия CoS",
+      "proposed": "Сессия главы аппарата",
+      "reason": "CoS is the untranslated English human-role abbreviation Chief of Staff, not a model, brand, command or configuration value; the same role is already translated as «Глава аппарата» in aida_enabled.label."
+    },
+    {
+      "id": "RU-A-M2",
+      "severity": "major",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+      "english": "Today's constant.",
+      "current": "Текущая константа.",
+      "proposed": "Обычная подача.",
+      "reason": "«Текущая константа» reads as a mathematical/configuration constant, not ordinary existing vocal delivery; the source context explicitly excludes the mathematical-constant reading."
+    },
+    {
+      "id": "RU-A-m1",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.retired.title",
+      "english": "Retired",
+      "current": "Выведенные",
+      "proposed": "Устаревшие",
+      "reason": "«Выведенные» is an incomplete Russian participle here; the section names inactive/retired settings, not something displayed or printed."
+    },
+    {
+      "id": "RU-A-m2",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.detail_length.label",
+      "english": "Detail length",
+      "current": "Длина детализации",
+      "proposed": "Объём подробностей",
+      "reason": "«Длина детализации» is a literal and unnatural rendering of the amount of detail."
+    },
+    {
+      "id": "RU-A-m3",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.proactive_patience_default_ms.label",
+      "english": "Default patience wait (ms)",
+      "current": "Ожидание терпения по умолчанию (мс)",
+      "proposed": "Ожидание по умолчанию (мс)",
+      "reason": "«Ожидание терпения» is an unnatural calque: the setting is a wait duration, not waiting for patience; the neighbouring backoff label already uses «ожиданий»."
+    },
+    {
+      "id": "RU-A-m4",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.web_fetch_blocked_retry.choice.false.description",
+      "english": "stay self-identifying",
+      "current": "оставаться узнаваемым",
+      "proposed": "явно представляться",
+      "reason": "«Оставаться узнаваемым» means remaining recognizable, not explicitly identifying the fetch client instead of impersonating browser headers; the adjacent help establishes that contrast."
+    },
+    {
+      "id": "RU-A-W1.01",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.agents_auto_update_seeds.label",
+      "english": "Auto-update built-in roles",
+      "current": "Автообновление встроенных ролей",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 31 Russian cells versus 26 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.02",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.aida_cadence_at.label",
+      "english": "Daily check-in time",
+      "current": "Время ежедневного выхода на связь",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 33 Russian cells versus 19 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.03",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.aida_cadence_max_extra_per_day.label",
+      "english": "Extra check-ins / day",
+      "current": "Дополнительные выходы на связь в день",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 37 Russian cells versus 21 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.04",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.aida_onboarding_nudge_days.label",
+      "english": "Integration nudge interval (days)",
+      "current": "Интервал напоминаний об интеграции (дни)",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 40 Russian cells versus 33 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.05",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.bash_query_budget_stop.label",
+      "english": "...stop rather than warn",
+      "current": "…останавливать, а не предупреждать",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 34 Russian cells versus 24 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.06",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.compaction_idle_min_growth_tokens.label",
+      "english": "Idle min growth (tokens)",
+      "current": "Мин. прирост в простое (токены)",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 31 Russian cells versus 24 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.07",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.compaction_resume_replay.label",
+      "english": "Resume replay",
+      "current": "Воспроизведение при возобновлении",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 33 Russian cells versus 13 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.08",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.compaction_wire_bytes_trigger.label",
+      "english": "Request size trigger (bytes)",
+      "current": "Триггер размера запроса (байты)",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 31 Russian cells versus 28 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.09",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.display_composer_rate.label",
+      "english": "Band: decode rate",
+      "current": "Полоса: скорость декодирования",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 30 Russian cells versus 17 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.10",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.hooks_forward_claude.label",
+      "english": "Forward Claude Code hooks",
+      "current": "Перенаправлять хуки Claude Code",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 31 Russian cells versus 25 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.11",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.local_providers.models.label",
+      "english": "{name} model overrides",
+      "current": "переопределения моделей для {name}",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 34 Russian cells versus 22 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.12",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.model_effort.label",
+      "english": "Default reasoning effort",
+      "current": "Усилие рассуждений по умолчанию",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 31 Russian cells versus 24 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.13",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.monitor_classifymaxchars.label",
+      "english": "Classifier state (chars)",
+      "current": "Состояние классификатора (символы)",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 34 Russian cells versus 24 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.14",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.monitor_normalizetimestamps.label",
+      "english": "Ignore timestamp churn",
+      "current": "Игнорировать шум меток времени",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 30 Russian cells versus 22 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.15",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.network_credentials_grant_ttl_s.label",
+      "english": "Borrowed login lifetime (s)",
+      "current": "Срок жизни заимствованного логина (сек)",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 39 Russian cells versus 27 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.16",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.network_credentials_offline_hold_s.label",
+      "english": "Borrowed login hold while owner is away (s)",
+      "current": "Удержание логина в отсутствие владельца (сек)",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 45 Russian cells versus 43 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.17",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.network_rollout_on_update.label",
+      "english": "Roll the mesh after an update",
+      "current": "Раскатывать меш-сеть после обновления",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 37 Russian cells versus 29 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.18",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.network_sync_debounce_s.label",
+      "english": "Sync quiet period (s)",
+      "current": "Период тишины синхронизации (сек)",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 33 Russian cells versus 21 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.19",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.network_sync_tick_s.label",
+      "english": "Sync check interval (s)",
+      "current": "Интервал проверки синхронизации (сек)",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 37 Russian cells versus 23 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.20",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.proactive_patience_default_ms.label",
+      "english": "Default patience wait (ms)",
+      "current": "Ожидание терпения по умолчанию (мс)",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 35 Russian cells versus 26 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.21",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.proactive_patience_max_pending.label",
+      "english": "Pending waits per session",
+      "current": "Незавершённые ожидания на сессию",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 32 Russian cells versus 25 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.22",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.label",
+      "english": "Anthropic 1h cache above (tokens)",
+      "current": "Кэш Anthropic на 1 ч свыше (токены)",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 35 Russian cells versus 33 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.23",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.providers_openai_use_max_context_window.label",
+      "english": "Use maximum OpenAI context",
+      "current": "Использовать максимальный контекст OpenAI",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 41 Russian cells versus 26 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.24",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.providers_openrouter_preferred_min_throughput.label",
+      "english": "min throughput (tok/s)",
+      "current": "мин. пропускная способность (ток/с)",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 35 Russian cells versus 22 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.25",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.retry_connectivitybackoffcapms.label",
+      "english": "Connectivity backoff cap (ms)",
+      "current": "Потолок задержки подключения (мс)",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 33 Russian cells versus 29 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.26",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.retry_pinnedfallback.label",
+      "english": "Pinned child fallback",
+      "current": "Резервный переход закреплённой дочерней сессии",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 46 Russian cells versus 21 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.27",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.retry_usageawareaccountpick.label",
+      "english": "Usage-aware account pick",
+      "current": "Выбор аккаунта по использованию",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 31 Russian cells versus 24 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.28",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.retry_usageawarefallback.label",
+      "english": "Usage-aware fallback",
+      "current": "Резервный переход по использованию",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 34 Russian cells versus 20 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.29",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.runtime_background_on_resume.label",
+      "english": "Keep working after /resume",
+      "current": "Продолжать работу после /resume",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 31 Russian cells versus 26 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.30",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.runtime_keep_alive_seconds.label",
+      "english": "Keep closed conversations warm (s)",
+      "current": "Держать закрытые беседы тёплыми (сек)",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 37 Russian cells versus 34 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.31",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.runtime_unattended_gate_timeout.label",
+      "english": "Unattended question timeout (h)",
+      "current": "Тайм-аут вопроса в ваше отсутствие (ч)",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 38 Russian cells versus 31 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.32",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.send_journal_unconfirmed.label",
+      "english": "Journal unacknowledged sends",
+      "current": "Журналировать неподтверждённые отправки",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 39 Russian cells versus 28 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.33",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.shell_environment_inherit.label",
+      "english": "…kept in allowlist mode",
+      "current": "…сохраняются в режиме allowlist",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 31 Russian cells versus 23 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.34",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.static_roots.label",
+      "english": "Extra preview roots",
+      "current": "Дополнительные корни предпросмотра",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 34 Russian cells versus 19 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.35",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.subagents_max_team_depth.label",
+      "english": "Max nested-team depth",
+      "current": "Макс. глубина вложенных команд",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 30 Russian cells versus 21 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.36",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.subagents_slim_child_knowledge.label",
+      "english": "Slim child knowledge",
+      "current": "Урезание знаний дочерних сессий",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 31 Russian cells versus 20 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.37",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.tools_defer.label",
+      "english": "Load rarely used tool schemas on demand",
+      "current": "Загружать схемы редких инструментов по требованию",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 49 Russian cells versus 39 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.38",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.tools_search_interception_block.label",
+      "english": "...refuse rather than warn",
+      "current": "…отклонять, а не предупреждать",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 30 Russian cells versus 26 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.39",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.tools_search_interception_enabled.label",
+      "english": "Block unbounded searches",
+      "current": "Блокировать неограниченные поиски",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 33 Russian cells versus 24 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.40",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.tools_search_interception_rg_excludes.label",
+      "english": "...prune vendor trees for ripgrep",
+      "current": "…обрезать деревья vendor для ripgrep",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 36 Russian cells versus 33 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.41",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.tui_sidebar_show_subagents.label",
+      "english": "Sidebar subagent layer",
+      "current": "Слой субагентов на боковой панели",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 33 Russian cells versus 22 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.42",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.wakes_triggers_max_per_day.label",
+      "english": "Max check-in wakes per day",
+      "current": "Макс. пробуждений для выхода на связь в день",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 44 Russian cells versus 26 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    },
+    {
+      "id": "RU-A-W1.43",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.mesh_move_working_set_max_bytes.label",
+      "english": "Working-files cap per move (bytes)",
+      "current": "Лимит рабочих файлов на перенос (байт)",
+      "proposed": "Rendered check required; retain only if complete meaning fits, otherwise shorten this label without dropping its unit or qualifier.",
+      "reason": "Relative-width risk: 38 Russian cells versus 34 English cells and the common 29-cell TUI label column. No clipping was observed; this is not rendered evidence."
+    }
+  ],
+  "finding_groups": {
+    "RU-A-M1": "31 inherited untranslated human-choice labels, one systemic issue",
+    "RU-A-M2": "1 inherited meaning error",
+    "RU-A-M3": "1 inherited untranslated human-role abbreviation",
+    "RU-A-W1": "43 inherited relative-width checks; no observed clipping, no standalone style-remediation wave requested"
+  },
+  "passed_vs_uncleared": {
+    "reviewed_keys": 895,
+    "keys_without_recorded_finding": 816,
+    "uncleared_keys": [
+      "wire.settings.agents_auto_update_seeds.label",
+      "wire.settings.aida_cadence_at.label",
+      "wire.settings.aida_cadence_max_extra_per_day.label",
+      "wire.settings.aida_onboarding_nudge_days.label",
+      "wire.settings.bash_memory_mode.choice.auto.label",
+      "wire.settings.bash_memory_mode.choice.manual.label",
+      "wire.settings.bash_query_budget_stop.label",
+      "wire.settings.classification_vendor.choice.auto.label",
+      "wire.settings.compaction_idle_min_growth_tokens.label",
+      "wire.settings.compaction_resume_replay.label",
+      "wire.settings.compaction_strategy.choice.auto.label",
+      "wire.settings.compaction_wire_bytes_trigger.label",
+      "wire.settings.detail_length.label",
+      "wire.settings.display_composer_rate.label",
+      "wire.settings.display_nerd_icons.choice.none.label",
+      "wire.settings.hooks_forward_claude.label",
+      "wire.settings.local_providers.models.label",
+      "wire.settings.mesh_move_working_set_max_bytes.label",
+      "wire.settings.model_effort.choice.unset.label",
+      "wire.settings.model_effort.label",
+      "wire.settings.monitor_classifymaxchars.label",
+      "wire.settings.monitor_normalizetimestamps.label",
+      "wire.settings.network_credentials_grant_ttl_s.label",
+      "wire.settings.network_credentials_offline_hold_s.label",
+      "wire.settings.network_rollout_on_update.choice.auto.label",
+      "wire.settings.network_rollout_on_update.label",
+      "wire.settings.network_sync_debounce_s.label",
+      "wire.settings.network_sync_tick_s.label",
+      "wire.settings.proactive_patience_default_ms.label",
+      "wire.settings.proactive_patience_max_pending.label",
+      "wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.label",
+      "wire.settings.providers_openai_use_max_context_window.label",
+      "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+      "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+      "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+      "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+      "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+      "wire.settings.providers_openrouter_preferred_min_throughput.label",
+      "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+      "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+      "wire.settings.providers_openrouter_sort.choice.unset.label",
+      "wire.settings.providers_openrouter_zdr.choice.true.label",
+      "wire.settings.providers_openrouter_zdr.choice.unset.label",
+      "wire.settings.retired.title",
+      "wire.settings.retry_connectivitybackoffcapms.label",
+      "wire.settings.retry_pinnedfallback.label",
+      "wire.settings.retry_usageawareaccountpick.label",
+      "wire.settings.retry_usageawarefallback.label",
+      "wire.settings.runtime_background_on_resume.label",
+      "wire.settings.runtime_keep_alive_seconds.label",
+      "wire.settings.runtime_unattended_gate_timeout.label",
+      "wire.settings.send_journal_unconfirmed.label",
+      "wire.settings.shell_environment_inherit.label",
+      "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "wire.settings.shell_environment_mode.choice.inherit.label",
+      "wire.settings.speech_transcription_cleanup.choice.auto.label",
+      "wire.settings.speech_transcription_cleanup.choice.client.label",
+      "wire.settings.speech_transcription_cleanup.choice.off.label",
+      "wire.settings.speech_transcription_cleanup.choice.provider.label",
+      "wire.settings.speech_voice_expressiveness.choice.medium.description",
+      "wire.settings.speech_voice_gender.choice.auto.label",
+      "wire.settings.speech_voice_gender.choice.female.label",
+      "wire.settings.speech_voice_gender.choice.male.label",
+      "wire.settings.static_roots.label",
+      "wire.settings.subagents_max_team_depth.label",
+      "wire.settings.subagents_slim_child_knowledge.label",
+      "wire.settings.team_bridge_session.label",
+      "wire.settings.tools_defer.label",
+      "wire.settings.tools_search_interception_block.label",
+      "wire.settings.tools_search_interception_enabled.label",
+      "wire.settings.tools_search_interception_rg_excludes.label",
+      "wire.settings.tui_sidebar_show_subagents.label",
+      "wire.settings.wakes_triggers_max_per_day.label",
+      "wire.settings.web_fetch_blocked_retry.choice.false.description",
+      "wire.settings.web_fetch_render_backend.choice.auto.label",
+      "wire.settings.web_search_strategy.choice.ordered.label",
+      "wire.settings.web_search_strategy.choice.round_robin.label"
+    ],
+    "blocker_major_keys": [
+      "wire.settings.bash_memory_mode.choice.auto.label",
+      "wire.settings.bash_memory_mode.choice.manual.label",
+      "wire.settings.classification_vendor.choice.auto.label",
+      "wire.settings.compaction_strategy.choice.auto.label",
+      "wire.settings.display_nerd_icons.choice.none.label",
+      "wire.settings.model_effort.choice.unset.label",
+      "wire.settings.network_rollout_on_update.choice.auto.label",
+      "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+      "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+      "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+      "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+      "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+      "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+      "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+      "wire.settings.providers_openrouter_sort.choice.unset.label",
+      "wire.settings.providers_openrouter_zdr.choice.true.label",
+      "wire.settings.providers_openrouter_zdr.choice.unset.label",
+      "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "wire.settings.shell_environment_mode.choice.inherit.label",
+      "wire.settings.speech_transcription_cleanup.choice.auto.label",
+      "wire.settings.speech_transcription_cleanup.choice.client.label",
+      "wire.settings.speech_transcription_cleanup.choice.off.label",
+      "wire.settings.speech_transcription_cleanup.choice.provider.label",
+      "wire.settings.speech_voice_expressiveness.choice.medium.description",
+      "wire.settings.speech_voice_gender.choice.auto.label",
+      "wire.settings.speech_voice_gender.choice.female.label",
+      "wire.settings.speech_voice_gender.choice.male.label",
+      "wire.settings.team_bridge_session.label",
+      "wire.settings.web_fetch_render_backend.choice.auto.label",
+      "wire.settings.web_search_strategy.choice.ordered.label",
+      "wire.settings.web_search_strategy.choice.round_robin.label"
+    ],
+    "new_two_semantics_passed": 2,
+    "whole_namespace_passed": false
+  },
+  "named_exceptions": [
+    {
+      "key": "wire.settings.classification_vendor.choice.openrouter.label",
+      "current": "openrouter",
+      "reason": "Official provider/product name, not an English instruction."
+    },
+    {
+      "key": "wire.settings.classification_vendor.choice.radient.label",
+      "current": "radient",
+      "reason": "Official provider/product name, not an English instruction."
+    },
+    {
+      "key": "wire.settings.classification_vendor.choice.typesafe.label",
+      "current": "typesafe",
+      "reason": "Official provider/product name, not an English instruction."
+    },
+    {
+      "key": "wire.settings.compaction_strategy.choice.context_full.label",
+      "current": "context-full",
+      "reason": "Named compaction implementation; technical algorithm identifier."
+    },
+    {
+      "key": "wire.settings.compaction_strategy.choice.snapcompact.label",
+      "current": "snapcompact",
+      "reason": "Named compaction implementation; technical algorithm identifier."
+    },
+    {
+      "key": "wire.settings.providers_openai_api.choice.chat_completions.label",
+      "current": "chat_completions",
+      "reason": "Named API surface; technical API identifier."
+    },
+    {
+      "key": "wire.settings.providers_openai_api.choice.responses.label",
+      "current": "responses",
+      "reason": "Named API surface; technical API identifier."
+    },
+    {
+      "key": "wire.settings.web_fetch_render_backend.choice.stdlib.label",
+      "current": "stdlib",
+      "reason": "Named Python standard-library implementation; technical renderer identifier."
+    },
+    {
+      "key": "wire.settings.guardrails_enabled.help",
+      "token": "dangerous-delete",
+      "reason": "Context explicitly identifies the built-in rule identifier; surrounding safety prose translated."
+    },
+    {
+      "key": "wire.settings.providers_bedrock_auth.help",
+      "token": "ambient",
+      "reason": "Context explicitly says literal value to type."
+    },
+    {
+      "key": "wire.settings.desktop_launch_command.placeholder",
+      "token": "local-operator-ui --open-session '{'session'}'",
+      "reason": "Literal launch command and escaped session placeholder."
+    },
+    {
+      "key": "wire.settings.local_providers.models.help",
+      "token": "JSON model-id/context_window snippet",
+      "reason": "Machine-readable JSON example, escaped ICU literal braces preserved."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_max_price.placeholder",
+      "token": "'{'\"prompt\": 1, \"completion\": 2'}'",
+      "reason": "Machine-readable JSON example."
+    },
+    {
+      "key": "wire.settings.aida.title",
+      "token": "Aida",
+      "reason": "Agent display name."
+    },
+    {
+      "key": "wire.settings.hub.title",
+      "token": "Agent Hub",
+      "reason": "Product/service name."
+    },
+    {
+      "key": "wire.settings.display_time_format.choice.12h.description",
+      "token": "7:52 PM PDT",
+      "reason": "Literal 12-hour clock-format example, not English description prose."
+    },
+    {
+      "key": "wire.settings.display_time_format.choice.24h.description",
+      "token": "19:52 PDT",
+      "reason": "Literal 24-hour clock-format example with timezone abbreviation."
+    }
+  ],
+  "controls": {
+    "keys": 895,
+    "parse_shape_errors": [],
+    "argument_keys": {
+      "wire.settings.local_providers.base_url.label": [
+        [
+          "name",
+          "simple"
+        ]
+      ],
+      "wire.settings.local_providers.models.label": [
+        [
+          "name",
+          "simple"
+        ]
+      ]
+    },
+    "missing_argument_negative": [
+      [
+        "wire.settings.local_providers.base_url.label",
+        "PASS"
+      ],
+      [
+        "wire.settings.local_providers.models.label",
+        "PASS"
+      ]
+    ],
+    "nfc_failures": [],
+    "bidi_controls": [],
+    "markup_mismatches": [],
+    "plural_messages": 0,
+    "ru_categories": [
+      "few",
+      "many",
+      "one",
+      "other"
+    ],
+    "cldr_samples": {
+      "0": "many",
+      "1": "one",
+      "2": "few",
+      "4": "few",
+      "5": "many",
+      "11": "many",
+      "21": "one",
+      "22": "few",
+      "25": "many",
+      "1.5": "other"
+    },
+    "context_width_exceeded": [],
+    "same_english_labels": [
+      [
+        "wire.settings.bash_memory_mode.choice.auto.label",
+        "auto",
+        "auto"
+      ],
+      [
+        "wire.settings.bash_memory_mode.choice.manual.label",
+        "manual",
+        "manual"
+      ],
+      [
+        "wire.settings.classification_vendor.choice.auto.label",
+        "auto",
+        "auto"
+      ],
+      [
+        "wire.settings.classification_vendor.choice.openrouter.label",
+        "openrouter",
+        "openrouter"
+      ],
+      [
+        "wire.settings.classification_vendor.choice.radient.label",
+        "radient",
+        "radient"
+      ],
+      [
+        "wire.settings.classification_vendor.choice.typesafe.label",
+        "typesafe",
+        "typesafe"
+      ],
+      [
+        "wire.settings.compaction_strategy.choice.auto.label",
+        "auto",
+        "auto"
+      ],
+      [
+        "wire.settings.compaction_strategy.choice.context_full.label",
+        "context-full",
+        "context-full"
+      ],
+      [
+        "wire.settings.compaction_strategy.choice.snapcompact.label",
+        "snapcompact",
+        "snapcompact"
+      ],
+      [
+        "wire.settings.display_nerd_icons.choice.none.label",
+        "auto",
+        "auto"
+      ],
+      [
+        "wire.settings.model_effort.choice.unset.label",
+        "auto",
+        "auto"
+      ],
+      [
+        "wire.settings.network_rollout_on_update.choice.auto.label",
+        "auto",
+        "auto"
+      ],
+      [
+        "wire.settings.providers_openai_api.choice.chat_completions.label",
+        "chat_completions",
+        "chat_completions"
+      ],
+      [
+        "wire.settings.providers_openai_api.choice.responses.label",
+        "responses",
+        "responses"
+      ],
+      [
+        "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+        "false",
+        "false"
+      ],
+      [
+        "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+        "default",
+        "default"
+      ],
+      [
+        "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+        "allow",
+        "allow"
+      ],
+      [
+        "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+        "deny",
+        "deny"
+      ],
+      [
+        "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+        "default",
+        "default"
+      ],
+      [
+        "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+        "true",
+        "true"
+      ],
+      [
+        "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+        "default",
+        "default"
+      ],
+      [
+        "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+        "true",
+        "true"
+      ],
+      [
+        "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+        "default",
+        "default"
+      ],
+      [
+        "wire.settings.providers_openrouter_sort.choice.unset.label",
+        "default",
+        "default"
+      ],
+      [
+        "wire.settings.providers_openrouter_zdr.choice.true.label",
+        "true",
+        "true"
+      ],
+      [
+        "wire.settings.providers_openrouter_zdr.choice.unset.label",
+        "default",
+        "default"
+      ],
+      [
+        "wire.settings.shell_environment_mode.choice.allowlist.label",
+        "allowlist",
+        "allowlist"
+      ],
+      [
+        "wire.settings.shell_environment_mode.choice.inherit.label",
+        "inherit",
+        "inherit"
+      ],
+      [
+        "wire.settings.speech_transcription_cleanup.choice.auto.label",
+        "auto",
+        "auto"
+      ],
+      [
+        "wire.settings.speech_transcription_cleanup.choice.client.label",
+        "client",
+        "client"
+      ],
+      [
+        "wire.settings.speech_transcription_cleanup.choice.off.label",
+        "off",
+        "off"
+      ],
+      [
+        "wire.settings.speech_transcription_cleanup.choice.provider.label",
+        "provider",
+        "provider"
+      ],
+      [
+        "wire.settings.speech_voice_gender.choice.auto.label",
+        "auto",
+        "auto"
+      ],
+      [
+        "wire.settings.speech_voice_gender.choice.female.label",
+        "female",
+        "female"
+      ],
+      [
+        "wire.settings.speech_voice_gender.choice.male.label",
+        "male",
+        "male"
+      ],
+      [
+        "wire.settings.web_fetch_render_backend.choice.auto.label",
+        "auto",
+        "auto"
+      ],
+      [
+        "wire.settings.web_fetch_render_backend.choice.stdlib.label",
+        "stdlib",
+        "stdlib"
+      ],
+      [
+        "wire.settings.web_search_strategy.choice.ordered.label",
+        "ordered",
+        "ordered"
+      ],
+      [
+        "wire.settings.web_search_strategy.choice.round_robin.label",
+        "round_robin",
+        "round_robin"
+      ]
+    ]
+  },
+  "additional_controls": {
+    "positive": [
+      {
+        "key": "wire.settings.local_providers.base_url.label",
+        "output": "endpoint Сервер ABC"
+      },
+      {
+        "key": "wire.settings.local_providers.models.label",
+        "output": "переопределения моделей для Сервер ABC"
+      }
+    ],
+    "synthetic": [
+      {
+        "key": "wire.settings.tool_approval_mode.choice.ask.label",
+        "en_cells": 3,
+        "ru_cells": 10,
+        "literal_pseudo": "⟦спрашивать~~~⟧",
+        "pseudo_cells": 15,
+        "synthetic_bidi_roundtrip": "PASS; RLI/PDI plus ABC-123 /path, not rendered RTL evidence"
+      },
+      {
+        "key": "wire.settings.tool_approval_mode.choice.auto.label",
+        "en_cells": 9,
+        "ru_cells": 13,
+        "literal_pseudo": "⟦автоматически~~~~⟧",
+        "pseudo_cells": 19,
+        "synthetic_bidi_roundtrip": "PASS; RLI/PDI plus ABC-123 /path, not rendered RTL evidence"
+      }
+    ],
+    "labels_over_29": [
+      {
+        "key": "wire.settings.agents_auto_update_seeds.label",
+        "en_cells": 26,
+        "ru_cells": 31,
+        "current": "Автообновление встроенных ролей"
+      },
+      {
+        "key": "wire.settings.aida_cadence_at.label",
+        "en_cells": 19,
+        "ru_cells": 33,
+        "current": "Время ежедневного выхода на связь"
+      },
+      {
+        "key": "wire.settings.aida_cadence_max_extra_per_day.label",
+        "en_cells": 21,
+        "ru_cells": 37,
+        "current": "Дополнительные выходы на связь в день"
+      },
+      {
+        "key": "wire.settings.aida_onboarding_nudge_days.label",
+        "en_cells": 33,
+        "ru_cells": 40,
+        "current": "Интервал напоминаний об интеграции (дни)"
+      },
+      {
+        "key": "wire.settings.bash_query_budget_stop.label",
+        "en_cells": 24,
+        "ru_cells": 34,
+        "current": "…останавливать, а не предупреждать"
+      },
+      {
+        "key": "wire.settings.compaction_idle_min_growth_tokens.label",
+        "en_cells": 24,
+        "ru_cells": 31,
+        "current": "Мин. прирост в простое (токены)"
+      },
+      {
+        "key": "wire.settings.compaction_resume_replay.label",
+        "en_cells": 13,
+        "ru_cells": 33,
+        "current": "Воспроизведение при возобновлении"
+      },
+      {
+        "key": "wire.settings.compaction_wire_bytes_trigger.label",
+        "en_cells": 28,
+        "ru_cells": 31,
+        "current": "Триггер размера запроса (байты)"
+      },
+      {
+        "key": "wire.settings.display_composer_rate.label",
+        "en_cells": 17,
+        "ru_cells": 30,
+        "current": "Полоса: скорость декодирования"
+      },
+      {
+        "key": "wire.settings.hooks_forward_claude.label",
+        "en_cells": 25,
+        "ru_cells": 31,
+        "current": "Перенаправлять хуки Claude Code"
+      },
+      {
+        "key": "wire.settings.local_providers.models.label",
+        "en_cells": 22,
+        "ru_cells": 34,
+        "current": "переопределения моделей для {name}"
+      },
+      {
+        "key": "wire.settings.model_effort.label",
+        "en_cells": 24,
+        "ru_cells": 31,
+        "current": "Усилие рассуждений по умолчанию"
+      },
+      {
+        "key": "wire.settings.monitor_classifymaxchars.label",
+        "en_cells": 24,
+        "ru_cells": 34,
+        "current": "Состояние классификатора (символы)"
+      },
+      {
+        "key": "wire.settings.monitor_normalizetimestamps.label",
+        "en_cells": 22,
+        "ru_cells": 30,
+        "current": "Игнорировать шум меток времени"
+      },
+      {
+        "key": "wire.settings.network_credentials_grant_ttl_s.label",
+        "en_cells": 27,
+        "ru_cells": 39,
+        "current": "Срок жизни заимствованного логина (сек)"
+      },
+      {
+        "key": "wire.settings.network_credentials_offline_hold_s.label",
+        "en_cells": 43,
+        "ru_cells": 45,
+        "current": "Удержание логина в отсутствие владельца (сек)"
+      },
+      {
+        "key": "wire.settings.network_rollout_on_update.label",
+        "en_cells": 29,
+        "ru_cells": 37,
+        "current": "Раскатывать меш-сеть после обновления"
+      },
+      {
+        "key": "wire.settings.network_sync_debounce_s.label",
+        "en_cells": 21,
+        "ru_cells": 33,
+        "current": "Период тишины синхронизации (сек)"
+      },
+      {
+        "key": "wire.settings.network_sync_tick_s.label",
+        "en_cells": 23,
+        "ru_cells": 37,
+        "current": "Интервал проверки синхронизации (сек)"
+      },
+      {
+        "key": "wire.settings.proactive_patience_default_ms.label",
+        "en_cells": 26,
+        "ru_cells": 35,
+        "current": "Ожидание терпения по умолчанию (мс)"
+      },
+      {
+        "key": "wire.settings.proactive_patience_max_pending.label",
+        "en_cells": 25,
+        "ru_cells": 32,
+        "current": "Незавершённые ожидания на сессию"
+      },
+      {
+        "key": "wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.label",
+        "en_cells": 33,
+        "ru_cells": 35,
+        "current": "Кэш Anthropic на 1 ч свыше (токены)"
+      },
+      {
+        "key": "wire.settings.providers_openai_use_max_context_window.label",
+        "en_cells": 26,
+        "ru_cells": 41,
+        "current": "Использовать максимальный контекст OpenAI"
+      },
+      {
+        "key": "wire.settings.providers_openrouter_preferred_min_throughput.label",
+        "en_cells": 22,
+        "ru_cells": 35,
+        "current": "мин. пропускная способность (ток/с)"
+      },
+      {
+        "key": "wire.settings.retry_connectivitybackoffcapms.label",
+        "en_cells": 29,
+        "ru_cells": 33,
+        "current": "Потолок задержки подключения (мс)"
+      },
+      {
+        "key": "wire.settings.retry_pinnedfallback.label",
+        "en_cells": 21,
+        "ru_cells": 46,
+        "current": "Резервный переход закреплённой дочерней сессии"
+      },
+      {
+        "key": "wire.settings.retry_usageawareaccountpick.label",
+        "en_cells": 24,
+        "ru_cells": 31,
+        "current": "Выбор аккаунта по использованию"
+      },
+      {
+        "key": "wire.settings.retry_usageawarefallback.label",
+        "en_cells": 20,
+        "ru_cells": 34,
+        "current": "Резервный переход по использованию"
+      },
+      {
+        "key": "wire.settings.runtime_background_on_resume.label",
+        "en_cells": 26,
+        "ru_cells": 31,
+        "current": "Продолжать работу после /resume"
+      },
+      {
+        "key": "wire.settings.runtime_keep_alive_seconds.label",
+        "en_cells": 34,
+        "ru_cells": 37,
+        "current": "Держать закрытые беседы тёплыми (сек)"
+      },
+      {
+        "key": "wire.settings.runtime_unattended_gate_timeout.label",
+        "en_cells": 31,
+        "ru_cells": 38,
+        "current": "Тайм-аут вопроса в ваше отсутствие (ч)"
+      },
+      {
+        "key": "wire.settings.send_journal_unconfirmed.label",
+        "en_cells": 28,
+        "ru_cells": 39,
+        "current": "Журналировать неподтверждённые отправки"
+      },
+      {
+        "key": "wire.settings.shell_environment_inherit.label",
+        "en_cells": 23,
+        "ru_cells": 31,
+        "current": "…сохраняются в режиме allowlist"
+      },
+      {
+        "key": "wire.settings.static_roots.label",
+        "en_cells": 19,
+        "ru_cells": 34,
+        "current": "Дополнительные корни предпросмотра"
+      },
+      {
+        "key": "wire.settings.subagents_max_team_depth.label",
+        "en_cells": 21,
+        "ru_cells": 30,
+        "current": "Макс. глубина вложенных команд"
+      },
+      {
+        "key": "wire.settings.subagents_slim_child_knowledge.label",
+        "en_cells": 20,
+        "ru_cells": 31,
+        "current": "Урезание знаний дочерних сессий"
+      },
+      {
+        "key": "wire.settings.tools_defer.label",
+        "en_cells": 39,
+        "ru_cells": 49,
+        "current": "Загружать схемы редких инструментов по требованию"
+      },
+      {
+        "key": "wire.settings.tools_search_interception_block.label",
+        "en_cells": 26,
+        "ru_cells": 30,
+        "current": "…отклонять, а не предупреждать"
+      },
+      {
+        "key": "wire.settings.tools_search_interception_enabled.label",
+        "en_cells": 24,
+        "ru_cells": 33,
+        "current": "Блокировать неограниченные поиски"
+      },
+      {
+        "key": "wire.settings.tools_search_interception_rg_excludes.label",
+        "en_cells": 33,
+        "ru_cells": 36,
+        "current": "…обрезать деревья vendor для ripgrep"
+      },
+      {
+        "key": "wire.settings.tui_sidebar_show_subagents.label",
+        "en_cells": 22,
+        "ru_cells": 33,
+        "current": "Слой субагентов на боковой панели"
+      },
+      {
+        "key": "wire.settings.wakes_triggers_max_per_day.label",
+        "en_cells": 26,
+        "ru_cells": 44,
+        "current": "Макс. пробуждений для выхода на связь в день"
+      },
+      {
+        "key": "wire.settings.mesh_move_working_set_max_bytes.label",
+        "en_cells": 34,
+        "ru_cells": 38,
+        "current": "Лимит рабочих файлов на перенос (байт)"
+      }
+    ]
+  },
+  "control_execution": {
+    "command": "env -i HOME=<own scratchpad> PATH=/usr/bin:/bin PYTHONPATH=<pinned worktree> ~/local-operator/.venv/bin/python <own ru_a_controls.py and ru_a_extra.py>",
+    "actual_exit_codes": [
+      0,
+      0
+    ],
+    "parse_keys": 895,
+    "placeholder_integrity": "0 shape mismatches; both name/simple placeholders preserved, positive substitutions and missing-argument negatives exercised",
+    "plurals": "0 plural messages in this namespace; fixed durations read with correct Russian case. CLDR one/few/many/other sample selection exercised, not claimed catalogue plural-branch coverage.",
+    "RTL": "Russian is LTR. No authored bidi controls across 895. Synthetic RLI/PDI roundtrip on new two labels is not native RTL evidence.",
+    "NFC": "895/895 NFC",
+    "pseudolocalization": "Only new two literal labels, expansion and synthetic bidi controls; not whole namespace or rendered fit."
+  },
+  "consumer_evidence": [
+    "local_operator/settings_io.py:333-338 separates Choice.value/label/description",
+    "local_operator/settings_io.py:3395-3405 approval raw values ask/auto separate localized labels",
+    "local_operator/settings_io.py:6254-6268 gender labels separate from machine values",
+    "local_operator/settings_io.py:6399-6418 cleanup labels separate from machine values",
+    "104 context entries including medium.description disambiguation"
+  ],
+  "limits": [
+    "No repo edits, translation fixes, ledger changes, testsuites, app/browser/native/server, dependency installation, live settings or credential access.",
+    "No current partner opinions or auditor receipts read. Translator provenance receipt only.",
+    "No whole UI, renderer, merge or release clearance.",
+    "Unchanged prose citations of exact enum values are technical references, not blanket exemptions for labels. Existing endpoint/extra/merge/pull/push/commit/shell Latin terms follow explicitly recorded Russian glossary/style exceptions."
+  ],
+  "overall_verdict": "FAIL whole namespace: 31 inherited untranslated choice labels, 1 inherited untranslated human-role abbreviation, and 1 inherited medium-expressiveness semantic defect. New Ask/Automatic pair passes semantic/safety audit. All 895 pairs and 104 contexts freshly read; structural controls pass."
+}

@@ -1,0 +1,134 @@
+{
+  "locale": "vi",
+  "namespace": "tui.info",
+  "source_sha256": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+  "context_sha256": "aee21715fca769227b3bda5b500a5e81e51763cf86817f741baff8b1a5ef0ae7",
+  "target_sha256": "7e0f97d45840a223868d89907d4d5da6010931b1fd486ab399728a0a091ab15b",
+  "commit": "2c282261f27b66390061563359f9cf72f2520538",
+  "base": "e9e6c3711149",
+  "round": 2,
+  "status": "passed",
+  "translator": {
+    "agent": "info-translate-vi",
+    "session": "685380b18640",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "fallback_from": "anthropic/claude-opus-5-5",
+    "provenance_source": "pr4420-integration-preflight.json locales.vi.retained_key_author; this actor owns 267 unchanged values only"
+  },
+  "auditor": {
+    "agent": "translation-auditor / info-r2-cache-B-vi",
+    "session": "d1b11927b624",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "fallback_from": "anthropic/claude-opus-5-5",
+    "fallback_reason": "Current host model-switch card: provider failure: quota. Actual fallback disclosed; no model-default changes made.",
+    "result": "passed",
+    "findings": 0
+  },
+  "translation_provenance": {
+    "manifest": "i18n/audits/evidence/pr4420-integration-preflight.json",
+    "before_sha256": "a61a967b3abbd7250f4fc220d5a806957abb843a09633784165297f243fa3174",
+    "target_sha256": "7e0f97d45840a223868d89907d4d5da6010931b1fd486ab399728a0a091ab15b",
+    "retained_key_count": 267,
+    "changed_key_count": 10,
+    "changed_key_authors": {
+      "tui.info.status.bound_held": {"agent": "info-remediate-vi / translator", "session": "25413fcdc8db", "model": "openai/gpt-6.1-sol"},
+      "tui.info.latest.behind_short": {"agent": "info-remediate-vi / translator", "session": "25413fcdc8db", "model": "openai/gpt-6.1-sol"},
+      "tui.info.not_answering_clause.no_rows": {"agent": "info-remediate-vi / translator", "session": "25413fcdc8db", "model": "openai/gpt-6.1-sol"},
+      "tui.info.not_answering_clause.remedy_one": {"agent": "info-remediate-vi / translator", "session": "25413fcdc8db", "model": "openai/gpt-6.1-sol"},
+      "tui.info.not_answering_clause.remedy_many": {"agent": "info-remediate-vi / translator", "session": "25413fcdc8db", "model": "openai/gpt-6.1-sol"},
+      "tui.info.not_answering_clause.full": {"agent": "info-remediate-vi / translator", "session": "25413fcdc8db", "model": "openai/gpt-6.1-sol"},
+      "tui.info.tree_lines.deeper": {"agent": "info-remediate-vi / translator", "session": "25413fcdc8db", "model": "openai/gpt-6.1-sol"},
+      "tui.info.export.build_age": {"agent": "info-remediate-vi / translator", "session": "25413fcdc8db", "model": "openai/gpt-6.1-sol"},
+      "tui.info.export.uptime": {"agent": "info-remediate-vi / translator", "session": "25413fcdc8db", "model": "openai/gpt-6.1-sol"},
+      "tui.info.state.stale": {"agent": "info-remediate-vi / translator", "session": "25413fcdc8db", "model": "openai/gpt-6.1-sol"}
+    },
+    "historical_receipt": "i18n/audits/evidence/pr4420-initial-native-vi-r1.json",
+    "historical_receipt_handling": "Original passed-with-minors old-source evidence preserved. Not reused as current semantic approval. No historical files edited."
+  },
+  "review_scope": {
+    "kind": "B first participation, fresh full namespace independent semantic audit",
+    "namespace_keys": 277,
+    "source_keys_read": 277,
+    "target_keys_read": 277,
+    "contexts_read": 277,
+    "fresh_semantic_keys": 277,
+    "retained_semantic_keys": 0,
+    "ordered_key_list_sha256": "6a13331c217592a36ea6eddf972dfe0dac209f4ac94d8f12cf2931b6baf7e4bf",
+    "changed_target_keys": 10,
+    "changed_context_keys": 12,
+    "changed_source_fields": ["tui.info.export.build_age", "tui.info.export.uptime"],
+    "note": "277 fresh means this independent B agent read the complete English/Vietnamese pairs and current contexts here. It does not convert the remediation translator into the author of 277 values. No current partner reports read."
+  },
+  "input_binding": {
+    "manifest": "i18n/audits/evidence/pr4420-audited-input-cache/manifest.json",
+    "head": "2c282261f27b66390061563359f9cf72f2520538",
+    "source_cache": "i18n/audits/evidence/pr4420-audited-input-cache/en.json",
+    "target_cache": "i18n/audits/evidence/pr4420-audited-input-cache/vi.json",
+    "source_cache_sha256": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+    "target_cache_sha256": "7e0f97d45840a223868d89907d4d5da6010931b1fd486ab399728a0a091ab15b",
+    "source_canonical_map_sha256": "c06de4b6d6b19d71ff4fc20128937f72d6d18fc7757854f493e8e3834bb1423c",
+    "target_canonical_map_sha256": "81ab38b0044d3dedd9bfd0205344e0307ac46ca399ccd0748d877816c08c6c8d",
+    "verification": "Independently recomputed cache byte and canonical-map hashes against manifest; hash-only original product bytes matched committed-file hashes. Context metadata parsed only after its exact expected SHA matched. No original product prose decoded or dumped. No Git/public-reader retry."
+  },
+  "safety_semantics": {
+    "held": "quá hạn, chưa xác nhận hồi phục preserves exceeded bound plus unproven recovery; it does not assert hung or unresponsive, nor independently authorize stop/kill. Checked against HELD_UNPROVEN/legacy-marker context.",
+    "stale": "tiến trình không còn describes process absence, not heartbeat expiry or inferred exit intention. A fresh stored heartbeat does not contradict absent PID; a live-but-silent PID is not translated stale.",
+    "kill_ladder": "Nonresponse condition retained for normal stop; still-beating-but-silent owner retained for force. Force explicitly discards the in-flight turn. All command bytes checked, without executing any command.",
+    "lower_bound": "Read caveat alongside trajectory summaries, addends and separate runtime counts. Lower bound qualifies aggregate work trajectories, not incomplete runtime census. Queued and retained settled work stay distinct from running trajectories.",
+    "hidden_nodes": "# tác nhân ở tầng sâu hơn counts descendant agents/nodes at deeper levels, not number of levels or just last-row children.",
+    "answering": "Phản hồi is the effective-model row label, with model value beside it; not a boolean or responsiveness state. Verified caller info_panel.py:936-942.",
+    "credentials": "đã đặt in the credentials row denotes keys set/configured, not appointment or authorization. Neighbor chưa lưu khóa nào means none stored. Read caller info_panel.py:1825-1832.",
+    "durations": "Age uses native before/elapsed idiom. tuổi bản dựng and thời gian đã chạy whole-field missing branches use chưa rõ; known branches preserve interpolated native durations. Read info/copy.py:111-132: existing wire.session_status duration keys reused. This is not an audit of that separate namespace."
+  },
+  "glossary_and_register": {
+    "result": "passed",
+    "native_terms": ["phiên", "tác nhân", "tác nhân con", "công cụ", "mô hình", "luồng xử lý", "thông tin xác thực"],
+    "register": "bạn with natural pronoun omission; terse factual diagnostic tone, sentence case; no T/V inconsistency found",
+    "named_kept_english_exceptions": ["runtime: vi style guide lines 75-76", "cache and script: vi style guide lines 23-25", "commit/push/pull/merge/token/prompt/deploy: recorded developer terms", "technical pid/rt abbreviations, IDs, commands/flags, paths, sys.path, PyPI, Python, MCP; wheel is a package-format noun"]
+  },
+  "controls": {
+    "execution": "env -u XPC_FLAGS /Users/damian/local-operator/.venv/bin/python $LOCAL_OPERATOR_SCRATCHPAD/pr4420-r2-B-vi-controls.py; final exit 0",
+    "script": "scratchpad://pr4420-r2-B-vi-controls.py",
+    "parser_and_argument_kind_parity": "277/277 passed",
+    "select_arms_and_number_date_time_skeletons": "277/277 passed; skeleton equality checked even though none may be used",
+    "CLDR": {"0": "other", "1": "other", "2": "other", "5": "other", "11": "other", "21": "other", "1000": "other"},
+    "plural_arms": "Every Vietnamese plural uses other only, retains count #",
+    "render_count": 5817,
+    "render_matrix": "277 keys x 7 count values x yes/other/unmeasured select defaults. This is not an exhaustive independent-select Cartesian product or native rendering.",
+    "missing_argument_negative": "MessageFormatError: message argument 'deeper' was not supplied (have: none)",
+    "missing_vs_zero_actual": {
+      "build_age": ["  tuổi bản dựng     chưa rõ", "  tuổi bản dựng     0 giây", "  tuổi bản dựng     5 phút"],
+      "uptime": ["  thời gian đã chạy chưa rõ", "  thời gian đã chạy 0 giây", "  thời gian đã chạy 5 phút"]
+    },
+    "command_literals": "Every source quoted stop command and backtick span survives byte-exactly",
+    "pseudo": "All 10 changed values pseudo-expanded at literal AST leaves only; parameter values/selectors untouched, complete rendered commands preserved. This stresses strings, not native layout.",
+    "NFC": "277/277 passed",
+    "RTL": "Vietnamese LTR; 0 authored bidi controls across all 277 values. No native RTL claim.",
+    "compiled_source_sha256": {
+      "local_operator/i18n/format.py": "dd15c8fefaeddc121a8f7722fb179ef82e0b0e44e19d0c2dcb99d78ec49f5bc7",
+      "local_operator/i18n/runtime.py": "fe6ca993affb666d802b8c6a7a05fdfd21070a64a57e2f2d3f51eec7b651a367",
+      "local_operator/i18n/data/formats.json": "728ad518f47eb1011ddaeeaae81065ef9e6a36012f1e2a82fd5fd70bc500c9e2",
+      "local_operator/i18n/data/plural_rules.json": "a58fc97ed92a6fdc1c31cd6c40c856fa9c6539f54e1ce76461ec6cff9f235ffe"
+    },
+    "harness_recovery": "First control execution reached report assembly but called plural_category with reversed arguments; corrected from the actual function signature. First pseudo probe exposed incomplete-command fragments across AST args; protected lop stop, /stop, pid and flags explicitly and asserted exact complete rendered commands in the final successful run. No product bytes edited."
+  },
+  "width_watchlist": [
+    {"key": "tui.info.status.bound_held", "en_cells": 10, "vi_cells": 31, "text": "quá hạn, chưa xác nhận hồi phục", "action": "Rendered-fit check needed in layout lane; do not remove uncertainty qualifier to fit"},
+    {"key": "tui.info.label.agent_home", "en_cells": 10, "vi_cells": 20, "text": "Thư mục gốc tác nhân", "action": "Rendered-fit check in layout lane"},
+    {"key": "tui.info.label.terminal", "en_cells": 8, "vi_cells": 17, "text": "Thiết bị đầu cuối", "action": "Rendered-fit check in layout lane"},
+    {"key": "tui.info.heading.agents_and_subagents", "en_cells": 20, "vi_cells": 24, "text": "Tác nhân và tác nhân con", "action": "Rendered-fit check in layout lane"}
+  ],
+  "findings": [],
+  "minor_count": 0,
+  "nit_count": 0,
+  "namespace_verdict": "tui.info: passed, 277 English/vi pairs read fresh; no unresolved blocker/major",
+  "overall_verdict": "passed for this complete namespace semantic/safety audit; terminal B stream",
+  "limitations": [
+    "No native-renderer, App, browser, clipboard integration, terminal-fit or whole-interface clearance. Width values measured with rich.cells.cell_len, not observed frames.",
+    "No actual stop/kill, live config/API, pytest, full checks, build/dependencies, new worktree, generation, ledger append, repo edits, Git, commit or push.",
+    "This is independent B only. Manager must combine actual independent A and B evidence for the two-auditor safety gate; no partner judgment consulted.",
+    "Only normal write tool used for this canonical receipt in own scratch; historical evidence and catalogues unchanged."
+  ]
+}

@@ -1,0 +1,2122 @@
+{
+  "schema": "approval-full-repair-author/v1",
+  "locale": "ur",
+  "namespace": "wire.settings",
+  "status": "AUTHOR_REPAIR_COMPLETE_AWAITING_INDEPENDENT_A_B_DELTA_AUDIT",
+  "author": {
+    "role": "translator",
+    "session_id": "c8c42578bc8c",
+    "actual_authoring_model": "openai/gpt-6.1-sol",
+    "initial_model": "anthropic/claude-opus-5-5",
+    "fallback": "Explicit host model-switch card: provider failure: quota. All native authoring and mechanical verification performed after this switch. No serving identity inferred from a resumed header.",
+    "not_auditors": [
+      "A0628",
+      "B28a4"
+    ],
+    "date_utc": "2026-11-22T02:39:12.595636+00:00"
+  },
+  "allocation": {
+    "lane": "bounded locale repair",
+    "budget_minutes": 45,
+    "no_self_audit": true
+  },
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+  "frozen_head": "90009effa833836ce4471e99d90d3b6438de7f60",
+  "scope": "56 accepted major union keys plus 19 direct terminology/display-label reference neighbors; not whole-895 reauthoring",
+  "inputs": {
+    "root_decision": "i18n/audits/evidence/approval-full-root-adjudication.json",
+    "ledger": "i18n/audits/evidence/approval-full-deduplicated-ledger.json",
+    "target_approved_envelope": "i18n/audits/evidence/approval-full-inputs/ur-approved-envelope.json",
+    "target_envelope_sha256": "409c3ef0a5e038d9d7f946f4deef6320fe3a1b3b84d506664b29b9fe3a7a8cc3",
+    "english_approved_envelope": "i18n/audits/evidence/approval-full-inputs/Englishvoiceconstant-full-en-approved-capture.json",
+    "english_envelope_sha256": "c17b1262dc76d312cfa21313bd0d1414e2b4132d9900265119d4c1d8d9c237f6",
+    "raw_target_original_manifest_hash_verified_before_first_edit": true,
+    "context_entries": 104,
+    "policy": [
+      "docs/I18N.md",
+      "docs/design/i18n.md §§2/4/6",
+      "i18n/glossary.md",
+      "i18n/style-guides/ur.md"
+    ],
+    "public_reader_calls": 0,
+    "source_input_policy": "Only cached approved envelopes and attributed ledger used as native input; raw catalogue parsing limited to hashes, exact byte replacement, key metadata and ICU/token mechanical checks."
+  },
+  "hashes": {
+    "english_before": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+    "english_after": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+    "context_before": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+    "context_after": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+    "target_before": "79869c119f2cb73152c50a4a3ffb647441cd0b0db0fb1f49a76f29a15324bc5e",
+    "target_after": "66c856c3c9ab823665241301511c50286e4dae574a0dd617d0c764a43d99331b"
+  },
+  "counts": {
+    "total_keys": 895,
+    "changed": 75,
+    "unchanged": 820,
+    "accepted_major_keys_addressed": 56,
+    "human_choice_labels": 30,
+    "direct_neighbors": 19,
+    "added_keys": 0,
+    "removed_keys": 0,
+    "numstat": "75\t75\tlocal_operator/i18n/catalogues/ur/wire.settings.json"
+  },
+  "changes": [
+    {
+      "key": "wire.settings.bash_memory_mode.choice.auto.label",
+      "value": "خودکار",
+      "backtranslation": "Automatic",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-E6C2188A81F3",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-1"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          5150
+        ],
+        "setting_key": "bash.memory.mode",
+        "choice_value": "auto",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.bash_memory_mode.choice.manual.label",
+      "value": "دستی",
+      "backtranslation": "Manual",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-802B8268724D",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-2"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          5155
+        ],
+        "setting_key": "bash.memory.mode",
+        "choice_value": "manual",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.bash_memory_mode.help",
+      "value": "'خودکار' اس وقت ڈیوائس کی خالی میموری سے حد نکالتا ہے، اس لیے مصروف مشین پر حد خود سخت ہو جاتی ہے۔ 'دستی' اسے نیچے دیے گئے عدد پر مقرر کرتا ہے۔",
+      "backtranslation": "Automatic derives the ceiling from currently free device memory and tightens it when busy. Manual pins it to the number below.",
+      "scope": "direct-reference-neighbor",
+      "accepted_id": null,
+      "auditor_finding_ids": [],
+      "source_usage": null,
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.classification_vendor.choice.auto.label",
+      "value": "خودکار",
+      "backtranslation": "Automatic",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-803C522C3F62",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-3"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          4043
+        ],
+        "setting_key": "classification.vendor",
+        "choice_value": "auto",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.classification_vendor.help",
+      "value": "تجاویز فعال ہونی چاہییں۔ ایک راستہ مقرر کریں؛ خودکار انتخاب میں Radient کو ترجیح ملتی ہے۔",
+      "backtranslation": "Recommendations must be enabled. Pin one route; automatic selection prefers Radient.",
+      "scope": "direct-reference-neighbor",
+      "accepted_id": null,
+      "auditor_finding_ids": [],
+      "source_usage": null,
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.compaction_strategy.choice.auto.label",
+      "value": "خودکار",
+      "backtranslation": "Automatic",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-240C498CA1C1",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-4"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          4517
+        ],
+        "setting_key": "compaction.strategy",
+        "choice_value": "auto",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.compaction_strategy.help",
+      "value": "کمپریشن کا طریقہ۔ خودکار انتخاب ماڈل کے مطابق ہوتا ہے۔",
+      "backtranslation": "Compaction mechanism. Automatic selection depends on the model.",
+      "scope": "direct-reference-neighbor",
+      "accepted_id": null,
+      "auditor_finding_ids": [],
+      "source_usage": null,
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.compaction_wire_bytes_budget.label",
+      "value": "درخواست کے حجم کی حد (بائٹس)",
+      "backtranslation": "Request size limit (bytes)",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-40637B7E415B",
+      "auditor_finding_ids": [
+        "URB-42"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          4671
+        ],
+        "setting_key": "compaction.wire_bytes_budget",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.display_nerd_icons.choice.none.label",
+      "value": "خودکار",
+      "backtranslation": "Automatic",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-CDE402D4ABB5",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-5"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2820
+        ],
+        "setting_key": "display.nerd_icons",
+        "choice_value": null,
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.display_nerd_icons.help",
+      "value": "ٹول قطار کے بڑے آئیکنز۔ خودکار انتخاب ٹرمینل ایمولیٹر کے نشانات پڑھتا ہے۔",
+      "backtranslation": "Expanded tool-row icons. Automatic selection reads terminal-emulator markers.",
+      "scope": "direct-reference-neighbor",
+      "accepted_id": null,
+      "auditor_finding_ids": [],
+      "source_usage": null,
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.display_notification_session_name.help",
+      "value": "بینرز پر سیشن کا نام، آخری سطر اور خرابی کی وجوہات ظاہر ہوتی ہیں۔ ان میں لاک اسکرین اور منسلک فونز کی اطلاعات بھی شامل ہیں، جو Radient کی پُش سروس کے ذریعے ان تک پہنچتی ہیں۔",
+      "backtranslation": "Banners show session name, last line and error causes, including lock-screen and paired-phone notifications delivered through Radient's push service.",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-FBC1A7C09726",
+      "auditor_finding_ids": [
+        "UR-A2",
+        "URB-40"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2919
+        ],
+        "setting_key": "display.notification_session_name",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.display_rail.help",
+      "value": "ایک لکیر جواب کو نمایاں کرتی ہے: وہ پیغام جو باری ختم کرتا ہے۔ باری کے دوران کی وضاحت کے ساتھ لکیر نہیں ہوتی۔",
+      "backtranslation": "A line highlights the answer: the message ending the turn. Mid-turn explanation has no line.",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-63084A2AECAA",
+      "auditor_finding_ids": [
+        "UR-A2",
+        "URB-33"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2784
+        ],
+        "setting_key": "display.rail",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.hub.description",
+      "value": "Agent Hub سے حاصل کردہ ایجنٹس اور ٹیموں کو تازہ رکھیں: اپ ڈیٹس خودکار طور پر merge ہوں یا نہیں، ہب کتنی بار جانچا جائے، اور کون سا ماڈل تضاد حل کرے۔ آپ کی ترامیم اور حذف کردہ مواد merge ہوتے ہیں، ان کی جگہ نیا مواد نہیں لکھا جاتا۔",
+      "backtranslation": "Keep agents and teams obtained from Agent Hub current: whether updates merge automatically, how often the hub is checked, and which model resolves conflicts. Edits and deletions are merged, not overwritten.",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-7BC71BEE5100",
+      "auditor_finding_ids": [
+        "URB-34"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          1061
+        ],
+        "setting_key": null,
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired; scoped technical merge retained with Root-confirmed glossary proof"
+    },
+    {
+      "key": "wire.settings.hub_auto_update_agents.choice.true.description",
+      "value": "ہب کی اپ ڈیٹس خودکار merge کریں",
+      "backtranslation": "Automatically merge hub updates",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-E4736E35DC92",
+      "auditor_finding_ids": [
+        "URB-35"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [],
+        "setting_key": null,
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired; scoped technical merge retained with Root-confirmed glossary proof"
+    },
+    {
+      "key": "wire.settings.hub_auto_update_agents.help",
+      "value": "حاصل کردہ ایجنٹس میں ہب کی اپ ڈیٹس خودکار merge کریں۔",
+      "backtranslation": "Automatically merge hub updates into obtained agents",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-E649D656620C",
+      "auditor_finding_ids": [
+        "URB-36"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [],
+        "setting_key": null,
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired; scoped technical merge retained with Root-confirmed glossary proof"
+    },
+    {
+      "key": "wire.settings.hub_auto_update_teams.choice.true.description",
+      "value": "ہب کی اپ ڈیٹس خودکار merge کریں",
+      "backtranslation": "Automatically merge hub updates",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-89000E708CCA",
+      "auditor_finding_ids": [
+        "URB-37"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          5864
+        ],
+        "setting_key": "hub.auto_update.teams",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired; scoped technical merge retained with Root-confirmed glossary proof"
+    },
+    {
+      "key": "wire.settings.hub_auto_update_teams.help",
+      "value": "حاصل کردہ ٹیموں میں ہب کی اپ ڈیٹس خودکار merge کریں۔",
+      "backtranslation": "Automatically merge hub updates into obtained teams",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-B46B76077316",
+      "auditor_finding_ids": [
+        "URB-38"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          5867
+        ],
+        "setting_key": "hub.auto_update.teams",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired; scoped technical merge retained with Root-confirmed glossary proof"
+    },
+    {
+      "key": "wire.settings.librarian.description",
+      "value": "لائبریرین مشترکہ لائبریری منظم رکھتی ہے: اس کا ظاہری نام، روزانہ جائزہ اور روکنے کا اختیار۔ لائبریری طویل مدتی ذخیرہ ہے جو تمام گفتگوؤں میں مشترک ہے۔",
+      "backtranslation": "The librarian keeps the shared library organised: her display name, daily review and pause switch. The library is a long-term collection shared by all conversations.",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-521BD8E7974A",
+      "auditor_finding_ids": [
+        "UR-A2",
+        "URB-50"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          1050
+        ],
+        "setting_key": null,
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.librarian.title",
+      "value": "لائبریرین",
+      "backtranslation": "Librarian",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-8316D70230B6",
+      "auditor_finding_ids": [
+        "UR-A2"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          1048
+        ],
+        "setting_key": null,
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.librarian_cadence_at.label",
+      "value": "روزانہ جائزے کا وقت",
+      "backtranslation": "Daily review time",
+      "scope": "direct-reference-neighbor",
+      "accepted_id": null,
+      "auditor_finding_ids": [],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          6065
+        ],
+        "setting_key": "librarian.cadence.at",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.librarian_cadence_max_extra_per_day.help",
+      "value": "روزانہ کتنے اضافی جائزوں کی درخواست کر سکے۔ 0 اضافی جائزے بند کرتا ہے۔",
+      "backtranslation": "How many extra reviews she can request daily. 0 disables extra reviews.",
+      "scope": "direct-reference-neighbor",
+      "accepted_id": null,
+      "auditor_finding_ids": [],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          6093
+        ],
+        "setting_key": "librarian.cadence.max_extra_per_day",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.librarian_cadence_max_extra_per_day.label",
+      "value": "اضافی جائزے / دن",
+      "backtranslation": "Extra reviews / day",
+      "scope": "direct-reference-neighbor",
+      "accepted_id": null,
+      "auditor_finding_ids": [],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          6088
+        ],
+        "setting_key": "librarian.cadence.max_extra_per_day",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.librarian_cadence_min_gap_minutes.help",
+      "value": "جائزوں کے درمیان کم از کم وقفہ؛ اس سے کم وقفے والی درخواستیں مسترد ہوں گی۔",
+      "backtranslation": "Minimum interval between reviews; requests closer together are refused.",
+      "scope": "direct-reference-neighbor",
+      "accepted_id": null,
+      "auditor_finding_ids": [],
+      "source_usage": null,
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.librarian_cadence_paused.help",
+      "value": "روکنے پر شیڈول شدہ اندراجات ہٹ جاتے ہیں؛ دوبارہ شروع کرنے پر اگلا جائزہ مقرر ہو جاتا ہے۔ ڈیسک ٹاپ اور /librarian ایک ہی کلید میں تبدیلی کرتے ہیں۔",
+      "backtranslation": "Pausing removes scheduled entries; resuming schedules the next review. Desktop and /librarian write the same key.",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-3E5CEB1F650A",
+      "auditor_finding_ids": [
+        "UR-A2",
+        "URB-39"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          6082
+        ],
+        "setting_key": "librarian.cadence.paused",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.librarian_cadence_paused.label",
+      "value": "روزانہ جائزہ روکا ہوا",
+      "backtranslation": "Daily review paused",
+      "scope": "direct-reference-neighbor",
+      "accepted_id": null,
+      "auditor_finding_ids": [],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          6075
+        ],
+        "setting_key": "librarian.cadence.paused",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.librarian_enabled.label",
+      "value": "لائبریرین فعال",
+      "backtranslation": "Librarian enabled",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-9D18DD153837",
+      "auditor_finding_ids": [
+        "UR-A2"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          6041
+        ],
+        "setting_key": "librarian.enabled",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.model_effort.choice.unset.label",
+      "value": "خودکار",
+      "backtranslation": "Automatic",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-C4D3DE320B13",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-6"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          1657
+        ],
+        "setting_key": null,
+        "choice_value": "",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.network_rollout_on_update.choice.auto.label",
+      "value": "خودکار",
+      "backtranslation": "Automatic",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-66D2D9CC6848",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-7"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          5690
+        ],
+        "setting_key": "network.rollout_on_update",
+        "choice_value": "auto",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.network_sync_debounce_s.help",
+      "value": "سیشن کا ٹرانسکرپٹ کتنے سیکنڈ تک بے تبدیلی رہے، تب اس کا مالک نقل رکھنے والی ڈیوائسز کو تازہ نقل لینے کا کہے۔ سیشن فارغ ہوتے ہی تبدیلیاں فوراً بھیج دی جاتی ہیں، اس لیے اس کا آخری پیغام اس وقفے کی وجہ سے نہیں رکتا۔",
+      "backtranslation": "How many seconds the transcript must remain unchanged before its owner tells devices holding a copy to fetch a fresh copy. Changes are sent immediately when the session becomes idle, so the final message is not delayed by this interval.",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-662F033EF478",
+      "auditor_finding_ids": [
+        "URB-45"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          5769
+        ],
+        "setting_key": "network.sync.debounce_s",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.network_sync_tick_s.help",
+      "value": "مالک نقل شدہ سیشنز میں تبدیلیاں کتنی بار جانچے: ہر فائل کی حالت ایک بار جانچی جاتی ہے۔",
+      "backtranslation": "How often the owner checks copied sessions for changes: each file's state is checked once.",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-505F370AA612",
+      "auditor_finding_ids": [
+        "URB-46"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          5780
+        ],
+        "setting_key": "network.sync.tick_s",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.providers.title",
+      "value": "ترسیلی پروٹوکول",
+      "backtranslation": "Transmission protocol",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-A7F067B70BC1",
+      "auditor_finding_ids": [
+        "UR-A2",
+        "URB-41"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          549
+        ],
+        "setting_key": null,
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+      "value": "نہیں",
+      "backtranslation": "No (false display choice)",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-513A71CB406C",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-8"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2324
+        ],
+        "setting_key": "providers.openrouter.allow_fallbacks",
+        "choice_value": "false",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+      "value": "طے شدہ",
+      "backtranslation": "Default",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-32DB6C298E5C",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-9"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2319
+        ],
+        "setting_key": "providers.openrouter.allow_fallbacks",
+        "choice_value": "",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.help",
+      "value": "'طے شدہ' کوئی ترجیح نہیں بھیجتا (ترجیحی ہوسٹ ناکام ہو تو OpenRouter دوسرے ہوسٹ پر منتقل ہوتا ہے)؛ 'نہیں' آپ کی ترجیحات سے باہر کے ہوسٹ پر جانے کے بجائے درخواست ناکام کر دیتا ہے۔",
+      "backtranslation": "Default sends no preference; OpenRouter falls through when the preferred host fails. No fails the request instead of using a host outside your preferences.",
+      "scope": "direct-reference-neighbor",
+      "accepted_id": null,
+      "auditor_finding_ids": [],
+      "source_usage": null,
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "value": "اجازت دیں",
+      "backtranslation": "Allow",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-DD21D2852FC7",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-10"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2369
+        ],
+        "setting_key": "providers.openrouter.data_collection",
+        "choice_value": "allow",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "value": "اجازت نہ دیں",
+      "backtranslation": "Deny",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-961F6FF2DA51",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-11"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2374
+        ],
+        "setting_key": "providers.openrouter.data_collection",
+        "choice_value": "deny",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+      "value": "طے شدہ",
+      "backtranslation": "Default",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-EAD73985D2C9",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-12"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2364
+        ],
+        "setting_key": "providers.openrouter.data_collection",
+        "choice_value": "",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.help",
+      "value": "'اجازت نہ دیں' ایسے ہوسٹس کو خارج کرتا ہے جو آپ کے پرامپٹس سے تربیت حاصل کر سکتے ہوں یا انہیں محفوظ رکھ سکتے ہوں۔ 'طے شدہ' کوئی ترجیح نہیں بھیجتا (OpenRouter کی طے شدہ ترجیح: اجازت دیں)۔",
+      "backtranslation": "Deny excludes hosts that may train on or retain prompts. Default sends no preference; OpenRouter's default is Allow.",
+      "scope": "direct-reference-neighbor",
+      "accepted_id": null,
+      "auditor_finding_ids": [],
+      "source_usage": null,
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+      "value": "ہاں",
+      "backtranslation": "Yes (true display choice)",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-378BA7328B99",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-13"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2423
+        ],
+        "setting_key": "providers.openrouter.enforce_distillable_text",
+        "choice_value": "true",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+      "value": "طے شدہ",
+      "backtranslation": "Default",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-CD06C73F8E78",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-14"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2418
+        ],
+        "setting_key": "providers.openrouter.enforce_distillable_text",
+        "choice_value": "",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.help",
+      "value": "'ہاں': صرف ان اینڈ پوائنٹس تک محدود کرے جن کے متنی آؤٹ پٹ سے دوسرے ماڈل کی تربیت کی جا سکتی ہے۔ 'طے شدہ': کچھ نہیں بھیجا جاتا۔",
+      "backtranslation": "Yes restricts to endpoints whose text output can train another model. Default sends nothing.",
+      "scope": "direct-reference-neighbor",
+      "accepted_id": null,
+      "auditor_finding_ids": [],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2414
+        ],
+        "setting_key": "providers.openrouter.enforce_distillable_text",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+      "value": "ہاں",
+      "backtranslation": "Yes (true display choice)",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-2B7797E9A40D",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-15"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2348
+        ],
+        "setting_key": "providers.openrouter.require_parameters",
+        "choice_value": "true",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+      "value": "طے شدہ",
+      "backtranslation": "Default",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-653D8954B431",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-16"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2343
+        ],
+        "setting_key": "providers.openrouter.require_parameters",
+        "choice_value": "",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.help",
+      "value": "'ہاں' صرف ان ہوسٹس تک محدود کرتا ہے جو آپ کے بھیجے ہوئے تمام پیرامیٹرز کی حمایت کریں (ٹولز، ساختہ آؤٹ پٹ)؛ 'طے شدہ' OpenRouter کو غیر معاون پیرامیٹرز خاموشی سے حذف کرنے دیتا ہے۔",
+      "backtranslation": "Yes restricts to hosts supporting every sent parameter, including tools and structured output. Default lets OpenRouter silently drop unsupported parameters.",
+      "scope": "direct-reference-neighbor",
+      "accepted_id": null,
+      "auditor_finding_ids": [],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2339
+        ],
+        "setting_key": "providers.openrouter.require_parameters",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+      "value": "طے شدہ",
+      "backtranslation": "Default",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-8DDA7C4D87CB",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-17"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2228
+        ],
+        "setting_key": "providers.openrouter.sort",
+        "choice_value": "",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.help",
+      "value": "OpenRouter اس کال کے لیے ہوسٹس کی درجہ بندی کیسے کرے۔ موجودہ پرامپٹ کیشے والے ہوسٹ سے ہٹ سکتا ہے (طویل گفتگوؤں میں ابتدا سے کام کرنا پڑے گا)؛ 'طے شدہ' کوئی ترجیح نہیں بھیجتا۔",
+      "backtranslation": "How OpenRouter ranks hosts for this call. It may leave the host with the existing prompt cache, requiring work from the beginning for long conversations. Default sends no preference.",
+      "scope": "direct-reference-neighbor",
+      "accepted_id": null,
+      "auditor_finding_ids": [],
+      "source_usage": null,
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+      "value": "ہاں",
+      "backtranslation": "Yes (true display choice)",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-3DE117B6A717",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-18"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2401
+        ],
+        "setting_key": "providers.openrouter.zdr",
+        "choice_value": "true",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+      "value": "طے شدہ",
+      "backtranslation": "Default",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-A73734B5D1A9",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-19"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2396
+        ],
+        "setting_key": "providers.openrouter.zdr",
+        "choice_value": "",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.help",
+      "value": "'ہاں': صرف ان اینڈ پوائنٹس تک محدود کرے جو ڈیٹا بالکل محفوظ نہیں رکھتے۔ 'طے شدہ': کچھ نہیں بھیجا جاتا۔",
+      "backtranslation": "Yes restricts to endpoints that retain no data. Default sends nothing.",
+      "scope": "direct-reference-neighbor",
+      "accepted_id": null,
+      "auditor_finding_ids": [],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2392
+        ],
+        "setting_key": "providers.openrouter.zdr",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.session_cleanup_max_total_bytes.label",
+      "value": "↳ کل بائٹس کی حد",
+      "backtranslation": "Maximum total bytes",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-D968226F1484",
+      "auditor_finding_ids": [
+        "URB-43"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          3562
+        ],
+        "setting_key": "session.cleanup.max_total_bytes",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.session_scratchpad.title",
+      "value": "عارضی فائلیں",
+      "backtranslation": "Temporary files",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-0C842967FFF2",
+      "auditor_finding_ids": [
+        "UR-A2",
+        "URB-47"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          699
+        ],
+        "setting_key": null,
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.session_scratchpad_max_bytes.help",
+      "value": "سیشن کی عارضی فائلوں کی گنجائش: 16 MiB سے 8 GiB تک۔ ڈیفالٹ 256 MiB۔",
+      "backtranslation": "Session temporary-file capacity: 16 MiB to 8 GiB. Default 256 MiB.",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-7BB0A888B1A4",
+      "auditor_finding_ids": [
+        "UR-A2",
+        "URB-48"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          3439
+        ],
+        "setting_key": "session.scratchpad.max_bytes",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.session_scratchpad_max_bytes.label",
+      "value": "عارضی فائلوں کی حد (بائٹس)",
+      "backtranslation": "Temporary-file limit (bytes)",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-5C534E296CE9",
+      "auditor_finding_ids": [
+        "UR-A2",
+        "URB-49"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          3434
+        ],
+        "setting_key": "session.scratchpad.max_bytes",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "value": "اجازت کی فہرست",
+      "backtranslation": "Allowlist",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-B7F88E3953BA",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-20"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          5278
+        ],
+        "setting_key": "shell_environment.mode",
+        "choice_value": "allowlist",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+      "value": "موجودہ ماحول اپنائیں",
+      "backtranslation": "Adopt existing environment",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-3CD94E41B2B7",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-21"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          5273
+        ],
+        "setting_key": "shell_environment.mode",
+        "choice_value": "inherit",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.help",
+      "value": "'موجودہ ماحول اپنائیں' ایجنٹ کی چلائی ہوئی کمانڈ کو آپ کے ماحول تک رسائی دیتا ہے (gh، aws، npm اپنے ٹوکنز رکھتے ہیں)۔ 'اجازت کی فہرست' صرف PATH/HOME/SHELL/TERM/USER/LOGNAME اور ساتھ کی دو فہرستیں دیتا ہے، اس لیے سیشن شروع کرتے وقت استعمال ہونے والی پرووائیڈر کلید ماڈل کی لکھی کمانڈ کو نہیں ملتی۔ فی سیشن ایک بار پڑھا جاتا ہے: تبدیلی اگلے آغاز پر لاگو ہوتی ہے۔",
+      "backtranslation": "Adopt existing environment lets agent commands access your environment; gh, aws and npm retain tokens. Allowlist passes only PATH/HOME/SHELL/TERM/USER/LOGNAME and the adjacent two lists, keeping the launch provider key from model-written commands. Read once per session; changes apply next launch.",
+      "scope": "direct-reference-neighbor",
+      "accepted_id": null,
+      "auditor_finding_ids": [],
+      "source_usage": null,
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+      "value": "خودکار",
+      "backtranslation": "Automatic",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-2E0C22F21B6C",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-22"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          6402
+        ],
+        "setting_key": "speech.transcription.cleanup",
+        "choice_value": "auto",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+      "value": "کلائنٹ",
+      "backtranslation": "Client",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-F8A25CCB46D7",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-23"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          6412
+        ],
+        "setting_key": "speech.transcription.cleanup",
+        "choice_value": "client",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+      "value": "پرووائیڈر",
+      "backtranslation": "Provider",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-9F37CDCBD6ED",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-24"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          6407
+        ],
+        "setting_key": "speech.transcription.cleanup",
+        "choice_value": "provider",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.help",
+      "value": "بول کر لکھواتے وقت غیر ضروری الفاظ اور غیر گفتاری اشارے کیسے ہٹائے جائیں۔ خودکار انتخاب جہاں دستیاب ہو پرووائیڈر کی اپنی صفائی استعمال کرتا ہے، ورنہ کلائنٹ کے محتاط قواعد؛ پرووائیڈر اور کلائنٹ میں سے ہر انتخاب صرف اپنا متعلقہ طریقہ استعمال کرتا ہے؛ آف اصل ٹرانسکرپٹ جوں کا توں رکھتا ہے۔ ہر درخواست کا `cleanup` فیلڈ پھر بھی ترجیح رکھتا ہے۔",
+      "backtranslation": "How dictation removes unnecessary words and non-speech cues. Automatic uses native provider cleanup where available, otherwise conservative client rules. Provider and Client each use their own mechanism. Off keeps the verbatim transcript. Per-request `cleanup` still takes priority.",
+      "scope": "direct-reference-neighbor",
+      "accepted_id": null,
+      "auditor_finding_ids": [],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          6398
+        ],
+        "setting_key": "speech.transcription.cleanup",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+      "value": "آواز کی معمول کی ادائیگی۔",
+      "backtranslation": "The voice's normal delivery",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-86C0F950D222",
+      "auditor_finding_ids": [
+        "UR-A5",
+        "URB-31"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          6327
+        ],
+        "setting_key": "speech.voice.expressiveness",
+        "choice_value": "medium",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.auto.label",
+      "value": "خودکار",
+      "backtranslation": "Automatic",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-FA7340FF8D3C",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-25"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          6257
+        ],
+        "setting_key": "speech.voice.gender",
+        "choice_value": "auto",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.female.label",
+      "value": "خاتون",
+      "backtranslation": "Female",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-C3F93F5552D5",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-26"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          6262
+        ],
+        "setting_key": "speech.voice.gender",
+        "choice_value": "female",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.male.label",
+      "value": "مرد",
+      "backtranslation": "Male",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-6E07BEFC2F49",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-27"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          6267
+        ],
+        "setting_key": "speech.voice.gender",
+        "choice_value": "male",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.help",
+      "value": "خودکار انتخاب ہر ایجنٹ کے مطابق ہوتا ہے؛ مقررہ قدر درجہ بندی کرنے والے ماڈل کے انتخاب پر ترجیح رکھتی ہے۔",
+      "backtranslation": "Automatic chooses for each agent. A fixed value takes priority over the classifier model's choice.",
+      "scope": "direct-reference-neighbor",
+      "accepted_id": null,
+      "auditor_finding_ids": [
+        "UR-A8",
+        "URB-m10"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          6253
+        ],
+        "setting_key": "speech.voice.gender",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.subagents_model_choice.choice.operator.description",
+      "value": "سیشن کا ماڈل اپناتا ہے",
+      "backtranslation": "Adopts the session's model",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-70403DB342CD",
+      "auditor_finding_ids": [
+        "URB-44"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          3797
+        ],
+        "setting_key": "subagents.model_choice",
+        "choice_value": "operator",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.team_bridge_screening_ambient_budget_per_hour.help",
+      "value": "یہ غیر مخاطب پیغامات کی حد میں سے مختص حصہ ہے، اکاؤنٹ کی حد میں اضافہ نہیں: مشترکہ کمروں میں ایجنٹس کی بات چیت کے لیے ہر گھنٹے زیادہ سے زیادہ اتنی جانچ کی کالیں کی جا سکتی ہیں۔",
+      "backtranslation": "This is an allocation within the unaddressed-message limit, not an increase to the account limit. Agent chatter in shared rooms can use at most this many screening calls each hour.",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-74E6FF398FD7",
+      "auditor_finding_ids": [
+        "UR-A6"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          6628
+        ],
+        "setting_key": "team_bridge.screening.ambient_budget_per_hour",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.help",
+      "value": "یہ اکاؤنٹ کی حد میں سے مختص حصہ ہے، اس میں اضافہ نہیں: آپ کے ایجنٹ کو مخاطب کرنے والے شخص کے پیغامات کے علاوہ باقی سب کے لیے ہر گھنٹے زیادہ سے زیادہ اتنی جانچ کی کالیں کی جا سکتی ہیں۔ باقی گنجائش لوگوں کے لیے محفوظ رہتی ہے۔",
+      "backtranslation": "This is an allocation within the account limit, not an increase. Everything except messages from a person addressing your agent can use at most this many screening calls each hour. The rest is reserved for people.",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-2CB74583869E",
+      "auditor_finding_ids": [
+        "UR-A6"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          6610
+        ],
+        "setting_key": "team_bridge.screening.unaddressed_budget_per_hour",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.tools_search_interception_rg_excludes.label",
+      "value": "...وینڈر فولڈر ripgrep کی تلاش سے خارج کریں",
+      "backtranslation": "Exclude vendor folders from ripgrep searches",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-6CF6A86C9157",
+      "auditor_finding_ids": [
+        "UR-A3",
+        "URB-32"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          5101
+        ],
+        "setting_key": "tools.search_interception.rg_excludes",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.web_fetch_render_backend.choice.auto.label",
+      "value": "خودکار",
+      "backtranslation": "Automatic",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-7AB27EDC4AA9",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-28"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          4905
+        ],
+        "setting_key": "web_fetch.render_backend",
+        "choice_value": "auto",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.web_fetch_render_backend.help",
+      "value": "[fetch] extra انسٹال ہو تو خودکار انتخاب markdownify استعمال کرتا ہے۔",
+      "backtranslation": "Automatic uses markdownify when the [fetch] extra is installed.",
+      "scope": "direct-reference-neighbor",
+      "accepted_id": null,
+      "auditor_finding_ids": [],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          4901
+        ],
+        "setting_key": "web_fetch.render_backend",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.web_search_strategy.choice.ordered.label",
+      "value": "ترتیب وار",
+      "backtranslation": "Ordered",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-21B6A15BD737",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-29"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          4722
+        ],
+        "setting_key": "web_search.strategy",
+        "choice_value": "ordered",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+      "value": "باری باری",
+      "backtranslation": "Round robin",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-3886CD8B7B42",
+      "auditor_finding_ids": [
+        "UR-A1",
+        "URB-30"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          4717
+        ],
+        "setting_key": "web_search.strategy",
+        "choice_value": "round_robin",
+        "choice_value_verified_from_ast": true
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.mesh_move_working_set_max_bytes.help",
+      "value": "کام کی فائلوں کے ڈیٹا کی زیادہ سے زیادہ مقدار جو ایک منتقلی دوسری ڈیوائس کو بھیج یا اس سے قبول کر سکتی ہے۔ اس میں بنڈل شدہ commits اور اسٹیج کی گئی، اسٹیج نہ کی گئی اور Git میں شامل نہ کی گئی فائلیں شامل ہیں۔ حد سے زیادہ ہونے پر منتقلی مسترد ہوتی ہے اور کچھ نہیں بدلتا۔ ڈیفالٹ 256 MiB۔",
+      "backtranslation": "Maximum working-file data one move may send to or accept from another device, including bundled commits and staged, unstaged and Git-untracked files. Exceeding the limit refuses the move without changes. Default 256 MiB.",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-80CE4493BFC5",
+      "auditor_finding_ids": [
+        "URB-51"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          5712
+        ],
+        "setting_key": "mesh.move.working_set_max_bytes",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    },
+    {
+      "key": "wire.settings.mesh_move_working_set_roots.help",
+      "value": "اس ڈیوائس پر سیشن کی منتقلی کہاں ریپوزٹری بنا یا بحال کر سکتی ہے: آپ کے ہوم کے اندر فولڈر، ~ کے ساتھ لکھے اور کوما سے الگ کیے گئے (مثلاً ~/code, ~/work)۔ پوشیدہ، سسٹم، کمانڈ (PATH پر) اور node_modules فولڈر کبھی استعمال نہیں ہوتے۔ سیٹ نہ ہو تو: ریپوزٹری وہیں بحال ہوتی ہے جہاں وہ پہلے سے ہے، اور غائب ریپوزٹری صرف ایسے فولڈر میں کلون ہوتی ہے جس میں پہلے سے آپ کی ریپوزٹریز ہوں؛ دوسرے فولڈروں کی اجازت کے لیے اسے سیٹ کریں۔",
+      "backtranslation": "Where on this device a session move can create or restore a repository: home folders written with ~, separated by commas, for example ~/code, ~/work. Hidden, system, PATH command and node_modules folders are never used. If unset, restore in place, and clone a missing repository only into a folder already containing your repositories. Set this to allow other folders.",
+      "scope": "accepted-major",
+      "accepted_id": "I18N-WS-69F2A85DFCD2",
+      "auditor_finding_ids": [
+        "UR-A4",
+        "URB-m1"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          5728
+        ],
+        "setting_key": "mesh.move.working_set_roots",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "disposition": "repaired"
+    }
+  ],
+  "glossary_choices": [
+    {
+      "term": "auto/manual/default/true/false and display enums",
+      "decision": "Translate human Choice.label fields and their paired human-help references, never serialized Choice.value, API fields or examples. ہاں/نہیں are natural yes/no labels, not literal machine booleans."
+    },
+    {
+      "term": "Librarian / Library",
+      "decision": "لائبریرین / لائبریری are familiar Urdu-script loanwords for the role and shared collection, not Latin English surface leakage. Exact default persona placeholder Librarian remains unchanged; /librarian and API paths unchanged."
+    },
+    {
+      "term": "daily pass",
+      "decision": "جائزہ (review/pass), with the five direct repeated labels/help neighbors aligned; avoids the opaque پاس while retaining scheduled-pass meaning."
+    },
+    {
+      "term": "Scratchpad",
+      "decision": "عارضی فائلیں (temporary files) in this file-storage section, not merely a text notebook; cap help and label use the same wording. No scratchpad:// URI changed."
+    },
+    {
+      "term": "wire protocol",
+      "decision": "ترسیلی پروٹوکول, a generic transmission-protocol heading, not a provider name."
+    },
+    {
+      "term": "screenings/hour",
+      "decision": "جانچ کی کالیں ہر گھنٹے; call counts, not fractions of the hour. Both nested ceilings and the reserved human capacity retained."
+    },
+    {
+      "term": "push notifications",
+      "decision": "پُش سروس uses established Urdu-script technical borrowing; Radient stays the proper provider name. Not treated as Git push."
+    },
+    {
+      "term": "standard vocal delivery",
+      "decision": "آواز کی معمول کی ادائیگی۔ replaces current constant price; bound to NEW English Standard vocal delivery. and context entry for standard voice meaning."
+    },
+    {
+      "term": "vendor pruning",
+      "decision": "خارج کریں (exclude) with تلاش (search), not حذف کریں (delete); ripgrep stays tool name."
+    },
+    {
+      "term": "comma-separated",
+      "decision": "کوما سے الگ کیے گئے; the literal ASCII ~/code, ~/work example stays exact."
+    },
+    {
+      "term": "Git file states",
+      "decision": "اسٹیج کی گئی، اسٹیج نہ کی گئی، Git میں شامل نہ کی گئی translates staged/unstaged/untracked. Git stays technology name, bundled commits kept per scoped glossary."
+    }
+  ],
+  "technical_retention_proof": [
+    {
+      "keys": [
+        "wire.settings.hub.description",
+        "wire.settings.hub_auto_update_agents.choice.true.description",
+        "wire.settings.hub_auto_update_agents.help",
+        "wire.settings.hub_auto_update_teams.choice.true.description",
+        "wire.settings.hub_auto_update_teams.help"
+      ],
+      "terms": [
+        "merge"
+      ],
+      "glossary": "i18n/glossary.md:118–127 all-locales git/hub operation keep-English set",
+      "consumer_proof": [
+        "local_operator/settings_io.py:1058–1061 (Hub section description)",
+        "local_operator/settings_io.py:5857–5867 (hub.auto_update.teams choice/help)",
+        "local_operator/hub_sync/settings.py:9–12,42–43 (actual agents/teams auto-update config paths)",
+        "local_operator/hub_sync/merge.py:1,1232–1233 (three-way merge core and merge_field)",
+        "local_operator/hub_sync/runner.py:9,452–454 (auto-update switch applies updates)"
+      ],
+      "decision": "Retain merge as the documented Hub operation; generic hub surrounding prose translated ہب, overwrite prose translated. Agent Hub preserved only as full named product service, not blanket exemption for hub prose. Root explicit disposition accepted scoped glossary retention."
+    },
+    {
+      "keys": [
+        "wire.settings.mesh_move_working_set_max_bytes.help"
+      ],
+      "terms": [
+        "commits"
+      ],
+      "glossary": "i18n/glossary.md:118–127 git commit terminology; §1 Git technology name",
+      "consumer_proof": [
+        "local_operator/settings_io.py:5704–5712 (mesh.move.working_set_max_bytes help binding)",
+        "local_operator/network/workset_transfer.py:1 (git engine carrying moved-session worktrees)",
+        "local_operator/network/workset_transfer.py:579–580 (git bundle create object scan)"
+      ],
+      "decision": "Keep bundled Git commits, not generic prose. Translate all staged/unstaged/untracked descriptions. Root explicitly confirmed bundled GIT commit-object exception."
+    },
+    {
+      "keys": [
+        "wire.settings.network_sync_debounce_s.help"
+      ],
+      "terms": [],
+      "decision": "No git/hub exception assumed for transcript transfer. Ordinary directions translated as fetching a fresh copy and sending changes; no Latin pull/push retained."
+    },
+    {
+      "keys": [
+        "wire.settings.web_fetch_render_backend.help"
+      ],
+      "terms": [
+        "markdownify",
+        "[fetch]",
+        "extra"
+      ],
+      "glossary": "i18n/glossary.md:118–123 pip extras; §1 technology/config identifiers",
+      "decision": "Preserve exact package/optional-dependency tokens only; translate Auto and surrounding prose."
+    }
+  ],
+  "invariants": {
+    "value_only_byte_preserving_patch": true,
+    "original_urdu_key_order_and_formatting_retained": true,
+    "english_envelope_key_order_difference": "Discovered approved English map order differs from Urdu. Correct checks preserve Urdu order and compare English key sets; no catalogue reorder occurred.",
+    "protected_code_source_context_generated_history_script_files_checked": 3418,
+    "protected_hash_failures": [],
+    "staging_unchanged": true,
+    "head_unchanged": true,
+    "other_locales": "No author writes to other locales. Concurrent six-locale author changes explicitly excluded from own invariance claim.",
+    "allowed_durable_writes": [
+      "local_operator/i18n/catalogues/ur/wire.settings.json",
+      "i18n/audits/evidence/approval-full-repair-author-ur.json"
+    ],
+    "no_commit_push_generation_baseline_history_eligibility_changes": true,
+    "bedrock_help": "Untouched: prior masking observation was semantic PASS, not source bug.",
+    "ask_automatic_labels": "پوچھیں / خودکار approval-choice labels retained; no change."
+  },
+  "mechanical_checks": {
+    "icu_catalogue_pairs_parsed": 895,
+    "unchanged_icu_signatures": 895,
+    "changed_source_arguments_checked": 75,
+    "malformed_negative_controls": [
+      "rejected",
+      "rejected"
+    ],
+    "positive_one_other_control": "PASS",
+    "key_count": 895,
+    "changed": 75,
+    "unchanged": 820,
+    "key_order": "original Urdu order retained; English envelope order differs, equal key set verified",
+    "nfc_changed_values": "PASS",
+    "bidi_controls_introduced": 0,
+    "source_sha256": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+    "context_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+    "target_sha256": "66c856c3c9ab823665241301511c50286e4dae574a0dd617d0c764a43d99331b",
+    "protected_files_unchanged": 3418,
+    "backtick_token_preservation": "PASS",
+    "literal_checks": {
+      "wire.settings.display_notification_session_name.help": [
+        "Radient"
+      ],
+      "wire.settings.hub.description": [
+        "Agent Hub",
+        "merge"
+      ],
+      "wire.settings.librarian_cadence_paused.help": [
+        "/librarian"
+      ],
+      "wire.settings.mesh_move_working_set_max_bytes.help": [
+        "commits",
+        "256 MiB"
+      ],
+      "wire.settings.mesh_move_working_set_roots.help": [
+        "~",
+        "~/code, ~/work",
+        "PATH",
+        "node_modules"
+      ],
+      "wire.settings.shell_environment_mode.help": [
+        "gh",
+        "aws",
+        "npm",
+        "PATH/HOME/SHELL/TERM/USER/LOGNAME"
+      ],
+      "wire.settings.speech_transcription_cleanup.help": [
+        "`cleanup`"
+      ],
+      "wire.settings.web_fetch_render_backend.help": [
+        "[fetch]",
+        "extra",
+        "markdownify"
+      ],
+      "wire.settings.session_scratchpad_max_bytes.help": [
+        "16 MiB",
+        "8 GiB",
+        "256 MiB"
+      ]
+    },
+    "approval_choice_labels_retained": [
+      "wire.settings.tool_approval_mode.choice.ask.label",
+      "wire.settings.tool_approval_mode.choice.auto.label"
+    ],
+    "width": [
+      {
+        "key": "wire.settings.bash_memory_mode.choice.auto.label",
+        "english_cells": 4,
+        "urdu_cells": 6,
+        "relative_expansion": 1.5,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.bash_memory_mode.choice.manual.label",
+        "english_cells": 6,
+        "urdu_cells": 4,
+        "relative_expansion": 0.667,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.classification_vendor.choice.auto.label",
+        "english_cells": 4,
+        "urdu_cells": 6,
+        "relative_expansion": 1.5,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.compaction_strategy.choice.auto.label",
+        "english_cells": 4,
+        "urdu_cells": 6,
+        "relative_expansion": 1.5,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.compaction_wire_bytes_budget.label",
+        "english_cells": 26,
+        "urdu_cells": 28,
+        "relative_expansion": 1.077,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.display_nerd_icons.choice.none.label",
+        "english_cells": 4,
+        "urdu_cells": 6,
+        "relative_expansion": 1.5,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.librarian.title",
+        "english_cells": 9,
+        "urdu_cells": 9,
+        "relative_expansion": 1.0,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.librarian_cadence_at.label",
+        "english_cells": 15,
+        "urdu_cells": 19,
+        "relative_expansion": 1.267,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.librarian_cadence_max_extra_per_day.label",
+        "english_cells": 18,
+        "urdu_cells": 16,
+        "relative_expansion": 0.889,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.librarian_cadence_paused.label",
+        "english_cells": 17,
+        "urdu_cells": 21,
+        "relative_expansion": 1.235,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.librarian_enabled.label",
+        "english_cells": 17,
+        "urdu_cells": 14,
+        "relative_expansion": 0.824,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.model_effort.choice.unset.label",
+        "english_cells": 4,
+        "urdu_cells": 6,
+        "relative_expansion": 1.5,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.network_rollout_on_update.choice.auto.label",
+        "english_cells": 4,
+        "urdu_cells": 6,
+        "relative_expansion": 1.5,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.providers.title",
+        "english_cells": 13,
+        "urdu_cells": 15,
+        "relative_expansion": 1.154,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+        "english_cells": 5,
+        "urdu_cells": 4,
+        "relative_expansion": 0.8,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+        "english_cells": 7,
+        "urdu_cells": 6,
+        "relative_expansion": 0.857,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+        "english_cells": 5,
+        "urdu_cells": 9,
+        "relative_expansion": 1.8,
+        "maxCells": null,
+        "static_risk": true,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+        "english_cells": 4,
+        "urdu_cells": 12,
+        "relative_expansion": 3.0,
+        "maxCells": null,
+        "static_risk": true,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+        "english_cells": 7,
+        "urdu_cells": 6,
+        "relative_expansion": 0.857,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+        "english_cells": 4,
+        "urdu_cells": 3,
+        "relative_expansion": 0.75,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+        "english_cells": 7,
+        "urdu_cells": 6,
+        "relative_expansion": 0.857,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+        "english_cells": 4,
+        "urdu_cells": 3,
+        "relative_expansion": 0.75,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+        "english_cells": 7,
+        "urdu_cells": 6,
+        "relative_expansion": 0.857,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+        "english_cells": 7,
+        "urdu_cells": 6,
+        "relative_expansion": 0.857,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+        "english_cells": 4,
+        "urdu_cells": 3,
+        "relative_expansion": 0.75,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+        "english_cells": 7,
+        "urdu_cells": 6,
+        "relative_expansion": 0.857,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.session_cleanup_max_total_bytes.label",
+        "english_cells": 17,
+        "urdu_cells": 16,
+        "relative_expansion": 0.941,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.session_scratchpad.title",
+        "english_cells": 10,
+        "urdu_cells": 12,
+        "relative_expansion": 1.2,
+        "maxCells": 12,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.session_scratchpad_max_bytes.label",
+        "english_cells": 27,
+        "urdu_cells": 26,
+        "relative_expansion": 0.963,
+        "maxCells": 29,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+        "english_cells": 9,
+        "urdu_cells": 14,
+        "relative_expansion": 1.556,
+        "maxCells": null,
+        "static_risk": true,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+        "english_cells": 7,
+        "urdu_cells": 20,
+        "relative_expansion": 2.857,
+        "maxCells": null,
+        "static_risk": true,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+        "english_cells": 4,
+        "urdu_cells": 6,
+        "relative_expansion": 1.5,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+        "english_cells": 6,
+        "urdu_cells": 6,
+        "relative_expansion": 1.0,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+        "english_cells": 8,
+        "urdu_cells": 9,
+        "relative_expansion": 1.125,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+        "english_cells": 24,
+        "urdu_cells": 25,
+        "relative_expansion": 1.042,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.speech_voice_gender.choice.auto.label",
+        "english_cells": 4,
+        "urdu_cells": 6,
+        "relative_expansion": 1.5,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.speech_voice_gender.choice.female.label",
+        "english_cells": 6,
+        "urdu_cells": 5,
+        "relative_expansion": 0.833,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.speech_voice_gender.choice.male.label",
+        "english_cells": 4,
+        "urdu_cells": 3,
+        "relative_expansion": 0.75,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.tools_search_interception_rg_excludes.label",
+        "english_cells": 33,
+        "urdu_cells": 43,
+        "relative_expansion": 1.303,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.web_fetch_render_backend.choice.auto.label",
+        "english_cells": 4,
+        "urdu_cells": 6,
+        "relative_expansion": 1.5,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.web_search_strategy.choice.ordered.label",
+        "english_cells": 7,
+        "urdu_cells": 9,
+        "relative_expansion": 1.286,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      },
+      {
+        "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+        "english_cells": 11,
+        "urdu_cells": 9,
+        "relative_expansion": 0.818,
+        "maxCells": null,
+        "static_risk": false,
+        "rendered_fit": "UNVERIFIED"
+      }
+    ],
+    "pseudo": "NOT RUN: author lane prohibits rendering/generation; no pseudo/format tables changed. Existing ICU one/other control only, not pseudo proof.",
+    "rtl": "Logical-order native Urdu authored without bidi controls; render isolation/native shaping NOT VERIFIED."
+  },
+  "mechanical_execution": {
+    "command": "/Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/c8c42578bc8c/scratchpad/verify_ur.py",
+    "actual_result": "exit 0; 895 ICU signature pairs preserved, 75 changed-source argument signatures matched, 2 malformed-brace negative controls rejected, one/other positive control passed; NFC and no bidi controls; 3418 protected hashes equal",
+    "method": "AST extract existing runtime.py pure parser definitions only, plus existing Rich cell metric; no full module/package imports, pytest, browser, build, dependencies or renderer.",
+    "controls_note": "Initial test using a missing other branch was accepted by the existing pure parser: source inspection shows CLDR other enforcement is the caller parity gate, not parse_message. Replaced that mistaken expectation with genuinely malformed-brace controls. No parser or test was changed."
+  },
+  "width_risks": [
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "english_cells": 5,
+      "urdu_cells": 9,
+      "relative_expansion": 1.8,
+      "maxCells": null,
+      "static_risk": true,
+      "rendered_fit": "UNVERIFIED"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "english_cells": 4,
+      "urdu_cells": 12,
+      "relative_expansion": 3.0,
+      "maxCells": null,
+      "static_risk": true,
+      "rendered_fit": "UNVERIFIED"
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "english_cells": 9,
+      "urdu_cells": 14,
+      "relative_expansion": 1.556,
+      "maxCells": null,
+      "static_risk": true,
+      "rendered_fit": "UNVERIFIED"
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+      "english_cells": 7,
+      "urdu_cells": 20,
+      "relative_expansion": 2.857,
+      "maxCells": null,
+      "static_risk": true,
+      "rendered_fit": "UNVERIFIED"
+    }
+  ],
+  "dispositions": {
+    "accepted_major_findings": "All 56 addressed in authored values; five Hub keys retain genuine merge term with individual Root-confirmed glossary proof. Independent auditors determine final semantic verdict.",
+    "rejected_major_findings": [],
+    "unaddressed_major_findings": [],
+    "deferred_minor": "Pure style and static width risks deferred to integration rendered review, not claimed clipping; no blanket whole-prose rewrite.",
+    "static_width_risk_count": 4,
+    "unverified": [
+      "independent native A/B delta audits",
+      "rendered label fit",
+      "native Urdu shaping and render-layer isolation",
+      "pseudo-localized rendered frames",
+      "real-path code/design/UX/QA and release gates"
+    ],
+    "whole_namespace_clearance": false
+  }
+}

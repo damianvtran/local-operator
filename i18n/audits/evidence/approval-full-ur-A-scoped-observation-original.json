@@ -1,0 +1,13 @@
+{
+  "kind": "transcript observation; not an exact original tool envelope",
+  "tool": "read_public_copy",
+  "path": "local_operator/i18n/catalogues/ur/wire.settings.json",
+  "key": "wire.settings.providers_bedrock_auth.help",
+  "repo_root": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+  "head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+  "lease": "one manager-authorized single-key call; released",
+  "result": "Direct approved tool result was readable and semantically correct: literal ambient, current machine AWS credentials, IAM role, Bedrock. No generic-output masked-value reconstruction used.",
+  "source_value_sha256": "6a044771c627d34a62b39866fbbf5a0d5b7c41b9b3d353d647848d25996b8fcc",
+  "original_contains_literal_redaction_marker": false,
+  "public_details_limitation": "Direct tool result displayed the JSON value but no details/envelope path; cannot claim an exact original-envelope capture hash. Full immutable approved envelope provenance is recorded separately."
+}

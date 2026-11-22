@@ -1,0 +1,81 @@
+{
+  "schema": "approval-repair-r3-integration-control/v1",
+  "session": "22522732cf63",
+  "actual_served_model": "openai/gpt-6.1-sol",
+  "model_provenance": "host quota fallback notice",
+  "K": "4880031aeed59ef17ae6ffccc15d28e1fc0db104",
+  "K2": "e1c00f8c6bc4c06f2519c63d0ac406e31628dcf8",
+  "private_commit_exact_paths": [
+    "i18n/audits/evidence/approval-repair-r3-K2-source-binding.json",
+    "i18n/audits/evidence/approval-repair-r3-author-es.json",
+    "i18n/audits/evidence/approval-repair-r3-author-vi.json",
+    "local_operator/i18n/catalogues/es/wire.settings.json",
+    "local_operator/i18n/catalogues/vi/wire.settings.json"
+  ],
+  "tracked_worktree_clean": true,
+  "other_tracked_K_to_K2_exact": true,
+  "preexisting_untracked_byte_preserved_count": 79,
+  "author_receipts_exact": {
+    "es": "ab08a0f810bdff3acc453f8da01119bab6f7fe445393153b7f9d5149aa9bb9ad",
+    "vi": "8ea9955f5a2958d4d585ef795878f57b0c210b63e5036a2b2c30a6007bfddd79"
+  },
+  "source_binding_sha256": "e6fd243ec7a9c29b5b93555f646b8aac3d336b6d70904c8412ae2f51346afd1d",
+  "readerbrief_path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-repair-r3-readerbrief.json",
+  "readerbrief_sha256": "f04cbb514cc210c2254e4becda86edc81b0a46f4a9672e4329ef9d8b0e6a6951",
+  "input_manifest_path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-repair-r3-postauthor-inputs/manifest.json",
+  "input_manifest_sha256": "2d1ae84852bd98cbed9329f24b3cc6c36afff0058750576f407357a8ff789d76",
+  "captures": [
+    {
+      "locale": "es",
+      "path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-repair-r3-postauthor-inputs/es-approved-envelope.json",
+      "envelope_sha256": "4a19391b248248b90df7778e0c885769cf90d8bdc5aa1efb69a6daeb87917886",
+      "raw_file_sha256": "36132ff7f31a6a42c941661fb983f8b14b54954bdaf54f268f8f69eb9672c52b",
+      "canonical_sha256": "b9a695630ba8d744739476368ccbf4df7b1680565e5aed4dfcf3bc996632a77e",
+      "tool_call_id": "call_5179f9f6c66743e0bf1a8de1bac018b7:97479977e8704865ab0f57a66e9b9c61"
+    },
+    {
+      "locale": "vi",
+      "path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-repair-r3-postauthor-inputs/vi-approved-envelope.json",
+      "envelope_sha256": "09b9926dbdf120e9a049ed171522656312a2d9720e3e6db8e035f2a67c95946f",
+      "raw_file_sha256": "100fc2ccedd6bc0def2837912b4332d9b0438c1f0dc5451e072d37bf94e1e964",
+      "canonical_sha256": "332a6f0bfa576e504d3964c60bc2176f08ee803edd6153f2270c6d2227c270b7",
+      "tool_call_id": "call_b09d4eeda78e4821a623956c835f6648:f3766d2e418540cd84b3b407b36109ad"
+    }
+  ],
+  "five_stream_compatibility_sha256": "67da2fced4574790204aedffb5398ccb498f9d3a87fd44531b99c27a6b266e3f",
+  "five_stream_targets": [
+    {
+      "locale": "zh-CN",
+      "path": "local_operator/i18n/catalogues/zh-CN/wire.settings.json",
+      "K_raw_sha256": "c17c1cf7e60d836a2e15bfdb341977ceab0ff15d4c62cfa92e7f03b8ed2e53ba"
+    },
+    {
+      "locale": "fr",
+      "path": "local_operator/i18n/catalogues/fr/wire.settings.json",
+      "K_raw_sha256": "e093d4481ac0d477c86b562ff8ab1f59c2a00e948fddce1b3f34c1da73064ffa"
+    },
+    {
+      "locale": "ru",
+      "path": "local_operator/i18n/catalogues/ru/wire.settings.json",
+      "K_raw_sha256": "5c50edd1aa20e5755f5704f95835117852dd9e0e39b222ce421bf6c47f003651"
+    },
+    {
+      "locale": "hi",
+      "path": "local_operator/i18n/catalogues/hi/wire.settings.json",
+      "K_raw_sha256": "b030c730c0f8a179773b082a8e907d4487e8cf31a590714b62bab51614a5c30a"
+    },
+    {
+      "locale": "ur",
+      "path": "local_operator/i18n/catalogues/ur/wire.settings.json",
+      "K_raw_sha256": "66c856c3c9ab823665241301511c50286e4dae574a0dd617d0c764a43d99331b"
+    }
+  ],
+  "R2_original_binding_sha256": "678728561a2cc8f93d490ba38f510f4660b0b5999b6f24977ba003347922fc27",
+  "R2_original_count": 14,
+  "R2_ledger_sha256": "45c0e8e7f97e9dcb1af71d44324ff777fa9dd51fd3ba37ff10e1092f4b0abd53",
+  "frozen_major_count": 8,
+  "all_frozen_majors_in_delta": true,
+  "publication_attempted": false,
+  "native_render_semantic_global_pass_claimed": false,
+  "pending": "Root to dispatch only four fresh private independent ES/VI delta readers. No historical eligibility appended."
+}

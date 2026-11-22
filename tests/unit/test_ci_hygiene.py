@@ -4718,6 +4718,9 @@ def test_guards_job_reads_the_one_guard_list() -> None:
     from scripts import affected_tests
 
     assert affected_tests.GUARD_TESTS, "an empty guard list runs nothing on PRs"
+    # File discovery alone cannot catch a deleted namespace or locale directory;
+    # keep the manifest's tree-wide coverage assertion on fast PR admission.
+    assert "tests/unit/i18n/test_language_manifest.py" in affected_tests.GUARD_TESTS
     for node in affected_tests.GUARD_TESTS:
         rel, _, name = node.partition("::")
         assert (REPO / rel).is_file(), f"GUARD_TESTS names a missing file: {rel}"

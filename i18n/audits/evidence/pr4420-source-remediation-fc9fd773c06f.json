@@ -1,0 +1,104 @@
+{
+  "stage": "PRIVATE immutable SOURCE/CODE checkpoint; NOT complete localization or ship clearance",
+  "base": "e9e6c3711149cba6899083eab019342d98d5fa55",
+  "head": "8f1e45a3a98ca9f8b7312b6707c36e21b758966d",
+  "agent": "coder / fc9fd773c06f",
+  "model": "openai/gpt-6.1-sol",
+  "fallback_from": "anthropic/claude-opus-5-5; provider quota notice before implementation",
+  "catalogue_changes": {
+    "local_operator/i18n/catalogues/en/tui.info.json": {
+      "sha256": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+      "new_keys": [],
+      "changed_keys": [
+        "tui.info.export.build_age",
+        "tui.info.export.uptime"
+      ],
+      "key_count": 277
+    },
+    "local_operator/i18n/catalogues/en/tui.info.context.json": {
+      "sha256": "aee21715fca769227b3bda5b500a5e81e51763cf86817f741baff8b1a5ef0ae7",
+      "new_keys": [],
+      "changed_keys": [
+        "tui.info.status.bound_held",
+        "tui.info.install.build_age",
+        "tui.info.latest.checked_full",
+        "tui.info.latest.checked_short",
+        "tui.info.session.started",
+        "tui.info.fleet_caveats.lower_bound",
+        "tui.info.latest_line.checked",
+        "tui.info.not_answering_clause.full",
+        "tui.info.tree_lines.deeper",
+        "tui.info.export.build_age",
+        "tui.info.export.uptime",
+        "tui.info.state.stale"
+      ],
+      "key_count": 277
+    }
+  },
+  "contracts": {
+    "new_keys": [],
+    "changed_messages": [
+      "tui.info.export.build_age",
+      "tui.info.export.uptime"
+    ],
+    "generated_python_key_module_byte_identical": true,
+    "params": "Existing build_age_s: str / uptime_s: str. ICU select unmeasured selects a whole missing-field line; other interpolates the same argument. None is passed as stable unmeasured selector, never zero or parsed English unknown.",
+    "human_units": "All Info duration consumers reuse four audited wire.session_status duration keys in Info active locale, without importing session.catalog or changing info.model formatter. English thresholds/ungrouped days unchanged.",
+    "composition": "Shared ICU walker retains simple-interpolation owners; tr_record returns source-aware parts. Info expands nested parts without string-search substitution, preserving leaf fallback source and technical commands. Note wrap keeps fitting Urdu technical literals whole, retaining fragment ownership when necessary."
+  },
+  "old_reproductions": {
+    "R1": "French absent clipboard durations unknown",
+    "R2": "Whole actual-PID force command not isolated at widths1000/126",
+    "R3": "English SHA complete at51, French/Spanish/Vietnamese/Urdu incomplete",
+    "Q1": "New first-frame regression fails against in-memory git-show old modules: English footer remains; expected pytest rc1 observed twice"
+  },
+  "tests": [
+    {
+      "files": [
+        "tests/unit/i18n/test_info_readout.py",
+        "tests/unit/i18n/test_runtime.py",
+        "tests/unit/tui/test_info_i18n_refresh.py",
+        "tests/unit/tui/test_info_panel.py",
+        "tests/unit/info/test_redaction.py"
+      ],
+      "result": "231 passed, 2 pre-existing pydantic deprecation warnings",
+      "seconds": 14.79,
+      "log": "targeted.log"
+    },
+    {
+      "files": [
+        "tests/unit/i18n/test_info_readout.py",
+        "tests/unit/i18n/test_text.py",
+        "tests/unit/i18n/test_messages.py"
+      ],
+      "result": "57 passed (includes subsequently added classification/held/hidden-node/fleet-count control)",
+      "seconds": 1.97,
+      "log": "neighbors.log"
+    }
+  ],
+  "test_environment": "Primary Python3.12.13 .venv, PYTHONPATH points at manager worktree; env-i HOME/config isolated, TERM=xterm-256color, CMUX/LOP inherited settings stripped; -n0; each run via run_bounded command-status timeout600 memory3036.",
+  "real_path": "Real OperatorApp CSS, command/watcher/manual poll plus separate Python writer and automatic watcher, each midscroll/endpinned: first hint French before refresh callbacks, snapshot/screen identity retained and end/middle scrolling invariant passes. Before/after first-frame PNGs rendered with librsvg and viewed; not native Urdu shaping evidence.",
+  "artifacts_session": "fc9fd773c06f",
+  "artifacts": [
+    "old-repro.log",
+    "old-frames.log",
+    "targeted.log",
+    "neighbors.log",
+    "old-frames/first-frame.png",
+    "frames/first-command-frame.png",
+    "frames/first-external-frame.png",
+    "frames/*.svg",
+    "frames/*.geometry.json"
+  ],
+  "not_run": [
+    "Full-suite/guard bundle/CI/native/browser",
+    "Full generation: pending legitimate revised namespace translator and audit metadata; no accept-stranded, eligibility waiver or generated-file edits",
+    "Lint: primary venv ruff executable absent, no dependency install attempted"
+  ],
+  "remaining": [
+    "Fresh translator roles adapt both whole-field select templates and accepted native findings against this immutable EN/context pin",
+    "Independent namespace audits, correct append-only ledger metadata and full generation, then combined remediation integration push and fresh review/QA/design/UX as manager determines",
+    "Absent-duration target production messages currently retain old templates and therefore display unmeasured until translators adapt them; marker tests prove routing, NOT final native missing-value copy"
+  ],
+  "preservation": "All seven target catalogues 277keys and bytes unchanged from base; all pre-existing untracked review/QA/manager evidence retained. No push, PR, rebase, reset, merge, release, install, version bump or server/browser processes."
+}
