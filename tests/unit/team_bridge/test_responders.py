@@ -773,14 +773,16 @@ async def test_outstanding_ask_is_published_on_the_heartbeat(tmp_path: Path, mon
 )
 @pytest.mark.parametrize("layout", ["present", "no_file", "no_dir"])
 def test_every_route_onto_the_policy_or_its_directory_is_critical(
-    tmp_path: Path, command: str, layout: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str, layout: str
 ) -> None:
-    """M1/S-1: link, rsync, recursive copy, archive extract, git checkout, an
-    interpreter, a case or ``..`` spelling, and moving/removing ``team_bridge``
-    itself all rank CRITICAL — including the default state, no policy yet."""
+    """M1/S-1: every spelling that reaches the policy on a case-insensitive
+    volume ranks CRITICAL, even before the policy or its directory exists."""
 
-    from local_operator.guardrails.classify import Risk, classify_bash
+    from local_operator.guardrails import classify
 
+    # The two case variants are aliases only in this mode. Keep their full
+    # classifier coverage in all three layouts without inheriting the CI volume.
+    monkeypatch.setattr(classify, "_case_insensitive", lambda _state: True)
     home = tmp_path / "home"
     state = home / ".local-operator"
     state.mkdir(parents=True)
@@ -790,8 +792,34 @@ def test_every_route_onto_the_policy_or_its_directory_is_critical(
     if layout == "present":
         (state / "team_bridge" / "responders.yaml").write_text("version: 1\n")
     env = {"HOME": str(home), "LOCAL_OPERATOR_CONFIG_DIR": str(state), "PATH": "/usr/bin:/bin"}
-    verdict = classify_bash(command, cwd=str(home), env=env, session_id="own", scratchpad=None)
-    assert verdict.risk is Risk.CRITICAL, verdict.reasons
+    verdict = classify.classify_bash(
+        command, cwd=str(home), env=env, session_id="own", scratchpad=None
+    )
+    assert verdict.risk is classify.Risk.CRITICAL, verdict.reasons
+
+
+@pytest.mark.parametrize(
+    ("relative", "is_case_variant"),
+    [
+        ("team_bridge/responders.yaml", False),
+        ("team_bridge/RESPONDERS.yaml", True),
+        ("TEAM_BRIDGE/responders.yaml", True),
+    ],
+    ids=["exact", "file-case-variant", "directory-case-variant"],
+)
+@pytest.mark.parametrize("case_insensitive", [False, True], ids=["sensitive", "insensitive"])
+def test_policy_region_matches_case_variants_only_on_case_insensitive_volumes(
+    monkeypatch: pytest.MonkeyPatch, relative: str, is_case_variant: bool, case_insensitive: bool
+) -> None:
+    from local_operator.guardrails import classify
+
+    # Compare synthetic names only: OS path resolution could identify aliases
+    # before the comparator gets to apply the simulated volume's case rules.
+    monkeypatch.setattr(classify, "_case_insensitive", lambda _state: case_insensitive)
+    state = "/synthetic-state"
+    assert classify._in_policy_region(f"{state}/{relative}", state) is (
+        case_insensitive or not is_case_variant
+    )
 
 
 def test_ln_s_a_directory_in_place_of_team_bridge_is_critical(tmp_path: Path) -> None:
