@@ -10,7 +10,7 @@ The caller owns codec sequencing and must never reseal/reuse an abandoned nonce.
 from __future__ import annotations
 
 import math
-import select
+import selectors
 import socket
 import sys
 import threading
@@ -181,13 +181,22 @@ class LinuxPreparedRecordWriter:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise _Abandon("deadline")
-                    readable, writable, _ = select.select(
-                        [self._wake_read], [self._duplicate], [], remaining
-                    )
-                    if readable:
+                    # Linux's default selector uses epoll, not fd_set: valid
+                    # duplicate AND wake descriptors may exceed select's ceiling.
+                    # Scope its owned kernel handle to this wait, outside both
+                    # exclusion scopes, including on timeout/EINTR/abandonment.
+                    with selectors.DefaultSelector() as readiness:
+                        readiness.register(self._wake_read, selectors.EVENT_READ)
+                        readiness.register(self._duplicate, selectors.EVENT_WRITE)
+                        events = readiness.select(remaining)
+                    # Cancellation wins even when both handles become ready.
+                    if any(key.fileobj is self._wake_read for key, _ in events):
                         raise _Abandon("cancelled")
-                    if not writable:
-                        raise _Abandon("deadline")
+                    if not events:
+                        # An interrupted/empty wait is not evidence of expiry.
+                        # Recompute the caller's absolute deadline, without a
+                        # polling interval or another send on stale readiness.
+                        continue
                 with boundary as state:
                     if type(state) is not AttemptState:
                         raise TypeError("boundary must yield exact AttemptState")

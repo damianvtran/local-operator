@@ -103,7 +103,7 @@ def mutate_revision(lock, revision, waiting, changed, committed_at):
     # spawn passes an independently opened OS semaphore handle to this process.
     if not waiting.wait(5):
         raise RuntimeError("writer did not reach outside-boundary backpressure")
-    # Rig scheduling allowance only: let the writer enter the real select
+    # Rig scheduling allowance only: let the writer enter the real selector
     # syscall after announcing a non-writable socket. Timestamp containment
     # below (and the syscall evidence run) verifies the actual overlap.
     time.sleep(0.02)
@@ -123,6 +123,195 @@ def receive_all(peer):
     while chunk := peer.recv(65536):
         received.extend(chunk)
     return bytes(received)
+
+
+@contextlib.contextmanager
+def high_descriptor(writer, attribute):
+    """Lease only two high slots in this disposable test process, not the service.
+
+    F_DUPFD_CLOEXEC avoids opening thousands of descriptors merely to reproduce
+    fd_set's ceiling. Restore the soft limit even when the old source fails.
+    """
+    import fcntl
+    import resource
+
+    limits = resource.getrlimit(resource.RLIMIT_NOFILE)
+    try:
+        if limits[0] <= 1024:
+            assert limits[1] >= 1026, "high-descriptor test lease unavailable"
+            resource.setrlimit(resource.RLIMIT_NOFILE, (1026, limits[1]))
+        low = getattr(writer, attribute)
+        fd = fcntl.fcntl(low.fileno(), fcntl.F_DUPFD_CLOEXEC, 1024)
+        high = socket.socket(fileno=fd)
+        try:
+            assert fd in (1024, 1025), "only the two leased high slots are allowed"
+            high.settimeout(low.gettimeout())
+            setattr(writer, attribute, high)
+            low.close()
+            yield fd
+        finally:
+            writer.close()
+            high.close()
+            with pytest.raises(OSError):
+                os.fstat(fd)
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, limits)
+        assert resource.getrlimit(resource.RLIMIT_NOFILE) == limits
+        print("NOFILE_RESTORED", limits)
+
+
+@pytest.mark.parametrize("attribute", [None, "_duplicate", "_wake_read"])
+def test_high_descriptor_completes_authenticated_record(attribute):
+    with tcp_pair() as (original, peer):
+        sender, receiver = codecs()
+        reader = FrameReader(peer)
+        before = {"op": "ordinary-before"}
+        original.sendall(sender.seal(before))
+        assert receiver.open(reader.read_record_payload(time.monotonic() + 5)) == before
+        writer = LinuxPreparedRecordWriter(original, linux_prepared_writer_enabled=True)
+        boundary = Boundary()
+        frame = {"op": "high-descriptor", "body": "h" * 262144}
+        sealed = sender.seal(frame)
+        received, errors = [], []
+
+        def receive():
+            try:
+                # Rig delay establishes actual TCP backpressure; never product policy.
+                time.sleep(0.05)
+                received.append(receiver.open(reader.read_record_payload(time.monotonic() + 5)))
+            except BaseException as exc:
+                errors.append(exc)
+
+        lease = high_descriptor(writer, attribute) if attribute else contextlib.nullcontext(None)
+        with lease as fd:
+            thread = threading.Thread(target=receive)
+            thread.start()
+            try:
+                result = writer.write_record(
+                    sealed, expected_revision=0, boundary=boundary, deadline=time.monotonic() + 5
+                )
+                join(thread)
+                assert not errors and received == [frame]
+                assert result.complete and result.accepted_bytes == len(sealed)
+                assert boundary.entries > 1
+                writer.close()
+                after = {"op": "ordinary-after"}
+                original.sendall(sender.seal(after))
+                assert receiver.open(reader.read_record_payload(time.monotonic() + 5)) == after
+                peer.sendall(receiver.seal({"op": "reverse"}))
+                reverse = sender.open(
+                    FrameReader(original).read_record_payload(time.monotonic() + 5)
+                )
+                assert reverse == {"op": "reverse"}
+                assert sender.sent == receiver.received == 3
+                print(
+                    "HIGHFD_COMPLETE", attribute, fd, result, "ordinary-before/after reverse PASS"
+                )
+            finally:
+                writer.cancel()
+                join(thread)
+
+
+@pytest.mark.parametrize("attribute", [None, "_duplicate", "_wake_read"])
+@pytest.mark.parametrize("stop", ["cancel", "close", "deadline"])
+def test_backpressured_descriptor_abandons_exact_prefix(attribute, stop, monkeypatch):
+    with tcp_pair() as (original, peer):
+        writer = LinuxPreparedRecordWriter(original, linux_prepared_writer_enabled=True)
+        lease = high_descriptor(writer, attribute) if attribute else contextlib.nullcontext(None)
+        with lease as fd:
+            boundary = Boundary()
+            sender, _ = codecs()
+            sealed = sender.seal({"op": "abandoned", "body": "p" * 262144})
+            real_duplicate = writer._duplicate
+            partial = threading.Event()
+            accepted, results, errors = [], [], []
+
+            class ObservedSend:
+                def __getattr__(self, name):
+                    return getattr(real_duplicate, name)
+
+                def send(self, data, flags):
+                    assert boundary.inside
+                    sent = real_duplicate.send(data, flags)
+                    accepted.append(sent)
+                    if 0 < sent < len(data):
+                        partial.set()
+                    return sent
+
+            monkeypatch.setattr(writer, "_duplicate", ObservedSend())
+
+            def write():
+                try:
+                    results.append(
+                        writer.write_record(
+                            sealed,
+                            expected_revision=0,
+                            boundary=boundary,
+                            deadline=time.monotonic() + (0.15 if stop == "deadline" else 5),
+                        )
+                    )
+                except BaseException as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=write)
+            thread.start()
+            try:
+                assert partial.wait(5), "no actual partial TCP send"
+                if stop != "deadline":
+                    # Let the actual continuation enter readiness. On old source
+                    # a high fd instead escapes with ValueError, which is RED.
+                    time.sleep(0.02)
+                    assert thread.is_alive(), errors
+                    getattr(writer, stop)()
+                join(thread)
+                assert not errors, errors
+                result = results[0]
+                assert not result.complete
+                assert result.reason == ("deadline" if stop == "deadline" else "cancelled")
+                assert 0 < result.accepted_bytes == sum(accepted) < len(sealed)
+                raw = receive_all(peer)
+                assert raw == sealed[:result.accepted_bytes]
+                with pytest.raises(ConnectionError):
+                    FrameReader(peer, buffered=raw).read_record_payload(time.monotonic() + 1)
+                assert original.fileno() >= 0 and original.recv(1) == b""
+                with pytest.raises(RuntimeError, match="closed"):
+                    writer.write_record(
+                        sealed,
+                        expected_revision=0,
+                        boundary=boundary,
+                        deadline=time.monotonic() + 1,
+                    )
+                writer.cancel()
+                writer.close()
+                assert real_duplicate.fileno() == -1
+                assert writer._wake_read.fileno() == writer._wake_write.fileno() == -1
+                print("PREFIX_EOF", attribute, fd, stop, result, "next-refusal owned-cleanup PASS")
+            finally:
+                writer.cancel()
+                join(thread)
+                print(
+                    "DESCRIPTOR_RUN",
+                    attribute,
+                    fd,
+                    stop,
+                    "accepted_bytes",
+                    sum(accepted),
+                    "results",
+                    results,
+                    "errors",
+                    [repr(exc) for exc in errors],
+                )
+
+
+def observe_readiness(monkeypatch, observe):
+    """Instrument the actual selector syscall, not a replacement readiness rig."""
+    real_selector = writer_module.selectors.DefaultSelector
+
+    class ObservedSelector(real_selector):
+        def select(self, timeout=None):
+            return observe(super().select, timeout)
+
+    monkeypatch.setattr(writer_module.selectors, "DefaultSelector", ObservedSelector)
 
 
 def test_enabled_linux_writer_completes_record_without_changing_reader_timeout(
@@ -173,20 +362,18 @@ def test_enabled_linux_writer_completes_record_without_changing_reader_timeout(
 
         reader_thread = threading.Thread(target=original_reader)
         reader_thread.start()
-        real_select = select.select
         waits = []
         release_receiver = threading.Event()
 
-        def observed_select(readers, writers, errors, timeout):
+        def observed_select(real_select, timeout):
             assert not boundary.inside
-            if writers and writers[0] is duplicate:
-                ready = real_select([], writers, [], 0)[1]
-                waits.append(bool(ready))
-                if not ready:
-                    release_receiver.set()
-            return real_select(readers, writers, errors, timeout)
+            ready = real_select(0)
+            waits.append(bool(ready))
+            if not ready:
+                release_receiver.set()
+            return real_select(timeout)
 
-        monkeypatch.setattr(writer_module.select, "select", observed_select)
+        observe_readiness(monkeypatch, observed_select)
         receiver_results, receiver_errors = [], []
 
         def receive_protected():
@@ -269,22 +456,20 @@ def test_linux_writer_boundary_change_abandons_partial_record_and_shuts_down(
         writer = LinuxPreparedRecordWriter(original, linux_prepared_writer_enabled=True)
         duplicate_fd = writer._duplicate.fileno()
         boundary = ProcessBoundary(lock, revision)
-        real_select = select.select
         writer_results, errors, raw = [], [], []
         wait_spans = []
 
-        def observed_select(readers, writers, exceptional, timeout):
+        def observed_select(real_select, timeout):
             assert not boundary.inside
-            if writers and writers[0] is writer._duplicate:
-                if not real_select([], writers, [], 0)[1]:
-                    started = time.monotonic()
-                    waiting.set()
-                    ready = real_select(readers, writers, exceptional, timeout)
-                    wait_spans.append((started, time.monotonic()))
-                    return ready
-            return real_select(readers, writers, exceptional, timeout)
+            if not real_select(0):
+                started = time.monotonic()
+                waiting.set()
+                ready = real_select(timeout)
+                wait_spans.append((started, time.monotonic()))
+                return ready
+            return real_select(timeout)
 
-        monkeypatch.setattr(writer_module.select, "select", observed_select)
+        observe_readiness(monkeypatch, observed_select)
 
         def write():
             try:
@@ -515,7 +700,6 @@ def test_cancel_and_close_do_not_release_active_attempt_handles(monkeypatch, sto
         writer = LinuxPreparedRecordWriter(original, linux_prepared_writer_enabled=True)
         boundary = Boundary()
         waiting, release = threading.Event(), threading.Event()
-        real_select = select.select
         real_release = writer._release_locked
         releases = []
 
@@ -526,14 +710,14 @@ def test_cancel_and_close_do_not_release_active_attempt_handles(monkeypatch, sto
         monkeypatch.setattr(writer, "_release_locked", release_once)
         results, errors = [], []
 
-        def paused_wait(readers, writers, exceptional, timeout):
+        def paused_wait(real_select, timeout):
             assert not boundary.inside
-            if writers and not real_select([], writers, [], 0)[1]:
+            if not real_select(0):
                 waiting.set()
                 assert release.wait(5)
-            return real_select(readers, writers, exceptional, timeout)
+            return real_select(timeout)
 
-        monkeypatch.setattr(writer_module.select, "select", paused_wait)
+        observe_readiness(monkeypatch, paused_wait)
 
         def write():
             try:
@@ -578,6 +762,69 @@ def test_cancel_and_close_do_not_release_active_attempt_handles(monkeypatch, sto
             release.set()
             writer.cancel()
             join(thread)
+
+
+def test_empty_readiness_retries_deadline_without_stale_send(monkeypatch):
+    with tcp_pair() as (original, peer):
+        writer = LinuxPreparedRecordWriter(original, linux_prepared_writer_enabled=True)
+        boundary = Boundary()
+        snapshots = []
+
+        def empty_once(real_select, timeout):
+            assert not boundary.inside
+            snapshots.append((boundary.entries, timeout))
+            if len(snapshots) == 1:
+                return []  # DefaultSelector's interrupted-wait result.
+            assert snapshots[1][0] == snapshots[0][0]
+            assert 0 < snapshots[1][1] <= snapshots[0][1]
+            writer.cancel()
+            # Both handles are ready on this initially writable TCP endpoint;
+            # cancellation must win over the write event, without another send.
+            ready = real_select(timeout)
+            assert {key.fileobj for key, _ in ready} == {writer._duplicate, writer._wake_read}
+            return ready
+
+        observe_readiness(monkeypatch, empty_once)
+        result = writer.write_record(
+            b"s" * 262144, expected_revision=0, boundary=boundary, deadline=time.monotonic() + 1
+        )
+        assert not result.complete and result.reason == "cancelled"
+        assert boundary.entries == 1
+        assert receive_all(peer) == b"s" * result.accepted_bytes
+        assert writer._duplicate.fileno() == -1
+        assert writer._wake_read.fileno() == writer._wake_write.fileno() == -1
+
+
+def test_signal_interrupted_backpressure_keeps_callers_deadline():
+    import signal
+
+    # A real signal interrupts the actual epoll wait; Python/DefaultSelector
+    # must retain the finite absolute deadline, not translate EINTR to success.
+    with tcp_pair() as (original, peer):
+        writer = LinuxPreparedRecordWriter(original, linux_prepared_writer_enabled=True)
+        signals = []
+        previous_handler = signal.getsignal(signal.SIGALRM)
+        previous_timer = signal.getitimer(signal.ITIMER_REAL)
+        assert previous_timer == (0.0, 0.0), "test process already owns an alarm"
+        signal.signal(signal.SIGALRM, lambda *_: signals.append(time.monotonic()))
+        started = time.monotonic()
+        deadline = started + 0.15
+        try:
+            signal.setitimer(signal.ITIMER_REAL, 0.04)
+            result = writer.write_record(
+                b"s" * 262144, expected_revision=0, boundary=Boundary(), deadline=deadline
+            )
+            assert signals and started < signals[0] < deadline
+            assert not result.complete and result.reason == "deadline"
+            assert time.monotonic() >= deadline
+            assert 0 < result.accepted_bytes < 262144
+            assert receive_all(peer) == b"s" * result.accepted_bytes
+            assert writer._duplicate.fileno() == -1
+            assert writer._wake_read.fileno() == writer._wake_write.fileno() == -1
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous_handler)
+            writer.close()
 
 
 def test_deadline_and_socket_error_abandon():
