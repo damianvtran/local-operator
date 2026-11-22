@@ -8143,10 +8143,9 @@ def _offload(
     # session restores against the CURRENT team/agent brief and the operator's custom
     # instructions rather than whatever mirror the cadence last left there (a team
     # edited a minute ago, or a node paired since the last tick). It runs before the
-    # invite, and therefore before any commit. NON-FATAL by design: the move's own
-    # contract is the transcript, and refusing a move because a brief could not be
-    # refreshed would strand the session on a device the operator is moving it off.
-    # The failure is not silent — it names the copy that may be stale on the receipt.
+    # invite, and therefore before any commit. A failed push is reported rather
+    # than itself refusing the move: the destination may already have the exact
+    # team. The pull independently refuses if it cannot verify that identity.
     definitions_notice = _push_move_definitions(
         server, session_id, target_device, target_name or target_device
     )
@@ -8446,8 +8445,8 @@ def _push_move_definitions(
     The names come from the session's own ``attachment.json`` (what ``/team`` and
     ``/agent`` put on it); ``definitions.push_to_peer`` expands a team to its roster
     and always carries the operator-instructions singleton, so a session with no
-    attachment still gets the operator's standing rules. Never raises: see the call
-    site for why this cannot fail a move.
+    attachment still gets the operator's standing rules. Never raises: the actual
+    team-identity decision belongs to the destination pull, not the push receipt.
     """
     from local_operator.network import definitions
     from local_operator.resume import read_session_attachment

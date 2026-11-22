@@ -1874,21 +1874,24 @@ def test_offload_reports_a_team_conflict_without_replacing_the_local_definition(
     assert still_local is not None and still_local.instructions == "different brief"
 
 
-def test_a_failed_definitions_refresh_names_the_stale_copy_but_still_moves(
+def test_a_failed_definitions_refresh_does_not_block_an_already_matching_team(
     pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The refresh is non-fatal: the move completes and the receipt names what may
-    be stale on the destination, instead of silently running an older brief."""
+    """A failed push still reports its notice, but doesn't decide team identity."""
     from local_operator.network import definitions
     from local_operator.resume import write_session_attachment
+    from local_operator.teams import TeamEditFields, TeamRegistry
 
     server_a, server_b, _host, _port = pair
     _pair_settled(pair, monkeypatch, role="admin", settings=server_b.settings)
     session_dir = _owned_session(server_a)
+    fields = TeamEditFields(name="lopdev", instructions="the same team brief")
+    TeamRegistry(server_a.root).create_team(fields)
+    TeamRegistry(server_b.root).create_team(fields)
     write_session_attachment(session_dir, team="lopdev", agent="", goal="")
 
     def refused(server: Any, device_id: str, **kwargs: Any) -> dict[str, Any]:
-        return {"ok": False, "code": "conflict", "message": "team 'lopdev' (local edits)"}
+        return {"ok": False, "code": "unreachable", "message": "definitions relay unavailable"}
 
     monkeypatch.setattr(definitions, "push_to_peer", refused)
 
@@ -1897,4 +1900,4 @@ def test_a_failed_definitions_refresh_names_the_stale_copy_but_still_moves(
     assert result["ok"] is True, result
     assert (server_b.root / "sessions" / SESSION).is_dir()
     notice = (result.get("carry") or {}).get("definitions_notice") or ""
-    assert "team 'lopdev'" in notice and "local edits" in notice, result
+    assert "definitions relay unavailable" in notice, result
