@@ -1,3 +1,3 @@
 {
-  "cli.network_send.still_starting": "La session {session_id} est toujours en cours de démarrage sur {peer} ; le message n’a PAS été mis en file d’attente"
+  "cli.network_send.still_starting": "La session {session_id} est toujours en cours de démarrage sur {peer} ; le message n’a PAS été mis en file d’attente"
 }
