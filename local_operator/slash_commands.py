@@ -67,6 +67,16 @@ from local_operator.tui.librarian_control import VERBS as LIBRARIAN_VERBS
 #: So the footer gets the command and the roomier surfaces get the pair: the
 #: bare-`/model` notice names `/settings` in `_persist_hint_notice`, which wraps
 #: instead of truncating, and the `/help` row is reachable at any width.
+#:
+#: AND THEN THE FOOTER STOPPED PRINTING IT (the footer localization slice). The
+#: TUI picker footer now renders the audited ``tui.model_persistence.persist`` key
+#: at paint time, so switching language does not leave one English sentence
+#: behind; this constant stays BYTE-IDENTICAL because the legacy CLI, `/help` and
+#: the switch receipts still print exactly these bytes, and
+#: ``model_picker.PERSIST_HINT_PREFIX`` still recognises a string that carries
+#: them. The sizing arithmetic above therefore outlived its tightest site rather
+#: than being re-derived: it is the history of WHY this string is this short, and
+#: shortening it further would change bytes those consumers already print.
 PERSIST_HINT = "/model default saves this for new sessions"
 
 #: The one flag ``/session`` takes: copy the current session ID instead of

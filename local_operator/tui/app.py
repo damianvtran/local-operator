@@ -491,7 +491,7 @@ from local_operator.tui.widgets.library_view import (
     LibraryViewLibrarianRequested,
 )
 from local_operator.tui.widgets.link_picker import LinkPickerScreen
-from local_operator.tui.widgets.model_picker import ModelRow
+from local_operator.tui.widgets.model_picker import PERSIST_CLAUSE_MARKER, ModelRow
 from local_operator.tui.widgets.move_picker import MovePickerScreen
 from local_operator.tui.widgets.move_workset_confirm import MoveWorkingSetConfirmScreen
 from local_operator.tui.widgets.network_panel import NetworkCommandRequested
@@ -47867,7 +47867,7 @@ class OperatorApp(App[None]):
         self._run_session_transition(self._boot_after_setup())
 
     def _footer_persist_hint(self) -> str:
-        """``PERSIST_HINT`` for the picker footer, or "" where it cannot be run.
+        """The persistence clause HANDLE for the picker footer, or "" where it cannot run.
 
         The footer's half of U12. The notice above the list stops naming
         `/model default` in the no-hosting and unknown-hosting setup variants
@@ -47888,10 +47888,27 @@ class OperatorApp(App[None]):
         whose launches it should govern" refusal. That case is pre-existing and
         outside #641's scope — recorded here rather than fixed so the next
         reader does not take the coupling for wider than it is.
+
+        THE RETURN VALUE IS A MARKER, NOT THE SENTENCE. The clause is copy with
+        an audited key in every shipped locale (``tui.model_persistence.persist``),
+        and this method's string is only ever handed to
+        ``ModelPicker.set_rows(status=…)``, whose consumer is the WIDGET's paint.
+        The app composes the status when it populates the list; the footer is
+        repainted later on events the app never sees (a resize, a scroll, a
+        keystroke, a locale move), so an English sentence baked in here kept
+        painting English after a language switch — the last authored-English
+        surface behind a localized interface. The marker defers the resolution to
+        that paint, in the active locale; see ``model_picker.PERSIST_CLAUSE_MARKER``.
+
+        ``PERSIST_HINT`` is untouched and still the ENGLISH adapter for the legacy
+        CLI/help/receipt consumers (the catalogue's own note names them), and
+        ``PERSIST_HINT_PREFIX`` still recognises a string that carries it. Neither
+        is fed to, nor fed by, this marker: the prefix parser never sees the
+        marker or a translated clause.
         """
         if self._setup_state and not self._model_missing_for:
             return ""
-        return PERSIST_HINT
+        return PERSIST_CLAUSE_MARKER
 
     def _persist_hint_notice(self, *, label: str | None = None) -> str:
         """The line a bare ``/model`` prints above the list.
@@ -47912,6 +47929,17 @@ class OperatorApp(App[None]):
         names is one the user has to already know), and that the default is
         also editable on the settings page, which is the discoverable route for
         a user who did not arrive with a command in mind.
+
+        THAT PARAGRAPH IS NOW HISTORY, AND STILL THE RIGHT REASON (the footer
+        localization slice). The picker footer no longer prints ``PERSIST_HINT``:
+        it prints ``tui.model_persistence.persist``, resolved at paint time from
+        the marker ``model_picker.PERSIST_CLAUSE_MARKER``, and in several shipped
+        locales that clause is LONGER than the English one. So the 43-cell
+        arithmetic below describes the English adapter this notice used to
+        duplicate, not today's footer row — and the conclusion stands unweakened:
+        the footer is a fixed-width row that truncates, the notice is the surface
+        that wraps, so the pair belongs here. ``PERSIST_HINT`` itself is unchanged
+        for the legacy CLI/help/receipt consumers.
 
         The measurement above is about the NOTICE's own last row and about
         command names spanning a fold — nothing stronger (QA round 1, Q1). An
@@ -48866,6 +48894,18 @@ class OperatorApp(App[None]):
         # call, so the rows on screen repaint rather than waiting for the next
         # keystroke (QA round 1, Q1). Silent when no editor is mounted.
         self._refresh_offered_commands()
+        # The model picker's FOOTER is painted text too, and its persistence
+        # clause is resolved by the WIDGET at paint time
+        # (``model_picker.PERSIST_CLAUSE_MARKER``) rather than baked into the
+        # status the app hands it — so an open `/model` list has to be repainted
+        # here or it keeps the previous language until an unrelated event
+        # redraws it. `refresh_locale` re-renders only what the widget already
+        # holds: no catalogue read (that is ``_populate_model_picker``, which
+        # also dispatches the live-refresh worker) and no provider request, so a
+        # locale move still costs one paint.
+        picker = composer.model_picker if composer is not None else None
+        if picker is not None and picker.is_open():
+            picker.refresh_locale()
         # Localized transcript furniture is baked into finalized blocks just as
         # theme ink is. Reuse that same rebuild sweep so a locale move repaints
         # mounted rows at their CURRENT width, with no resize or stale cache.
