@@ -29,6 +29,18 @@ def foot_failed_no_reason() -> Msg:
     return Msg("tui.transcript_fold.foot_failed_no_reason", {})
 
 
+def kind_messages() -> Msg:
+    return Msg("tui.transcript_fold.kind_messages", {})
+
+
+def kind_shell() -> Msg:
+    return Msg("tui.transcript_fold.kind_shell", {})
+
+
+def kind_subagents() -> Msg:
+    return Msg("tui.transcript_fold.kind_subagents", {})
+
+
 def legend_all() -> Msg:
     return Msg("tui.transcript_fold.legend_all", {})
 

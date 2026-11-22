@@ -25,6 +25,24 @@
     "role": "turn foot line (failure, no detail)",
     "tone": "terse"
   },
+  "tui.transcript_fold.kind_messages": {
+    "note": "One tool-kind noun on a fold bar's summary line, beside the action count: the app's messaging tools (`hub`, `send`) are one kind. Short noun, lower case, no punctuation; it sits in a comma-separated list and may be truncated with an ellipsis at narrow widths.",
+    "maxCells": 12,
+    "role": "fold bar tool-kind noun",
+    "tone": "terse noun"
+  },
+  "tui.transcript_fold.kind_shell": {
+    "note": "One tool-kind noun on a fold bar's summary line: a `bash` call is a shell command. Short noun, lower case, no punctuation; it sits in a comma-separated list and may be truncated with an ellipsis at narrow widths.",
+    "maxCells": 8,
+    "role": "fold bar tool-kind noun",
+    "tone": "terse noun"
+  },
+  "tui.transcript_fold.kind_subagents": {
+    "note": "One tool-kind noun on a fold bar's summary line: a `task` call runs subagents. Short noun, lower case, no punctuation; it sits in a comma-separated list and may be truncated with an ellipsis at narrow widths.",
+    "maxCells": 12,
+    "role": "fold bar tool-kind noun",
+    "tone": "terse noun"
+  },
   "tui.transcript_fold.legend_all": {
     "note": "Keys-card row for the +/- keys on a focused fold bar: plus opens every fold level of the turn the bar belongs to, minus resets that turn to its default open/closed states. ASCII + and - are the key names; keep them.",
     "maxCells": 48,
