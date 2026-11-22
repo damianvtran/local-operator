@@ -1,0 +1,8 @@
+{
+  "tui.editor_readonly.hint": {
+    "role": "Placeholder in the terminal chat composer while a read-only page owns the view and the composer refuses input",
+    "tone": "concise, neutral; state followed by the way back",
+    "maxCells": 40,
+    "note": "Read-only and back are ordinary localized prose. {key} is the actual keyboard token supplied as esc: preserve the placeholder exactly, do not translate the token or imply that typing is enabled. Esc returns from the read-only page to the chat. English renders exactly Read-only · esc back (20 cells). Keep one short line in a 40-column split; the middle dot separates state and action. No user text, session names, model prompts, role badges or agent labels are included. Resolve at paint time and repaint on live language changes, not once at module import."
+  }
+}
