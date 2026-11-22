@@ -564,6 +564,57 @@ describe("a failed take: Retry, Discard, and what cannot be retried", () => {
 		expect(retryControl()).toBeTruthy();
 	});
 
+	it("offers Retry for a tunnel 5xx too: every 5xx is transient, as on the desktop", async () => {
+		renderComposer();
+		/* A tunnel's own 504 is the class the old [500, 502] pair dropped: it is
+		   an upstream wait, not an answer to the request, so the same bytes are
+		   worth sending again. */
+		await failTake(new api.HttpError(504, "gateway timeout"));
+
+		expect(screen.getByText("Transcription failed")).toBeTruthy();
+		expect(retryControl()).toBeTruthy();
+	});
+
+	it("an unknown non-5xx status keeps Discard alone and does not promise 'Try again'", async () => {
+		renderComposer();
+		await failTake(new api.HttpError(418, "I'm a teapot"));
+
+		expect(screen.getByText("Transcription failed")).toBeTruthy();
+		/* The row draws no Retry here, so its copy must not offer one. */
+		expect(screen.queryByText(/Try again/)).toBeNull();
+		expect(screen.queryByRole("button", { name: "retry transcription" })).toBeNull();
+		expect(discardControl()).toBeTruthy();
+	});
+
+	it("hands focus to the status row when Retry removes the button that had it", async () => {
+		renderComposer();
+		await failTake(new api.HttpError(502, "Transcription failed upstream."));
+		const row = screen.getByRole("alert").parentElement as HTMLElement;
+		const retry = retryControl();
+		retry.focus();
+		fireEvent.click(retry);
+
+		await waitFor(() => expect(screen.getByText("Transcribing…")).toBeTruthy());
+		/* A real browser drops focus to <body> when the focused button unmounts;
+		   that strands a hardware keyboard's place in the form. */
+		expect(document.activeElement).not.toBe(document.body);
+		expect(document.activeElement).toBe(row);
+	});
+
+	it("rings both actions for a keyboard and keeps them 44 px apart", async () => {
+		renderComposer();
+		await failTake(new api.HttpError(502, "Transcription failed upstream."));
+
+		for (const control of [retryControl(), discardControl()]) {
+			expect(control.className).toContain("focus-visible:outline-2");
+			expect(control.className).toContain("min-h-11");
+		}
+		/* D1: Retry is a quiet bordered pill, Discard bare, and the pair reads as
+		   two targets rather than one run of text. */
+		expect(retryControl().className).toContain("rounded-full");
+		expect(retryControl().parentElement?.className).toContain("gap-4");
+	});
+
 	it("Discard frees the take: no request, no row, nothing left to retry", async () => {
 		renderComposer();
 		await failTake(new api.HttpError(502, "Transcription failed upstream."));

@@ -491,6 +491,75 @@ def test_a_transport_failure_is_named_by_class_and_its_own_sentence(
     assert "detail=Connection refused" in line
 
 
+def _injected_multipart(media_type: str) -> bytes:
+    """A multipart body whose audio part declares ``media_type`` verbatim.
+
+    httpx refuses to build a header with a bare LF in it, so the body is written
+    by hand: python-multipart accepts the LF inside a part-header VALUE, which is
+    how a caller controls ``UploadFile.content_type``.
+    """
+    boundary = "probe-not-closed"
+    return (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="audio"; filename="a.wav"\r\n'
+        f"Content-Type: {media_type}\r\n"
+        "\r\n"
+        "not-really-audio\r\n"
+        f"--{boundary}--\r\n"
+    ).encode()
+
+
+def test_a_forged_media_type_cannot_split_the_refusal_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The part's Content-Type is caller text and used to reach the log raw.
+
+    Logged before the allowlist check, ``audio/x\\nFAKE status=200 code=ok``
+    rendered as TWO lines in ``mobile.log`` — the second reading as a successful
+    call to any ``grep``, which is the triage this line exists to support. Only
+    an allowlisted media type is echoed now; anything else is ``other``.
+    """
+    client = _logged_in()
+    with caplog.at_level("WARNING", logger="local_operator.mobile.daemon"):
+        response = client.post(
+            "/api/transcribe",
+            content=_injected_multipart("audio/x\nFAKE status=200 code=ok"),
+            headers={"content-type": "multipart/form-data; boundary=probe-not-closed"},
+        )
+
+    assert response.status_code == 422
+    lines = _refusal_lines(caplog)
+    assert len(lines) == 1
+    line = lines[0]
+    assert "media=other" in line
+    # Neither the forged record's break nor the tokens that made it read as a
+    # successful call.
+    assert "\n" not in line
+    assert "\r" not in line
+    assert "status=200" not in line
+    assert "code=ok" not in line
+
+
+def test_control_characters_in_a_transport_detail_cannot_split_the_line(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A transport failure's sentence is free text: it stays ONE record too."""
+    _stub_dispatch(
+        monkeypatch,
+        error=APIError("connection\r\nrefused\x00 by the far end", status_code=None),
+    )
+    client = _logged_in()
+    with caplog.at_level("WARNING", logger="local_operator.mobile.daemon"):
+        response = _post_with_fields(client)
+
+    assert response.status_code == 502
+    line = _refusal_lines(caplog)[0]
+    assert "\n" not in line
+    assert "\r" not in line
+    assert "\x00" not in line
+    assert "detail=connection" in line
+
+
 def test_a_quota_refusal_logs_the_quota_code(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

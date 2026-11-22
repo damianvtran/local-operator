@@ -394,6 +394,21 @@ STT_TOO_LARGE_ERROR = (
 STT_CLIENT_KINDS = frozenset({"web", "app"})
 
 
+def _stt_log_text(value: str, limit: int = 200) -> str:
+    """Caller-influenced text made safe to place in ONE log record.
+
+    ``media_type`` is the uploaded part's own ``Content-Type`` and ``detail`` is
+    a transport failure's sentence: both are caller text. A newline inside one
+    forges a second record — python-multipart accepts a bare LF in a part-header
+    value, so ``Content-Type: audio/x\\nFAKE status=200`` used to render as two
+    lines, the second reading as a successful call in a grep of ``mobile.log``.
+    Non-printables become spaces rather than escapes: a log file is read, never
+    round-tripped, so a literal ``\\n`` would be noise, not fidelity.
+    """
+    printable = "".join(ch if ch.isprintable() else " " for ch in value)
+    return printable.strip()[:limit]
+
+
 def _stt_client_kind(declared: Any, user_agent: str) -> str:
     """The coarse client class for the transcription refusal line.
 
@@ -11662,9 +11677,23 @@ def build_app(daemon: MobileDaemon):
             the classifier has already read it), any header value or cookie.
             ``detail`` is the ONE tolerated free text — a transport failure's
             own sentence ("connection refused"), truncated; it never carries a
-            response body.
+            response body. Both fields below are caller text: ``media`` is
+            allowlisted and ``detail`` goes through ``_stt_log_text`` before
+            this ONE record is written.
             """
             note_reason(request.scope, code)
+            # The part's Content-Type is whatever the client sent, and it lands
+            # in a log line: only an allowlisted media type is echoed, anything
+            # else is the literal ``other`` (a pre-parse arm has none: ``-``).
+            # Logged raw, ``audio/x\nFAKE status=200`` forged a second record
+            # that reads as a successful call — see ``_stt_log_text``.
+            if not media_type:
+                media_log = "-"
+            elif media_type in STT_MIME_ALLOWLIST:
+                media_log = media_type
+            else:
+                media_log = "other"
+            detail_log = _stt_log_text(detail) if detail else ""
             logger.warning(
                 "mobile transcription refused: status=%s code=%s provider=%s upstream=%s "
                 "client=%s session=%s bytes=%s media=%s%s",
@@ -11677,8 +11706,8 @@ def build_app(daemon: MobileDaemon):
                 # The audio part's own size once it was read; the declared body
                 # length when the header refused it before the parse.
                 "-" if audio_bytes is None else audio_bytes,
-                media_type or "-",
-                f" detail={detail[:200]}" if detail else "",
+                media_log,
+                f" detail={detail_log}" if detail_log else "",
             )
             return JSONResponse(body, status_code=status)
 
