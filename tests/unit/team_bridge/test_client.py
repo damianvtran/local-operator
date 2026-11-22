@@ -1586,3 +1586,70 @@ def test_file_mode_has_exactly_one_caller_the_desktop_route():
             ):
                 callers.add(source.relative_to(package).as_posix())
     assert callers == {"server/routes/desktop_team_bridge.py"}
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"topic": ""},
+        {"name": "  legacy name  "},
+        {"topic": " a\nb "},
+        {"name": "new", "topic": "both"},
+        {"name": None},
+        {"topic": None},
+        {},
+    ],
+)
+async def test_metadata_update_wire_presence(fields):
+    """Real client serialization/auth over MockTransport, not a live hub."""
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return _ok({"id": "bcv_abc12345", "name": "canonical"})
+
+    client = _make_client(handler)
+    result = await client.conversation_update(
+        "bcv_abc12345", tenant_id="tnt_1", expected_account_id="acc_1", **fields
+    )
+    assert result["name"] == "canonical"
+    assert len(requests) == 1
+    sent = requests[0]
+    assert sent.method == "PATCH"
+    assert sent.url.path == "/v1/messaging/conversations/bcv_abc12345"
+    assert not sent.url.query
+    assert json.loads(sent.content) == {"tenant_id": "tnt_1", **fields}
+    assert sent.headers["Authorization"] == "Bearer token-1"
+
+
+async def test_metadata_update_wrong_owner_never_dispatches():
+    requests = []
+    client = _make_client(lambda request: requests.append(request))
+    with pytest.raises(BridgeRefusal) as info:
+        await client.conversation_update(
+            "bcv_abc12345", topic="", tenant_id="tnt_1", expected_account_id="acc_other"
+        )
+    assert info.value.code == "account_mismatch"
+    assert not requests
+
+
+@pytest.mark.parametrize(
+    "status,code,details",
+    [
+        (400, "invalid_request", {"field": "topic", "rule": "too_long"}),
+        (403, "conversation_not_permitted", None),
+        (404, "conversation_not_found", None),
+        (409, "conversation_archived", None),
+        (429, "rate_limited", None),
+        (503, "messaging_unavailable", None),
+    ],
+)
+async def test_metadata_update_transport_refusal_unchanged(status, code, details):
+    client = _make_client(lambda request: _err(status, code, details=details))
+    with pytest.raises(BridgeRefusal) as info:
+        await client.conversation_update(
+            "bcv_abc12345", topic="", tenant_id="tnt_1", expected_account_id="acc_1"
+        )
+    assert info.value.http_status == status
+    assert info.value.code == code
+    assert info.value.details == (details or {})

@@ -42,6 +42,7 @@ from tests.unit.team_bridge.test_owner_audit_isolation import (
     TENANT,
     _hub_answer,
 )
+from tests.unit.team_bridge.test_tool_ack_progress import StubHub
 
 TAKE_UP_BODY = "a screened teammate body"
 
@@ -129,15 +130,29 @@ def test_the_driver_table_covers_every_op() -> None:
 async def test_a_real_call_of_each_op_is_classified_as_expected(tmp_path: Path, op: str) -> None:
     # The shared reads need the durable chief of staff (a task session is refused).
     aida_state.write_state(tmp_path, {"session_id": "sess_1"})
-    runtime = _runtime(tmp_path)
+    # Progress ACKs require a matching delivery.state, not the generic send
+    # receipt _hub returns. Reuse the state machine so the taint assertion
+    # exercises confirmed working→done rather than a locally held claim.
+    ack_hub = StubHub()
+    runtime = _runtime(tmp_path, ack_hub if op == "ack" else _hub)
     if op == "ack":
-        # ``done`` needs a live claim by this session; claim it with the real op first.
-        await _classify(runtime, {"op": "ack", "message_id": "bmsg_1", "state": "working"})
+        working, _, _ = await _classify(
+            runtime, {"op": "ack", "message_id": "bmsg_1", "state": "working"}
+        )
+        working_details = (working.provider_payload or {})["details"]
+        assert working_details["ok"] is True
+        assert working_details["hub_ack"] == "confirmed"
     message, live, durable = await _classify(runtime, _args(op))
     details = (message.provider_payload or {}).get("details") or {}
     # Not vacuous: the op ran to its success shape, it was not refused before it started.
     assert details.get("ok") is True, (op, details)
     assert live is durable is OP_LATCHES[op], (op, details)
+    if op == "ack":
+        assert details["hub_ack"] == "confirmed"
+        assert [post["state"] for post in ack_hub.posts] == ["working", "done"]
+        assert ack_hub.state_events == ["read", "working", "done"]
+        assert all("screening" not in post for post in ack_hub.posts)
+        assert len({post["client_ref"] for post in ack_hub.posts}) == 2
 
 
 @pytest.mark.asyncio
