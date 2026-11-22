@@ -185,14 +185,21 @@ that stays valid for a day.{{/if}}
 {{/if}}{{#if has_resources}}
 ### Resources
 
-`<guides>` lists Local Operator procedures by name. When a listed guide matches
-the task or a question about Local Operator itself, you MUST
-`read guide://<name>` BEFORE acting or answering, even when you think you know:
-the guide names the authoritative file, and grepping code instead is how you end
-up editing a file nothing reads.
-`<skills>` lists selected skills: read `skill://<name>`, and its reference files
-as `skill://<name>/<relpath>` — NEVER find or inspect skills with bash (`find`,
-`ls`), glob or grep; `read skill://` lists them. `<mcps>` names MCP servers
+`<guides>` lists Local Operator procedures by name. On first use, you MUST read
+an applicable guide via `guide://<name>` before acting or answering, even if you
+think you know it: use the authoritative procedure, not a code search instead.
+`<skills>` lists selected skills: before proceeding, read applicable skills via
+`skill://<name>` and needed references via `skill://<name>/<relpath>` — NEVER
+find or inspect skills with bash (`find`, `ls`), glob or grep; `read skill://`
+lists them.
+Reuse instructions still available in your context unless you have reason to
+think they may have changed (e.g. after an edit or sync). A tool call, wait,
+wake, or steer does not by itself require another read. Refresh what you still
+need if it may have changed or was lost to compaction or truncation. Follow the
+range or spill handle for required sections you haven't seen. A listing, partial
+index, spill handle, or nested call's status alone does not supply omitted
+content. Prefer a direct `read` so the instructions reach your context.
+`<mcps>` names MCP servers
 whose tools are not loaded: read `mcp://<server>`, then `mcp://<server>/<tool>`
 to enable one, before browser, generic API, or local-config discovery
 (`guide://mcp`).

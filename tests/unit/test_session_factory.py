@@ -7213,6 +7213,148 @@ async def _composition_root_session(
 
 
 @pytest.mark.asyncio
+async def test_resource_cues_and_read_results_across_wait_and_steer(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Use the real session, virtual reader, wait, and chat wire; script only decisions."""
+    import httpx
+
+    from local_operator.harness.types import AgentEndEvent, ToolExecutionUpdateEvent
+    from local_operator.providers.clients import OpenAICompatClient
+    from local_operator.skills.discovery import Skill
+
+    guide_body = "The fixture guide body: check the blue dial."
+    skill_body = "The fixture skill body: check the green dial."
+    nested_status = "Nested read finished (status only)."
+    guide_path = tmp_config_dir / "GUIDE.md"
+    skill_path = tmp_config_dir / "SKILL.md"
+    guide_path.write_text(guide_body, encoding="utf-8")
+    skill_path.write_text(skill_body, encoding="utf-8")
+    guide = Skill(
+        name="dial-procedure",
+        description="Procedures for dials",
+        file_path=guide_path,
+        base_dir=tmp_config_dir,
+        source="fixture",
+        resource_type="guide",
+    )
+    skill = Skill(
+        name="dial-workflow",
+        description="Workflows for dials",
+        file_path=skill_path,
+        base_dir=tmp_config_dir,
+        source="fixture",
+    )
+
+    class Index:
+        async def select(self, query: str, **kwargs: Any) -> list[Skill]:
+            return [guide, skill]
+
+    async def setup_knowledge(*args: Any, **kwargs: Any) -> Any:
+        return session_factory._KnowledgeHooks(
+            index=cast(Any, Index()),
+            guides_by_name={guide.name: guide},
+            skills_by_name={skill.name: skill},
+        )
+
+    monkeypatch.setattr(session_factory, "_setup_knowledge", setup_knowledge)
+    monkeypatch.setattr(session_factory, "_attach_classification", lambda *a, **kw: None)
+
+    def call(name: str, call_id: str, **args: Any) -> list[Any]:
+        return [
+            StreamToolCallDelta(index=0, id=call_id, name=name, argument_delta=json.dumps(args)),
+            StreamEndEvent(stop_reason="tool_use"),
+        ]
+
+    def answer() -> list[Any]:
+        return [StreamTextDelta(delta="Done."), StreamEndEvent(stop_reason="stop")]
+
+    async def status_only(call_id, args, signal, on_update, context):
+        # Models an outer tool reporting success without forwarding the nested body.
+        return ToolResult(
+            tool_call_id=call_id, tool_name="status_only", content=[TextContent(text=nested_status)]
+        )
+
+    stream = _ScriptedChatStream([])
+    session = await _composition_root_session(tmp_config_dir, monkeypatch, stream)
+    parked, release, idle_wake_done = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    ends = 0
+
+    def on_event(event):
+        nonlocal ends
+        if isinstance(event, ToolExecutionUpdateEvent) and event.tool_name == "wait":
+            if (event.partial_result.details or {}).get("waiting_on"):
+                parked.set()
+        if isinstance(event, AgentEndEvent):
+            ends += 1
+            if ends == 2:
+                idle_wake_done.set()
+
+    async def runner(job_id, signal, report_progress):
+        await release.wait()
+        return "Dial job settled."
+
+    session.subscribe(on_event)
+    try:
+        assert session.refresh_tools(
+            [
+                *session._tools,
+                AgentTool(name="status_only", parameters={"type": "object"}, execute=status_only),
+            ]
+        )
+        job_id = session.jobs.register("bash", "dial-job", runner)
+        stream.turns.extend(
+            [
+                call("status_only", "status"),
+                call("read", "guide", path="guide://dial-procedure"),
+                call("read", "skill", path="skill://dial-workflow"),
+                call("wait", "wait", job_id=job_id, wait_ms=30_000),
+                answer(),
+                answer(),
+            ]
+        )
+        async with asyncio.TaskGroup() as group:
+            group.create_task(session.prompt("Use the dial procedures and workflows."))
+            await asyncio.wait_for(parked.wait(), timeout=5)
+            session.steer("Continue after the in-flight wait.")
+            release.set()
+        session.steer("Resume the dial task from idle.")
+        await asyncio.wait_for(idle_wake_done.wait(), timeout=5)
+
+        # Test the serialized payload, not just the model message objects. No network
+        # is permitted; the HTTP client isn't used to send anything.
+        async with httpx.AsyncClient() as http:
+            client = OpenAICompatClient("https://fixture.invalid", http_client=http)
+            wire = [client._build_body(request)["messages"] for request in stream.requests]
+        assert len(wire) == 6
+
+        def copies(messages, text):
+            return sum(json.dumps(message, ensure_ascii=False).count(text) for message in messages)
+
+        for messages in wire:
+            assert copies(messages, "<guides>") == 2  # base protocol mention + one listing
+            assert copies(messages, "- dial-procedure: Procedures for dials") == 1
+            assert copies(messages, "- dial-workflow: Workflows for dials") == 1
+
+        assert copies(wire[1], nested_status) == 1
+        assert copies(wire[1], guide_body) == copies(wire[1], skill_body) == 0
+        assert [copies(messages, guide_body) for messages in wire] == [0, 0, 1, 1, 1, 1]
+        assert [copies(messages, skill_body) for messages in wire] == [0, 0, 0, 1, 1, 1]
+        assert copies(wire[4], "Continue after the in-flight wait.") == 1
+        assert copies(wire[5], "Resume the dial task from idle.") == 1
+
+        # Keep these checks after the shape checks: restoring the old copy must
+        # fail on the cue, not on a difference in how the loop carries history.
+        for messages in wire:
+            assert copies(messages, "unless its current, relevant ") == 1
+            assert copies(messages, "unless their current, ") == 1
+            assert copies(messages, "nested call's status alone does not supply omitted") == 1
+    finally:
+        release.set()
+        await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_tool_enabled_mid_turn_waits_for_the_next_turn_in_the_array(
     tmp_config_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
