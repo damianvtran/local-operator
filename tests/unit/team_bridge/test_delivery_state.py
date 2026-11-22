@@ -1114,9 +1114,7 @@ def test_a_window_closing_mid_review_redrive_has_already_admitted_fresh_work(
     bodies = {f"bcmsg_review{index:02d}": f"held {index}" for index in range(5)}
     bodies["bcmsg_fresh01"] = FRESH_BODY
     fresh = "bcmsg_fresh01"
-    wire = _OrderingWire(
-        bodies, cancel_phase="review_body", cancel_message_id="bcmsg_review00"
-    )
+    wire = _OrderingWire(bodies, cancel_phase="review_body", cancel_message_id="bcmsg_review00")
     a, config_dir, _store, _review_ids = _ordering_rig(tmp_path, monkeypatch, wire)
 
     with pytest.raises(asyncio.CancelledError):
@@ -1264,9 +1262,7 @@ def test_the_feed_refs_are_consumed_before_the_review_half(
 
     bodies = {f"bcmsg_review{index:02d}": f"held {index}" for index in range(5)}
     bodies["bcmsg_fresh01"] = FRESH_BODY
-    wire = _OrderingWire(
-        bodies, cancel_phase="review_body", cancel_message_id="bcmsg_review00"
-    )
+    wire = _OrderingWire(bodies, cancel_phase="review_body", cancel_message_id="bcmsg_review00")
     a, config_dir, store, _review_ids = _ordering_rig(tmp_path, monkeypatch, wire, real_feed=True)
 
     with pytest.raises(asyncio.CancelledError):
