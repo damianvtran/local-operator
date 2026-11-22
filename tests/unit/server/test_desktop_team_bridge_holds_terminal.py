@@ -16,6 +16,7 @@ and they pin the two rules that must not drift:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import time
@@ -25,19 +26,19 @@ import pytest
 from local_operator.server.utils import desktop_team_bridge_holds as holds
 from local_operator.team_bridge import hold_release as hr
 from local_operator.team_bridge.store import OwnerReceipt, Store, StoreRefused
-from local_operator.team_bridge.types import OwnerSnapshot
+from local_operator.team_bridge.types import ConversationFeedRef, OwnerSnapshot
 
 DAY = 86400.0
 CONVERSATION = "bcv_abcdefgh"
 
 # The operator's own stuck row, in shape: a review hold with an ELIGIBLE decision
 # whose Deliver window has closed.
-STUCK = "bcmsg_5ac4b3e8a40641c4b90eafaf71a0dba7"
-# A row with no decision record at all: nothing can ever release or deliver it.
-ORPHAN = "bcmsg_c21c1ee0614948aaa8bd2ddd348f5627"
+STUCK = "bcmsg_syntheticstuck"
+# An unresolved hold: absence of a decision has no terminal meaning.
+ORPHAN = "bcmsg_syntheticorphan"
 # The retryable delivery class: 22 of these on the real store, all must survive.
-RETRYABLE = "bcmsg_8f1b0a1d2c3e4f5061728394a5b6c7d8"
-DELIVERABLE = "bcmsg_0a1b2c3d4e5f60718293a4b5c6d7e8f9"
+RETRYABLE = "bcmsg_syntheticretry"
+DELIVERABLE = "bcmsg_syntheticfresh"
 
 
 def _owner() -> OwnerSnapshot:
@@ -151,21 +152,15 @@ def test_evidence_records_the_facts_an_auditor_needs(rig) -> None:
     row = store.hold_terminal(owner, STUCK)
     assert row["screener_verdict"] == "hold"
     assert row["detail"] == "deliver_window_passed"
-    # Numbers and booleans only: the store refuses any string value, so no body,
-    # sender or label can ride along in the evidence column.
-    facts = row["evidence"]
-    assert '"deliver_until_passed":true' in facts
-    assert '"allow_receipt":false' in facts
-    assert '"body_reservation":false' in facts
+    assert json.loads(row["evidence"]) == {"deliver_until_passed": True}
+    assert row["notice_state"] == "none"
+    assert (
+        store.record_hold_terminal(owner, ORPHAN, expected=("fake_metadata",), now=created) is None
+    )
     with pytest.raises(StoreRefused):
-        store.record_hold_terminal(
-            owner,
-            ORPHAN,
-            CONVERSATION,
-            "model_hold",
-            reason="discarded_undeliverable",
-            evidence={"leaked": "a sender's own words"},
-        )
+        store.record_hold_terminal(owner, "sender_text", expected=(), now=created)
+    with pytest.raises(StoreRefused):
+        store.record_hold_terminal(owner, STUCK, expected=(), now=float("inf"))
 
 
 # --- the two traps ------------------------------------------------------------
@@ -191,7 +186,7 @@ def test_conversation_failed_is_never_disposable_though_served_as_unknown(rig) -
         holds.discard_undeliverable_hold(config_dir, owner, message_id=RETRYABLE, now=later)
     assert refused.value.code == "hold_not_releasable"
 
-    counts = holds.discard_all_undeliverable(config_dir, owner, now=later)
+    counts = holds.discard_all_undeliverable(config_dir, owner, message_ids=[RETRYABLE], now=later)
     assert counts == {"discarded": 0, "already": 0, "skipped": 1}
     assert holds.expire_undeliverable_holds(config_dir, owner, now=later) == 0
     assert store.hold_terminal(owner, RETRYABLE) is None
@@ -223,10 +218,11 @@ def test_cleared_but_deliverable_is_not_terminal(rig) -> None:
 # --- no decision record, and a hold row that vanished -------------------------
 
 
-def test_a_hold_with_no_decision_record_is_disposable_once_past_the_window(rig) -> None:
+@pytest.mark.parametrize("code", ["provider_error", "budget_exhausted", "write_once_conflict"])
+def test_age_without_a_decision_is_not_terminal_evidence(rig, code) -> None:
     config_dir, store, owner = rig
     created = time.time()
-    store.persist_hold(owner, ORPHAN, "write_once_conflict")
+    store.persist_hold(owner, ORPHAN, code)
 
     # INSIDE the Deliver window: an in-flight screener may still write the
     # decision, and racing it would lose a deliverable message.
@@ -235,48 +231,37 @@ def test_a_hold_with_no_decision_record_is_disposable_once_past_the_window(rig) 
 
     later = created + 8 * DAY
     outside = holds.list_holds(config_dir, owner, now=later)["items"]
-    assert outside[0]["terminal_discard"] is True
-    assert outside[0]["undeliverable_reason"] == "no_decision_record"
+    assert outside[0]["terminal_discard"] is False
     assert outside[0]["decision"] is None
 
-    answer = holds.discard_undeliverable_hold(config_dir, owner, message_id=ORPHAN, now=later)
-    assert answer["terminal"]["detail"] == "no_decision_record"
-    assert store.hold_terminal(owner, ORPHAN) is not None
+    with pytest.raises(holds.HoldRefused):
+        holds.discard_undeliverable_hold(config_dir, owner, message_id=ORPHAN, now=later)
+    assert holds.discard_all_undeliverable(
+        config_dir, owner, message_ids=[ORPHAN], now=created + 20 * DAY
+    ) == {"discarded": 0, "already": 0, "skipped": 1}
+    assert holds.expire_undeliverable_holds(config_dir, owner, now=created + 20 * DAY) == 0
+    assert store.hold_terminal(owner, ORPHAN) is None
 
 
 def test_a_vanished_hold_row_is_nothing_to_dispose_not_an_error(rig) -> None:
     """``screening_holds`` deletes its row when a delivery finally hands off."""
 
     config_dir, store, owner = rig
-    # (a) A terminal write for a message with no hold row at all still lands.
-    terminal = store.record_hold_terminal(
-        owner,
-        ORPHAN,
-        CONVERSATION,
-        "model_hold",
-        reason="discarded_undeliverable",
-        detail="no_decision_record",
-        now=time.time(),
-    )
-    assert terminal["already"] is False
-    assert store.hold_terminal(owner, ORPHAN) is not None
-
-    # (b) A message with neither a hold row nor a marker answers "nothing left".
-    answer = holds.discard_undeliverable_hold(config_dir, owner, message_id=DELIVERABLE)
-    assert answer == {
-        "message_id": DELIVERABLE,
+    stamp = time.time()
+    store.persist_hold(owner, STUCK, "model_hold")
+    _decision(store, owner, STUCK, now=stamp)
+    later = stamp + 8 * DAY
+    expected = store.hold_terminal_candidate(owner, STUCK, now=later)
+    assert expected is not None
+    store.delete_hold(owner, STUCK)
+    assert store.record_hold_terminal(owner, STUCK, expected=expected, now=later) is None
+    assert store.hold_terminal(owner, STUCK) is None
+    assert holds.discard_undeliverable_hold(config_dir, owner, message_id=STUCK) == {
+        "message_id": STUCK,
         "disposed": False,
         "already": True,
         "terminal": None,
     }
-
-    # (c) A marker standing over a hold whose row has since been deleted: the
-    # list is empty and nothing raises, in either surface.
-    store.persist_hold(owner, STUCK, "model_hold")
-    store.delete_hold(owner, STUCK)
-    assert holds.list_holds(config_dir, owner)["items"] == []
-    assert holds.expire_undeliverable_holds(config_dir, owner) == 0
-    assert store.hold_terminal(owner, ORPHAN)["message_id"] == ORPHAN
 
 
 # --- bulk and age-based passes ------------------------------------------------
@@ -287,7 +272,8 @@ def test_expiry_is_bounded_and_idempotent(rig, monkeypatch: pytest.MonkeyPatch) 
     created = time.time()
     ids = [f"bcmsg_orphan{i:04d}" for i in range(5)]
     for message_id in ids:
-        store.persist_hold(owner, message_id, "write_once_conflict")
+        store.persist_hold(owner, message_id, "model_hold")
+        _decision(store, owner, message_id, now=created)
     later = created + 15 * DAY  # past the 14-day default
     monkeypatch.setattr(holds, "EXPIRY_MAX_PER_PASS", 3)
 
@@ -296,7 +282,7 @@ def test_expiry_is_bounded_and_idempotent(rig, monkeypatch: pytest.MonkeyPatch) 
     assert holds.expire_undeliverable_holds(config_dir, owner, now=later) == 0
     for message_id in ids:
         row = store.hold_terminal(owner, message_id)
-        assert row["detail"] == "payload_expired"
+        assert row["detail"] == "deliver_window_passed"
         assert row["reason"] == "discarded_undeliverable"
 
 
@@ -319,7 +305,8 @@ def test_expiry_never_touches_a_deliverable_row(rig) -> None:
 def test_a_disabled_expiry_setting_never_disposes_anything(rig, tmp_path) -> None:
     config_dir, store, owner = rig
     created = time.time()
-    store.persist_hold(owner, ORPHAN, "write_once_conflict")
+    store.persist_hold(owner, ORPHAN, "model_hold")
+    _decision(store, owner, ORPHAN, now=created)
     (config_dir / "config.yml").write_text(
         json.dumps({"values": {"team_bridge": {"held_expiry_days": 0}}}), encoding="utf-8"
     )
@@ -327,13 +314,14 @@ def test_a_disabled_expiry_setting_never_disposes_anything(rig, tmp_path) -> Non
     assert store.hold_terminal(owner, ORPHAN) is None
 
 
-def test_discard_all_disposes_every_candidate_and_reports_the_rest(rig) -> None:
+def test_bulk_revalidates_only_the_deduplicated_confirmed_ids(rig) -> None:
     config_dir, store, owner = rig
     created = time.time()
     later = created + 8 * DAY
     store.persist_hold(owner, STUCK, "model_hold")
     _decision(store, owner, STUCK, now=created)
-    store.persist_hold(owner, ORPHAN, "write_once_conflict")
+    store.persist_hold(owner, ORPHAN, "model_hold")
+    _decision(store, owner, ORPHAN, now=created)
     store.persist_hold(owner, RETRYABLE, "conversation_failed")
     store.persist_hold(owner, DELIVERABLE, "model_hold")
     # A review decision can be written DAYS after the hold (measured on the
@@ -341,16 +329,18 @@ def test_discard_all_disposes_every_candidate_and_reports_the_rest(rig) -> None:
     # still be perfectly deliverable — that row must be left alone.
     _decision(store, owner, DELIVERABLE, now=later - 1 * DAY)
 
-    counts = holds.discard_all_undeliverable(config_dir, owner, now=later)
-    assert counts == {"discarded": 2, "already": 0, "skipped": 2}
+    ids = [STUCK, RETRYABLE, DELIVERABLE, STUCK]
+    counts = holds.discard_all_undeliverable(config_dir, owner, message_ids=ids, now=later)
+    assert counts == {"discarded": 1, "already": 0, "skipped": 2}
+    assert store.hold_terminal(owner, ORPHAN) is None
     # The retryable class and the still-deliverable row are untouched.
     assert store.hold_terminal(owner, RETRYABLE) is None
     assert store.hold_terminal(owner, DELIVERABLE) is None
     assert store.hold_terminal(owner, STUCK) is not None
 
-    again = holds.discard_all_undeliverable(config_dir, owner, now=later)
+    again = holds.discard_all_undeliverable(config_dir, owner, message_ids=ids, now=later)
     assert again["discarded"] == 0
-    assert again["already"] == 2
+    assert again["already"] == 1
     assert again["skipped"] == 2  # the two that were always left alone
 
 
@@ -390,35 +380,9 @@ def test_negative_control_without_a_marker_the_row_is_still_served(rig) -> None:
     assert old[0]["actionable"] is True
     assert old[0]["can_deliver"] is False
 
-    store.record_hold_terminal(
-        owner,
-        STUCK,
-        CONVERSATION,
-        "model_hold",
-        reason="discarded_undeliverable",
-        detail="deliver_window_passed",
-        now=later,
-    )
+    holds.discard_undeliverable_hold(config_dir, owner, message_id=STUCK, now=later)
     assert holds.list_holds(config_dir, owner, now=later)["items"] == []
     assert holds.list_holds(config_dir, owner, now=later)["items"] == []
-
-
-# --- the reversal verb and the schema ----------------------------------------
-
-
-def test_reopen_removes_the_marker_and_the_row_is_listed_again(rig) -> None:
-    config_dir, store, owner = rig
-    created = time.time()
-    store.persist_hold(owner, ORPHAN, "write_once_conflict")
-    later = created + 8 * DAY
-    holds.discard_undeliverable_hold(config_dir, owner, message_id=ORPHAN, now=later)
-    assert holds.list_holds(config_dir, owner, now=later)["items"] == []
-
-    assert holds.reopen_hold(config_dir, owner, message_id=ORPHAN) is True
-    assert [
-        item["message_id"] for item in holds.list_holds(config_dir, owner, now=later)["items"]
-    ] == [ORPHAN]
-    assert holds.reopen_hold(config_dir, owner, message_id=ORPHAN) is False
 
 
 def test_a_stamped_v9_store_without_the_marker_table_refuses_as_damaged(rig) -> None:
@@ -496,8 +460,229 @@ def test_the_discard_body_models_keep_deliver_strict(rig) -> None:
     # A binding without the conversation is the OLD request, and is refused.
     with pytest.raises(ValueError):
         TeamBridgeHoldDiscard(expected_account_id=account, body_sha256="a" * 64)
-    with pytest.raises(ValueError):
-        TeamBridgeHoldBatchDiscard(expected_account_id=account, scope="everything")
-    assert TeamBridgeHoldBatchDiscard(expected_account_id=account, scope="undeliverable").scope == (
-        "undeliverable"
+    valid = {"expected_account_id": account, "scope": "undeliverable", "message_ids": [STUCK]}
+    for invalid in (
+        {**valid, "scope": "everything"},
+        {**valid, "message_ids": []},
+        {**valid, "message_ids": ["not-an-id"]},
+        {**valid, "message_ids": [STUCK] * 201},
+        {**valid, "extra": True},
+        {k: v for k, v in valid.items() if k != "message_ids"},
+    ):
+        with pytest.raises(ValueError):
+            TeamBridgeHoldBatchDiscard.model_validate(invalid)
+    assert TeamBridgeHoldBatchDiscard.model_validate(
+        {**valid, "message_ids": [STUCK, STUCK]}
+    ).message_ids == [STUCK]
+
+
+def _ref(message_id: str, *, seq: int = 1) -> ConversationFeedRef:
+    return ConversationFeedRef(
+        conversation_id=CONVERSATION,
+        message_id=message_id,
+        conversation_seq=seq,
+        mention=False,
+    ).validated()
+
+
+def _expired(rig) -> tuple[ConversationFeedRef, float]:
+    _, store, owner = rig
+    ref = _ref(STUCK)
+    stamp = time.time()
+    store.persist_hold(owner, ref.encode(), "model_hold", retry_at=stamp - 1)
+    _decision(store, owner, STUCK, now=stamp - 8 * DAY)
+    return ref, time.time()
+
+
+@pytest.mark.parametrize(
+    "change", ["recode", "reschedule", "claim", "reservation", "allow", "release", "decision"]
+)
+def test_authority_winning_after_read_prevents_terminal_write(rig, change) -> None:
+    _, store, owner = rig
+    ref, stamp = _expired(rig)
+    expected = store.hold_terminal_candidate(owner, STUCK, now=stamp)
+    assert expected is not None
+    if change == "recode":
+        store.persist_hold(owner, STUCK, "conversation_failed")  # second, newer alias
+    elif change == "reschedule":
+        store.advance_hold_retry(owner, ref.encode(), retry_at=stamp + 5)
+    elif change == "claim":
+        store.claim(owner, ref.encode(), "s1", "synthetic-token", expiry=stamp + 60)
+    elif change == "reservation":
+        _reserve(store, owner, stamp)
+    elif change == "decision":
+        store.drop_review_decision(owner, STUCK)
+        _decision(store, owner, STUCK, now=stamp)
+    else:
+        with sqlite3.connect(store._path) as conn:
+            key = conn.execute("SELECT owner_key FROM work_scope_decisions").fetchone()[0]
+            if change == "allow":
+                conn.execute(
+                    "INSERT INTO screening_receipts (owner_key, message_id, body_sha256, template_sha256, "
+                    "prompt_version, model, verdict, categories, envelope_digest, admission_revision, "
+                    "policy_epoch, creator_generation, created_at) VALUES (?, ?, '', '', '', '', 'allow', '[]', '', '', 1, 1, ?)",
+                    (key, ref.encode(), stamp),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO owner_releases (owner_key, message_id, conversation_id, body_sha256, "
+                    "envelope_digest, hold_code, screener_provider, screener_model, template_sha256, "
+                    "categories, word, decided_at, account_id, key_id, signature, surface, creator_generation, outcome) "
+                    "VALUES (?, ?, ?, '', '', 'model_hold', '', '', '', '[]', 'deliver', ?, ?, '', '', 'desktop', 1, 'pending')",
+                    (key, ref.encode(), CONVERSATION, stamp, owner.account_id),
+                )
+    assert store.record_hold_terminal(owner, STUCK, expected=expected, now=stamp) is None
+    assert store.hold_terminal(owner, STUCK) is None
+
+
+def _reserve(store: Store, owner: OwnerSnapshot, stamp: float) -> bool:
+    return store.record_body_reservation(
+        owner,
+        conversation_id=CONVERSATION,
+        message_id=STUCK,
+        conversation_seq=1,
+        mention=False,
+        body_sha256="a" * 64,
+        screening_fingerprint="b" * 64,
+        policy_epoch=1,
+        consent_version=None,
+        designated_session="s1",
+        now=stamp,
     )
+
+
+def test_terminal_winner_fences_real_retry_claim_and_reservation(rig, monkeypatch) -> None:
+    from local_operator.team_bridge.connector import loop
+
+    root, store, owner = rig
+    ref, stamp = _expired(rig)
+    assert store.due_screening_holds(owner, now=stamp)[0]["message_id"] == ref.encode()
+    assert holds.discard_undeliverable_hold(root, owner, message_id=STUCK, now=stamp)["disposed"]
+    assert store.due_screening_holds(owner, now=stamp) == []
+    for message_id in (ref.encode(), STUCK):
+        with pytest.raises(StoreRefused, match="terminally discarded"):
+            store.claim(owner, message_id, "s1", "synthetic-token", expiry=stamp + 60)
+    with pytest.raises(StoreRefused, match="terminally discarded"):
+        _reserve(store, owner, stamp)
+
+    with pytest.raises(StoreRefused, match="terminally discarded"):
+        store.advance_hold_retry(owner, ref.encode(), retry_at=stamp + 60)
+    with pytest.raises(StoreRefused, match="terminally discarded"):
+        store.persist_hold(owner, ref.encode(), "conversation_failed")
+
+    # A screening pass already in flight must not write authority behind a
+    # terminal marker. The attempt lookup must not run before the fence.
+    with pytest.raises(StoreRefused, match="terminally discarded"):
+        store.finish_screening(
+            owner,
+            STUCK,
+            attempt_id="synthetic-attempt",
+            fingerprint="f" * 64,
+            expected_epoch=1,
+            hold_code="model_hold",
+        )
+
+    async def unexpected_spine(*args, **kwargs):
+        pytest.fail("terminal ID reached conversation retry")
+
+    monkeypatch.setattr(loop, "handle_conversation_available", unexpected_spine)
+    result = asyncio.run(loop.retry_due_holds(owner, config_dir=root, access=None, auth_store=None))
+    assert result["due"] == 0 and result["outcomes"] == []
+
+
+def test_setting_off_does_not_authorize_a_fresh_decision(rig, monkeypatch) -> None:
+    root, store, owner = rig
+    stamp = time.time()
+    store.persist_hold(owner, STUCK, "model_hold")
+    _decision(store, owner, STUCK, now=stamp + 19 * DAY)
+    monkeypatch.setattr(hr, "review_enabled", lambda *_: False)
+    later = stamp + 20 * DAY
+    assert holds.list_holds(root, owner, now=later)["items"][0]["terminal_discard"] is False
+    assert holds.expire_undeliverable_holds(root, owner, now=later) == 0
+    with pytest.raises(holds.HoldRefused):
+        holds.discard_undeliverable_hold(root, owner, message_id=STUCK, now=later)
+    assert store.hold_terminal(owner, STUCK) is None
+
+
+def test_v8_validation_precedes_schema_stamp_or_mutation(rig) -> None:
+    _, store, owner = rig
+    with sqlite3.connect(store._path) as conn:
+        conn.execute("DROP TABLE hold_terminals")
+        conn.execute("UPDATE schema_meta SET value = '8' WHERE key = 'schema_version'")
+        conn.execute("ALTER TABLE body_reservations RENAME COLUMN state TO broken_state")
+    with pytest.raises(StoreRefused) as failure:
+        store.persist_hold(owner, STUCK, "model_hold")
+    assert failure.value.code == "schema_damaged"
+    with sqlite3.connect(store._path) as conn:
+        assert conn.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone() == ("8",)
+        assert (
+            conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'hold_terminals'").fetchone()
+            is None
+        )
+        assert conn.execute("SELECT COUNT(*) FROM screening_holds").fetchone() == (0,)
+
+
+@pytest.mark.asyncio
+async def test_real_discard_routes_revalidate_snapshot_and_account(rig, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.config import ConfigManager
+    from local_operator.server.routes.desktop_team_bridge import router
+    from local_operator.team_bridge import read_context
+
+    root, store, owner = rig
+    _expired(rig)
+    store.persist_hold(owner, ORPHAN, "model_hold")
+    _decision(store, owner, ORPHAN, now=time.time() - 8 * DAY)
+
+    class FixtureOAuthWire:
+        async def current_access(self):
+            return SimpleNamespace(
+                kind="oauth",
+                account_id=owner.account_id,
+                credential_id=owner.credential_id,
+                base_url=owner.canonical_base_url,
+            )
+
+    monkeypatch.setattr(read_context, "wire_for", lambda _: FixtureOAuthWire())
+    token = "synthetic-desktop-token"
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", token)
+    app = FastAPI()
+    app.state.config_manager = ConfigManager(root)
+    app.include_router(router)
+    batch = "/v1/desktop/team-bridge/holds/discard-all"
+    body = {
+        "expected_account_id": owner.account_id,
+        "scope": "undeliverable",
+        "message_ids": [STUCK, STUCK],
+    }
+    headers = {"Authorization": f"Bearer {token}"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as http:
+        unauth = await http.post(batch, json=body)
+        wrong = await http.post(
+            batch, json={**body, "expected_account_id": "acc_other"}, headers=headers
+        )
+        malformed = await http.post(batch, json={**body, "message_ids": ["bad"]}, headers=headers)
+        outcome = await http.post(batch, json=body, headers=headers)
+        repeat = await http.post(batch, json=body, headers=headers)
+        assert store.hold_terminal(owner, ORPHAN) is None
+        single = await http.post(
+            f"/v1/desktop/team-bridge/holds/{ORPHAN}/discard",
+            json={"expected_account_id": owner.account_id},
+            headers=headers,
+        )
+    for response in (unauth, wrong, malformed, outcome, repeat, single):
+        print(response.status_code, response.text)
+    assert unauth.status_code == 401
+    assert wrong.status_code == 409 and wrong.json()["detail"]["code"] == "account_mismatch"
+    assert malformed.status_code == 422
+    assert outcome.status_code == repeat.status_code == single.status_code == 200
+    assert outcome.json()["result"] == {"discarded": 1, "already": 0, "skipped": 0}
+    assert repeat.json()["result"] == {"discarded": 0, "already": 1, "skipped": 0}
+    assert single.json()["result"]["disposed"] is True
+    assert store.hold_terminal(owner, ORPHAN) is not None

@@ -1,4 +1,4 @@
-"""``lop team-bridge holds [list|expire|discard|reopen]``: this machine's held messages.
+"""``lop team-bridge holds [list|expire|discard]``: this machine's held messages.
 
 WHY THIS EXISTS (operator report 2026-11-18). Twelve held messages sat on the
 operator's machine for up to ~18 days, visible only in the desktop app's Agent
@@ -23,15 +23,15 @@ signed-in bridge credential to reach the hub. No desktop bearer, no daemon, and
 the receiver may be stopped. When the hub cannot be reached the local rows still
 print, with the sender column saying why it is missing.
 
-IT CHANGES NO HOLD BODY. ``list`` writes nothing to the bridge store. The three
-DISPOSAL verbs (``expire``, ``discard``, ``reopen``) write exactly ONE
+IT CHANGES NO HOLD BODY. ``list`` writes nothing to the bridge store. The
+DISPOSAL verbs (``expire``, ``discard``) write exactly ONE
 contentless row per settled message — ``hold_terminals``, ids and closed codes
 only, no body, no sender, no label — because a hold that provably cannot be
 delivered had no exit from a terminal at all (operator report 2026-11-21,
 ``bcmsg_5ac4…``: listed ``releasable: true``, nothing on screen to bind a
 button to, badge stuck for ever). They write NO ``owner_releases`` row, sign
-nothing, and call no hub: a signed release is a word over a BODY, and these rows
-have no loadable body by definition. ``deliver``, and ``discard`` of a row that
+nothing, and call no hub: a signed release is a word over a BODY, and this path does
+not assume a body is loadable. ``deliver``, and ``discard`` of a row that
 CAN be delivered, stay the desktop's bearer-gated routes
 (``desktop_team_bridge_holds.decide``); nothing added here can admit or deliver
 anything, or dispose of a deliverable row. There is no body cache: the excerpt
@@ -437,8 +437,6 @@ def main(args: argparse.Namespace) -> int:
         return _expire_command(args)
     if command == "discard":
         return _discard_command(args)
-    if command == "reopen":
-        return _reopen_command(args)
     try:
         answer = collect(_config_dir(), excerpt=bool(getattr(args, "excerpt", False)))
     except StoreRefused as refusal:
@@ -499,7 +497,7 @@ def _expire_command(_args: argparse.Namespace) -> int:
 
 
 def _discard_command(args: argparse.Namespace) -> int:
-    """``holds discard``: one message, or every undeliverable one, with no proof."""
+    """``holds discard``: one undeliverable message, with no proof."""
 
     from local_operator.server.utils import desktop_team_bridge_holds as holds
     from local_operator.team_bridge.store import StoreRefused
@@ -508,19 +506,6 @@ def _discard_command(args: argparse.Namespace) -> int:
     _store, owner = _write_store_and_owner(root)
     if owner is None:
         return _no_owner()
-    if getattr(args, "undeliverable", False):
-        try:
-            counts = holds.discard_all_undeliverable(root, owner)
-        except StoreRefused as refusal:
-            print(  # i18n: ignore developer CLI output (see the module docstring)
-                f"team-bridge holds: the local bridge store refused the pass ({refusal.code})"
-            )
-            return 1
-        print(  # i18n: ignore developer CLI output (see the module docstring)
-            f"disposed of {counts['discarded']}, already disposed {counts['already']}, "
-            f"left alone {counts['skipped']}"
-        )
-        return 0
     message_id = str(getattr(args, "message", "") or "")
     try:
         answer = holds.discard_undeliverable_hold(root, owner, message_id=message_id)
@@ -545,36 +530,5 @@ def _discard_command(args: argparse.Namespace) -> int:
     word = "disposed of" if answer.get("disposed") else "already disposed of"
     print(  # i18n: ignore developer CLI output (see the module docstring)
         f"team-bridge holds: {message_id} {word} ({answer['terminal']['detail']})"
-    )
-    return 0
-
-
-def _reopen_command(args: argparse.Namespace) -> int:
-    """``holds reopen``: drop the dispose marker; it cannot undo a non-delivery."""
-
-    from local_operator.team_bridge.store import StoreRefused
-
-    root = _config_dir()
-    _store, owner = _write_store_and_owner(root)
-    if owner is None:
-        return _no_owner()
-    message_id = str(getattr(args, "message", "") or "")
-    try:
-        from local_operator.server.utils import desktop_team_bridge_holds as holds
-
-        removed = holds.reopen_hold(root, owner, message_id=message_id)
-    except StoreRefused as refusal:
-        print(  # i18n: ignore developer CLI output (see the module docstring)
-            f"team-bridge holds: the local bridge store refused the write ({refusal.code})"
-        )
-        return 1
-    if not removed:
-        print(  # i18n: ignore developer CLI output (see the module docstring)
-            f"team-bridge holds: {message_id} had no dispose marker"
-        )
-        return 0
-    print(  # i18n: ignore developer CLI output (see the module docstring)
-        f"team-bridge holds: {message_id} is listed again. This only removed the "
-        "marker: it did not deliver the message, and nothing was sent to the sender."
     )
     return 0

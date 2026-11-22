@@ -4762,19 +4762,19 @@ class TeamBridgeHoldDiscard(_Strict):
 
 
 class TeamBridgeHoldBatchDiscard(_Strict):
-    """``POST …/holds/discard-all`` body: ONE closed scope word.
-
-    An unknown scope is refused by the field's own validator, which FastAPI
-    answers 422 for — this endpoint must never guess what a typo meant.
-    """
+    """The exact IDs offered at confirmation, not permission to sweep the store."""
 
     expected_account_id: str = Field(min_length=1, max_length=128)
     scope: Literal["undeliverable"]
+    message_ids: list[str] = Field(min_length=1, max_length=200)
 
     @model_validator(mode="after")
     def _grammar(self) -> "TeamBridgeHoldBatchDiscard":
         if not is_account_id(self.expected_account_id):
             raise ValueError("expected_account_id is outside the accepted grammar")
+        if any(not re.fullmatch(_CONVERSATION_MESSAGE_ID, item) for item in self.message_ids):
+            raise ValueError("message_ids contains an invalid conversation message ID")
+        self.message_ids = list(dict.fromkeys(self.message_ids))
         return self
 
 
@@ -4942,13 +4942,7 @@ async def discard_all_holds(
     body: TeamBridgeHoldBatchDiscard,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
-    """Terminally discard EVERY provably-undeliverable hold, in one pass.
-
-    The scope word is closed (``undeliverable``): a bulk write has to say WHAT it
-    is clearing, and an unknown word is a 422 rather than a guess. Rows that can
-    still be delivered are never touched and are reported as ``skipped`` — the
-    person's own Deliver stays available for them.
-    """
+    """Revalidate and dispose only the IDs in the confirmed snapshot."""
 
     response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
     _refuse_write_scope(request)
@@ -4959,7 +4953,10 @@ async def discard_all_holds(
 
     try:
         payload = await asyncio.to_thread(
-            holds.discard_all_undeliverable, config_manager.config_dir, owner
+            holds.discard_all_undeliverable,
+            config_manager.config_dir,
+            owner,
+            message_ids=body.message_ids,
         )
     except holds.HoldRefused as refusal:
         _raise_hold(refusal.code)

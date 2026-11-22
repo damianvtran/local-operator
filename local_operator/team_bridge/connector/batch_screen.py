@@ -40,6 +40,8 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import logging
+import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
@@ -184,9 +186,8 @@ async def prescreen_conversation_refs(
     state = _ACTIVE.get()
     if state is None or len(refs) < 2:
         return 0
-    from ..store import Store
+    from ..store import CONNECTOR_CLAIM_TOKEN_PREFIX, Store, StoreRefused
     from . import conversation as _conversation
-    from . import wake as _wake
 
     store = Store(config_dir)
     # The same cheap gates the handler applies first: a fenced or unengaged
@@ -199,6 +200,58 @@ async def prescreen_conversation_refs(
     designation = store.designated_session_for(owner)
     if designation is None or _conversation.engagement_hold(designation, config_dir):
         return 0
+    # Batch prefetch runs before the individual handler's claim. Use that
+    # same authority here: a winning discard blocks even the fetch, and a
+    # winning claim protects the message through all awaited batch work.
+    token = f"{CONNECTOR_CLAIM_TOKEN_PREFIX}{uuid.uuid4()}"
+    claimed: dict[str, ConversationFeedRef] = {}
+    try:
+        for ref in refs:
+            if ref.message_id in claimed:
+                continue
+            try:
+                store.claim(
+                    owner,
+                    ref.message_id,
+                    designation,
+                    token,
+                    expiry=time.time() + _conversation.CLAIM_TTL_S,
+                )
+            except StoreRefused:
+                continue
+            claimed[ref.message_id] = ref
+        if len(claimed) < 2:
+            return 0
+        return await _prescreen_claimed_refs(
+            owner,
+            tuple(claimed.values()),
+            state=state,
+            config_dir=config_dir,
+            access=access,
+            auth_store=auth_store,
+            settings=settings,
+            wire=wire,
+        )
+    finally:
+        for message_id in claimed:
+            with contextlib.suppress(StoreRefused):
+                store.release_claim(owner, message_id, token)
+
+
+async def _prescreen_claimed_refs(
+    owner: Any,
+    refs: Sequence[ConversationFeedRef],
+    *,
+    state: _Prescreened,
+    config_dir: Path,
+    access: Any,
+    auth_store: Any,
+    settings: Any,
+    wire: Any,
+) -> int:
+    from . import conversation as _conversation
+    from . import wake as _wake
+
     client = (
         wire if wire is not None else await _conversation._wire_for(owner, config_dir, auth_store)
     )

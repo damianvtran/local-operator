@@ -61,21 +61,11 @@ def _key(endpoint_id: str) -> str:
 
 
 def expire_holds_once(owner: Any, config_dir: Path, now: float | None = None) -> int:
-    """Run the undeliverable-hold retention pass once; closed counts, never raises.
+    """Run the age-gated terminal disposition pass; closed counts, never raises.
 
-    WHERE THIS IS CALLED FROM, and why there: :func:`tick`, the long-hold alert
-    the connector already drives every 300 s. A hold that can never be delivered
-    used to be IMMORTAL — ``screening_holds`` is re-upserted by every retry and
-    ``list_holds`` served it for ever — so nothing except a background pass can
-    bound it. Do not move this into ``connector/loop.py`` or
-    ``connector/conversation.py``: a parallel change owns those files.
-
-    The reader lives in ``server.utils.desktop_team_bridge_holds`` because that
-    module owns the ONE classification of "provably undeliverable" (a second
-    copy here is how the badge and the pass would come to disagree). That import
-    is lazy and one-way at runtime, and the module pulls no web framework (it is
-    plain stdlib plus ``team_bridge``), so the connector does not acquire
-    ``lop serve``'s boot cost by calling this.
+    The alert already revisits old holds periodically. The store is the only
+    authority for terminal disposition: a missing decision, hold age or an
+    unavailable notification channel is not proof that delivery cannot resume.
     """
 
     from local_operator.server.utils import desktop_team_bridge_holds as holds
@@ -159,8 +149,6 @@ def _run(owner: Any, config_dir: Path, now: float | None) -> str:
     # ``0`` (alert off) or a missing inbox cannot also switch the backstop off,
     # and it never changes this function's own closed outcome: retention is not
     # the alert, and a failure there is one log line, not a failed alert.
-    # ``connector/loop.py`` and ``connector/conversation.py`` are deliberately not
-    # touched (another change owns them).
     expire_holds_once(owner, config_dir, now)
     t = tr("cli.team_bridge_alert")
 

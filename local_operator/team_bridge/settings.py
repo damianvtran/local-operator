@@ -263,20 +263,10 @@ DEFAULT_REVIEW_HELD = True
 #: ``hold_alert_after_minutes``.
 DEFAULT_SCREENING_HOLD_REVIEW_AFTER_MINUTES = 30
 
-#: ``team_bridge.held_expiry_days`` — how many DAYS a held conversation message
-#: may sit undeliverable before the maintenance pass DISPOSES of it (writes a
-#: ``hold_terminals`` row, so it leaves the holds list, the nav badge and the
-#: long-hold count for good). ``0`` disables the pass; valid range 0..3650.
-#:
-#: WHY (operator report 2026-11-21). A hold whose payload could never be loaded
-#: again had no exit at all: ``list_holds`` served it ``releasable: true`` and the
-#: Approvals badge could never reach zero (``bcmsg_5ac4…``: decision cleared, no
-#: release row, nothing on screen to bind a button to). The explicit discard
-#: verbs settle the rows a person can see; this is the BACKSTOP that bounds the
-#: table when nobody is looking, which is why 14 days — past the 7-day Deliver
-#: window (``hold_release.DELIVER_WINDOW_S``), so it can never take a message the
-#: person could still legitimately deliver, and short enough that the badge
-#: cannot stand for a month.
+#: ``team_bridge.held_expiry_days`` — minimum age for the maintenance pass.
+#: ``0`` disables the pass; valid range 0..3650. Age never grants disposal:
+#: the same stored proof required for manual terminal discard must also pass
+#: under the write lock. An old hold can have a newer, still-open decision.
 #:
 #: NO ``/settings`` ROW, for the same i18n-ledger reason as
 #: ``hold_alert_after_minutes`` and ``screening_hold_review_after_minutes``

@@ -145,30 +145,12 @@ def add_parser(
         # i18n: ignore developer CLI help pending the CLI copy-extraction tranche
         help="Dispose of holds that can never be delivered (no proof needed)",
     )
-    discard_target = holds_discard.add_mutually_exclusive_group(required=True)
-    discard_target.add_argument(
-        "--undeliverable",
-        action="store_true",
-        # i18n: ignore developer CLI flag help (see the pragma above)
-        help="Every hold that can never be delivered, in one pass",
-    )
-    discard_target.add_argument(
-        "--message",
-        metavar="ID",
-        # i18n: ignore developer CLI flag help (see the pragma above)
-        help="One held message, by its bcmsg_ message id",
-    )
-    holds_reopen = holds_actions.add_parser(
-        "reopen",  # i18n: ignore CLI command name
-        # i18n: ignore developer CLI help pending the CLI copy-extraction tranche
-        help="Remove a dispose marker so the hold is listed again",
-    )
-    holds_reopen.add_argument(
+    holds_discard.add_argument(
         "--message",
         metavar="ID",
         required=True,
         # i18n: ignore developer CLI flag help (see the pragma above)
-        help="The bcmsg_ message id whose dispose marker to remove",
+        help="One held message, by its bcmsg_ message id",
     )
     avatar = group_actions.add_parser(
         "avatar",  # i18n: ignore CLI command name
