@@ -25,3 +25,11 @@ session's `ci-repair/normalized-parity.log` and `normalized-mutant.log`;
 these are not substituted for the original archived logs. Wrapper cleanup
 remains unknown. No full test suite, native frames, dependency installation,
 local Black/isort execution or typing qualification is claimed here.
+
+The subsequent required lint job 137171784241 accepted Black/isort but found
+one E501 in the duplicate probe's long pytest node identifier. That literal
+is now split into adjacent string literals: the complete AST, including
+import order, is identical to `82d5566fe5c7`. Only that probe's checksum changes.
+Existing local flake8 passed on both probes and all three product/test repair
+files after this wrapping. No runtime or projection rerun was needed for this
+AST-identical edit; original raw logs/results/source proof remain untouched.

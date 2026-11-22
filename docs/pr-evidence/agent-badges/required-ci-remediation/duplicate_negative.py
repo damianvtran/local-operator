@@ -35,7 +35,8 @@ raise SystemExit(
             "-n",
             "0",
             "-q",
-            "tests/unit/tui/test_agent_facts.py::test_spilling_duplicate_facts_projects_only_first_occurrences",
+            "tests/unit/tui/test_agent_facts.py::"
+            "test_spilling_duplicate_facts_projects_only_first_occurrences",
         ]
     )
 )
