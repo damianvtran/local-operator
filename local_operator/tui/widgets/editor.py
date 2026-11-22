@@ -1766,6 +1766,7 @@ def _reload_copy() -> None:
 
 register_refresh(_reload_copy)
 
+
 #: What the composer says while it refuses input. It names the state AND the
 #: consequence, because the only useful thing to tell someone whose keys are
 #: being ignored is how to get a composer that accepts them.
