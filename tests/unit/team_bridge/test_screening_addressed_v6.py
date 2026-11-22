@@ -28,6 +28,7 @@ from typing import Any
 
 import httpx
 import pytest
+from typing_extensions import TypedDict
 
 from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge import screening
@@ -224,6 +225,11 @@ def test_v6_offered_renders_v6_and_sends_its_hash(
     }
 
 
+class _AdmitGrantKwargs(TypedDict, total=False, closed=True):
+    files_hash: str
+    attachments_hash: str
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("verdict", "template", "grant", "error"),
@@ -239,7 +245,7 @@ async def test_invalid_admit_evidence_never_reaches_transport(
     monkeypatch: pytest.MonkeyPatch,
     verdict: str,
     template: str | None,
-    grant: dict[str, str],
+    grant: _AdmitGrantKwargs,
     error: str,
 ) -> None:
     from tests.unit.team_bridge.test_client import _make_client
