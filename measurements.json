@@ -1,0 +1,191 @@
+{
+  "wide-dark": {
+    "viewport": "390x844",
+    "theme": "localOperatorDark",
+    "before": {
+      "scrollTop": 0,
+      "scrollHeight": 3182,
+      "clientHeight": 509,
+      "chip": null,
+      "chipText": null,
+      "chipAria": null,
+      "scroller": {
+        "top": 103,
+        "bottom": 612,
+        "left": 0,
+        "right": 390
+      },
+      "composerTop": 670,
+      "theme": "localOperatorDark"
+    },
+    "with_chip": {
+      "scrollTop": 0,
+      "scrollHeight": 3211,
+      "clientHeight": 509,
+      "chip": {
+        "left": 254,
+        "top": 572,
+        "width": 124,
+        "height": 32,
+        "right": 378
+      },
+      "chipText": "\u2193\nJump to latest",
+      "chipAria": "Jump to latest",
+      "scroller": {
+        "top": 103,
+        "bottom": 612,
+        "left": 0,
+        "right": 390
+      },
+      "composerTop": 670,
+      "theme": "localOperatorDark"
+    },
+    "after_click": {
+      "scrollTop": 2702,
+      "scrollHeight": 3211,
+      "clientHeight": 509,
+      "chip": null,
+      "chipText": null,
+      "chipAria": null,
+      "scroller": {
+        "top": 103,
+        "bottom": 612,
+        "left": 0,
+        "right": 390
+      },
+      "composerTop": 670,
+      "theme": "localOperatorDark"
+    },
+    "chip_appeared": true,
+    "chip_hidden_after_click": true,
+    "before_arrival_filename": "jtl-390x844-localoperatordark-before-arrival.png",
+    "scrolled_up_filename": "jtl-390x844-localoperatordark-scrolled-up.png",
+    "at_bottom_filename": "jtl-390x844-localoperatordark-at-bottom.png"
+  },
+  "wide-light": {
+    "viewport": "390x844",
+    "theme": "localOperatorLight",
+    "before": {
+      "scrollTop": 0,
+      "scrollHeight": 3211,
+      "clientHeight": 509,
+      "chip": null,
+      "chipText": null,
+      "chipAria": null,
+      "scroller": {
+        "top": 103,
+        "bottom": 612,
+        "left": 0,
+        "right": 390
+      },
+      "composerTop": 670,
+      "theme": "localOperatorLight"
+    },
+    "with_chip": {
+      "scrollTop": 0,
+      "scrollHeight": 3240,
+      "clientHeight": 509,
+      "chip": {
+        "left": 254,
+        "top": 572,
+        "width": 124,
+        "height": 32,
+        "right": 378
+      },
+      "chipText": "\u2193\nJump to latest",
+      "chipAria": "Jump to latest",
+      "scroller": {
+        "top": 103,
+        "bottom": 612,
+        "left": 0,
+        "right": 390
+      },
+      "composerTop": 670,
+      "theme": "localOperatorLight"
+    },
+    "after_click": {
+      "scrollTop": 2731,
+      "scrollHeight": 3240,
+      "clientHeight": 509,
+      "chip": null,
+      "chipText": null,
+      "chipAria": null,
+      "scroller": {
+        "top": 103,
+        "bottom": 612,
+        "left": 0,
+        "right": 390
+      },
+      "composerTop": 670,
+      "theme": "localOperatorLight"
+    },
+    "chip_appeared": true,
+    "chip_hidden_after_click": true,
+    "before_arrival_filename": "jtl-390x844-localoperatorlight-before-arrival.png",
+    "scrolled_up_filename": "jtl-390x844-localoperatorlight-scrolled-up.png",
+    "at_bottom_filename": "jtl-390x844-localoperatorlight-at-bottom.png"
+  },
+  "narrow-light": {
+    "viewport": "320x640",
+    "theme": "localOperatorLight",
+    "before": {
+      "scrollTop": 0,
+      "scrollHeight": 3408,
+      "clientHeight": 305,
+      "chip": null,
+      "chipText": null,
+      "chipAria": null,
+      "scroller": {
+        "top": 103,
+        "bottom": 408,
+        "left": 0,
+        "right": 320
+      },
+      "composerTop": 466,
+      "theme": "localOperatorLight"
+    },
+    "with_chip": {
+      "scrollTop": 0,
+      "scrollHeight": 3458,
+      "clientHeight": 305,
+      "chip": {
+        "left": 232,
+        "top": 368,
+        "width": 76,
+        "height": 32,
+        "right": 308
+      },
+      "chipText": "\u2193\nLatest",
+      "chipAria": "Jump to latest",
+      "scroller": {
+        "top": 103,
+        "bottom": 408,
+        "left": 0,
+        "right": 320
+      },
+      "composerTop": 466,
+      "theme": "localOperatorLight"
+    },
+    "after_click": {
+      "scrollTop": 3153,
+      "scrollHeight": 3458,
+      "clientHeight": 305,
+      "chip": null,
+      "chipText": null,
+      "chipAria": null,
+      "scroller": {
+        "top": 103,
+        "bottom": 408,
+        "left": 0,
+        "right": 320
+      },
+      "composerTop": 466,
+      "theme": "localOperatorLight"
+    },
+    "chip_appeared": true,
+    "chip_hidden_after_click": true,
+    "before_arrival_filename": "jtl-320x640-localoperatorlight-before-arrival.png",
+    "scrolled_up_filename": "jtl-320x640-localoperatorlight-scrolled-up.png",
+    "at_bottom_filename": "jtl-320x640-localoperatorlight-at-bottom.png"
+  }
+}
