@@ -15,7 +15,7 @@ the developer's own settings.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator, Literal
 
 import pytest
 import yaml
@@ -35,7 +35,7 @@ from tests.unit.tui.waiting import settle
 
 
 @pytest.fixture(autouse=True)
-def _scratch_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def _scratch_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     # The display cache is per PROCESS, so a value left by an earlier test would
     # leak into this one's first read.
@@ -146,7 +146,9 @@ async def test_the_view_stores_the_mode_and_hands_it_back() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("source", ["local", "disk"])
-async def test_a_config_change_hands_the_new_mode_to_the_view(tmp_path: Path, source: str) -> None:
+async def test_a_config_change_hands_the_new_mode_to_the_view(
+    tmp_path: Path, source: Literal["local", "disk"]
+) -> None:
     """Both sources: the command/page write is `local`, an outside edit is `disk`.
 
     Without the arm the view would keep the mode it booted with while the page
