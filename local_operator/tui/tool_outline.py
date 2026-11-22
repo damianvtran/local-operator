@@ -463,18 +463,28 @@ def _ended_in_failure(span: Sequence[OutlineRow]) -> bool:
     a turn without an answer, and only the harness's own failed notice says the
     turn died. A failed CALL is not enough either — the run folds and counts it.
 
-    The named failed head may sit before the closing incident row (a provider
-    failure replays as the raw `[session incident …]` record first and the
-    stop notice last), so the head test is unordered; the last-row test catches
-    the other spelling, `Stopped with an error — …`, which has no such head.
+    Two arms, and the ANSWERED one is ordered on purpose. A turn that produced
+    prose answered; a failure notice before that prose is history the turn went
+    on from, and it cannot make the turn read as dead. For a turn with no answer
+    the failed head may sit before the closing incident row (a provider failure
+    replays as the raw `[session incident …]` record first and the stop notice
+    last), so there the head test is unordered; the last-row test catches the
+    other spelling, `Stopped with an error — …`, which has no such head.
     """
-    failed_notices = [row for row in span if row.kind == "notice_failed"]
-    if any(row.notice_head.startswith(_FAILED_NOTICE_HEADS) for row in failed_notices):
+    if not span:
+        return False
+    last = span[-1]
+    if last.kind == "notice_failed" and not last.notice_head.startswith(_NEUTRAL_NOTICE_HEADS):
+        # The turn ENDED on an error: `turn failed`, `Stopped with an error`, or
+        # a provider error that produced nothing. Cut-off/interrupted are
+        # excluded by their neutral heads above.
         return True
-    return (
-        bool(span)
-        and span[-1].kind == "notice_failed"
-        and not span[-1].notice_head.startswith(_NEUTRAL_NOTICE_HEADS)
+    answered = any(row.kind == "prose_final" for row in span)
+    if answered:
+        return False
+    return any(
+        row.kind == "notice_failed" and row.notice_head.startswith(_FAILED_NOTICE_HEADS)
+        for row in span
     )
 
 

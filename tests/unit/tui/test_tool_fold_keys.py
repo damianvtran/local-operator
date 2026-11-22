@@ -712,3 +712,33 @@ async def test_minus_on_a_child_bar_restores_its_turn_and_right_skips_narration(
         await _settle(pilot)
         assert not run_bar.expanded
         assert not any(card.display for card in cards), "- did not restore the turn's defaults"
+
+
+@pytest.mark.asyncio
+async def test_f_reveals_a_failure_below_the_viewport_too() -> None:
+    """L7: the jump scrolls its target into view in either direction."""
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(100, 10)) as pilot:
+        view = app.query_one(TranscriptView)
+        _user(view, "anchor:u1")
+        cards = [_tool(view, f"t{index}", TOOLS[index % len(TOOLS)]) for index in range(9)]
+        cards[8].restore(state="error", error="boom", duration_s=1.0)
+        _answer(view)
+        await _settle(pilot)
+
+        (turn_bar,) = _bars(view)
+        turn_bar.activate()
+        await _settle(pilot)
+        assert all(card.display for card in cards), "premise: the turn is open"
+        turn_bar.focus()
+        await _settle(pilot)
+        view.scroll_to(y=0, animate=False, immediate=True)
+        await _settle(pilot)
+        assert view.block_row_on_screen(cards[8], 0) is None, "premise: the failure is below"
+
+        await pilot.press("f")
+        await _settle(pilot)
+        assert app.focused is cards[8]
+        assert view.block_row_on_screen(cards[8], 0) is not None

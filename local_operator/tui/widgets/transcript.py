@@ -9495,6 +9495,25 @@ class TranscriptView(ScrollableContainer):
             self.scroll_to(y=max(0.0, top), animate=False, immediate=True)
         return True
 
+    def show_block(self, block: TranscriptBlock) -> bool:
+        """Bring ``block`` into the viewport after a KEYBOARD jump.
+
+        Different contract from :meth:`reveal_block`: that one corrects only the
+        row a growth pushed ABOVE the viewport and deliberately leaves a row
+        below it to the tail anchor. A navigation gesture is the opposite — the
+        reader asked to be taken somewhere, and a target that is not on screen
+        is a keystroke with no visible effect. So: already visible, no move; off
+        screen either way, scroll its top there and release the tail.
+        """
+        if block.parent is not self:
+            return False
+        if self.block_row_on_screen(block, 0) is not None:
+            return False
+        self._tail_anchor.release()
+        with self._tail_anchor.programmatic_scroll():
+            self.scroll_to(y=max(0.0, block.virtual_region.y), animate=False, immediate=True)
+        return True
+
     def block_row_on_screen(self, block: TranscriptBlock, row: int) -> int | None:
         """The viewport row ``block``'s content line ``row`` is painted on, or ``None``.
 

@@ -410,11 +410,11 @@ class ToolFoldLayer:
         block = self._rows.get(target)
         if block is not None:
             block.focus()
-            self._view.reveal_block(block)
+            self._view.show_block(block)
             # Once more after the layout the opening just caused: the first
             # call reads the pre-open region, and a row that was already
             # painted (the `+` case) needs the truthful one.
-            self._view.call_after_refresh(lambda: self._view.reveal_block(block))
+            self._view.call_after_refresh(lambda: self._view.show_block(block))
 
     def jump_from_card(self, card: "ToolCard", delta: int) -> bool:
         """Continue the ladder from the CARD the last jump landed on.
@@ -546,8 +546,8 @@ class ToolFoldLayer:
             self._gaps_dirty = False
             self._view.reapply_gaps()
         if open:
-            self._view.reveal_block(bar)
-            self._view.call_after_refresh(lambda: self._view.reveal_block(bar))
+            self._view.show_block(bar)
+            self._view.call_after_refresh(lambda: self._view.show_block(bar))
 
     def focus_neighbour(self, block: TranscriptBlock, delta: int) -> bool:
         """Walk the VISIBLE order — bars included — and focus the next row.
