@@ -1614,6 +1614,10 @@ async def _session_display_send_kwargs(
     Status/POST are not atomic: a mixed pre-parser fleet can refuse the POST.
     Such a 400 remains visible; never strip the object and silently resend.
     """
+    # "Each NEW logical send" means one that may attach this optional object.
+    # A send with no captured display cannot attach it: keep legacy omission
+    # free of a new status-call failure/latency path. Named sends probe anew; no
+    # capability (positive or negative) is latched between logical sends.
     if not isinstance(display, str) or not display.strip():
         return {}
     from .host import _admission_from_payload, outbound_tool_fence

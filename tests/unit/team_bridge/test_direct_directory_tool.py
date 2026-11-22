@@ -797,3 +797,69 @@ async def test_session_display_status_definitive_disabled_payload_never_posts(
     with pytest.raises(BridgeRefusal):
         await _session_display_send_kwargs(_runtime(client, config_dir=tmp_path), "Host task")
     assert methods == ["GET"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("display", [None, "", "  ", "Host task"])
+@pytest.mark.parametrize("feature", [None, 2])
+async def test_unnamed_vs_named_unsupported_probe_preserves_legacy_wire(
+    tmp_path, monkeypatch, display, feature
+):
+    """Only attachable displays acquire probe latency; support is never latched."""
+    import httpx
+
+    from local_operator.team_bridge.client import TeamBridgeClient
+    from local_operator.team_bridge.tool import _session_display_send_kwargs
+    from tests.unit.team_bridge.test_client import FakeStore, _ok
+
+    monkeypatch.setattr(
+        "local_operator.team_bridge.client.org_oauth_destination_allowed", lambda _: True
+    )
+    monkeypatch.setattr(host_mod, "outbound_tool_fence", lambda _: None)
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if request.method == "GET":
+            assert request.url.path.endswith("/messaging/status")
+            return _ok(
+                {
+                    "features": (
+                        {} if feature is None else {"team_bridge_agent_session_display": feature}
+                    )
+                }
+            )
+        return _ok({"id": "bcmsg_display01", "seq": 1}, status=201)
+
+    client = TeamBridgeClient(
+        base_url="https://hub.example",
+        store=FakeStore(),
+        transport=httpx.MockTransport(handler),
+        credential_id=1,
+    )
+    runtime = _runtime(client, config_dir=tmp_path)
+    # Two independent logical sends prove a prior negative answer cannot turn
+    # the next named send into a cached/no-probe send. Unnamed sends add no GET.
+    named = bool(display and display.strip())
+    for index in range(2):
+        start = len(calls)
+        kwargs = await _session_display_send_kwargs(runtime, display)
+        await client.conversation_send(
+            "bcv_abcd1234",
+            client_ref=f"logical-{index}",
+            text="exact body",
+            tenant_id=runtime.tenant_id,
+            actor_endpoint_id="bep_1",
+            origin_session_id="sess_1",
+            **kwargs,
+        )
+        attempt = calls[start:]
+        assert [request.method for request in attempt] == (["GET", "POST"] if named else ["POST"])
+        assert json.loads(attempt[-1].content) == {
+            "client_ref": f"logical-{index}",
+            "body": "exact body",
+            "tenant_id": runtime.tenant_id,
+            "actor_endpoint_id": "bep_1",
+            "origin_session_id": "sess_1",
+        }
+    assert sum(request.method == "GET" for request in calls) == (2 if named else 0)
