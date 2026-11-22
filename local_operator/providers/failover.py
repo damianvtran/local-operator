@@ -5301,8 +5301,13 @@ async def _stream_with_failover_events(
                 if is_server_side_failure(exc):
                     server_fault_requests += 1
                     server_faults_by_target[route_key] = server_fault_requests
+                vertex_429 = provider == "google-vertex" and exc.status == 429
                 if (
                     exc.kind == "quota"
+                    # Vertex's in-place retries already honor the hint with a
+                    # bounded budget. Don't schedule a second retry wave (or
+                    # a wait on a credential the walk just exhausted).
+                    and not vertex_429
                     and exc.retry_after_ms
                     and exc.retry_after_ms <= LOOPBACK_MAX_WAIT_MS
                 ):
@@ -5401,7 +5406,6 @@ async def _stream_with_failover_events(
                     if pinned and pin_selector is not None:
                         raise _pinned_fallback_disabled_error(pin_selector, exc) from exc
                     raise exc
-                vertex_429 = provider == "google-vertex" and exc.status == 429
                 # If Vertex names a delay longer than even the pinned budget,
                 # move on instead of waiting a minute only to retry too early.
                 vertex_wait_fits = (
