@@ -586,12 +586,23 @@ describe("a failed take: Retry, Discard, and what cannot be retried", () => {
 		expect(discardControl()).toBeTruthy();
 	});
 
-	it("hands focus to the status row when Retry removes the button that had it", async () => {
+	it("hands focus to the status row and the row STAYS focusable while it is rendered", async () => {
 		renderComposer();
 		await failTake(new api.HttpError(502, "Transcription failed upstream."));
 		const row = screen.getByRole("alert").parentElement as HTMLElement;
+		/* Script-focusable only, and already so while the failure is shown. */
+		expect(row.getAttribute("tabindex")).toBe("-1");
 		const retry = retryControl();
 		retry.focus();
+		/* Registered BEFORE the click: the Retry press calls the endpoint
+		   synchronously, so a later `mockResolvedValueOnce` would arrive after the
+		   retry already took the default (empty) answer. */
+		mockedTranscribe.mockResolvedValueOnce({
+			text: "hello",
+			provider: "radient",
+			model: null,
+			path: "provider_stt_radient",
+		});
 		fireEvent.click(retry);
 
 		await waitFor(() => expect(screen.getByText("Transcribing…")).toBeTruthy());
@@ -599,6 +610,21 @@ describe("a failed take: Retry, Discard, and what cannot be retried", () => {
 		   that strands a hardware keyboard's place in the form. */
 		expect(document.activeElement).not.toBe(document.body);
 		expect(document.activeElement).toBe(row);
+
+		/* THE HANDOFF TARGET MUST OUTLIVE THE FAILURE STATE. Retry clears
+		   `dictationFailure`, and Chrome resets activeElement to <body> the instant
+		   the focused element loses its tabIndex (Gecko keeps it, so this is
+		   invisible outside a real Chrome). happy-dom never moves focus for a
+		   removed tabIndex, so the attribute IS the check that discriminates:
+		   conditional tabIndex fails the two assertions below on the Retry render. */
+		expect(row.getAttribute("tabindex")).toBe("-1");
+
+		await waitFor(() => expect(field().value).toBe("hello"));
+		/* Past the transcribing state, the row is still the same element and still
+		   holds focus: the outcome notice keeps it mounted. */
+		expect(screen.getByText("Transcript added")).toBeTruthy();
+		expect(document.activeElement).toBe(row);
+		expect(row.getAttribute("tabindex")).toBe("-1");
 	});
 
 	it("rings both actions for a keyboard and keeps them 44 px apart", async () => {

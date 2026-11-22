@@ -2270,10 +2270,15 @@ export function Composer({
 			{dictation !== "idle" || dictationFailure !== null || dictationNotice ? (
 				<div
 					ref={dictationRowRef}
-					/* Focusable by script only: the state change that REMOVES the
-					   focused Retry button hands focus here, or the browser drops it to
-					   <body> and a hardware keyboard loses its place in the form. */
-					tabIndex={dictationFailure !== null ? -1 : undefined}
+					/* Focusable by script only, for the row's WHOLE life: the state
+					   change that REMOVES the focused Retry button hands focus here, or
+					   the browser drops it to <body> and a hardware keyboard loses its
+					   place in the form. The attribute must outlive the failure row:
+					   Retry clears `dictationFailure` while this same row stays (the
+					   transcribing line, then the outcome notice), and Chrome resets
+					   activeElement to <body> the moment the FOCUSED element loses its
+					   tabIndex — Gecko keeps it, so only a real Chrome shows it. */
+					tabIndex={-1}
 					className={cn(
 						"flex min-h-11 items-center gap-2 px-0.5",
 						/* A long sentence and two 44 px actions cannot share one line at
