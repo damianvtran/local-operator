@@ -95,6 +95,47 @@ def test_status_json_is_the_index_rows(tmp_path: Path, capsys: pytest.CaptureFix
     assert payload[0]["dormant"] is False
 
 
+def test_status_uses_live_counters_without_replacing_spec_or_park_marker(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.state import write_counters
+    from local_operator.monitors.store import write_entry
+
+    now = int(time.time() * 1000)
+    due = now + 60_000
+    for session_id, preserve in (("msess01", None), ("msess02", {"stopped_at": now})):
+        write_entry(
+            tmp_path,
+            session_id,
+            cwd="/w",
+            monitors=[_row(next_due_at=now - 1, checks=2, until_at=now + 120_000)],
+            preserve=preserve,
+        )
+        write_counters(
+            tmp_path,
+            session_id,
+            "m1",
+            {
+                "schema": 1,
+                "next_due_at": due,
+                "last_check_at": now,
+                "checks": 3,
+                "until_at": now - 1,
+                "content_hash": "private-dedupe-state",
+            },
+        )
+
+    assert monitor_command(_args(json=True)) == 0
+    live, parked = sorted(json.loads(capsys.readouterr().out), key=lambda row: row["session_id"])
+    for row in (live, parked):
+        assert (row["next_due_at"], row["last_check_at"], row["checks"]) == (due, now, 3)
+        assert row["until_at"] == now + 120_000
+        assert "content_hash" not in row
+    assert live["dormant"] is False
+    assert parked["dormant"] is True
+
+
 def test_status_names_a_monitors_state_and_health(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

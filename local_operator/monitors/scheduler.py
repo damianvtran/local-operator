@@ -439,6 +439,7 @@ class MonitorScheduler:
         deliver: Callable[[MonitorDelivery], Awaitable[None] | None],
         persist: Callable[[list[MonitorSpec]], Awaitable[None] | None],
         on_change: Callable[[], None] | None = None,
+        on_quiet_check: Callable[[], None] | None = None,
         index_writable: Callable[[], bool] | None = None,
         #: The §8 classifier gate: bounded delta → the materiality class, or
         #: ``None`` for "no classifier". Absent (``None``) means every change
@@ -462,6 +463,7 @@ class MonitorScheduler:
         self._deliver = deliver
         self._persist = persist
         self._on_change = on_change
+        self._on_quiet_check = on_quiet_check
         self._index_writable = index_writable
         self._classify = classify
         self._announce = announce
@@ -1081,20 +1083,16 @@ class MonitorScheduler:
                         if restored is not None:
                             notices.append(restored)
                     self._write_counters(entry)
-                    # AN UNAVAILABLE EPISODE PUBLISHES ITS TWO EDGES, NEVER ITS
-                    # TICKS. Every reader outside this process — `lop monitor
-                    # status`, the desktop route, the TUI band through the
-                    # frontend state — renders the published row, and a tick
-                    # publishes nothing (§10.2), so before this an unreachable
-                    # watch rendered as a normal one everywhere but here until
-                    # the 24 h episode ended in a disable (agent review round 1,
-                    # MAJOR-1). One site, AFTER the write, so the published row
-                    # and the counters file agree on every key — the retry's
-                    # ``next_due_at`` included — and one call even when the
-                    # episode's end IS the disable.
+                    # Publish unavailable edges to the index after writing the
+                    # retry's due time, once even if the edge is also a disable.
+                    # A quiet check has a separate viewer-only path: leave the
+                    # index alone, and let material changes and notices publish
+                    # through their existing paths.
                     stall_edge = was_unavailable != bool(entry.counters.get("unavailable_since"))
                     if entry.counters.get("disabled") or stall_edge:
                         self._notify_change()
+                    elif change is None and not notices:
+                        self._notify_quiet_check()
                 if change is not None:
                     # The gate runs OUTSIDE the write lock: the classifier
                     # call is a network call bounded by ``timeoutMs``, and a
@@ -2166,6 +2164,13 @@ class MonitorScheduler:
             self._on_change()
         except Exception:  # noqa: BLE001 — observation cannot break scheduling
             logger.warning("monitor on_change failed", exc_info=True)
+
+    def _notify_quiet_check(self) -> None:
+        if self._on_quiet_check is not None:
+            try:
+                self._on_quiet_check()
+            except Exception:  # noqa: BLE001 — observation cannot break scheduling
+                logger.debug("monitor quiet check observer failed", exc_info=True)
 
     @staticmethod
     async def _maybe_await(value: Any) -> Any:

@@ -229,6 +229,33 @@ async def test_a_quiet_tick_delivers_nothing_and_stays_off_the_index(harness: Ha
 
 
 @pytest.mark.asyncio
+async def test_status_advances_after_a_real_quiet_tick(harness: Harness, monkeypatch) -> None:
+    from local_operator.cli import _monitor_rows
+    from local_operator.monitors.store import write_entry
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(harness.config_dir))
+    harness.scheduler.load([spec()])
+    harness.results.extend([{"text": "A", "error": None}, {"text": "A", "error": None}])
+    await harness.pump_ripen()
+    index = write_entry(
+        harness.config_dir, "sess", cwd="/w", monitors=harness.scheduler.index_rows()
+    )
+    assert index is not None
+    original = index.read_bytes()
+    changes_before = harness.changes
+
+    await harness.pump_ripen()
+
+    counters = harness.counters()
+    assert not harness.deliveries and harness.changes == changes_before
+    assert index.read_bytes() == original
+    (row,) = _monitor_rows()
+    assert row["checks"] == counters["checks"] == 2
+    assert row["last_check_at"] == counters["last_check_at"] == harness.now_ms
+    assert row["next_due_at"] == counters["next_due_at"] > harness.now_ms
+
+
+@pytest.mark.asyncio
 async def test_a_change_delivers_a_bounded_delta(harness: Harness) -> None:
     harness.scheduler.load([spec()])
     harness.results.extend([{"text": "A\nB", "error": None}, {"text": "A\nB\nC", "error": None}])
