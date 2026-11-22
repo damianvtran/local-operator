@@ -1,0 +1,95 @@
+{
+  "record_kind": "translation_author_evidence",
+  "status": "translated",
+  "locale": "zh-CN",
+  "namespace": "tui.model_persistence",
+  "author_date": "2026-11-22T10:11:51.754129+00:00",
+  "key_count": 4,
+  "source_revision": "c40586cd0ae23ca25a6c82c26c4f867271c4e01f",
+  "translator": {
+    "agent": "i18n-translator / model-notice-zhCN-author",
+    "session": "58dee179aac0",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Explicit model-switch message in session: temporary fallback from anthropic/claude-opus-5-5 due to provider failure: quota; all translations authored after switch",
+    "fallback_used": true,
+    "fallback_from": "anthropic/claude-opus-5-5"
+  },
+  "auditor": null,
+  "independent_audits_pending": [
+    "A",
+    "B"
+  ],
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.json",
+      "sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.context.json",
+      "sha256": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc"
+    },
+    "zh-CN": {
+      "path": "local_operator/i18n/catalogues/zh-CN/tui.model_persistence.json",
+      "sha256": "c9fb6447f1e19037cf40808089111d4980f5fd96d3e905d843f797230b9329b0"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/zh-CN.md",
+      "sha256": "615a126a8dbff72c52875a56aa80728f8af858764ef4974e1f74192589b830b6"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.model_persistence/zha58/validate.py.txt",
+      "sha256": "fbc02fa3d7b05ab7f329629890edba27e9e0cb520cff95d9b7041b7e8a65e46d"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.model_persistence/zha58/validation.log",
+      "sha256": "ca11f47e7551baeb82eeb42bf0343afbb18f159c6ffe0216afda1c340dd3594b"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.model_persistence/zha58/author-notes.md",
+      "sha256": "efd7dc8c162a8792798a7c476dcaa8287eb7d5e2e378ed23c6b0cef1b3066896"
+    }
+  ],
+  "artifact_roles": {
+    "validation.log": "actual_execution_log",
+    "author-notes.md": "author_notes_not_execution_log",
+    "validate.py.txt": "exact_executed_scoped_validation_script"
+  },
+  "validation": {
+    "exit_code": 0,
+    "key_order_preserved": true,
+    "argument_types": {
+      "persist": {},
+      "settings": {},
+      "saved": {},
+      "with_model": {
+        "label": "str",
+        "routes": "str"
+      }
+    },
+    "plural_arm_count": 0,
+    "select_arm_count": 0,
+    "protected_tokens": [
+      "/model default",
+      "/model saved",
+      "/settings"
+    ],
+    "global_checker_run": false,
+    "live_ui_validation_run": false
+  },
+  "current_report_verdict": {
+    "status": "translated",
+    "unresolved_blocker_major_count": null,
+    "finding_ids": [],
+    "note": "Author record only; no independent audit verdict or passed claim."
+  },
+  "original_lost_evidence": null,
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false
+}

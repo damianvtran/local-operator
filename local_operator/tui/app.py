@@ -149,6 +149,7 @@ from local_operator.i18n.keys import tui_app as _x
 from local_operator.i18n.keys import tui_asks as _ask_keys
 from local_operator.i18n.keys import tui_boot_prompt as _boot_prompt_keys
 from local_operator.i18n.keys import tui_library
+from local_operator.i18n.keys import tui_model_persistence as _model_persistence_keys
 from local_operator.i18n.keys import tui_notification_kinds as _kind_keys
 from local_operator.i18n.keys import tui_projects as _pc
 from local_operator.i18n.keys import tui_projects_edit as _pe
@@ -162,7 +163,7 @@ from local_operator.i18n.keys import tui_update as _upd
 from local_operator.i18n.keys import tui_welcome
 from local_operator.i18n.keys import wire_language_receipts as _lang_keys
 from local_operator.i18n.messages import Msg
-from local_operator.i18n.text import register_refresh, tr
+from local_operator.i18n.text import active_locale, register_refresh, tr
 from local_operator.logger import current_log_file
 
 # The `/mcp` verb helpers live with the verbs they serve, so the terminal and
@@ -44517,7 +44518,9 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — a note is never worth a broken prompt
             logger.debug("the parked approval card could not be annotated", exc_info=True)
 
-    def _system_notice(self, body: str, kind: NoticeKind = "info") -> None:
+    def _system_notice(
+        self, body: str, kind: NoticeKind = "info", *, wrap_atoms: tuple[str, ...] = ()
+    ) -> None:
         """A notice about the HARNESS that leaves the empty state intact.
 
         Separate from :meth:`_notice` because the two answer different questions.
@@ -44533,10 +44536,15 @@ class OperatorApp(App[None]):
         (``NoticeFn``); a caller that must keep the block calls
         :meth:`_system_notice_block` instead.
         """
-        self._system_notice_block(body, kind)
+        self._system_notice_block(body, kind, wrap_atoms=wrap_atoms)
 
     def _system_notice_block(
-        self, body: str, kind: NoticeKind = "info", *, fold_width: int = 0
+        self,
+        body: str,
+        kind: NoticeKind = "info",
+        *,
+        fold_width: int = 0,
+        wrap_atoms: tuple[str, ...] = (),
     ) -> NoticeBlock:
         """The same notice, handing back the block it created.
 
@@ -44557,7 +44565,7 @@ class OperatorApp(App[None]):
         1, Q1 measured it on the real fixture: nine rows at ``[2,1,2,2,1,1,1,2,2]``
         with ``gap-above`` on all of them, then all 1 row with one gap.
         """
-        block = NoticeBlock(body, kind, fold_width=fold_width)
+        block = NoticeBlock(body, kind, fold_width=fold_width, wrap_atoms=wrap_atoms)
         # While the boot CARD is up the notice is part of a centred composition;
         # below the card threshold the input is a full-width bar and the spine is
         # the axis everything shares. `_append_block` recomputes the boot layout
@@ -47878,7 +47886,7 @@ class OperatorApp(App[None]):
             return ""
         return PERSIST_HINT
 
-    def _persist_hint_notice(self) -> str:
+    def _persist_hint_notice(self, *, label: str | None = None) -> str:
         """The line a bare ``/model`` prints above the list.
 
         It says the one thing the picker cannot: that a pick is session-scoped
@@ -48009,11 +48017,16 @@ class OperatorApp(App[None]):
         the primary next step it always was. Pinned by
         `test_the_model_notice_in_dead_end_setup_variants_names_only_settings`.
         """
-        session = self._session
-        label = session.model_label if session is not None else ""
-        # Named once: it is the one clause every variant below shares, and the
-        # wrap analysis above measured this exact string.
-        settings_clause = "/settings edits the boot default too"
+        if label is None:
+            session = self._session
+            label = session.model_label if session is not None else ""
+        # Resolve only this new opening, never historical transcript content.
+        # One locale snapshot keeps the clauses and their carrier consistent;
+        # the next opening follows a live language change without translating
+        # import-time PERSIST_HINT, which legacy CLI/footer parsers still own.
+        locale = active_locale()
+        settings_clause = _model_persistence_keys.settings().envelope(locale=locale)["text"]
+        persist_clause = _model_persistence_keys.persist().envelope(locale=locale)["text"]
         # `/model saved` sits at its clause's END, which is what removes the
         # split: as the clause's FIRST word it sat one word from the `·` seam
         # and broke across the fold at 4 of the 27 rendered label x width
@@ -48031,18 +48044,23 @@ class OperatorApp(App[None]):
         # naming an occasion to use it (UX review round 2, U6), and it measures
         # better on both width families, not worse: pristine C3 3 -> 2 and
         # non-empty C2 5 -> 3, with C1 and pristine C2 still 0.
-        saved_clause = "switch to the boot default with /model saved"
+        saved_clause = _model_persistence_keys.saved().envelope(locale=locale)["text"]
         if self._setup_state and not self._model_missing_for:
             # No hosting / unknown hosting: every `/model` route refuses here,
             # so the notice must not name one. `/settings` is the live escape.
             routes = settings_clause
         elif self._setup_state:
-            routes = f"{PERSIST_HINT} · {settings_clause}"
+            routes = f"{persist_clause} · {settings_clause}"
         else:
-            routes = f"{PERSIST_HINT} · {saved_clause} · {settings_clause}"
+            routes = f"{persist_clause} · {saved_clause} · {settings_clause}"
         if not label:
             return routes
-        return f"model: {label} — {routes}"
+        # The model label is an opaque machine identifier, not markup or copy.
+        # Keep it unchanged inside the existing plain-text notice envelope;
+        # dedup still compares rendered text and skips the pinned working tail.
+        return _model_persistence_keys.with_model(label=label, routes=routes).envelope(
+            locale=locale
+        )["text"]
 
     # -- reasoning effort ---------------------------------------------------
     def _effort_levels(self) -> tuple[str, ...]:
@@ -49786,7 +49804,11 @@ class OperatorApp(App[None]):
         must both print.
         """
         message.stop()
-        hint = self._persist_hint_notice()
+        # Snapshot opaque identity once for both text and layout metadata. An ID
+        # may itself contain command-looking text; never parse it out of copy.
+        session = self._session
+        label = session.model_label if session is not None else ""
+        hint = self._persist_hint_notice(label=label)
         transcript = self._transcript_view()
         blocks = transcript.blocks()
         pinned = transcript.pinned_tail()
@@ -49794,7 +49816,9 @@ class OperatorApp(App[None]):
         # mid-turn append actually lands.
         last = next((b for b in reversed(blocks) if b is not pinned), None)
         if not (isinstance(last, NoticeBlock) and last.text() == hint):
-            self._system_notice(hint)
+            self._system_notice(
+                hint, wrap_atoms=(label, "/model default", "/model saved", "/settings")
+            )
         self._populate_model_picker()
 
     def _open_model_picker(self) -> None:

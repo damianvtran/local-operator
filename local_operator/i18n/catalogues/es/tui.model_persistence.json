@@ -1,0 +1,6 @@
+{
+  "tui.model_persistence.persist": "/model default guarda este modelo para nuevas sesiones",
+  "tui.model_persistence.settings": "/settings también cambia el modelo de inicio predeterminado",
+  "tui.model_persistence.saved": "cambia al modelo de inicio predeterminado con /model saved",
+  "tui.model_persistence.with_model": "modelo: {label} — {routes}"
+}

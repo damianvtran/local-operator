@@ -1,0 +1,112 @@
+{
+  "record_kind": "independent_translation_audit_A",
+  "locale": "ru",
+  "namespace": "tui.model_persistence",
+  "audit_date": "2026-11-22",
+  "recorded_at": "2026-11-22T10:49:49.212970+00:00",
+  "key_count": 4,
+  "source_audit_revision": "b1c5ca8be245dcc3f9cae4463d9a5553b3e0c01f",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "2986f83bd020",
+    "model": "openai/gpt-6.1-sol",
+    "requested_model": "anthropic/claude-opus-5-5",
+    "fallback_used": true,
+    "fallback_model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host [model switch] message: provider failure: quota; temporary fallback before substantive audit",
+    "independent_from_translator_session": true,
+    "translator_session": "e6cc991f4cd7",
+    "date": "2026-11-22",
+    "result": "passed",
+    "findings": 0
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "e6cc991f4cd7",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host model-switch message: provider failure: quota; temporary fallback before translation",
+    "requested_model": "anthropic/claude-opus-5-5",
+    "fallback_used": true,
+    "fallback_model": "openai/gpt-6.1-sol",
+    "translation_method": "LLM native reasoning; no MT/API/service"
+  },
+  "translator_provenance_record": "i18n/audits/evidence/ru/tui.model_persistence/ru-e6cc/record.json",
+  "source_author_session": "a97c7f76d5ee",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.json",
+      "sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.context.json",
+      "sha256": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc"
+    },
+    "ru": {
+      "path": "local_operator/i18n/catalogues/ru/tui.model_persistence.json",
+      "sha256": "9d08bddeee59461ae1a9f27de2839c39dc7b0cad17b6171e26fd7cde82946940"
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "source_context_target_before_after_equal": true,
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ru/tui.model_persistence/ru-A2986/report.md",
+      "sha256": "fe4e44fd76bb7a04c636d5155755b226a50f77626475e32602891b573eebc9f3"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.model_persistence/ru-A2986/audit.log",
+      "sha256": "2fa4a391525da8da47952d28f92b5cd066e06bb11ec84f558261b7dc43cdff68"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.model_persistence/ru-A2986/script.py.txt",
+      "sha256": "e00a2a713b60b85a61606993517e7d28f468c6ad98ccbea576c483791603d196"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.model_persistence/ru-A2986/receipt.json",
+      "sha256": "cdd76984f3d2333179b26c78befa4b3fbea278fb9422e4059e1fe1a77e292611"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.model_persistence/ru-A2986/ledger-dry-run.log",
+      "sha256": "c969dd43c63db25e90868ff0efba147696fd1531c6e973cd8453b20f73279157"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "report_kind": "audit_notes_not_execution_log",
+  "actual_execution_logs": [
+    "audit.log",
+    "ledger-dry-run.log"
+  ],
+  "validation": {
+    "exit_code": 0,
+    "official_scoped_result": [],
+    "scope": "en/ru tui.model_persistence; official checker enumeration narrowed only",
+    "command": "env -i HOME=\"$LOCAL_OPERATOR_SCRATCHPAD/ru-A-home\" LOCAL_OPERATOR_CONFIG_DIR=\"$LOCAL_OPERATOR_SCRATCHPAD/ru-A-home/config\" PATH=\"$PATH\" TERM=xterm-256color PYTHONPATH=\"$PWD\" /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/ru/tui.model_persistence/ru-A2986/script.py.txt \"$PWD\"",
+    "key_count": 4,
+    "plural_branches": 0,
+    "select_branches": 0,
+    "plain_rich_wrap_cases": 36,
+    "negative_controls": [
+      "official missing key",
+      "official missing argument",
+      "runtime missing label/routes in en and ru",
+      "production resolver unknown key in en and ru"
+    ],
+    "pseudo": "human-only expansion with protected literal command and ICU tokens",
+    "ledger": "official history-sha and append --dry-run succeeded; no history write",
+    "expected_history_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+  },
+  "not_claimed": [
+    "completed independent B",
+    "global/base-aware check",
+    "eligibility/admission",
+    "styled NoticeBlock",
+    "pristine/nonempty transcript-family rendering",
+    "native UI",
+    "UR/HI qualification",
+    "committed or merged evidence"
+  ]
+}

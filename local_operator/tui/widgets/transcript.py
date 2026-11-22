@@ -257,6 +257,58 @@ def wrap_cells(text: str, width: int) -> list[str]:
     return rows
 
 
+def _wrap_notice_atoms(text: str, width: int, atoms: tuple[str, ...]) -> list[str]:
+    """Wrap explicit literals without interpreting translated prose or opaque IDs.
+
+    Literal boundaries permit a fold without adding a space (notably beside
+    CJK prose). Longest-first matching protects a model ID containing command
+    syntax before its substrings become separate commands. Ordinary notices
+    retain the legacy wrapper; this metadata never changes copy/history text.
+    """
+    if not atoms or width <= 0:
+        return wrap_cells(text, width)
+    literals = sorted({atom for atom in atoms if atom}, key=len, reverse=True)
+    tokens: list[tuple[str, str]] = []
+    word = ""
+    separator = ""
+    offset = 0
+    while offset < len(text):
+        atom = next((a for a in literals if text.startswith(a, offset)), None)
+        if atom is not None:
+            if word:
+                tokens.append((word, separator))
+                separator = ""
+                word = ""
+            tokens.append((atom, separator))
+            separator = ""
+            offset += len(atom)
+        elif text[offset] == " ":
+            tokens.append((word, separator))
+            word = ""
+            separator = " "
+            offset += 1
+        else:
+            word += text[offset]
+            offset += 1
+    if word or separator:
+        tokens.append((word, separator))
+    rows: list[str] = []
+    current = ""
+    for word, separator in tokens:
+        candidate = current + separator + word if current else word
+        if cell_len(candidate) <= width:
+            current = candidate
+            continue
+        if current:
+            rows.append(current)
+        # A literal wider than the entire row must still use bounded-cell
+        # fallback, including its width-one wide-character progress guarantee.
+        current = _break_word(word, width, rows, cell_len(word))
+    if current or not rows:
+        rows.append(current)
+    return rows
+
+
 def _break_word(word: str, width: int, rows: list[str], remaining: int) -> str:
     """Break a word that does not fit into rows of at most ``width`` cells.
 
@@ -1968,7 +2020,13 @@ class NoticeBlock(TranscriptBlock):
     }
 
     def __init__(
-        self, text: str, kind: NoticeKind = "info", *, fold_width: int = 0, accent: str = ""
+        self,
+        text: str,
+        kind: NoticeKind = "info",
+        *,
+        fold_width: int = 0,
+        accent: str = "",
+        wrap_atoms: tuple[str, ...] = (),
     ) -> None:
         """``fold_width``: the width this notice is about to be given.
 
@@ -1989,6 +2047,8 @@ class NoticeBlock(TranscriptBlock):
         self.add_class("notice-block")
         self._text = text
         self._accent = accent
+        # Layout only: raw text remains the copy/dedup authority, not metadata.
+        self._wrap_atoms = wrap_atoms
         self.notice_kind = kind
         self._token = self._KIND_TOKENS.get(kind, "dim")
         self._glyph = NOTICE_GLYPHS.get(kind, "·")
@@ -2235,7 +2295,12 @@ class NoticeBlock(TranscriptBlock):
             stripped = line.lstrip(" ")
             indent = " " * min(len(line) - len(stripped), max(body - 1, 0))
             room = max(body - len(indent), 1)
-            rows.extend(indent + row if row else "" for row in wrap_cells(stripped, room))
+            wrapped = (
+                _wrap_notice_atoms(stripped, room, self._wrap_atoms)
+                if self._wrap_atoms
+                else wrap_cells(stripped, room)
+            )
+            rows.extend(indent + row if row else "" for row in wrapped)
         while len(rows) > 1 and not rows[0]:
             rows.pop(0)
         while len(rows) > 1 and not rows[-1]:

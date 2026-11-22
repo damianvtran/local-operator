@@ -1,0 +1,101 @@
+{
+  "locale": "fr",
+  "namespace": "tui.model_persistence",
+  "audit_id": "a-0ecda03",
+  "audit_date": "2026-11-22",
+  "key_count": 4,
+  "audit_pass": "A",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "task": "model-notice-fr-audit-A",
+    "session": "0ecda03ab969",
+    "model": "openai/gpt-6.1-sol",
+    "primary_model": "anthropic/claude-opus-5-5",
+    "fallback_used": true,
+    "fallback_reason": "provider failure: quota",
+    "actual_model_source": "Explicit runtime model-switch user event in this auditor transcript before substantive audit",
+    "independent_from_translator_session": "1ca940cf73ba",
+    "independent_from_source_author_session": "a97c7f76d5ee",
+    "date": "2026-11-22",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "finding_ids": []
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "task": "model-notice-fr-author",
+    "session": "1ca940cf73ba",
+    "model": "openai/gpt-6.1-sol",
+    "primary_model": "anthropic/claude-opus-5-5",
+    "fallback_used": true,
+    "fallback_reason": "provider failure: quota",
+    "actual_model_source": "Explicit user model-switch event before authoring"
+  },
+  "source_audit_revision": "c40586cd0ae23ca25a6c82c26c4f867271c4e01f",
+  "target_admission_revision": "87d87ec8b02ef3c279fda673302ce775f4a0329e",
+  "observed_revision": "87d87ec8b02ef3c279fda673302ce775f4a0329e",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.json",
+      "sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.context.json",
+      "sha256": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc"
+    },
+    "fr": {
+      "path": "local_operator/i18n/catalogues/fr/tui.model_persistence.json",
+      "sha256": "2d31f57fd8a19eb9c82b71b135fc0cd76c0056d80a0ab846a744da2467e7c002"
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/fr/tui.model_persistence/a-0ecda03/admission-notes.json",
+      "sha256": "aa0b059b870e87047ba00f6ea87bdc5b7bcbf03ab23d62d2e35bd2b31d1279b6",
+      "kind": "audit_notes_not_execution_log"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.model_persistence/a-0ecda03/attempt-1.log",
+      "sha256": "3de994ae8baa04ff0d8f955aaea3435915b979a365634d5c0c60e065ecf3bb7d",
+      "kind": "actual_execution_log"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.model_persistence/a-0ecda03/attempt-2.log",
+      "sha256": "828007a97ccf5d3f78606028cd072e92b25d5ef860afc2f3026d2d299056747a",
+      "kind": "actual_execution_log"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.model_persistence/a-0ecda03/audit.log",
+      "sha256": "c042b412b88c29e126d9d8e8ae7cd7f2cd64c2615114e9c4dcebf1fdd3187b13",
+      "kind": "actual_execution_log"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.model_persistence/a-0ecda03/receipt.json",
+      "sha256": "b9718e3e57dab7c8b89e8f46ce83f1a294b4cebf902ed59a4c58f2087c48d24f",
+      "kind": "append_ready_receipt"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.model_persistence/a-0ecda03/report.md",
+      "sha256": "2e8e2b58ea5e7ff9d287e72d39dd629db7bc8616319ee70af91d5844495362c7",
+      "kind": "audit_notes_not_execution_log"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.model_persistence/a-0ecda03/validation.py.txt",
+      "sha256": "27dad56ccd971a26acec70a1df5ebd0c9e5c1c9db8c5a8c478cef50cefa90a42",
+      "kind": "validation_source"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "findings_report": "i18n/audits/evidence/fr/tui.model_persistence/a-0ecda03/report.md",
+  "limitations": [
+    "A audit only; B pass pending",
+    "Plain ICU/Rich wrapping controls, not native NoticeBlock or transcript integration",
+    "No ledger append/stage/commit/push by auditor"
+  ]
+}

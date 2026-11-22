@@ -1,0 +1,6 @@
+Command: shasum -a 256 local_operator/i18n/catalogues/en/tui.model_persistence.json local_operator/i18n/catalogues/en/tui.model_persistence.context.json local_operator/i18n/catalogues/zh-CN/tui.model_persistence.json
+4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff  local_operator/i18n/catalogues/en/tui.model_persistence.json
+b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc  local_operator/i18n/catalogues/en/tui.model_persistence.context.json
+c9fb6447f1e19037cf40808089111d4980f5fd96d3e905d843f797230b9329b0  local_operator/i18n/catalogues/zh-CN/tui.model_persistence.json
+Exit: 0
+Recorded UTC: 2026-11-22T10:17:03Z

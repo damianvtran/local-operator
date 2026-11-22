@@ -1,0 +1,105 @@
+{
+  "record_kind": "translation_author_evidence_not_independent_audit",
+  "locale": "fr",
+  "namespace": "tui.model_persistence",
+  "audit_date": "2026-11-22",
+  "recorded_at": "2026-11-22T10:11:30.674246+00:00",
+  "key_count": 4,
+  "status": "translated",
+  "translator": {
+    "agent": "i18n-translator",
+    "task": "model-notice-fr-author",
+    "session": "1ca940cf73ba",
+    "model": "openai/gpt-6.1-sol",
+    "primary_model": "anthropic/claude-opus-5-5",
+    "fallback_used": true,
+    "fallback_reason": "provider failure: quota",
+    "actual_model_source": "Explicit user model-switch event before authoring"
+  },
+  "auditor": null,
+  "independent_audit_performed": false,
+  "source_author_session": "a97c7f76d5ee",
+  "source_worktree_head": "c40586cd0ae23ca25a6c82c26c4f867271c4e01f",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.json",
+      "sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.context.json",
+      "sha256": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc"
+    },
+    "fr": {
+      "path": "local_operator/i18n/catalogues/fr/tui.model_persistence.json",
+      "sha256": "2d31f57fd8a19eb9c82b71b135fc0cd76c0056d80a0ab846a744da2467e7c002"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    "style": {
+      "path": "i18n/style-guides/fr.md",
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/fr/tui.model_persistence/author-1ca940/validation.py.txt",
+      "sha256": "27080a953c85282bfc1a960931ee96f912bc746ff8deb5fa56fba999108e5b04"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.model_persistence/author-1ca940/validation.log",
+      "sha256": "fe639ab9ba444b7c38f499594dc552ce033e3379af0990e602a8590076c6c427"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.model_persistence/author-1ca940/author-notes.md",
+      "sha256": "ef83f55440570d88ca3fec69b6303af53456cc4579f558f6d5ee3cf222bb6b87"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "translated",
+    "unresolved_blocker_major_count": null,
+    "finding_ids": [],
+    "note": "Author evidence only; independent A and B audits are not performed by this translator."
+  },
+  "validation": {
+    "exit_code": 0,
+    "scope": "four French keys only; catalogue/ICU APIs and formatting, not global checker or UI",
+    "command": "env -i HOME=\"$LOCAL_OPERATOR_SCRATCHPAD/fr-validation-home\" LOCAL_OPERATOR_CONFIG_DIR=\"$LOCAL_OPERATOR_SCRATCHPAD/fr-validation-home/config\" PATH=\"$PATH\" PYTHONPATH=\"$PWD\" TERM=xterm-256color /Users/damian/local-operator/.venv/bin/python \"$LOCAL_OPERATOR_SCRATCHPAD/validate-fr-model-notice.py\" > i18n/audits/evidence/fr/tui.model_persistence/author-1ca940/validation.log 2>&1",
+    "executed_script_copy": "i18n/audits/evidence/fr/tui.model_persistence/author-1ca940/validation.py.txt",
+    "icu_arguments": {
+      "persist": [],
+      "settings": [],
+      "saved": [],
+      "with_model": [
+        [
+          "label",
+          "simple"
+        ],
+        [
+          "routes",
+          "simple"
+        ]
+      ]
+    },
+    "plural_select_arm_count": 0,
+    "protected_literals": [
+      "/model default",
+      "/model saved",
+      "/settings"
+    ],
+    "live_wrapping_not_validated": [
+      80,
+      100,
+      120
+    ]
+  },
+  "glossary_proposals": [
+    {
+      "en": "boot default",
+      "fr": "modèle par défaut au démarrage",
+      "reason": "Configured model used to start new sessions; distinct from current session choice."
+    }
+  ],
+  "author_notes_not_execution_log": "i18n/audits/evidence/fr/tui.model_persistence/author-1ca940/author-notes.md"
+}

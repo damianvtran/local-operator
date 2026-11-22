@@ -1,0 +1,81 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "tui.model_persistence",
+  "audit_date": "2026-11-22",
+  "recorded_at": "2026-11-22T10:54:31.744135+00:00",
+  "key_count": 4,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "2e43efb61fa1",
+    "model": "openai/gpt-6.1-sol",
+    "primary_model": "anthropic/claude-opus-5-5",
+    "fallback_used": true,
+    "fallback_reason": "provider failure: quota",
+    "actual_model_source": "Runtime [model switch] message explicitly identifies openai/gpt-6.1-sol temporary quota fallback before all target assessment and execution. No provider telemetry queried.",
+    "independent_from_translator_session": true,
+    "translator_session": "e069889d36f8",
+    "audit_pass": "B"
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "e069889d36f8",
+    "model": "openai/gpt-6.1-sol",
+    "primary_model": "anthropic/claude-opus-5-5",
+    "fallback_used": true,
+    "fallback_reason": "provider failure: quota",
+    "actual_model_source": "Runtime model-switch message in this session explicitly names openai/gpt-6.1-sol as temporary quota fallback; Spanish authorship and validation occurred after this message. No external provider telemetry queried.",
+    "independent_from_translator_session": false,
+    "role": "author; not an independent auditor"
+  },
+  "translator_provenance_source": {
+    "path": "i18n/audits/evidence/es/tui.model_persistence/esa-e069/record.json",
+    "sha256": "d3c0b6efead65a9fa406d6ec741656630df3df8df4fe495d91be7a3e772e8f8d"
+  },
+  "source_audit_revision": "b1c5ca8be245dcc3f9cae4463d9a5553b3e0c01f",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.json",
+      "sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.context.json",
+      "sha256": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc"
+    },
+    "es": {
+      "path": "local_operator/i18n/catalogues/es/tui.model_persistence.json",
+      "sha256": "253fc1d487b648e6c778ac0f102ca5a49865dd8e223374ad31981f92ff97cce4"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.model_persistence/esB-2e43/report.md",
+      "sha256": "c037bdf1462fc7a2dadd00b69d49cd0d4596f101388706f0397a7ce18ca5fa59"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.model_persistence/esB-2e43/script.py.txt",
+      "sha256": "4a686049ddcf60c7c7cccc3ade60919152b29702061465273e3c724f4e8a075e"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.model_persistence/esB-2e43/audit.log",
+      "sha256": "921956fa236691937e271d8bcb6d43e720b6e845b08097bbe6182cda06e21538"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "notes_kind": "audit_notes_not_execution_log",
+  "execution_log": "i18n/audits/evidence/es/tui.model_persistence/esB-2e43/audit.log",
+  "validation": {
+    "exit_code": 0,
+    "ordered_key_count": 4,
+    "plural_select_count": 0,
+    "plain_rich_cases": 96,
+    "native_noticeblock_geometry": false,
+    "source_hashes_unchanged": true,
+    "global_checker_run": false
+  },
+  "release_clearance": false
+}

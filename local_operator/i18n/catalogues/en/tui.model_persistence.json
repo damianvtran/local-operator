@@ -1,0 +1,6 @@
+{
+  "tui.model_persistence.persist": "/model default saves this for new sessions",
+  "tui.model_persistence.settings": "/settings edits the boot default too",
+  "tui.model_persistence.saved": "switch to the boot default with /model saved",
+  "tui.model_persistence.with_model": "model: {label} — {routes}"
+}

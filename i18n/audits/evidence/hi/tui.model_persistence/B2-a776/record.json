@@ -1,0 +1,105 @@
+{
+  "locale": "hi",
+  "namespace": "tui.model_persistence",
+  "audit_date": "2026-11-22",
+  "key_count": 4,
+  "round": 2,
+  "audit_pass": "Independent high-visibility B, same-history remediation",
+  "source_audit_revision": "912e165fd76e217b5cd5d212a59e7e1e906fa6fd",
+  "scope": "61b98804881432cfaca9a7f84ef78d81183e2083..912e165fd76e217b5cd5d212a59e7e1e906fa6fd",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "a776dd8a4364",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": true,
+    "actual_model_source": "Current resumed host Model declaration; no fresh model-switch telemetry supplied for this resumed round",
+    "fallback": {
+      "used": false,
+      "scope": "No fallback event supplied in current resumed round; not a claim about historical B round"
+    }
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "fdf96049990f",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Requesting manager reports parent wait 9b5 and Hub completion metadata both GPT; not directly inspected by this auditor",
+    "self_reported_model": "anthropic/claude-opus-5-5",
+    "self_report_source": "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9-fix1/record.json",
+    "qualification": "Self-report conflicts with parent-served metadata; no fresh fallback reason inferred; manager retains host snapshot addendum"
+  },
+  "historical_original_translator": {
+    "agent": "i18n-translator",
+    "session": "fdf96049990f",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": false,
+    "actual_model_source": "Host model-switch telemetry: provider failure: quota; fallback from anthropic/claude-opus-5-5 to openai/gpt-6.1-sol before Hindi authorship",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.json",
+      "sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.context.json",
+      "sha256": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc"
+    },
+    "hi": {
+      "path": "local_operator/i18n/catalogues/hi/tui.model_persistence.json",
+      "sha256": "fe5174ef5f6cd8ea96d751c6722707d58a6a9108d17922d9b411b9a6b6799967"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/B2-a776/report.md",
+      "sha256": "69d155ad2f1432dd47a06707df9aa182e1025beef415678229c3972b44f0ee27"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/B2-a776/audit.log",
+      "sha256": "71a7d432a3346ef0e7e2730f6ae75be6e57d8b3d3b4b3c2873f105ba9b13cdf1"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/B2-a776/preservation.log",
+      "sha256": "8b35c5921cc04e3ea2f422c2bcbefb36e47cd707c9f01911497bc066daea5e19"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/B2-a776/script.py.txt",
+      "sha256": "0c0a669b0e5c388efb162a0fa66f96aed044fbda2136789324d231db0e55877f"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "resolved_finding_ids": [
+      "B-HI-1"
+    ],
+    "same_ambiguity_alias_per_manager": "HI-A1"
+  },
+  "prior_record": "i18n/audits/evidence/hi/tui.model_persistence/B-a776/record.json",
+  "audit_notes_not_execution_log": [
+    "report.md"
+  ],
+  "actual_execution_logs": [
+    "audit.log",
+    "preservation.log"
+  ],
+  "current_bytes_match_audited_hashes": true,
+  "independence": {
+    "parallel_A_round2_conclusions_read": false,
+    "independent_from_translator_session": true,
+    "independent_from_english_author": true
+  },
+  "clearance": {
+    "lexical_four_key_audit": true,
+    "native_fonts_shaping": false,
+    "styled_NoticeBlock": false,
+    "full_UI": false,
+    "global_ship_release": false
+  }
+}

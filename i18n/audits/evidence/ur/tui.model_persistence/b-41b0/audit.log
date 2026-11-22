@@ -1,0 +1,106 @@
+COMMAND ['/Users/damian/local-operator/.venv/bin/python', '/Users/damian/local-operator/.worktrees/i18n-model-persist-notice/i18n/audits/evidence/ur/tui.model_persistence/b-41b0/script.py.txt']
+CWD /Users/damian/.local-operator/sessions/41b08626ce5f/scratchpad/ur-b-41b0
+ENV isolated HOME/config; CMUX_*/LOP_* stripped; explicit PYTHONPATH=/Users/damian/local-operator/.worktrees/i18n-model-persist-notice
+PYTHON /Users/damian/local-operator/.venv/bin/python
+MODULE /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/catalogues.py
+MODULE /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/runtime.py
+BEFORE_HASHES {'en': '4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff', 'ur': '0e00e1ee1715d3ec8ad8d07440984da33fcb05336a35ceefbd32a87180a3e5f9', 'context': 'b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc'}
+OFFICIAL_SCOPED_CHECK []
+NEGATIVE_MISSING_KEY ["ur/tui.model_persistence: missing key 'tui.model_persistence.persist'"]
+NEGATIVE_ARGUMENT ["ur/tui.model_persistence: tui.model_persistence.with_model: arguments (('wrong', 'simple'), ('routes', 'simple')) != en's (('label', 'simple'), ('routes', 'simple')): argument 1 is 'wrong', en's is 'label' (renamed or reordered)"]
+KEY_PASS tui.model_persistence.persist args () plural/select=0 maxCells None maxChars None
+KEY_PASS tui.model_persistence.settings args () plural/select=0 maxCells None maxChars None
+KEY_PASS tui.model_persistence.saved args () plural/select=0 maxCells None maxChars None
+KEY_PASS tui.model_persistence.with_model args (('label', 'simple'), ('routes', 'simple')) plural/select=0 maxCells None maxChars None
+PSEUDO_PROTECTED_PASS en
+PLAIN_RICH_INPUT en ordinary 'model: openai/gpt-6 — /model default saves this for new sessions · switch to the boot default with /model saved · /settings edits the boot default too'
+PLAIN_RICH_FRAME en ordinary width 80 label_chars 12 'model: openai/gpt-6 — /model default saves this for new sessions · switch to the\nboot default with /model saved · /settings edits the boot default too\n'
+GEOMETRY [80, 69]
+PLAIN_RICH_FRAME en ordinary width 100 label_chars 12 'model: openai/gpt-6 — /model default saves this for new sessions · switch to the boot default with \n/model saved · /settings edits the boot default too\n'
+GEOMETRY [99, 51]
+PLAIN_RICH_FRAME en ordinary width 120 label_chars 12 'model: openai/gpt-6 — /model default saves this for new sessions · switch to the boot default with /model saved · \n/settings edits the boot default too\n'
+GEOMETRY [114, 36]
+PLAIN_RICH_INPUT en ordinary 'model: anthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-0123456789 — /model default saves this for new sessions · switch to the boot default with /model saved · /settings edits the boot default too'
+PLAIN_RICH_FRAME en ordinary width 80 label_chars 81 'model: \nanthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-012345678\n9 — /model default saves this for new sessions · switch to the boot default with\n/model saved · /settings edits the boot default too\n'
+GEOMETRY [7, 80, 80, 51]
+PLAIN_RICH_FRAME en ordinary width 100 label_chars 81 'model: anthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-0123456789 — /model \ndefault saves this for new sessions · switch to the boot default with /model saved · /settings edits\nthe boot default too\n'
+GEOMETRY [98, 100, 20]
+PLAIN_RICH_FRAME en ordinary width 120 label_chars 81 'model: anthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-0123456789 — /model default saves this for\nnew sessions · switch to the boot default with /model saved · /settings edits the boot default too\n'
+GEOMETRY [120, 98]
+PLAIN_RICH_INPUT en setup-missing 'model: openai/gpt-6 — /model default saves this for new sessions · /settings edits the boot default too'
+PLAIN_RICH_FRAME en setup-missing width 80 label_chars 12 'model: openai/gpt-6 — /model default saves this for new sessions · /settings \nedits the boot default too\n'
+GEOMETRY [77, 26]
+PLAIN_RICH_FRAME en setup-missing width 100 label_chars 12 'model: openai/gpt-6 — /model default saves this for new sessions · /settings edits the boot default \ntoo\n'
+GEOMETRY [100, 3]
+PLAIN_RICH_FRAME en setup-missing width 120 label_chars 12 'model: openai/gpt-6 — /model default saves this for new sessions · /settings edits the boot default too\n'
+GEOMETRY [103]
+PLAIN_RICH_INPUT en setup-missing 'model: anthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-0123456789 — /model default saves this for new sessions · /settings edits the boot default too'
+PLAIN_RICH_FRAME en setup-missing width 80 label_chars 81 'model: \nanthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-012345678\n9 — /model default saves this for new sessions · /settings edits the boot \ndefault too\n'
+GEOMETRY [7, 80, 74, 11]
+PLAIN_RICH_FRAME en setup-missing width 100 label_chars 81 'model: anthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-0123456789 — /model \ndefault saves this for new sessions · /settings edits the boot default too\n'
+GEOMETRY [98, 74]
+PLAIN_RICH_FRAME en setup-missing width 120 label_chars 81 'model: anthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-0123456789 — /model default saves this for\nnew sessions · /settings edits the boot default too\n'
+GEOMETRY [120, 51]
+PLAIN_RICH_INPUT en sole-settings 'model: openai/gpt-6 — /settings edits the boot default too'
+PLAIN_RICH_FRAME en sole-settings width 80 label_chars 12 'model: openai/gpt-6 — /settings edits the boot default too\n'
+GEOMETRY [58]
+PLAIN_RICH_FRAME en sole-settings width 100 label_chars 12 'model: openai/gpt-6 — /settings edits the boot default too\n'
+GEOMETRY [58]
+PLAIN_RICH_FRAME en sole-settings width 120 label_chars 12 'model: openai/gpt-6 — /settings edits the boot default too\n'
+GEOMETRY [58]
+PLAIN_RICH_INPUT en sole-settings 'model: anthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-0123456789 — /settings edits the boot default too'
+PLAIN_RICH_FRAME en sole-settings width 80 label_chars 81 'model: \nanthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-012345678\n9 — /settings edits the boot default too\n'
+GEOMETRY [7, 80, 40]
+PLAIN_RICH_FRAME en sole-settings width 100 label_chars 81 'model: anthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-0123456789 — /settings\nedits the boot default too\n'
+GEOMETRY [100, 26]
+PLAIN_RICH_FRAME en sole-settings width 120 label_chars 81 'model: anthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-0123456789 — /settings edits the boot \ndefault too\n'
+GEOMETRY [116, 11]
+PSEUDO_PROTECTED_PASS ur
+PLAIN_RICH_INPUT ur ordinary 'ماڈل: openai/gpt-6 — /model default اس ماڈل کو نئے سیشنز کے لیے محفوظ کرتا ہے · اس سیشن میں محفوظ ابتدائی ماڈل پر آنے کے لیے /model saved استعمال کریں · /settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH_FRAME ur ordinary width 80 label_chars 12 'ماڈل: openai/gpt-6 — /model default اس ماڈل کو نئے سیشنز کے لیے محفوظ کرتا ہے · \nاس سیشن میں محفوظ ابتدائی ماڈل پر آنے کے لیے /model saved استعمال کریں · \n/settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے\n'
+GEOMETRY [80, 73, 57]
+PLAIN_RICH_FRAME ur ordinary width 100 label_chars 12 'ماڈل: openai/gpt-6 — /model default اس ماڈل کو نئے سیشنز کے لیے محفوظ کرتا ہے · اس سیشن میں محفوظ \nابتدائی ماڈل پر آنے کے لیے /model saved استعمال کریں · /settings سے نئے سیشن کا ابتدائی ماڈل بھی \nبدلا جا سکتا ہے\n'
+GEOMETRY [98, 97, 15]
+PLAIN_RICH_FRAME ur ordinary width 120 label_chars 12 'ماڈل: openai/gpt-6 — /model default اس ماڈل کو نئے سیشنز کے لیے محفوظ کرتا ہے · اس سیشن میں محفوظ ابتدائی ماڈل پر آنے کے\nلیے /model saved استعمال کریں · /settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے\n'
+GEOMETRY [120, 89]
+PLAIN_RICH_INPUT ur ordinary 'ماڈل: anthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-0123456789 — /model default اس ماڈل کو نئے سیشنز کے لیے محفوظ کرتا ہے · اس سیشن میں محفوظ ابتدائی ماڈل پر آنے کے لیے /model saved استعمال کریں · /settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH_FRAME ur ordinary width 80 label_chars 81 'ماڈل: \nanthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-012345678\n9 — /model default اس ماڈل کو نئے سیشنز کے لیے محفوظ کرتا ہے · اس سیشن میں محفوظ\nابتدائی ماڈل پر آنے کے لیے /model saved استعمال کریں · /settings سے نئے سیشن کا \nابتدائی ماڈل بھی بدلا جا سکتا ہے\n'
+GEOMETRY [6, 80, 80, 80, 32]
+PLAIN_RICH_FRAME ur ordinary width 100 label_chars 81 'ماڈل: anthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-0123456789 — /model \ndefault اس ماڈل کو نئے سیشنز کے لیے محفوظ کرتا ہے · اس سیشن میں محفوظ ابتدائی ماڈل پر آنے کے لیے \n/model saved استعمال کریں · /settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے\n'
+GEOMETRY [97, 97, 85]
+PLAIN_RICH_FRAME ur ordinary width 120 label_chars 81 'ماڈل: anthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-0123456789 — /model default اس ماڈل کو نئے \nسیشنز کے لیے محفوظ کرتا ہے · اس سیشن میں محفوظ ابتدائی ماڈل پر آنے کے لیے /model saved استعمال کریں · /settings سے نئے \nسیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے\n'
+GEOMETRY [120, 119, 40]
+PLAIN_RICH_INPUT ur setup-missing 'ماڈل: openai/gpt-6 — /model default اس ماڈل کو نئے سیشنز کے لیے محفوظ کرتا ہے · /settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH_FRAME ur setup-missing width 80 label_chars 12 'ماڈل: openai/gpt-6 — /model default اس ماڈل کو نئے سیشنز کے لیے محفوظ کرتا ہے · \n/settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے\n'
+GEOMETRY [80, 57]
+PLAIN_RICH_FRAME ur setup-missing width 100 label_chars 12 'ماڈل: openai/gpt-6 — /model default اس ماڈل کو نئے سیشنز کے لیے محفوظ کرتا ہے · /settings سے نئے \nسیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے\n'
+GEOMETRY [97, 40]
+PLAIN_RICH_FRAME ur setup-missing width 120 label_chars 12 'ماڈل: openai/gpt-6 — /model default اس ماڈل کو نئے سیشنز کے لیے محفوظ کرتا ہے · /settings سے نئے سیشن کا ابتدائی ماڈل \nبھی بدلا جا سکتا ہے\n'
+GEOMETRY [118, 19]
+PLAIN_RICH_INPUT ur setup-missing 'ماڈل: anthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-0123456789 — /model default اس ماڈل کو نئے سیشنز کے لیے محفوظ کرتا ہے · /settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH_FRAME ur setup-missing width 80 label_chars 81 'ماڈل: \nanthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-012345678\n9 — /model default اس ماڈل کو نئے سیشنز کے لیے محفوظ کرتا ہے · /settings سے نئے \nسیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے\n'
+GEOMETRY [6, 80, 80, 40]
+PLAIN_RICH_FRAME ur setup-missing width 100 label_chars 81 'ماڈل: anthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-0123456789 — /model \ndefault اس ماڈل کو نئے سیشنز کے لیے محفوظ کرتا ہے · /settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا \nجا سکتا ہے\n'
+GEOMETRY [97, 99, 10]
+PLAIN_RICH_FRAME ur setup-missing width 120 label_chars 81 'ماڈل: anthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-0123456789 — /model default اس ماڈل کو نئے \nسیشنز کے لیے محفوظ کرتا ہے · /settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے\n'
+GEOMETRY [120, 86]
+PLAIN_RICH_INPUT ur sole-settings 'ماڈل: openai/gpt-6 — /settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH_FRAME ur sole-settings width 80 label_chars 12 'ماڈل: openai/gpt-6 — /settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے\n'
+GEOMETRY [78]
+PLAIN_RICH_FRAME ur sole-settings width 100 label_chars 12 'ماڈل: openai/gpt-6 — /settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے\n'
+GEOMETRY [78]
+PLAIN_RICH_FRAME ur sole-settings width 120 label_chars 12 'ماڈل: openai/gpt-6 — /settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے\n'
+GEOMETRY [78]
+PLAIN_RICH_INPUT ur sole-settings 'ماڈل: anthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-0123456789 — /settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH_FRAME ur sole-settings width 80 label_chars 81 'ماڈل: \nanthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-012345678\n9 — /settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے\n'
+GEOMETRY [6, 80, 61]
+PLAIN_RICH_FRAME ur sole-settings width 100 label_chars 81 'ماڈل: anthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-0123456789 — /settings \nسے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے\n'
+GEOMETRY [100, 47]
+PLAIN_RICH_FRAME ur sole-settings width 120 label_chars 81 'ماڈل: anthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-0123456789 — /settings سے نئے سیشن کا \nابتدائی ماڈل بھی بدلا جا سکتا ہے\n'
+GEOMETRY [115, 32]
+AFTER_HASHES {'en': '4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff', 'ur': '0e00e1ee1715d3ec8ad8d07440984da33fcb05336a35ceefbd32a87180a3e5f9', 'context': 'b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc'}
+PASS scoped only; plain Rich is NOT styled NoticeBlock/native font/shaping/bidi proof; no all-width/no-wrap guarantee; no eligibility/release approval
+
+STDERR
+
+EXIT 0

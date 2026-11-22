@@ -1,0 +1,52 @@
+{
+  "locale": "ru",
+  "namespace": "tui.model_persistence",
+  "source_sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff",
+  "status": "passed",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "e6cc991f4cd7",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host model-switch message: provider failure: quota; temporary fallback before translation",
+    "requested_model": "anthropic/claude-opus-5-5",
+    "fallback_used": true,
+    "fallback_model": "openai/gpt-6.1-sol",
+    "translation_method": "LLM native reasoning; no MT/API/service"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "bcbb66e8cd81",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "actual_model_source": "Host model-switch message: provider failure: quota, before audit; primary model anthropic/claude-opus-5-5",
+    "fallback_used": true,
+    "fallback_model": "openai/gpt-6.1-sol",
+    "independent_from_sessions": [
+      "e6cc991f4cd7",
+      "2986f83bd020",
+      "a97c7f76d5ee"
+    ]
+  },
+  "audit_date": "2026-11-22",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [],
+  "note": "Independent Russian B, 4/4 keys; 0 blocker/major. Record: i18n/audits/evidence/ru/tui.model_persistence/ru-bcbb/record.json. Plain Rich only; styled integration pending.",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ru/tui.model_persistence/ru-bcbb/record.json",
+      "sha256": "87a1e93e24493bed9eb51cc955260b9ddcef708f18152e34500244ee1af04475"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.model_persistence/ru-bcbb/report.md",
+      "sha256": "296cb119d10f584357083ea1f77278b077026122a80a05b519ce303151136956"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.model_persistence/ru-bcbb/audit.log",
+      "sha256": "186a3c6e6fe12aa7c01df7d3c2b84c343547f7a0928ac776abad5ca79ebab81e"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.model_persistence/ru-bcbb/script.py.txt",
+      "sha256": "a7c041f2ca3300895a92461524243c2d7ba0edb3669d0bd8bbb9d84bcefb3699"
+    }
+  ]
+}
