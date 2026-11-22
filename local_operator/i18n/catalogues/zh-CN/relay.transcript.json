@@ -41,5 +41,5 @@
   "relay.transcript.bridge.more_messages": "{count, plural, other {此卡片中还有#条消息}}",
   "relay.transcript.jump.latest": "跳到最新消息",
   "relay.transcript.jump.latest_short": "最新",
-  "relay.transcript.bridge.thread_reply": "话题回复"
+  "relay.transcript.bridge.thread_reply": "讨论串回复"
 }
