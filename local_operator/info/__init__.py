@@ -40,6 +40,7 @@ from local_operator.info.model import (
     SessionsInfo,
     SubagentLine,
 )
+
 if TYPE_CHECKING:
     from local_operator.info.render import build_export, relativise_home
 
@@ -54,6 +55,7 @@ def __getattr__(name: str) -> Any:
         render = import_module("local_operator.info.render")
         return render if name == "render" else getattr(render, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "UNKNOWN",

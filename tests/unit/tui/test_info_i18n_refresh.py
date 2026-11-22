@@ -19,7 +19,6 @@ from tests.unit.tui.test_app_pilot import FakeSession, _factory
 from tests.unit.tui.test_info_panel import _live, _snapshot
 from tests.unit.tui.test_language_live import _boot, _write_elsewhere
 
-
 # CI installs only local_operator, not tests. The other-process writer must use
 # installed production APIs even when the parent can import test helpers.
 _EXTERNAL_LANGUAGE_WRITE = """\

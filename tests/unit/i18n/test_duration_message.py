@@ -82,7 +82,8 @@ def test_info_callback_does_not_relabel_fallback_or_unknown(monkeypatch, source)
     try:
         text.set_active_locale("ur")
         monkeypatch.setattr(
-            messages, "render_record",
+            messages,
+            "render_record",
             lambda code, params, *, locale: messages.RenderedMessage("fallback", source),
         )
         value = info_duration(60)

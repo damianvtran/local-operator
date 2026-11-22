@@ -32,17 +32,9 @@ def format_duration(seconds: float, render: Callable[[Msg], T]) -> T:
         return _checked(render(keys.duration_minutes(count=total // 60)))
     if total < 86400:
         return _checked(
-            render(
-                keys.duration_hours_minutes(
-                    hours=total // 3600, minutes=(total % 3600) // 60
-                )
-            )
+            render(keys.duration_hours_minutes(hours=total // 3600, minutes=(total % 3600) // 60))
         )
     # ICU number grouping would change the legacy ungrouped 1000-day output.
     return _checked(
-        render(
-            keys.duration_days_hours(
-                days=str(total // 86400), hours=(total % 86400) // 3600
-            )
-        )
+        render(keys.duration_days_hours(days=str(total // 86400), hours=(total % 86400) // 3600))
     )
