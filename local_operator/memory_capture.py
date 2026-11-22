@@ -2135,6 +2135,17 @@ def hint(store: MemoryStore, marker_id: str) -> str:
     if state is None:
         return ""
     evicted = capture_evicted(store, marker_id)
+    # Capture is a candidate scan, not semantic acknowledgement of the old
+    # context. Review a small relevant set; never promote the whole scan or
+    # trade this advisory for a smaller preserved-operator block.
+    review_hint = (
+        "Review a small relevant candidate set before confirming: read source entries, "
+        "retain source entry attribution, stable subjects and accurate scope/kind; "
+        "correct stale decisions with revision-checked edits; inspect predecessors "
+        "before explicit replaces. Leave unreviewed candidates unconfirmed. "
+        "Before consequential work, recall narrowly, check conflicts/age and verify "
+        "against authoritative sources."
+    )
     if state.status == "ok":
         if state.reason == "timeout":
             text = (
@@ -2193,6 +2204,7 @@ def hint(store: MemoryStore, marker_id: str) -> str:
             f"Context compacted; automatic memory capture did not complete{detail}. "
             "Store key decisions explicitly."
         )
+    text += " " + review_hint
     if evicted:
         # D3's one automatic forget is announced where the pass is reported, so the
         # agent knows older captured candidates are gone (and can store what matters).

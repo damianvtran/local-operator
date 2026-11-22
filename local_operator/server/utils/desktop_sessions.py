@@ -2189,8 +2189,12 @@ class DesktopSessionBridge:
             "verified_at": verified_at,
         }
 
-    async def acquire(self, *, read: bool = False) -> AttachedSession:
+    async def acquire(self, *, read: bool = False, control_only: bool = False) -> AttachedSession:
         """Take one reference on this bridge, binding the owner if it is cold.
+
+        ``control_only`` reserves the same reference without binding display
+        state. Durable ask controls own their authenticated one-shot connection;
+        transient epoch-bound gates must keep the normal acquisition path.
 
         ``read`` is the READ envelope, and it is a property of the ROUTE rather
         than of the facade: reading state must never be able to fail because an
@@ -2306,7 +2310,11 @@ class DesktopSessionBridge:
                         attach_landed = bool(done)
                         if not done:
                             self.read_attach_outran.add(task)
-                else:
+                elif not control_only:
+                    # A durable ask is validated by ID at its owner, independently
+                    # of display epochs. Do not require a canonical snapshot before
+                    # delivering it: older owners can exceed the snapshot line cap
+                    # while their control socket remains fully operational.
                     await remote.attach_existing(control_budget=DESKTOP_CONTROL_ATTACH_S)
             except BaseException:
                 # SHIELDED, the shape the routes' ``_give_the_bridge_back`` settled in
@@ -11335,9 +11343,18 @@ class DesktopSessions:
 
     @contextlib.asynccontextmanager
     async def session(
-        self, session_id: str, *, read: bool = False, allow_draft: bool = False
+        self,
+        session_id: str,
+        *,
+        read: bool = False,
+        allow_draft: bool = False,
+        control_only: bool = False,
     ) -> AsyncIterator[DesktopSessionBridge]:
         """Hand out this session's bridge — or refuse, once the daemon has LATCHED.
+
+        ``control_only`` skips only display attachment at acquisition, not
+        lookup, draft exclusion, retirement, or the bridge reference lifetime.
+        The durable ask transport authenticates separately against its owner.
 
         ``read`` says the caller is READING state (``snapshot``, ``history``,
         ``events``, the ``/watch`` presence beat), and it is threaded down to
@@ -11635,7 +11652,10 @@ class DesktopSessions:
                             )
                             self.bridges[session_id] = bridge
             assert bridge is not None  # resolved above: either found or built
-            await bridge.acquire(read=read)
+            if control_only:
+                await bridge.acquire(read=read, control_only=True)
+            else:
+                await bridge.acquire(read=read)
         finally:
             # The window closes when acquire() returns, success or failure: from
             # here on the bridge is an ordinary resident one, and ``users`` (which

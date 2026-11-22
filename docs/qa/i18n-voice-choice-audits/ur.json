@@ -1,0 +1,245 @@
+{
+  "locale": "ur",
+  "namespace": "wire.settings",
+  "source_sha256": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+  "context_sha256": "e5c44bf0a9bcfdfa159a5bbf1c5caffcde2318946561fa4d7550bc30255e85a1",
+  "target_sha256": "5b47f6cbefb5a6c485d44af0b40842c3e295ef72538bb30bb27bed55ba706931",
+  "translator": {
+    "agent": "voice-labels-ur",
+    "session": "b42f2d2e1ed0",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "fallback": "anthropic/claude-opus-5-5 provider quota fallback; identity supplied by manager; target bytes independently verified"
+  },
+  "auditor": {
+    "agent": "translation-auditor (voice-audit-ur)",
+    "session": "f8a6afe093e4",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "fallback": "anthropic/claude-opus-5-5 provider quota failure in this session",
+    "result": "passed",
+    "verdict": "clean-with-findings",
+    "findings": 1,
+    "unresolved_blocker_major": 0,
+    "read_route_verified": true
+  },
+  "status": "passed",
+  "verdict": "clean-with-findings",
+  "reviewed_head": "982548f69eadede24ac530708ee882121378b3d9",
+  "round": 1,
+  "base": "4128f2a2",
+  "scope_keys": [
+    "wire.settings.speech_voice_tone.choice.warm.label",
+    "wire.settings.speech_voice_tone.choice.neutral.label",
+    "wire.settings.speech_voice_tone.choice.bright.label",
+    "wire.settings.speech_voice_tone.choice.calm.label",
+    "wire.settings.speech_voice_tone.choice.authoritative.label",
+    "wire.settings.speech_voice_expressiveness.choice.low.label",
+    "wire.settings.speech_voice_expressiveness.choice.medium.label",
+    "wire.settings.speech_voice_expressiveness.choice.high.label"
+  ],
+  "scope_key_count": 8,
+  "descriptions_read_count": 8,
+  "context_entries_read_count": 16,
+  "full_namespace_audit": false,
+  "changed_key_count": 7,
+  "unchanged_scope_keys": [
+    "wire.settings.speech_voice_tone.choice.warm.label"
+  ],
+  "scope_hash_encoding": "UTF-8 JSON, sort_keys=True, separators=(comma,colon), ensure_ascii=False",
+  "scope_source_sha256": "9ac8250b33acec1f2956ee91902518e229397d6b7cb1e7debe37754d3b3bafe0",
+  "scope_context_sha256": "2c1d3f0c2412cd92a3f1988ba0a5c36b0f9b6ac715271da41a540b55b86f2d44",
+  "scope_target_sha256": "e64fa5fb16e4520bfea733f8c5eacfc0775b89896014fa256fdd48b3a47d0db7",
+  "input_hashes": {
+    "style": "7276e96210fe5f23fd82a39ae4cc0c88b2c1009d3a551d914efc3f61516eddc4",
+    "glossary": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "preflight": "f7db934c8284b92b94e0e2adbb82360d0f70fafe93e0efec14e71ce60424e059"
+  },
+  "namespace_verdicts": {
+    "wire.settings": {
+      "verdict": "clean-with-findings",
+      "keys_read": 8,
+      "context_only_descriptions_read": 8,
+      "unresolved_blocker_major": 0
+    }
+  },
+  "findings": [
+    {
+      "id": "UR1",
+      "severity": "minor",
+      "key": "wire.settings.speech_voice_tone.choice.warm.label",
+      "current": "وارم",
+      "proposed": "گرمجوش",
+      "reason": "وارم is a recognizable English transliteration for bilingual readers but is less idiomatic as a standalone Urdu voice-personality label than گرمجوش; the native term directly conveys friendly/approachable warmth and matches this screen’s گرمجوشی help wording. This is a readability/idiom improvement, not a changed machine token or a claim that all loanwords are forbidden.",
+      "location": "local_operator/i18n/catalogues/ur/wire.settings.json:693",
+      "consumer": "local_operator/settings_io.py:6282-6285 constructs Choice(value=\"warm\", localized label, localized description); settings_view.py:4218-4243 paints label with description.",
+      "baseline": "Pre-existing unchanged value, explicitly included in requested eight-key audit; non-gating.",
+      "disposition": "proposed; auditor did not edit target"
+    }
+  ],
+  "linguistic_review": {
+    "accepted": "غیر جانب دار conveys neutral; پرجوش captures energetic/upbeat rather than visual brightness; پرسکون matches calm delivery; پراعتماد correctly reflects confident/assured rather than authoritarian. کم/درمیانی/زیادہ are natural level terms and do not imply volume in this expressiveness context. No T/V address forms or grammatical-gender mismatch in these adjective/level labels. No new glossary drift.",
+    "loanword_assessment": "Warm is not a protected identifier in this display field. وارم is intelligible as an English borrowing but less native here; UR1 is minor and pre-existing, not a manufactured blocker. Settled software loans elsewhere remain legitimate.",
+    "description_scope": "All eight descriptions read for meaning; byte-identical to base and not independently re-approved by this limited receipt."
+  },
+  "tested_controls": {
+    "committed_public_copy_read": "PASS: initial dirty-target refusal respected; read_public_copy succeeded after checkpoint 982548f69eadede24ac530708ee882121378b3d9",
+    "runtime_resolver": "PASS: isolated config.yml values.language=ur; boot configured_language and active_locale both ur; all eight settings_io Choice labels equal exact target values",
+    "machine_values_order": "PASS: warm/neutral/bright/calm/authoritative and low/medium/high preserved in production settings registry order",
+    "placeholder_markup_order": "PASS: source and target sequences empty for all eight labels; no placeholders/markup/skeletons exist to drop or reorder",
+    "CLDR": "N/A: eight labels contain no plural/select/count expressions",
+    "logical_bidi": "PASS: no manual bidi controls in eight labels and eight descriptions; labels contain only AL and whitespace; no embedded Latin or directional punctuation",
+    "english_negative_control": "PASS: configured ur forced to en; registry labels refreshed to English",
+    "restore_configured_locale": "PASS: restoring configured ur refreshes registry to exact target bytes",
+    "fit_measurement": "PASS measurement only, rich.cells.cell_len; see per_key_evidence. Neutral expands 7→12 cells (+5); flag for independent QA rendered check, not a proven overflow. No hard per-field cap exists; painter truncates whole choice rows with ellipsis, not wrapping.",
+    "delta_integrity": "PASS: exactly seven changed labels; warm retained; eight descriptions unchanged"
+  },
+  "not_run": [
+    "Pseudo-localization (not dispatched)",
+    "Rendered TUI/layout/native shaping or RTL mirroring (independent QA later; resolver output is not a rendered frame)",
+    "Browser/native/simulator/device dispatch",
+    "Whole or targeted test suites; generation/check scripts; installs"
+  ],
+  "execution_notes": [
+    "Probe initially used wrong top-level config shape and observed configured_language=auto; inspected read_config_values, corrected synthetic fixture to values.language=ur, then actual path passed. No product defect inferred.",
+    "Bulk key-read tool composition timed out; single whole-catalogue read_public_copy succeeded. No approval inferred from failed call.",
+    "Preflight context hash 2ee697... predates NEW16 metadata; audited current context e5c44bf0... and read its sixteen scoped entries."
+  ],
+  "evidence": {
+    "probe_script": "/Users/damian/.local-operator/sessions/f8a6afe093e4/scratchpad/voice-audit-ur-probe.py",
+    "probe_result": "/Users/damian/.local-operator/sessions/f8a6afe093e4/scratchpad/voice-audit-ur-probe-result.json",
+    "probe_result_sha256": "342c6830b2a024769cf29aeeb8c6dec0ebd7760ab4474c917b6078ca659c9245",
+    "per_key_evidence": [
+      {
+        "key": "wire.settings.speech_voice_tone.choice.warm.label",
+        "english": "warm",
+        "urdu": "وارم",
+        "english_description": "Friendly and approachable.",
+        "urdu_description": "دوستانہ اور قریب۔",
+        "english_cells": 4,
+        "urdu_cells": 4,
+        "description_cells": 17,
+        "tokens": [],
+        "bidi_classes": [
+          "AL"
+        ],
+        "resolved_value": "warm",
+        "resolved_label": "وارم"
+      },
+      {
+        "key": "wire.settings.speech_voice_tone.choice.neutral.label",
+        "english": "neutral",
+        "urdu": "غیر جانب دار",
+        "english_description": "Even and unmarked.",
+        "urdu_description": "معمول اور بے امتیاز۔",
+        "english_cells": 7,
+        "urdu_cells": 12,
+        "description_cells": 20,
+        "tokens": [],
+        "bidi_classes": [
+          "AL",
+          "WS"
+        ],
+        "resolved_value": "neutral",
+        "resolved_label": "غیر جانب دار"
+      },
+      {
+        "key": "wire.settings.speech_voice_tone.choice.bright.label",
+        "english": "bright",
+        "urdu": "پرجوش",
+        "english_description": "Upbeat and energetic.",
+        "urdu_description": "پرمسرت اور توانا۔",
+        "english_cells": 6,
+        "urdu_cells": 5,
+        "description_cells": 17,
+        "tokens": [],
+        "bidi_classes": [
+          "AL"
+        ],
+        "resolved_value": "bright",
+        "resolved_label": "پرجوش"
+      },
+      {
+        "key": "wire.settings.speech_voice_tone.choice.calm.label",
+        "english": "calm",
+        "urdu": "پرسکون",
+        "english_description": "Unhurried and steady.",
+        "urdu_description": "بے جلدی اور مستقل۔",
+        "english_cells": 4,
+        "urdu_cells": 6,
+        "description_cells": 18,
+        "tokens": [],
+        "bidi_classes": [
+          "AL"
+        ],
+        "resolved_value": "calm",
+        "resolved_label": "پرسکون"
+      },
+      {
+        "key": "wire.settings.speech_voice_tone.choice.authoritative.label",
+        "english": "authoritative",
+        "urdu": "پراعتماد",
+        "english_description": "Confident and assured.",
+        "urdu_description": "اعتماد اور یقین کے ساتھ۔",
+        "english_cells": 13,
+        "urdu_cells": 8,
+        "description_cells": 24,
+        "tokens": [],
+        "bidi_classes": [
+          "AL"
+        ],
+        "resolved_value": "authoritative",
+        "resolved_label": "پراعتماد"
+      },
+      {
+        "key": "wire.settings.speech_voice_expressiveness.choice.low.label",
+        "english": "low",
+        "urdu": "کم",
+        "english_description": "Restrained and plain.",
+        "urdu_description": "ضبط شدہ اور سادہ۔",
+        "english_cells": 3,
+        "urdu_cells": 2,
+        "description_cells": 17,
+        "tokens": [],
+        "bidi_classes": [
+          "AL"
+        ],
+        "resolved_value": "low",
+        "resolved_label": "کم"
+      },
+      {
+        "key": "wire.settings.speech_voice_expressiveness.choice.medium.label",
+        "english": "medium",
+        "urdu": "درمیانی",
+        "english_description": "Today's constant.",
+        "urdu_description": "موجودہ مستقل قیمت۔",
+        "english_cells": 6,
+        "urdu_cells": 7,
+        "description_cells": 18,
+        "tokens": [],
+        "bidi_classes": [
+          "AL"
+        ],
+        "resolved_value": "medium",
+        "resolved_label": "درمیانی"
+      },
+      {
+        "key": "wire.settings.speech_voice_expressiveness.choice.high.label",
+        "english": "high",
+        "urdu": "زیادہ",
+        "english_description": "Lively and expressive.",
+        "urdu_description": "جاندار اور اظہار آمیز۔",
+        "english_cells": 4,
+        "urdu_cells": 5,
+        "description_cells": 22,
+        "tokens": [],
+        "bidi_classes": [
+          "AL"
+        ],
+        "resolved_value": "high",
+        "resolved_label": "زیادہ"
+      }
+    ]
+  },
+  "note": "Terminal eight-label independent Urdu contribution audit only. Clean with one non-gating pre-existing idiom improvement; no blocker/major. Not approval for unread catalogue keys, unchanged descriptions, or visual layout. Read-only repo; manager integrates receipt."
+}

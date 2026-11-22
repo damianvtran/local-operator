@@ -1361,12 +1361,15 @@ def _drop_session_sidecars(config_dir: Path, session_id: str) -> None:
 
     Called once the directory is GONE, by both removers that take an established
     session out of the store: :func:`remove_session_dir` and the source half of a
-    committed mesh move (:func:`hand_off_session_dir`). Three files, each keyed by
+    committed mesh move (:func:`hand_off_session_dir`). Four files, each keyed by
     session id and each recreated from scratch if a session with that id is ever
     built again:
 
     * ``<config>/cache/session_files/<id>.json`` — a cache of what the directory's
       transcript contained; past the directory it caches a scan of nothing;
+    * ``<config>/cache/prewarm_settled/<id>.json`` — the boot prewarm's "this
+      journal needs no tail anchor" pin (``index_prewarm.SETTLED_DIRNAME``); it
+      pins an inode that no longer exists;
     * ``<config>/wakes/spooled/<id>.json`` — an obligation to deliver a spooled
       turn to a conversation nobody can open any more;
     * ``<config>/wakes/spooled/.<id>.lock`` — the mutex around writing that row.
@@ -1397,6 +1400,16 @@ def _drop_session_sidecars(config_dir: Path, session_id: str) -> None:
         pass
     except Exception:  # noqa: BLE001 — best effort, see the docstring
         logger.debug("session cleanup: could not drop the file-scan cache entry", exc_info=True)
+    try:
+        from local_operator.session import index_prewarm
+
+        settled = index_prewarm.settled_record_path(config_dir, session_id)
+        if settled is not None:
+            settled.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:  # noqa: BLE001 — best effort, see the docstring
+        logger.debug("session cleanup: could not drop the prewarm settlement", exc_info=True)
     try:
         from local_operator.wakes import spooled as spooled_store
         from local_operator.wakes.lock import (
