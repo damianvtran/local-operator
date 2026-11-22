@@ -7350,7 +7350,9 @@ async def test_resource_cues_and_read_results_across_wait_and_steer(
             assert copies(messages, "unless their current, ") == 1
             assert copies(messages, "Use direct `read` to bring instructions into context.") == 1
             assert copies(messages, "nested call's status alone does not supply omitted") == 1
-            assert copies(messages, "use the indicated range or spill handle for needed sections") == 1
+            assert (
+                copies(messages, "use the indicated range or spill handle for needed sections") == 1
+            )
     finally:
         release.set()
         await session.dispose()
