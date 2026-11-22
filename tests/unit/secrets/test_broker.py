@@ -24,6 +24,7 @@ import time
 from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -135,7 +136,7 @@ def test_registration_reply_precedes_concurrent_notification(
     real_audit = broker._audit
     real_send = broker_module.send_frame
 
-    def observed_send(connection: socket.socket, frame: dict) -> None:
+    def observed_send(connection: socket.socket, frame: dict[str, Any]) -> None:
         real_send(connection, frame)
         if frame.get("event") == "retrieved":
             notice_written.set()
