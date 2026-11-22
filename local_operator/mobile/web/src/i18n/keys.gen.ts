@@ -1248,10 +1248,17 @@ export type MessageParams = {
   "wire.remote_compute.no_capacity": undefined;
   "wire.remote_compute.no_credit": undefined;
   "wire.remote_compute.only_with": { "flag": string };
+  "wire.remote_compute.option_spot": undefined;
   "wire.remote_compute.preview_not_enabled": undefined;
+  "wire.remote_compute.refusal_conflict": undefined;
   "wire.remote_compute.replayed": { "run_id": string };
+  "wire.remote_compute.repo_no_remote": undefined;
+  "wire.remote_compute.repo_not_https_remote": undefined;
+  "wire.remote_compute.repo_unpushed_commit": { "detail": string };
   "wire.remote_compute.retrying": undefined;
+  "wire.remote_compute.run_busy": undefined;
   "wire.remote_compute.run_identity_mismatch": { "answered": string; "asked_for": string };
+  "wire.remote_compute.run_limit": undefined;
   "wire.remote_compute.status_line": { "status": string };
   "wire.remote_compute.status_network_matched": { "network_id": string };
   "wire.remote_compute.status_network_mismatch": { "network_id": string };
@@ -1259,6 +1266,8 @@ export type MessageParams = {
   "wire.remote_compute.status_unknown": { "status": string };
   "wire.remote_compute.still_running": { "run_id": string; "max_hours": string };
   "wire.remote_compute.submitted": { "run_id": string; "network_id": string };
+  "wire.remote_compute.tier_cloud_run": undefined;
+  "wire.remote_compute.tier_dedicated": undefined;
   "wire.remote_compute.unknown_run": undefined;
   "wire.remote_compute.unreachable": undefined;
   "wire.remote_compute.unreadable_envelope": undefined;

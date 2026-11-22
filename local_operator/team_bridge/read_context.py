@@ -96,14 +96,18 @@ READ_CAPABILITY = 1
 #: EXIST on this build, stated so a renderer decides what to draw instead of
 #: probing operations that are not there. M1a ships the detail read and the list
 #: excerpts, both only through the shared admission predicate, so
-#: ``screened_detail`` is true; ``read_ack`` turns true only when the ACK gate and
-#: its POST exist (M1b), and ``local_events`` is deliberately outside this family.
-#: It rides the team-bridge STATUS answer next to ``capability``, so one response
-#: can drive the whole surface decision.
+#: ``screened_detail`` is true; ``local_events`` is deliberately outside this
+#: family. It rides the team-bridge STATUS answer next to ``capability``, so one
+#: response can drive the whole surface decision.
+#:
+#: There is no ``read_ack`` key any more: it was a placeholder for a renderer-
+#: driven read ACK (M1b) that never shipped and that no UI read (checked against
+#: local-operator-ui and -mobile main). Read/working/done acks are posted by the
+#: connector and the agent tool, never by a renderer, so a permanently-false
+#: flag only advertised a door that does not exist.
 READ_AVAILABILITY: Mapping[str, bool] = {
     "metadata_inbox": True,
     "screened_detail": True,
-    "read_ack": False,
     "local_events": False,
 }
 

@@ -137,8 +137,12 @@ async def test_ack_working_claims_and_done_releases_with_the_same_token(tmp_path
     owner = _owner()
     store = Store(tmp_path)
     store.commit_enrollment(owner, OwnerReceipt(consent_version="cv-1", consent_ref="cr-1"))
+    # The ack op now posts working/done to the hub (test_tool_ack_progress);
+    # this stub accepts each move so the subject here stays the claim token.
     runtime = BridgeRuntime(
-        client=_client(lambda request: _ok({})),
+        client=_client(
+            lambda request: _ok({"delivery": {"state": json.loads(request.content)["state"]}})
+        ),
         config_dir=tmp_path,
         tenant_id=TENANT,
         owner=owner,

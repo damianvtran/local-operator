@@ -507,6 +507,10 @@ def static_feature_flags() -> dict[str, Any]:
         # (`conversation_name_taken` with `details`, `conversation_archived`,
         # `invalid_transition` with `rule`, 403, 404, 503) pass through as-is.
         "team_bridge_conversation_rename": 1,
+        # Atomic metadata PATCH, including explicit empty-topic clear. This is
+        # a daemon-route capability, not upstream version negotiation: deploy
+        # and verify the additive hub endpoint BEFORE releasing this runtime.
+        "team_bridge_conversation_update": 1,
         # TYPING INDICATORS (typing-indicators design §5): `GET|PUT|DELETE
         # .../conversations/{id}/typing` for the signed-in HUMAN only (no actor
         # endpoint on this plane). Both writes REQUIRE the captured-owner

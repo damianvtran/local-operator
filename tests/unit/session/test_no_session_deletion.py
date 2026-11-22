@@ -5186,6 +5186,21 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes only this call's failed run/heavy-jobs/slot-<int>.json.<pid>.<id>.tmp "
         "temp FILE; unlink rejects directories.",
     ),
+    (
+        "local_operator/remote_compute/records.py::_compact_if_grown",
+        "os.replace",
+        "Publishes the run-record FILE over itself: config_dir/remote-compute/runs.jsonl, "
+        "from a same-directory mkstemp temp. records_path() is the only path this module "
+        "builds and it never leaves <config>/remote-compute/, so no session directory is "
+        "reachable; os.replace refuses to put a file over a directory.",
+    ),
+    (
+        "local_operator/remote_compute/records.py::_compact_if_grown",
+        "os.unlink",
+        "Removes only this call's own failed mkstemp temp FILE in that same "
+        "<config>/remote-compute/ directory; unlink refuses directories, and the record "
+        "rows are not session state.",
+    ),
     # Heavy-lease audit trail rotation. Every caller of heavy_audit.record passes
     # the same `heavy_lease.lease_dir()`; `audit_path(directory)` is the fixed
     # `heavy-lease.jsonl` there, and rotation only shifts its fixed `.1`..`.3`
