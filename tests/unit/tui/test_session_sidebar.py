@@ -1336,7 +1336,10 @@ async def test_navigation_retires_the_real_opening_catalog(monkeypatch, timer_on
             before = app._sidebar_refresh_generation
             assert app._session_sidebar.cursor_id == "act1"
             assert {entry.id for entry in app._session_sidebar.entries} == {
-                "act1", "act2", "old1", "old2"
+                "act1",
+                "act2",
+                "old1",
+                "old2",
             }
             release.set()
             await workers[0].wait()
@@ -1366,7 +1369,8 @@ async def test_navigation_retires_the_real_opening_catalog(monkeypatch, timer_on
     # plus the actual cursor IDs, rather than accepting any AssertionError.
     source, first_line = inspect.getsourcelines(original)
     walked_line = first_line + next(
-        index for index, line in enumerate(source)
+        index
+        for index, line in enumerate(source)
         if line.strip().startswith('assert walked == ["act2", "old1", "old2"]')
     )
     try:
