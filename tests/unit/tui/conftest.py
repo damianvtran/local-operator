@@ -500,6 +500,33 @@ class StyledTranscriptApp(App[None]):
         yield TranscriptView()
 
 
+async def open_all_folds(view: Widget, pilot, *, rounds: int = 5) -> None:
+    """Reveal every span the tool fold condensed, so ROW geometry can be measured.
+
+    Slice 4 folds a settled run of tool rows under a bar (By turn's default), so
+    a fixture that appends consecutive cards now paints one bar and hides the
+    cards. The rows and the gaps between them are unchanged underneath — these
+    suites are about those rows — but a hidden row has no painted lane or
+    region, so they open the bars before they measure. Nested bars come out in
+    passes: a run's bar reveals its same-tool sub-bar only once it is open.
+    """
+    from local_operator.tui.widgets.transcript import FoldBarBlock
+
+    for _ in range(rounds):
+        closed = [
+            child
+            for child in view.children
+            if isinstance(child, FoldBarBlock) and not child.expanded
+        ]
+        if not closed:
+            await pilot.pause()
+            return
+        for bar in closed:
+            bar.activate()
+        await pilot.pause()
+        await pilot.pause()
+
+
 #: Mirrored from ``local_operator.tui.app`` so this helper does not import
 #: the app module (conftest loads for every TUI test). The match is pinned
 #: by ``test_composer_markers_match_the_app``.

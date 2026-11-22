@@ -1,0 +1,6 @@
+{
+  "tui.transcript_fold.turn": "turn",
+  "tui.transcript_fold.work": "work",
+  "tui.transcript_fold.failed": "✗ {label} failed",
+  "tui.transcript_fold.times": "×{label}"
+}

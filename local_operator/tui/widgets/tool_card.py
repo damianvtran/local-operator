@@ -2815,6 +2815,19 @@ class ToolCard(ExpandableActionBlock):
         """A call that FAILED. ``interrupted`` is a stop, not a failure."""
         return self._state == "error"
 
+    @property
+    def summary(self) -> str:
+        """The row's own summary text, as composed for this call.
+
+        Public for the same reason :attr:`duration_s` is: the tool fold's live bar
+        names the call it is reporting (``◐ <tool> <summary> <elapsed>``) and the
+        ONE text that belongs there is the card's own — a second derivation from
+        the arguments would disagree with the row it stands beside, and the
+        localized variants (a composing row, a send row's outcome) are already
+        decided here. Read-only: every writer is a lifecycle method on this card.
+        """
+        return self._summary
+
     def restore(
         self,
         *,

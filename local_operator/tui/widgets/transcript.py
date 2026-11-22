@@ -34,6 +34,7 @@ import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import (
+    TYPE_CHECKING,
     Any,
     Callable,
     ClassVar,
@@ -61,6 +62,7 @@ from textual.geometry import Size
 from textual.reactive import Reactive
 from textual.scrollbar import ScrollBar, ScrollDown, ScrollTo, ScrollUp
 from textual.selection import Selection
+from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Static
 
@@ -68,7 +70,11 @@ from local_operator.ansi import strip_control_sequences
 from local_operator.harness.intent import ACTIVITY_THINKING
 from local_operator.harness.peer_cycles import PeerCycleCertificate
 from local_operator.i18n.format import format_number
-from local_operator.i18n.keys import tui_bridge_card, tui_transcript
+from local_operator.i18n.keys import (
+    tui_bridge_card,
+    tui_transcript,
+    tui_transcript_fold,
+)
 from local_operator.i18n.text import active_locale, register_refresh, tr, tr_record
 from local_operator.mobile.peer_model import TERMINAL_SENDER
 from local_operator.tui import theme as theme_mod
@@ -102,6 +108,22 @@ from local_operator.tui.quiet_groups import (
     quiet_group_stretches,
     quiet_sender_label,
 )
+from local_operator.tui.tool_outline import (
+    Clause,
+    OutlineRow,
+    RowKind,
+    ToolFacts,
+    ToolState,
+    summary_clauses,
+)
+
+if TYPE_CHECKING:
+    # The fold layer reads this module's block classes, so it imports them at
+    # module scope while this module takes it lazily (see
+    # ``TranscriptView.__init__``). This guarded import is only for the type
+    # checker; nothing at runtime resolves it.
+    from local_operator.tui.tool_fold import ToolFoldLayer
+    from local_operator.tui.widgets.tool_card import ToolCard
 
 #: The turn spine (D20): user prompts sit at the gutter; everything else
 #: indents two cells so the gutter column reads at a glance.
@@ -780,6 +802,15 @@ class TranscriptBlock(Static):
     def finalize(self) -> None:
         """Freeze the block; the container never re-renders it afterwards."""
         self._finalized = True
+        # The tool fold's facts are read off block STATE, so a block that
+        # settles outside the append stream (a ToolCard's ``mark_done``, an
+        # assistant row's ``finalize_text``) still moves the bar above it: its
+        # tally, its summed clock and whether a call is still running. Only a
+        # MOUNTED block has a container to tell — everything else is picked up
+        # by the append that mounts it.
+        parent = self.parent
+        if isinstance(parent, TranscriptView):
+            parent.note_fold_change(self)
 
     def retheme(self) -> None:
         """Rebuild this block's content in the CURRENT theme's ink.
@@ -1432,6 +1463,10 @@ class ExpandableActionBlock(TranscriptBlock):
 #: every word — so a wave moves them like every other extracted area.
 _raw_t = tr("tui.transcript")
 _record_t = tr_record("tui.transcript")
+#: The tool fold's own copy (bar names, the tally, the sub-group count). Its OWN
+#: namespace, so a slice that adds a bar word cannot move ``tui.transcript``'s
+#: audited English hash and put seven locales' ledger rows out of date.
+_fold_t = tr("tui.transcript_fold")
 _t = display_tr("tui.transcript", technical_params=("pid",), technical_literals=("esc",))
 #: The inbound Team Bridge card's body copy (``tui.bridge_card``). ``m`` is the
 #: literal show-more key, kept an LTR island in every locale.
@@ -4080,7 +4115,141 @@ class HubMessageBlock(PeerMessageBlock):
         return " · ".join(part for part in parts if part)
 
 
-class QuietGroupBlock(ExpandableActionBlock):
+class _SingleRowBarBlock(ExpandableActionBlock):
+    """The plumbing every ONE-ROW bar in this ledger shares.
+
+    Two bars stand over rows they hide: the receipt fold (:class:`QuietGroupBlock`)
+    and the tool fold's turn/run/sub bars (:class:`FoldBarBlock`). Their rows say
+    different things — a receipt family word and a count, versus a call tally and
+    a right-aligned clock — but the MECHANICS are one contract, and a second copy
+    of them is how the two bars come to disagree about the name column or the
+    copy gutter once one of them is fixed:
+
+    * the bar is always exactly one row (:meth:`spans_multiple_rows`), built by
+      :meth:`_build_content` at the width the container published;
+    * it paints its own width every time content is applied (:meth:`_refresh_row`),
+      the ``WakeBlock`` ladder, so a detached build records the width it authored
+      and a mounted row never flashes at the fallback;
+    * the name column is the TRANSCRIPT's shared one (:meth:`_name_col`), which is
+      what keeps a bar's name on the same cells as the tool rows beside it;
+    * the copy gutter is the same field its row builder reserved (:meth:
+      `copy_gutter`) — an over-count there eats the first character of the name;
+    * every row is app chrome (:meth:`copy_row_is_chrome`), so a drag over a bar
+      hands back nothing and the members' own rows carry their own copy.
+
+    Subclasses set ``EXPANDED_CLASS``, build their one row in ``_build_content``,
+    and populate ``_row_count``/``_applied_rows`` through the inherited
+    :meth:`_refresh_row`. ``can_expand`` is theirs: a bar whose members cannot be
+    revealed is not a bar.
+    """
+
+    _row_count = 1
+    _applied_rows = -1
+    _built_width = -1
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._row_count = 1
+        self._applied_rows = -1
+        self._built_width = -1
+
+    def _build_content(self, width: int) -> Text:
+        """The bar's one row at ``width``. Each bar owns its own grammar."""
+        raise NotImplementedError
+
+    def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
+        """Re-fit the row at the new width — or at a new shared column.
+
+        Same guard as the tool card and the sibling receipts: the width this
+        row is laid out at and the ledger's shared column (see
+        :meth:`ExpandableActionBlock._layout_moved`).
+        """
+        size = getattr(event, "size", None)
+        if size is not None and not self._layout_moved(size.width):
+            return
+        self._refresh_row()
+
+    def copy_gutter(self, index: int) -> int:
+        """The icon field on the summary row, as built.
+
+        The same count the sibling receipts use — a bar sits between tool
+        rows, so a gutter measured against a different spine would eat the
+        first character of its name when copied.
+        """
+        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, ToolCard
+
+        if index != 0:
+            return OUTPUT_INDENT
+        return self._row_indent() + ToolCard.ICON_COLS
+
+    def copy_row_is_chrome(self, index: int) -> bool:
+        """Every row of a bar is the app's own furniture.
+
+        A bar states counts and outcomes the app derived; the content it stands
+        for lives on the members' own rows, which carry their own copy
+        behaviour when open.
+        """
+        return True
+
+    def refresh_row(self, width: int | None = None) -> None:
+        """Repaint at the current width — the ledger's shared column moved."""
+        self._refresh_row(width)
+
+    def _refresh_row(self, width: int | None = None) -> None:
+        """Rebuild the bar at its own width (the `WakeBlock` ladder)."""
+        from local_operator.tui.widgets.tool_card import FALLBACK_WIDTH, row_body_width
+
+        if width is not None and width > 0 and width == self._built_width:
+            return
+        width = self.fit_width(width)
+        detached = False
+        if width <= 0:
+            try:
+                width = self.app.console.width
+            except Exception:
+                width = FALLBACK_WIDTH
+                detached = True
+        content = self._build_content(width)
+        self._row_count = max(1, len(content.plain.splitlines()))
+        if detached:
+            return
+        self._built_width = width
+        self._built_name_col = self._name_col(row_body_width(width))
+        moved = self._row_count != self._applied_rows
+        self._applied_rows = self._row_count
+        was_finalized = self._finalized
+        self._finalized = False
+        try:
+            self.set_content(content, layout=moved)
+        finally:
+            self._finalized = was_finalized
+
+    def _name_col(self, width: int) -> int:
+        """The ledger's shared name column, in cells (read from the view)."""
+        from local_operator.tui.widgets.tool_card import NAME_COL, NAME_GROWTH_MIN_ROW
+
+        parent = self.parent
+        if isinstance(parent, TranscriptView) and width >= NAME_GROWTH_MIN_ROW:
+            return parent.tool_name_col
+        return NAME_COL
+
+    @staticmethod
+    def _count_label(count: int) -> str:
+        # Existing EN frames used raw decimal counts and must stay byte-stable.
+        # Other locales follow the shared formatter, not that compatibility pin.
+        locale = active_locale()
+        return str(count) if locale == "en" else format_number(count, locale)
+
+    def settled_rows(self) -> int:
+        """Rows settled now: always one — the bar does not grow."""
+        return self._row_count if self._finalized else 0
+
+    def spans_multiple_rows(self) -> bool:
+        """Never: the bar's own rendered height is pinned at one row."""
+        return False
+
+
+class QuietGroupBlock(_SingleRowBarBlock):
     """One bar over a run of consecutive delivery receipts (design
     ``docs/design/quiet-turns.md`` §5, slice S5).
 
@@ -4143,9 +4312,6 @@ class QuietGroupBlock(ExpandableActionBlock):
         self._expanded = False
         self._hovered = False
         self._focused = False
-        self._row_count = 1
-        self._applied_rows = -1
-        self._built_width = -1
         #: The name column's word for this bar. An INSTANCE attribute (the
         #: family is per-group), which is why it is set here rather than as a
         #: class constant like the single-kind receipts'.
@@ -4156,6 +4322,10 @@ class QuietGroupBlock(ExpandableActionBlock):
         self.finalize()
 
     # -- the fold's own lifecycle ---------------------------------------------
+
+    def members(self) -> tuple[TranscriptBlock, ...]:
+        """The blocks this bar stands for, in reading order (read-only)."""
+        return tuple(self._members)
 
     def restate_group(self, group: QuietGroup) -> None:
         """Re-state the facts after the open tail grew.
@@ -4242,93 +4412,9 @@ class QuietGroupBlock(ExpandableActionBlock):
         """Always: the collapsed line stands for the receipts behind it."""
         return True
 
-    def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
-        """Re-fit the row at the new width — or at a new shared column.
-
-        Same guard as the tool card and the sibling receipts: the width this
-        row is laid out at and the ledger's shared column (see
-        :meth:`ExpandableActionBlock._layout_moved`).
-        """
-        size = getattr(event, "size", None)
-        if size is not None and not self._layout_moved(size.width):
-            return
-        self._refresh_row()
-
-    def copy_gutter(self, index: int) -> int:
-        """The icon field on the summary row, as built.
-
-        The same count the sibling receipts use — a bar sits between tool
-        rows, so a gutter measured against a different spine would eat the
-        first character of its name when copied.
-        """
-        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, ToolCard
-
-        if index != 0:
-            return OUTPUT_INDENT
-        return self._row_indent() + ToolCard.ICON_COLS
-
-    def copy_row_is_chrome(self, index: int) -> bool:
-        """Every row of the bar is the app's own furniture (see the class
-        docstring): the family word and the count are the app talking, and
-        the members' content lives on their own blocks."""
-        return True
-
-    def refresh_row(self, width: int | None = None) -> None:
-        """Repaint at the current width — the ledger's shared column moved."""
-        self._refresh_row(width)
-
-    def _refresh_row(self, width: int | None = None) -> None:
-        """Rebuild the bar at its own width (the `WakeBlock` ladder)."""
-        from local_operator.tui.widgets.tool_card import FALLBACK_WIDTH, row_body_width
-
-        if width is not None and width > 0 and width == self._built_width:
-            return
-        width = self.fit_width(width)
-        detached = False
-        if width <= 0:
-            try:
-                width = self.app.console.width
-            except Exception:
-                width = FALLBACK_WIDTH
-                detached = True
-        content = self._build_content(width)
-        self._row_count = max(1, len(content.plain.splitlines()))
-        if detached:
-            return
-        self._built_width = width
-        self._built_name_col = self._name_col(row_body_width(width))
-        moved = self._row_count != self._applied_rows
-        self._applied_rows = self._row_count
-        was_finalized = self._finalized
-        self._finalized = False
-        try:
-            self.set_content(content, layout=moved)
-        finally:
-            self._finalized = was_finalized
-
-    def _name_col(self, width: int) -> int:
-        """The ledger's shared name column, in cells (read from the view)."""
-        from local_operator.tui.widgets.tool_card import NAME_COL, NAME_GROWTH_MIN_ROW
-
-        parent = self.parent
-        if isinstance(parent, TranscriptView) and width >= NAME_GROWTH_MIN_ROW:
-            return parent.tool_name_col
-        return NAME_COL
-
     def _summary_ink(self) -> str:
         """A receipt's band: the same dim the wake and monitor rows use."""
         return "dim"
-
-    @staticmethod
-    def _count_label(count: int) -> str:
-        # Existing EN frames used raw decimal counts and must stay byte-stable.
-        # Other locales follow the shared formatter, not that compatibility pin.
-        locale = active_locale()
-        return str(count) if locale == "en" else format_number(count, locale)
-
-    #: Provenance of the raw group sentence; ``None`` for internal work names,
-    #: which are not catalogue copy.
-    _summary_source_locale: str | None = None
 
     def _summary_text(self) -> str:
         """The bar's one sentence: ``messages · 12`` (``12+`` when cut).
@@ -4462,13 +4548,379 @@ class QuietGroupBlock(ExpandableActionBlock):
         class docstring — the expansion is the members' reveal)."""
         return self._build_row(width)
 
-    def settled_rows(self) -> int:
-        """Rows settled now: always one — the bar does not grow."""
-        return self._row_count if self._finalized else 0
 
-    def spans_multiple_rows(self) -> bool:
-        """Never: the bar's own rendered height is pinned at one row."""
-        return False
+#: Repaint cadence for a live fold bar's elapsed reading: the same 1 Hz the tool
+#: row's own clock runs at, so the bar and the card under it never disagree by a
+#: visible second.
+LIVE_CLOCK_S = 1.0
+
+
+class FoldBarBlock(_SingleRowBarBlock):
+    """One bar over a fold: a turn's before-answer span, a run, a sub-group.
+
+    THE LAYER OWNS THE FACTS. This widget paints one row and answers three
+    gestures; :class:`~local_operator.tui.tool_fold.ToolFoldLayer` derives what
+    it says and decides what it hides. The split is what keeps the live path and
+    replay identical: both derive the outline from the blocks on hand, so the
+    bar's count, kinds, failures and clock never depend on which event stream
+    happened to build it.
+
+    WHAT THE ROW SAYS, left to right: the disclosure mark in the ledger's ICON
+    column (the same cell a tool row spends on its identity glyph, so a bar reads
+    as part of the column), the name column the tool rows share, the summary
+    clause, an optional ``expand``/``collapse`` offer while hovered or focused,
+    and a right-aligned clock in the Duration column. A live run replaces the
+    clock with ``◐ <tool> <summary> <elapsed>`` — the one thing on this row that
+    moves, and the reason it owns a 1 Hz timer.
+
+    THE SUMMARY IS THE DESIGN'S GRAMMAR, not a second copy of it: ``N actions ·
+    kind, kind +M · ✗ K failed`` comes from ``tool_outline.summary_clauses``,
+    which drops kinds before the failure count and never touches the time (the
+    time is not in that text — it is the right-aligned cell this row reserves
+    first). A same-tool sub-group says ``×N`` where the count would be, because
+    its name column already states WHICH tool.
+
+    ONE ROW EITHER WAY. Opening a bar is the members' reveal, never this row's
+    growth: the bar authors one line in both states (see the class docstring of
+    the receipt bar beside it, which is the same shape), so toggling cannot move
+    the viewport by a wrapped line.
+
+    KEYS. ``enter``/``space`` toggle (inherited), ``up``/``down`` walk the
+    visible ledger (inherited, and the view asks this layer for the order),
+    ``left`` closes or steps OUT to the parent bar, ``right`` opens or steps INTO
+    the first child. The printable ``f``/``F``/``+``/``-`` keys are deliberately
+    NOT bound here or anywhere else yet (slice 5): a printable binding on a
+    focused row is excluded from the composer passthrough, which would swallow
+    the first letter of a sentence typed while a bar had focus.
+    """
+
+    EXPANDED_CLASS = "fold-bar-expanded"
+
+    BINDINGS = [
+        Binding("left", "fold_out", "Close, or out to the parent", show=False),
+        Binding("right", "fold_in", "Open, or into the first child", show=False),
+    ]
+
+    def __init__(self, key: str, layer: "ToolFoldLayer", *, fold_width: int = 0) -> None:
+        super().__init__()
+        self.key = key
+        #: The layer's nesting depth for this bar's ROW inset. Slice 5 threads
+        #: it through ``row_indent``; today it only orders sibling bars mounted
+        #: at one anchor (a turn bar before the run bar inside it).
+        self.depth = 0
+        self._layer = layer
+        #: ``turn`` | ``run`` | ``sub`` — the only thing that changes the row's
+        #: grammar. The name is resolved per BUILD from this token, so a live
+        #: language switch repaints the word with no restate.
+        self._kind = "run"
+        self._tool_name = ""
+        self._facts: ToolFacts | None = None
+        #: Whether the turn this bar lives in produced NO answer: the only
+        #: state where the failure clause earns danger ink (a failure on an
+        #: answered turn is history, not alarm).
+        self._noanswer = False
+        #: The running call whose progress this bar reports, if one is under
+        #: it. Held as the CARD so the clock is its own reading: the bar and the
+        #: row then cannot disagree about how long the call has been going, and
+        #: a card that cannot date itself shows no number rather than a zero.
+        self._live_card: ToolCard | None = None
+        self._live_summary = ""
+        self._clock: Timer | None = None
+        self._expanded = False
+        self._hovered = False
+        self._focused = False
+        self.set_fold_hint(fold_width)
+        self._refresh_row()
+        self.finalize()
+
+    # -- the layer's vocabulary ------------------------------------------------
+
+    @property
+    def kind(self) -> str:
+        """``turn`` | ``run`` | ``sub``: which grammar this bar's row speaks."""
+        return self._kind
+
+    def restate(
+        self,
+        *,
+        kind: str,
+        depth: int,
+        tool_name: str,
+        facts: ToolFacts,
+        noanswer: bool,
+        live: ToolCard | None,
+        live_summary: str,
+    ) -> None:
+        """Take the layer's latest derivation. Rebuilds only what moved."""
+        changed = (
+            kind != self._kind
+            or depth != self.depth
+            or tool_name != self._tool_name
+            or facts != self._facts
+            or noanswer != self._noanswer
+        )
+        self._kind = kind
+        self.depth = depth
+        self._tool_name = tool_name
+        self._facts = facts
+        self._noanswer = noanswer
+        live_changed = live is not self._live_card or live_summary != self._live_summary
+        self._live_card = live
+        self._live_summary = live_summary
+        if live_changed:
+            self._sync_clock()
+        if changed or live_changed:
+            self._refresh_row()
+
+    def set_open(self, open: bool) -> None:  # noqa: A002 - the reader's state, not a builtin use
+        """Paint the reader's open/closed state (the layer applies its veto)."""
+        if open == self._expanded:
+            return
+        self._expanded = open
+        self.set_class(open, self.EXPANDED_CLASS)
+        self._refresh_row()
+
+    def retire(self) -> None:
+        """Stop the clock before the layer unmounts this bar."""
+        self._stop_clock()
+
+    # -- ExpandableActionBlock's contract --------------------------------------
+
+    def can_expand(self) -> bool:
+        """Always: the layer only creates a bar that hides rows."""
+        return True
+
+    def _after_toggle(self) -> None:
+        """The reader's choice outranks every default from here on."""
+        self._layer.note_bar_toggled(self)
+
+    def action_fold_out(self) -> None:
+        """Left: close this bar, or — already closed — go out to its parent."""
+        if self._expanded:
+            self.activate()
+            return
+        parent = self._layer.parent_bar(self.key)
+        if parent is not None:
+            parent.focus()
+
+    def action_fold_in(self) -> None:
+        """Right: open this bar, or — already open — step into its first child."""
+        if not self._expanded:
+            self.activate()
+            return
+        child = self._layer.first_child(self.key)
+        if child is not None:
+            child.focus()
+
+    def on_mount(self) -> None:
+        """Start the clock for a bar mounted already reporting a live call.
+
+        The common path is a bar the layer created during a live turn — it is
+        restated and then mounted, and ``__init__`` had no pump to schedule
+        against. Same shape as the tool card's own ``on_mount``.
+        """
+        self._sync_clock()
+
+    def on_unmount(self) -> None:
+        self._stop_clock()
+
+    # -- the row --------------------------------------------------------------
+
+    def _row_name(self) -> str:
+        """The name column's word: the fold's own, or the tool a sub folds."""
+        from local_operator.tui.glyphs import display_name
+
+        if self._kind == "turn":
+            return _fold_t(tui_transcript_fold.turn())
+        if self._kind == "run":
+            return _fold_t(tui_transcript_fold.work())
+        return display_name(self._tool_name)
+
+    def _clauses(self, budget: int) -> tuple[Clause, ...]:
+        """The summary grammar for this bar's kind, fitted to ``budget`` cells.
+
+        The budget is decided by :meth:`_build_row`, because only it knows the
+        width the row really has after the name column, the offer and the
+        right-aligned clock have taken their cells.
+
+        A same-tool sub-group does NOT use the turn/run grammar: its name column
+        already says WHICH tool, so the count clause is ``×N`` and the tally
+        follows. Every other bar delegates to ``tool_outline.summary_clauses``,
+        which is the ONE implementation of "drop kinds before the tally, never
+        the clock".
+        """
+        facts = self._facts
+        if facts is None:
+            return ()
+        if self._kind == "sub":
+            clauses = [
+                Clause(
+                    _fold_t(tui_transcript_fold.times(label=self._count_label(facts.count))),
+                    "muted",
+                )
+            ]
+            if facts.failed:
+                clauses.append(Clause(" · ", "dim"))
+                clauses.append(
+                    Clause(self._failed_text(facts.failed), "danger" if self._noanswer else "muted")
+                )
+            return tuple(clauses)
+
+        def plural(count: int) -> str:
+            return _raw_t(tui_transcript.group_actions(count=count, label=self._count_label(count)))
+
+        return summary_clauses(
+            facts, budget, self._noanswer, plural=plural, failed=self._failed_text
+        )
+
+    def _failed_text(self, failed: int) -> str:
+        return _fold_t(tui_transcript_fold.failed(label=self._count_label(failed)))
+
+    def _append_clauses(self, row: Text, budget: int, clauses: tuple[Clause, ...]) -> None:
+        """Append ``clauses`` cut to ``budget`` cells, keeping each role's ink.
+
+        The clauses come from two keyed namespaces and a tool's own name, so the
+        bar carries no single source locale; the active locale is the source
+        ``localized_display`` projects against, which is the same treatment the
+        settings registry gives copy with no per-value provenance.
+        """
+        from local_operator.tui.widgets.tool_card import truncate_cells
+
+        remaining = budget
+        for clause in clauses:
+            if remaining <= 0:
+                return
+            style = Style(color=theme_mod.semantic_color(clause.role))
+            text = clause.text
+            if cell_len(text) <= remaining:
+                row.append(localized_display(text).plain, style=style)
+                remaining -= cell_len(text)
+                continue
+            # The ONE ellipsis the head-preserving fit uses; the row is one line
+            # and a cut clause must say it was cut (design D8's floor).
+            row.append(localized_display(truncate_cells(text, remaining)).plain, style=style)
+            return
+
+    def _right_segment(self, width: int) -> tuple[str, Style]:
+        """The right-aligned cell: the live reading, else the summed clock."""
+        from local_operator.tui.glyphs import display_name
+        from local_operator.tui.widgets.tool_card import (
+            DURATION_COL,
+            ICON_PARTIAL,
+            format_duration,
+            truncate_cells,
+        )
+
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        if self._live_card is not None:
+            elapsed = self._live_card.duration_s
+            clock = format_duration(elapsed) if elapsed is not None else ""
+            parts = (display_name(self._live_card.tool_name), self._live_summary)
+            label = " ".join(part for part in parts if part)
+            cap = 16 if width < 70 else 30
+            live = f"{ICON_PARTIAL} {truncate_cells(label, cap)}"
+            if clock:
+                live = f"{live} {clock}"
+            return live, Style(color=theme_mod.semantic_color("accent"))
+        facts = self._facts
+        if facts is not None and facts.duration_s is not None:
+            return format_duration(facts.duration_s).rjust(DURATION_COL), dim
+        return "", dim
+
+    def _build_row(self, width: int) -> Text:
+        """The single summary row — the one-row guarantee lives here."""
+        from local_operator.tui.glyphs import FOLD_CLOSED_GLYPH, FOLD_OPEN_GLYPH
+        from local_operator.tui.widgets.tool_card import (
+            _SUMMARY_FLOOR,
+            COLLAPSE_HINT,
+            EXPAND_HINT,
+            row_body_width,
+            row_indent,
+            truncate_cells,
+        )
+
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        muted = Style(color=theme_mod.semantic_color("muted"))
+
+        indent = row_indent(width)
+        width = row_body_width(width)
+        glyph = FOLD_OPEN_GLYPH if self._expanded else FOLD_CLOSED_GLYPH
+        label = self._row_name()
+        right_text, right_style = self._right_segment(width)
+        right_cells = cell_len(right_text) + 1 if right_text else 0
+
+        # The name column, the clock's cells and one cell of summary are spent
+        # before the summary is measured (the D8 floor's arithmetic, borrowed
+        # from the row this bar sits in).
+        name_budget = width - 4 - right_cells
+        if name_budget < 2:
+            # Too narrow even for a shrunken name: the mark and the disclosure
+            # are all this row can honestly carry.
+            row = Text(no_wrap=True, overflow="ellipsis")
+            if indent:
+                row.append(" " * indent, style=dim)
+            row.append(glyph + " ", style=dim)
+            return row
+
+        name_col = min(self._name_col(width), name_budget)
+        name = truncate_cells(label, name_col)
+        name = name + " " * max(0, name_col - cell_len(name))
+        prefix_cells = 2 + name_col + 1
+
+        remaining = max(0, width - prefix_cells)
+        slot = ""
+        if self._hovered or self._focused:
+            offer = COLLAPSE_HINT if self._expanded else EXPAND_HINT
+            if remaining - (cell_len(offer) + 1) - right_cells >= _SUMMARY_FLOOR:
+                slot = offer
+        slot_cells = cell_len(slot) + 1 if slot else 0
+        budget = max(0, remaining - slot_cells - right_cells)
+
+        row = Text(no_wrap=True, overflow="ellipsis")
+        if indent:
+            row.append(" " * indent, style=dim)
+        row.append(glyph + " ", style=dim)
+        row.append(name + " ", style=muted)
+        self._append_clauses(row, budget, self._clauses(budget))
+        if slot:
+            used = cell_len(row.plain)
+            pad = max(1, width - used - cell_len(slot) - right_cells)
+            row.append(" " * pad, style=dim)
+            row.append(slot, style=dim)
+        if right_text:
+            used = cell_len(row.plain)
+            pad = max(1, width - used - right_cells)
+            row.append(" " * pad, style=dim)
+            row.append(" ", style=dim)
+            row.append(right_text, style=right_style)
+        balance_display_line(row)
+        return row
+
+    def _build_content(self, width: int) -> Text:
+        """The bar itself: one row in both states (see the class docstring)."""
+        return self._build_row(width)
+
+    # -- the live clock -------------------------------------------------------
+
+    def _sync_clock(self) -> None:
+        """Run the 1 Hz repaint for as long as this bar reports a live call."""
+        if self._live_card is None or self._live_card.duration_s is None:
+            self._stop_clock()
+            return
+        if self._clock is None and self.is_running and self.is_mounted:
+            self._clock = self.set_interval(LIVE_CLOCK_S, self._tick_clock)
+
+    def _tick_clock(self) -> None:
+        """Repaint the ONE moving cell. No layout: the row is always one line."""
+        if self._live_card is None:
+            self._stop_clock()
+            return
+        self._refresh_row()
+
+    def _stop_clock(self) -> None:
+        if self._clock is not None:
+            self._clock.stop()
+            self._clock = None
 
 
 #: The predecessor families an owned auxiliary chain may pass through: the
@@ -4761,6 +5213,116 @@ def work_record_of_block(block: TranscriptBlock) -> WorkRecord:
     if isinstance(block, ImageBlock):
         return WorkRecord(source_id, "material", material=True)
     return WorkRecord(source_id, "notice")
+
+
+#: The stop-notice heads that name a turn which produced NOTHING (a failed or
+#: aborted turn, ``harness/rows.py::assistant_stop_notice``). The fold reads the
+#: row's TYPE and its kind first; these words are the last test because the
+#: notice's text is the one thing that says WHICH death it was, and only the
+#: failed one makes the failure tally an alarm rather than history. The strings
+#: are English by design — ``rows.py`` is model-and-phone-facing and its notices
+#: are not catalogue copy (the same exception ``quiet_groups.py`` records).
+_TURN_FAILED_HEADS: tuple[str, ...] = ("turn failed",)
+
+
+def _outline_row_id(block: TranscriptBlock) -> str:
+    """A row's stable id for the tool outline — the quiet records' own scheme.
+
+    ``navigation_anchor_id`` plus the part the source assigned, so a replayed row
+    and a live one of the same message agree; ``b<id>`` only for a block that has
+    never been told its anchor (a synthetic row built by a test or a preview),
+    where identity is all that can be stable. Keys are never re-derived from
+    POSITION: appends are the only structural change, so an id that is not
+    positional is what keeps a bar's key still while the run under it grows.
+    """
+    anchor = str(getattr(block, "navigation_anchor_id", "") or "")
+    part = getattr(block, "navigation_anchor_part", 0)
+    return f"{anchor}:{part}" if anchor else f"b{id(block):x}"
+
+
+def outline_row_of(block: TranscriptBlock) -> OutlineRow | None:
+    """One mounted block as the tool outline's row vocabulary, or ``None`` to skip.
+
+    The adapter half of the fold: ``tool_outline`` is pure and knows only row
+    KINDS, so exactly one place decides which block is which. Kept here rather
+    than in ``tool_fold`` because these are this module's block classes — and
+    the same vocabulary ``work_record_of_block`` reads a few lines up, whose
+    split (streaming vs settled vs narration) the assistant arm repeats rather
+    than inventing a second rule.
+
+    A block that is NOT one of the rows a reader reads (this layer's own bars, a
+    transient working line — the caller filters those) comes back as
+    ``other_visible``: an honest visible row that splits a run, which is the safe
+    direction for anything this adapter does not positively recognise.
+    """
+    from local_operator.tui.widgets.assistant import AssistantBlock
+    from local_operator.tui.widgets.image_block import ImageBlock
+    from local_operator.tui.widgets.tool_card import ToolCard
+
+    row_id = _outline_row_id(block)
+    if isinstance(block, ToolCard):
+        return OutlineRow(
+            row_id,
+            "tool",
+            tool_name=block.tool_name,
+            state=cast(ToolState, block.state),
+            duration_s=block.duration_s,
+            summary=block.summary,
+        )
+    if isinstance(block, UserBlock):
+        return OutlineRow(row_id, "user")
+    if isinstance(block, AssistantBlock):
+        if block.is_narration():
+            kind: RowKind = "prose_narration"
+        elif block._settled:
+            # The ONE final answer of a turn is the settled, non-narration row;
+            # ``tool_outline`` picks the last of these, so a streaming block is
+            # deliberately NOT one (a turn whose tail is still arriving has no
+            # answer to condense to yet).
+            kind = "prose_final"
+        else:
+            kind = "other_visible"
+        return OutlineRow(row_id, kind)
+    if isinstance(block, NoticeBlock):
+        if block.notice_kind == "error" and block.text().strip().startswith(_TURN_FAILED_HEADS):
+            return OutlineRow(row_id, "notice_failed")
+        return OutlineRow(row_id, "other_visible")
+    if isinstance(block, QuietGroupBlock):
+        # A receipt bar stands for its own members and is one visible row to
+        # this fold; the tools it hides are skipped by the layer (they belong
+        # to the receipt, not to a run).
+        return OutlineRow(row_id, "other_visible")
+    if isinstance(block, ImageBlock):
+        return OutlineRow(row_id, "other_visible")
+    return OutlineRow(row_id, "other_visible")
+
+
+def outline_row_is_exempt(block: TranscriptBlock) -> bool:
+    """Whether a fold may NEVER hide this row.
+
+    The design's three: an ``ask`` (a question the reader must answer), a
+    generated image (the answer itself) and a call awaiting approval
+    (``waiting`` — the one row that is a decision, not a receipt). Each also
+    SPLITS a run in ``tool_outline``, so a run never contains one; this predicate
+    is what keeps a TURN bar from hiding them, which is the direction the
+    prototype's pre-answer span would otherwise take.
+
+    ...plus every ``interactive-notice`` row: "older messages", "history page",
+    a draft recovered, a send that failed. Those rows exist to be ACTED on, and
+    a resumed window opens with one as its very first row — folding it under the
+    seam turn's bar hid the only control that pages further back (caught by
+    ``test_rendered_history_paging``, whose notice measured a zero region). The
+    test is the CSS class every one of them carries, not a list of types, so a
+    new interactive notice inherits the rule.
+    """
+    from local_operator.tui.widgets.image_block import ImageBlock
+    from local_operator.tui.widgets.tool_card import ToolCard
+
+    if isinstance(block, (AskResponseBlock, ImageBlock)):
+        return True
+    if block.has_class("interactive-notice"):
+        return True
+    return isinstance(block, ToolCard) and block.state == "waiting"
 
 
 def project_work_blocks(
@@ -7250,6 +7812,15 @@ class TranscriptView(ScrollableContainer):
         #: because a conversation's own rows are the state the fold reads — a
         #: parked view keeps its own tail, and :meth:`clear_blocks` resets it.
         self._quiet_groups = QuietGroupTracker(self)
+        #: The multi-level fold over tool calls (turn > run > same-tool
+        #: sub-group). Owns the bars, the reader's open state and every row's
+        #: visibility under them. Imported HERE rather than at module scope
+        #: because `tool_fold` reads this module's block classes at ITS module
+        #: scope; the cycle is broken at construction time, which is the first
+        #: moment either side is complete.
+        from local_operator.tui.tool_fold import ToolFoldLayer
+
+        self._tool_fold = ToolFoldLayer(self)
 
     def on_mount(self) -> None:
         """Give the system vertical scrollbar an open-hand hover cursor.
@@ -7394,9 +7965,11 @@ class TranscriptView(ScrollableContainer):
         if mode == self._display_mode:
             return
         self._display_mode = mode
-        # slice 4: re-derive from the earliest dirty turn here — mode switch
-        # keeps focus on the same entry or the nearest visible bar, and open
-        # state survives because the fold layer keys its bars by row id.
+        # One re-derivation, coalesced with any dirty appends: the layer diffs
+        # its bars by key, so only bars mount or unmount — no ToolCard is
+        # remounted — and the reader's open/closed choices survive because they
+        # are keyed by row id, not by the mode that drew them.
+        self._tool_fold.note_mode_change()
 
     @property
     def display_mode(self) -> str:
@@ -7647,6 +8220,11 @@ class TranscriptView(ScrollableContainer):
         )
         release_revision = self._tail_anchor.release_revision
         self.mount_all(blocks)
+        # The rows a held batch was carrying are MOUNTED now, which is what the
+        # tool fold's bars need before they can sit before them: a derive that
+        # ran while the batch was still held skipped its bars (their anchors had
+        # no seat yet), and this is what re-derives them in the same landing.
+        self._tool_fold.invalidate()
         # A batch arrives as ONE ledger change, so it gets one resync rather than
         # the per-append fast path's reading of it: the newcomers were held out
         # of the container while they were appended, and the column their names
@@ -7839,6 +8417,10 @@ class TranscriptView(ScrollableContainer):
         # Only a pending owned page requests adoption; ordinary inserts keep
         # their existing incremental tracker and default quiet-fold semantics.
         self._quiet_groups.adopt_reconciled_page()
+        # The page's rows are source rows at a positional seam: every span the
+        # tool fold derived may now cover different rows. Deferred to the frame,
+        # where the newcomers are mounted and carry their anchors.
+        self._tool_fold.invalidate()
         # Revealed rows are part of the ledger now, and a page can carry tool
         # names longer than anything already on screen. Re-derive and repaint in
         # the same pass as the mount: dropping the cache alone left the rows
@@ -8534,7 +9116,17 @@ class TranscriptView(ScrollableContainer):
         stopping at them: what the arrow keys traverse is the list of
         ACTIONABLE rows, and a stop on an inert paragraph would read as the
         key having failed.
+
+        THE ORDER IS THE FOLD LAYER'S when it has one. A fold bar is not a
+        source block (it stands over rows rather than being one), so it is not
+        in ``self._blocks``; and a row a closed bar hides must never be a stop.
+        The layer already derives exactly those two sets — visible rows plus the
+        bars over them, in reading order — so it answers first and the ledger
+        walk below stays the fallback for every view that has no fold (and for a
+        row the layer does not know, e.g. one inside an open receipt bar).
         """
+        if self._tool_fold.focus_neighbour(block, delta):
+            return True
         try:
             index = self._blocks.index(block)
         except ValueError:
@@ -8628,7 +9220,10 @@ class TranscriptView(ScrollableContainer):
             if following.SPACING_TRANSIENT:
                 continue
             self._apply_gap(self._anchor_before(offset), following)
-            return
+            break
+        # A removed row is a changed source: the fold drops any bar that stood
+        # over it and re-derives the turns around the hole.
+        self._tool_fold.invalidate()
 
     def replace_block(self, old: TranscriptBlock, new: TranscriptBlock) -> bool:
         """Swap one mounted block for its successor AT THE SAME POSITION.
@@ -8669,6 +9264,7 @@ class TranscriptView(ScrollableContainer):
         # newcomer as a tail row, which could never undo a boundary the old
         # row caused.
         self._quiet_groups.reconcile_source_change(new)
+        self._tool_fold.invalidate()
         return True
 
     def blocks(self) -> list[TranscriptBlock]:
@@ -8700,6 +9296,17 @@ class TranscriptView(ScrollableContainer):
 
     # -- the quiet-group fold (design §5, slice S5) --------------------------
 
+    def note_fold_change(self, block: TranscriptBlock) -> None:
+        """Tell the tool fold that a mounted row's FACTS moved.
+
+        Called from :meth:`TranscriptBlock.finalize`, i.e. wherever a row
+        becomes durable — the one funnel every settle path already runs through.
+        Not called per repaint: a card's 1 Hz clock repaints its own row, and the
+        fold's live bar rides its own clock for the same second, so a per-tick
+        re-derive would be the same number paid twice.
+        """
+        self._tool_fold.invalidate()
+
     def note_quiet_append(self, block: TranscriptBlock) -> None:
         """Feed one mounted append to the quiet-group fold.
 
@@ -8712,10 +9319,14 @@ class TranscriptView(ScrollableContainer):
         group nor anchor one.
         """
         self._quiet_groups.note_append(block)
+        self._tool_fold.invalidate()
 
     def restate_quiet_member(self, block: TranscriptBlock) -> None:
         """Refresh corrected receipt facts without appending a second member."""
         self._quiet_groups.restate_member(block)
+        # A member's facts moved (a corrected receipt, a settled call): the bar
+        # above it may be counting them.
+        self._tool_fold.invalidate()
 
     def note_quiet_source_part(self, block: TranscriptBlock) -> None:
         """Tell the fold about a source row INSERTED at its original seat.
@@ -8728,6 +9339,9 @@ class TranscriptView(ScrollableContainer):
         uses, which keeps the seat, the open/latch state and the original owner.
         """
         self._quiet_groups.reconcile_source_change(block)
+        # An ordered source change: the row's seat moved, so every derived span
+        # that touches it may have changed shape.
+        self._tool_fold.invalidate()
 
     def set_quiet_head_cut(self, cut: bool) -> None:
         """State whether this view's head may continue beyond its first row.
@@ -8764,6 +9378,10 @@ class TranscriptView(ScrollableContainer):
         # family decides whether the edge row itself continues a run, and the
         # decision table needs the family AND the coordinate (Q-R10-1).
         prev_kind, prev_owner = self._quiet_edge_context(above)
+        # The page is a source change at ``at_index``: the tool fold cannot see
+        # these rows until they mount, and the derive it schedules runs after
+        # that mount (see `ToolFoldLayer.invalidate`).
+        self._tool_fold.invalidate()
         return fold_quiet_group_list(
             blocks,
             prev_block=prev_block,
@@ -8861,6 +9479,10 @@ class TranscriptView(ScrollableContainer):
         # remembered would fold the next append onto widgets that no longer
         # exist.
         self._quiet_groups.reset()
+        # The fold's bars stand over these rows and its open state is keyed by
+        # their ids; a cleared transcript resets both (a resumed session starts
+        # folded the way a fresh one does).
+        self._tool_fold.reset()
         # An insert settling into the transcript that just went away has no
         # reader to hold. `_reanchor_insert` would notice the anchor is
         # unparented and drop it anyway, but clearing at the source keeps the

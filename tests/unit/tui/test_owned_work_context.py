@@ -589,7 +589,11 @@ async def test_a_live_tool_only_run_no_longer_forms_a_work_bar() -> None:
     from local_operator.tui.app import OperatorApp
     from local_operator.tui.events import ToolComposing, ToolStarted, UserMessageStart
     from local_operator.tui.widgets.tool_card import ToolCard
-    from local_operator.tui.widgets.transcript import QuietGroupBlock, TranscriptView
+    from local_operator.tui.widgets.transcript import (
+        FoldBarBlock,
+        QuietGroupBlock,
+        TranscriptView,
+    )
     from tests.unit.tui.conftest import await_session_boot
     from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -628,8 +632,14 @@ async def test_a_live_tool_only_run_no_longer_forms_a_work_bar() -> None:
         assert [card.tool_call_id for card in cards] == ["call-0", "call-1", "call-2"]
         assert not any(
             isinstance(block, QuietGroupBlock) for block in view.blocks()
-        ), "a tool-only run no longer forms a work bar"
-        assert all(card.display for card in cards), "the rows paint as ordinary cards"
+        ), "a tool-only run no longer forms a receipt bar"
+        # ...it forms a TOOL FOLD bar instead (slice 4). The rows are the same
+        # three cards, condensed by the layer that now owns consecutive tool
+        # runs; the receipt fold above is untouched.
+        bars = [child for child in view.children if isinstance(child, FoldBarBlock)]
+        assert [bar.kind for bar in bars] == ["run"], "the tool fold owns the run"
+        assert not bars[0].expanded, "a run with no live tail starts folded"
+        assert not any(card.display for card in cards), "the run bar condenses them"
         assert all(
             card.internal_work_membership is not None for card in cards
         ), "the rows are still owned work, just not folded work"

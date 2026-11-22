@@ -283,6 +283,7 @@ def summary_clauses(
     noanswer: bool,
     *,
     plural: Callable[[int], str] | None = None,
+    failed: Callable[[int], str] | None = None,
 ) -> tuple[Clause, ...]:
     """The bar's left-hand summary, per the prototype's ``barSummaryST``.
 
@@ -300,7 +301,10 @@ def summary_clauses(
 
     ``plural`` renders the count clause so the caller can plug the catalogue's
     ICU plural (``tui.transcript.group.actions``); without it the English
-    singular/plural pair is used. ``noanswer`` marks a turn that died, which
+    singular/plural pair is used. ``failed`` renders the tally the same way
+    (``✗ K failed``) and defaults to the English literal, so this module stays
+    runnable without a catalogue while the widget paints keyed copy.
+    ``noanswer`` marks a turn that died, which
     is the only state where the failure count earns danger ink.
     """
     count_clause = (plural or _english_actions)(facts.count)
@@ -319,7 +323,8 @@ def summary_clauses(
             clauses.append(Clause(kinds, "muted"))
         if facts.failed:
             clauses.append(Clause(" · ", "dim"))
-            clauses.append(Clause(f"✗ {facts.failed} failed", "danger" if noanswer else "muted"))
+            tally = failed(facts.failed) if failed is not None else f"✗ {facts.failed} failed"
+            clauses.append(Clause(tally, "danger" if noanswer else "muted"))
         return clauses
 
     for shown in range(min(MAX_SUMMARY_KINDS, len(names)), -1, -1):
