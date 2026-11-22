@@ -1,4 +1,5 @@
 """A mounted /info must repaint through both real language-setting routes."""
+
 import asyncio
 import os
 import subprocess
@@ -7,10 +8,10 @@ from pathlib import Path
 
 import pytest
 
+from local_operator.config_watch import _reset_for_tests, process_watcher
 from local_operator.i18n import text
 from local_operator.i18n.keys import tui_small
 from local_operator.paths import CONFIG_DIR_ENV
-from local_operator.config_watch import _reset_for_tests, process_watcher
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.info_panel import InfoScreen
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
@@ -24,6 +25,8 @@ from tests.unit.tui.test_language_live import _boot, _write_elsewhere
 async def test_mounted_info_repaints_without_refetching(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, route: str, at_end: bool
 ) -> None:
+    from scripts.visual_capture import save_capture
+
     config_dir = tmp_path / "cfg"
     config_dir.mkdir()
     monkeypatch.setenv(CONFIG_DIR_ENV, str(config_dir))
@@ -48,7 +51,6 @@ async def test_mounted_info_repaints_without_refetching(
             before = str(screen._title.content)
             evidence = os.environ.get("INFO_READOUT_EVIDENCE")
             if evidence:
-                from scripts.visual_capture import save_capture
                 save_capture(app, str(Path(evidence) / f"refresh-{route}-before.svg"))
             repainted = asyncio.Event()
             first_hints: list[str] = []
@@ -61,7 +63,9 @@ async def test_mounted_info_repaints_without_refetching(
                     # before call_after_refresh can repair a stale-language hint.
                     first_hints.append(str(screen._hint.content))
                     if evidence:
-                        save_capture(app, str(Path(evidence) / f"refresh-{route}-{at_end}-immediate.svg"))
+                        save_capture(
+                            app, str(Path(evidence) / f"refresh-{route}-{at_end}-immediate.svg")
+                        )
                     repainted.set()
 
             monkeypatch.setattr(screen, "_repaint", observe_first_paint)
@@ -73,12 +77,20 @@ async def test_mounted_info_repaints_without_refetching(
             else:
                 # A real other process, with only synthetic config and the test
                 # environment; the app's automatic watcher must deliver the move.
-                result = subprocess.run([
-                    sys.executable, "-c",
-                    "from pathlib import Path; import sys; "
-                    "from tests.unit.tui.test_language_live import _write_elsewhere; "
-                    "_write_elsewhere(Path(sys.argv[1]), 'fr')", str(config_dir),
-                ], cwd=tmp_path, capture_output=True, text=True, timeout=30)
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        "from pathlib import Path; import sys; "
+                        "from tests.unit.tui.test_language_live import _write_elsewhere; "
+                        "_write_elsewhere(Path(sys.argv[1]), 'fr')",
+                        str(config_dir),
+                    ],
+                    cwd=tmp_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
                 assert result.returncode == 0, result.stderr
                 assert result.stderr == ""
             await asyncio.wait_for(repainted.wait(), timeout=15)

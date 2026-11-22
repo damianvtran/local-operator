@@ -54,7 +54,9 @@ from local_operator.info.copy import (
     info_leaving,
     info_plural,
     info_state,
-    info_text as _i,
+)
+from local_operator.info.copy import info_text as _i
+from local_operator.info.copy import (
     info_update,
     info_wrap_end,
     join_info,
@@ -242,10 +244,10 @@ def _reload_state_copy() -> None:
     global _UPDATING_SHORT, _UPDATING_SHORT_OTHER
     _LEAVING_SHORT = {
         LEAVING_ON_SIGNAL: _i(
-                               _ik.status_leaving_silent(
-                                   SIGNAL_DRAIN_S=str(bound_text(SIGNAL_DRAIN_S)),
-                               ),
-                           ),
+            _ik.status_leaving_silent(
+                SIGNAL_DRAIN_S=str(bound_text(SIGNAL_DRAIN_S)),
+            ),
+        ),
         LEAVING_FOR_BUILD: _i(_ik.status_leaving_for_build()),
         # The bounded handover, and the SHELF IS `no movement {bound}` rather than a
         # cut of the long phrase: ``no movement`` is the runtime's own observation
@@ -255,14 +257,14 @@ def _reload_state_copy() -> None:
         # Rendered from the constant, like the signal rung's, so the compact form
         # cannot disagree with the long one.
         LEAVING_FOR_BUILD_OVERDUE: _i(
-                                       _ik.status_no_movement(
-                                           BUILD_DRAIN_PROGRESS_S=str(
-                                               bound_text(
-                                                   BUILD_DRAIN_PROGRESS_S,
-                                               ),
-                                           ),
-                                       ),
-                                   ),
+            _ik.status_no_movement(
+                BUILD_DRAIN_PROGRESS_S=str(
+                    bound_text(
+                        BUILD_DRAIN_PROGRESS_S,
+                    ),
+                ),
+            ),
+        ),
     }
 
     #: The fallback above: no trigger named, no bound claimed, nothing false.
@@ -650,7 +652,7 @@ def _install_section(body: _Body, snapshot: InfoSnapshot | None, loading: bool) 
         body.kv(
             _i(_ik.label_version()),
             (_i(_ik.install_loading()) if loading else _i(_ik.install_unavailable())),
-            value_style='dim',
+            value_style="dim",
         )
         return
     install = snapshot.install
@@ -734,14 +736,18 @@ def _install_section(body: _Body, snapshot: InfoSnapshot | None, loading: bool) 
             ),
             # Shed the translated description, never part of the identifying SHA.
             values=(
-                _i(_ik.install_source_snapshot(source_ref=str(install.source_ref[:12]))),
-                install.source_ref[:12],
-            ) if install.source_ref else (),
+                (
+                    _i(_ik.install_source_snapshot(source_ref=str(install.source_ref[:12]))),
+                    install.source_ref[:12],
+                )
+                if install.source_ref
+                else ()
+            ),
             notes=(
-                      _i(_ik.install_snapshot_note_full()),
-                      _i(_ik.install_snapshot_note_short()),
-                      'lop-update',
-                  ),
+                _i(_ik.install_snapshot_note_full()),
+                _i(_ik.install_snapshot_note_short()),
+                "lop-update",
+            ),
         )
     else:
         body.kv(
@@ -779,9 +785,7 @@ def _install_section(body: _Body, snapshot: InfoSnapshot | None, loading: bool) 
         # symptom is a change that "did not work" — and `/reload` does not clear
         # it, because the cwd is inherited at spawn (`runtime/launch.py`).
         body.blank()
-        body.note(
-            _i(_ik.install_shadow_explanation())
-        )
+        body.note(_i(_ik.install_shadow_explanation()))
 
 
 def _latest_notes(install: object) -> tuple[str, ...]:
@@ -799,24 +803,24 @@ def _latest_notes(install: object) -> tuple[str, ...]:
         # together on a broken install, which is the state /info is opened in
         # (review round 1, M3).
         return (
-                   _i(_ik.latest_installed_unreadable()),
-                   _i(_ik.latest_full_unknown()),
-                   _i(_ik.latest_unknown()),
-               )
+            _i(_ik.latest_installed_unreadable()),
+            _i(_ik.latest_full_unknown()),
+            _i(_ik.latest_unknown()),
+        )
     latest = getattr(install, "latest_known", None)
     if latest is None:
         return (
-                   _i(_ik.latest_never_checked()),
-                   _i(_ik.latest_full_unknown()),
-                   _i(_ik.latest_unknown()),
-               )
+            _i(_ik.latest_never_checked()),
+            _i(_ik.latest_full_unknown()),
+            _i(_ik.latest_unknown()),
+        )
     age = getattr(install, "latest_age_s", None)
     if getattr(install, "behind", False):
         return (
-                   _i(_ik.latest_behind_full(latest=str(latest))),
-                   f'< {latest}',
-                   _i(_ik.latest_behind_short()),
-               )
+            _i(_ik.latest_behind_full(latest=str(latest))),
+            f"< {latest}",
+            _i(_ik.latest_behind_short()),
+        )
     if age is None:
         return (_i(_ik.latest_current()), _i(_ik.latest_current()))
     stale = _i(_ik.latest_stale()) if age > TTL_S else ""
@@ -838,22 +842,22 @@ def _kind_of_runtime_notes(kind: str) -> tuple[str, ...]:
     """
     if kind == "daemon":
         return (
-                   _i(_ik.kind_of_runtime_daemon_full()),
-                   _i(_ik.kind_of_runtime_daemon_short()),
-                   _i(_ik.kind_of_runtime_daemon_terse()),
-               )
+            _i(_ik.kind_of_runtime_daemon_full()),
+            _i(_ik.kind_of_runtime_daemon_short()),
+            _i(_ik.kind_of_runtime_daemon_terse()),
+        )
     if kind == "tui":
         return (
-                   _i(_ik.kind_of_runtime_attached_full()),
-                   _i(_ik.kind_of_runtime_attached_short()),
-                   _i(_ik.kind_of_runtime_attached_short()),
-               )
+            _i(_ik.kind_of_runtime_attached_full()),
+            _i(_ik.kind_of_runtime_attached_short()),
+            _i(_ik.kind_of_runtime_attached_short()),
+        )
     if kind == "exec":
         return (
-                   _i(_ik.kind_of_runtime_exec_full()),
-                   _i(_ik.kind_of_runtime_exec_short()),
-                   _i(_ik.kind_of_runtime_exec_terse()),
-               )
+            _i(_ik.kind_of_runtime_exec_full()),
+            _i(_ik.kind_of_runtime_exec_short()),
+            _i(_ik.kind_of_runtime_exec_terse()),
+        )
     return ()
 
 
@@ -872,10 +876,10 @@ def _import_path_notes(install: object) -> tuple[str, ...]:
         return ()
     if getattr(install, "kind", "") == "editable":
         return (
-                   _i(_ik.import_path_editable_full()),
-                   _i(_ik.import_path_editable_short()),
-                   _i(_ik.import_path_editable_terse()),
-               )
+            _i(_ik.import_path_editable_full()),
+            _i(_ik.import_path_editable_short()),
+            _i(_ik.import_path_editable_terse()),
+        )
     return (
         _i(_ik.import_path_shadowed_full()),
         _i(_ik.import_path_shadowed_short()),
@@ -887,10 +891,10 @@ def _kind_notes(kind: str) -> tuple[str, ...]:
     """Say what the install kind MEANS for changing the code, at three widths."""
     if kind == "editable":
         return (
-                   _i(_ik.kind_editable_full()),
-                   _i(_ik.kind_editable_short()),
-                   _i(_ik.import_path_editable_terse()),
-               )
+            _i(_ik.kind_editable_full()),
+            _i(_ik.kind_editable_short()),
+            _i(_ik.import_path_editable_terse()),
+        )
     if kind == "uv-tool":
         return (
             _i(_ik.kind_uv_full()),
@@ -899,10 +903,10 @@ def _kind_notes(kind: str) -> tuple[str, ...]:
         )
     if kind in ("pip", "pipx"):
         return (
-                   _i(_ik.kind_pip_full(kind=str(kind))),
-                   _i(_ik.kind_pip_short(kind=str(kind))),
-                   _i(_ik.kind_non_editable()),
-               )
+            _i(_ik.kind_pip_full(kind=str(kind))),
+            _i(_ik.kind_pip_short(kind=str(kind))),
+            _i(_ik.kind_non_editable()),
+        )
     return ()
 
 
@@ -960,7 +964,7 @@ def _session_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState
         (
             _i(_ik.session_started(uptime_s=info_duration(process.uptime_s)))
             if process.uptime_s
-            else '—'
+            else "—"
         ),
     )
     body.kv(_i(_ik.label_working_dir()), _path(process.cwd, body.value_cells))
@@ -985,7 +989,7 @@ def _session_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState
     body.kv(
         _i(_ik.label_control_port()),
         port,
-        note=(_i(_ik.session_protocol(protocol=str(process.protocol))) if process.protocol else ''),
+        note=(_i(_ik.session_protocol(protocol=str(process.protocol))) if process.protocol else ""),
     )
 
 
@@ -1001,10 +1005,10 @@ def _redirect_notes(redirected: bool, variable: str) -> tuple[str, ...]:
     if not redirected:
         return ()
     return (
-               _i(_ik.redirect_full(variable=str(variable))),
-               _i(_ik.redirect_short()),
-               _i(_ik.redirect_terse()),
-           )
+        _i(_ik.redirect_full(variable=str(variable))),
+        _i(_ik.redirect_short()),
+        _i(_ik.redirect_terse()),
+    )
 
 
 def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
@@ -1103,7 +1107,7 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         # rightmost facts are the least identifying: which session it is and
         # whether it is not answering must survive to the narrowest frame,
         # while the memory figure is the one a reader can do without.
-        bits = [_i(_ik.sessions_self())] if line.is_self else []
+        bits: list[str] = [_i(_ik.sessions_self())] if line.is_self else []
         # THE HELD STATE, AHEAD OF THE STATE WORD AND OUTSIDE ITS BRANCH (design review
         # round 1, D1 for the placement; round 2, D6 for the gate). "not answering" alone
         # reads as "still settling", and before this change the bound RESOLVED such a
@@ -1126,7 +1130,7 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
             bits.append(
                 (
                     _t(_x.info_panel_not_answering())
-                    if line.state == 'wedged'
+                    if line.state == "wedged"
                     else info_state(line.state)
                 ),
             )
@@ -1216,11 +1220,7 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
             # answering" (a bound that fired and was held means nothing is reporting) and
             # it is the fact that tells the reader a person is needed. The wide frame
             # keeps both, so nothing is lost that fits.
-            short_meta = (
-                             HELD_STATE_WORD
-                             if line.stall_held
-                             else _i(_x.info_panel_not_answering())
-                         )
+            short_meta = HELD_STATE_WORD if line.stall_held else _i(_x.info_panel_not_answering())
         elif phase:
             # The SHELF form, keyed by the PHASE the row is in — the failed phase
             # included, so a fleet whose only news is an abandoned update says so at
@@ -1232,9 +1232,7 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
             short_meta = ""
         body.marked(glyph, ink, name, metas=metas, short_meta=short_meta)
     if sessions.build_skew:
-        body.note(
-            _i(_ik.sessions_build_skew())
-        )
+        body.note(_i(_ik.sessions_build_skew()))
     if not sessions.usage_available:
         body.note(_i(_ik.sessions_memory_unavailable()))
 
@@ -1302,9 +1300,7 @@ def _fleet_caveats(body: _Body, sessions: SessionsInfo | None) -> None:
         # "1 session runs an older build and do not report" — reachable as soon
         # as the fleet is one restart from updated, i.e. the tail of the very
         # rollout this caveat exists for.
-        body.note(
-            _i(_ik.fleet_caveats_lower_bound(count=count))
-        )
+        body.note(_i(_ik.fleet_caveats_lower_bound(count=count)))
     if sessions.wedged:
         # The shared sentence, NOT a second copy: it names the measured age, the
         # pid and the remedy (``lop stop --pid N``, with ``--force`` priced for
@@ -1354,10 +1350,10 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
         # coming; only its wording is compressed.
         short = _i(_ik.agents_loading_short(own=own))
         shorts = (
-                     _i(_ik.agents_loading_mid(short=str(short))),
-                     _i(_ik.agents_loading_terse(own=str(own))),
-                     short,
-                 )
+            _i(_ik.agents_loading_mid(short=str(short))),
+            _i(_ik.agents_loading_terse(own=str(own))),
+            short,
+        )
     else:
         runtimes = _runtimes(sessions)
         # ``≥`` — and the reason it is not simply the total — is the whole of
@@ -1384,23 +1380,23 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
             # unanchored — N trajectories across how many processes? The
             # abbreviation is what makes keeping both affordable.
             short = _i(
-                        _ik.agents_summary_terse(
-                            runtimes=str(runtimes),
-                            bound=str(bound),
-                            total=str(total),
-                        ),
-                    )
+                _ik.agents_summary_terse(
+                    runtimes=str(runtimes),
+                    bound=str(bound),
+                    total=str(total),
+                ),
+            )
         elif bound:
             # Nothing measured AND nothing known: ``0`` here would be pure
             # fabrication, so the count is refused outright rather than hedged.
             # ``—`` is the screen's existing "we looked and could not tell",
             # not a fourth vocabulary.
             meta = _i(
-                       _ik.agents_unknown_full(
-                           plural=str(_plural(runtimes, 'runtime')),
-                           UNKNOWN=str(UNKNOWN),
-                       ),
-                   )
+                _ik.agents_unknown_full(
+                    plural=str(_plural(runtimes, "runtime")),
+                    UNKNOWN=str(UNKNOWN),
+                ),
+            )
             short = _i(_ik.agents_unknown_terse(runtimes=str(runtimes), UNKNOWN=str(UNKNOWN)))
         elif sessions is not None and sessions.fleet_subagents_queued:
             # Measured, and measured as zero RUNNING — but not as nothing.
@@ -1414,11 +1410,11 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
             # through an unmeasured term.
             queued = sessions.fleet_subagents_queued
             meta = _i(
-                       _ik.agents_queued_full(
-                           plural=str(_plural(runtimes, 'runtime')),
-                           queued=queued,
-                       ),
-                   )
+                _ik.agents_queued_full(
+                    plural=str(_plural(runtimes, "runtime")),
+                    queued=queued,
+                ),
+            )
             # Two rungs, because this short form is the first whose width grows
             # with its DIGITS: a fleet-wide queued sum is not bounded by
             # ``max_running``, so two digits are ordinary on a busy host and
@@ -1429,15 +1425,15 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
             # is the backstop beneath both.
             short = _i(_ik.agents_queued_short(runtimes=str(runtimes), queued=str(queued)))
             shorts = (
-                         short,
-                         _i(_ik.agents_queued_terse(runtimes=str(runtimes), queued=str(queued))),
-                     )
+                short,
+                _i(_ik.agents_queued_terse(runtimes=str(runtimes), queued=str(queued))),
+            )
         else:
             # Every runtime reported, every one reported zero, and nothing is
             # waiting either. This is the one state in which the bare word is
             # earned: it is a measurement, and ``none running`` reads better
             # than ``0``.
-            meta = _i(_ik.agents_quiet_full(plural=str(_plural(runtimes, 'runtime'))))
+            meta = _i(_ik.agents_quiet_full(plural=str(_plural(runtimes, "runtime"))))
             # ``none`` and not ``0tj``: the bare-zero rule does not relax on a
             # narrow frame, and the word costs one cell more than the digit.
             short = _i(_ik.agents_quiet_short(runtimes=str(runtimes)))
@@ -1454,7 +1450,7 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
             _i(
                 _ik.agents_runtimes(
                     live=sessions.live,
-                    has_wedged=str('yes' if sessions.wedged else 'no'),
+                    has_wedged=str("yes" if sessions.wedged else "no"),
                     wedged=str(sessions.wedged),
                 ),
             ),
@@ -1487,13 +1483,11 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
             )
         else:
             bound = "≥" if sessions.subagents_unreported else ""
-            addends = (
-                _i(
-                    _ik.agents_addends(
-                        sessions=sessions.fleet_session_trajectories,
-                        subagents=sessions.fleet_subagents_running,
-                    ),
-                )
+            addends = _i(
+                _ik.agents_addends(
+                    sessions=sessions.fleet_session_trajectories,
+                    subagents=sessions.fleet_subagents_running,
+                ),
             )
             # Queued rides the ADDENDS, not the total: it is not a trajectory
             # (nothing is being spent yet), so adding it to the sum would
@@ -1564,7 +1558,7 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
     if agents is not None:
         body.kv(
             _i(_ik.label_agent_profiles()),
-            _counted(agents.profiles, 'agents.profiles', snapshot),
+            _counted(agents.profiles, "agents.profiles", snapshot),
         )
         body.kv(_i(_ik.label_teams()), _counted(agents.teams, "agents.teams", snapshot))
     queued = agents.queued if agents else live.queued
@@ -1594,7 +1588,7 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
                 _ik.agents_session_full(
                     running=running,
                     queued=queued,
-                    has_depth=str('yes' if depth else 'no'),
+                    has_depth=str("yes" if depth else "no"),
                     depth=str(depth),
                 ),
             ),
@@ -1608,7 +1602,7 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
                     _ik.agents_session_full(
                         running=running,
                         queued=queued,
-                        has_depth=str('yes' if depth else 'no'),
+                        has_depth=str("yes" if depth else "no"),
                         depth=str(depth),
                     ),
                 ),
@@ -1620,10 +1614,10 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
             # count that silently under-reports inside a bug report is worse
             # than one that says what it counts.
             notes=(
-                      _i(_ik.agents_retained_full(settled=settled)),
-                      _i(_ik.agents_retained_short(settled=settled)),
-                      _i(_ik.agents_retained_terse(settled=settled)),
-                  ),
+                _i(_ik.agents_retained_full(settled=settled)),
+                _i(_ik.agents_retained_short(settled=settled)),
+                _i(_ik.agents_retained_terse(settled=settled)),
+            ),
         )
     max_running = agents.max_running if agents else live.max_running
     at_capacity = agents.at_capacity if agents else live.at_capacity
@@ -1632,10 +1626,10 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
             _i(_ik.label_subagent_capacity()),
             _i(_ik.agents_capacity(max_running=max_running)),
             notes=(
-                      (_i(_ik.agents_capacity_full()), _i(_ik.agents_capacity_short()))
-                      if at_capacity
-                      else ()
-                  ),
+                (_i(_ik.agents_capacity_full()), _i(_ik.agents_capacity_short()))
+                if at_capacity
+                else ()
+            ),
             value_style="warning" if at_capacity else "fg",
         )
     if not tree:
@@ -1705,16 +1699,12 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
     # otherwise read as a fleet-wide view. The COUNTS above are fleet-wide, the
     # TREE is not, and which is which has to be said in words.
     if agents is not None and agents.cross_session_known:
-        body.note(
-            _i(_ik.agents_tree_counts())
-        )
+        body.note(_i(_ik.agents_tree_counts()))
     else:
         # Nobody else reported, so the older text is still exactly right: this
         # screen genuinely knows nothing about other windows' children, and
         # promising counts it does not have would be the worse error.
-        body.note(
-            _i(_ik.agents_tree_legacy())
-        )
+        body.note(_i(_ik.agents_tree_legacy()))
     _fleet_caveats(body, sessions)
 
 
@@ -1775,14 +1765,16 @@ def _env_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState) ->
             notes=(
                 (_i(_ik.env_mcp_connecting_full()), _i(_ik.env_mcp_connecting_short()))
                 if mcp_settling
-                else ((
-                          (
-                              _i(_ik.env_mcp_failed_full(mcp_failed=mcp_failed)),
-                              _i(_ik.env_mcp_failed_short()),
-                          )
-                          if mcp_failed
-                          else ()
-                      ))
+                else (
+                    (
+                        (
+                            _i(_ik.env_mcp_failed_full(mcp_failed=mcp_failed)),
+                            _i(_ik.env_mcp_failed_short()),
+                        )
+                        if mcp_failed
+                        else ()
+                    )
+                )
             ),
             value_style="warning" if mcp_failed and not mcp_settling else "fg",
         )
@@ -1888,11 +1880,11 @@ def build_info_report(
             _i(
                 _ik.report_captured(
                     time_strftime=str(
-                                      time.strftime(
-                                          '%H:%M:%S',
-                                          time.localtime(snapshot.captured_at),
-                                      ),
-                                  ),
+                        time.strftime(
+                            "%H:%M:%S",
+                            time.localtime(snapshot.captured_at),
+                        ),
+                    ),
                 ),
             ),
         )
@@ -2056,11 +2048,11 @@ class InfoScreen(ModalScreen[None]):
         hint = getattr(self, "_hint", None)
         if scroll is not None and hint is not None and hint.is_mounted:
             row = InfoRow(
-                      (
-                          self._info_hint()
-                          + (_t(_x.panels_scroll_hint()) if scroll.max_scroll_y > 0 else '')
-                      ),
-                  )
+                (
+                    self._info_hint()
+                    + (_t(_x.panels_scroll_hint()) if scroll.max_scroll_y > 0 else "")
+                ),
+            )
             row.truncate(self._card_width(), overflow="crop")
             hint.update(paint_info_row(row))
 

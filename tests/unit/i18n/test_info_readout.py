@@ -4,6 +4,7 @@ The English golden is derived from the manager-pinned base, not from the new
 implementation. It protects full/short/terse semantics and clipboard bytes while
 independent translators/auditors own the seven real target catalogues.
 """
+
 from __future__ import annotations
 
 import ast
@@ -17,11 +18,32 @@ import pytest
 from local_operator.i18n import catalogues
 from local_operator.i18n.keys import tui_info
 from local_operator.i18n.text import set_active_locale
-from local_operator.info.copy import InfoRow, info_duration, info_plural, info_text, paint_info_row
-from local_operator.info.model import InfoSnapshot, InstallInfo, SessionLine, SessionsInfo, format_duration
+from local_operator.info.copy import (
+    InfoRow,
+    info_duration,
+    info_plural,
+    info_text,
+    paint_info_row,
+)
+from local_operator.info.model import (
+    InfoSnapshot,
+    InstallInfo,
+    SessionLine,
+    SessionsInfo,
+    format_duration,
+)
 from local_operator.info.render import build_export, not_answering_clause, plural
-from local_operator.tui.widgets.info_panel import _Body, _install_section, build_info_report
-from tests.unit.tui.test_info_panel import _fleet_sessions, _live, _quiet_owner_sessions, _snapshot
+from local_operator.tui.widgets.info_panel import (
+    _Body,
+    _install_section,
+    build_info_report,
+)
+from tests.unit.tui.test_info_panel import (
+    _fleet_sessions,
+    _live,
+    _quiet_owner_sessions,
+    _snapshot,
+)
 
 FIXTURE = Path(__file__).with_name("fixtures") / "info_readout_en_golden.json"
 ROOT = Path(__file__).resolve().parents[3]
@@ -36,23 +58,23 @@ def source_cases() -> dict[str, InfoSnapshot | None]:
         "registry_unavailable": replace(normal, sessions=SessionsInfo(available=False)),
         "partial_fleet": replace(normal, sessions=_fleet_sessions(subagents_unreported=1)),
         "queued_only": replace(
-                           normal,
-                           sessions=_fleet_sessions(
-                                        fleet_session_trajectories=0,
-                                        fleet_subagents_running=0,
-                                        fleet_subagents_queued=3,
-                                        fleet_trajectories=0,
-                                    ),
-                       ),
+            normal,
+            sessions=_fleet_sessions(
+                fleet_session_trajectories=0,
+                fleet_subagents_running=0,
+                fleet_subagents_queued=3,
+                fleet_trajectories=0,
+            ),
+        ),
         "not_answering": replace(normal, sessions=_quiet_owner_sessions()),
         "shadowed": replace(
-                        normal,
-                        install=replace(
-                                    normal.install,
-                                    import_path='/opt/checkout/local_operator',
-                                    import_path_foreign=True,
-                                ),
-                    ),
+            normal,
+            install=replace(
+                normal.install,
+                import_path="/opt/checkout/local_operator",
+                import_path_foreign=True,
+            ),
+        ),
         "latest_unknown": replace(normal, install=replace(normal.install, latest_known=None)),
         "installed_unreadable": replace(normal, install=replace(normal.install, version="")),
         "degraded": replace(normal, degraded=(("env.credentials", "probe unavailable"),)),
@@ -97,17 +119,22 @@ def test_missing_namespace_and_key_use_english_source_plural_rules(monkeypatch, 
     root = tmp_path / "catalogues"
     (root / "en").mkdir(parents=True)
     (root / "fr").mkdir()
-    (root / "en" / "tui.info.json").write_text(json.dumps({
-        "tui.info.count.session": "{count, plural, one {# session} other {# sessions}}",
-    }))
+    (root / "en" / "tui.info.json").write_text(
+        json.dumps(
+            {
+                "tui.info.count.session": "{count, plural, one {# session} other {# sessions}}",
+            }
+        )
+    )
     monkeypatch.setattr(catalogues, "_CATALOGUES", root)
     set_active_locale("fr")
     assert info_plural(0, "session") == "0 sessions"
     assert info_plural(1, "session") == "1 session"
     assert info_plural(2, "session") == "2 sessions"
     # A carried namespace missing this key follows the identical source route.
-    (root / "fr" / "tui.info.json").write_text('{}')
+    (root / "fr" / "tui.info.json").write_text("{}")
     from local_operator.i18n.text import _sources
+
     _sources.cache_clear()
     assert info_plural(0, "session") == "0 sessions"
 
@@ -127,6 +154,7 @@ def test_marker_locale_reaches_body_and_clipboard_without_mutating_snapshot(
     (root / "fr" / "tui.info.json").write_text(json.dumps(markers))
     monkeypatch.setattr(catalogues, "_CATALOGUES", root)
     snapshot = source_cases()["populated"]
+    assert snapshot is not None
     before = asdict(snapshot)
     set_active_locale("fr")
     assert "MARKER-INSTALL" in build_info_report(snapshot, _live()).plain
@@ -161,9 +189,9 @@ def test_rtl_projection_is_source_aware_post_fit_and_not_exported(monkeypatch, t
     (root / "en" / "tui.info.json").write_text(json.dumps(source))
     # Synthetic glyph probes, NOT translations and NOT a native-layout claim.
     markers = {"tui.info.label.version": "\u0627" * 5}
-    markers["tui.info.not_answering_clause.remedy_one"] = "\u0627 " + source[
-        "tui.info.not_answering_clause.remedy_one"
-    ]
+    markers["tui.info.not_answering_clause.remedy_one"] = (
+        "\u0627 " + source["tui.info.not_answering_clause.remedy_one"]
+    )
     (root / "ur" / "tui.info.json").write_text(json.dumps(markers))
     monkeypatch.setattr(catalogues, "_CATALOGUES", root)
     set_active_locale("ur")
@@ -178,7 +206,9 @@ def test_rtl_projection_is_source_aware_post_fit_and_not_exported(monkeypatch, t
     command.append(info_text(tui_info.not_answering_clause_remedy_one(pid="4243")))
     painted = paint_info_row(command).plain
     assert "\u2066'lop stop --pid 4243 --force'\u2069" in painted
-    exported = build_export(source_cases()["not_answering"])
+    snapshot = source_cases()["not_answering"]
+    assert snapshot is not None
+    exported = build_export(snapshot)
     assert not any(control in exported for control in "\u2066\u2067\u2069")
 
 
@@ -202,7 +232,9 @@ def test_duration_uses_audited_units_in_info_locale() -> None:
     assert any(part is duration.parts[0] for part in outer.parts)
 
 
-def test_missing_duration_is_whole_field_select_not_zero_or_latest_unknown(monkeypatch, tmp_path) -> None:
+def test_missing_duration_is_whole_field_select_not_zero_or_latest_unknown(
+    monkeypatch, tmp_path
+) -> None:
     from local_operator.i18n.runtime import render_message
     from scripts.i18n.generate import _param_types
 
@@ -220,7 +252,15 @@ def test_missing_duration_is_whole_field_select_not_zero_or_latest_unknown(monke
         assert _param_types(source[key]) == [(arg, "str")]
         assert render_message(source[key], {arg: "unmeasured"}, "en") == label + "unknown"
         assert render_message(source[key], {arg: "0s"}, "en") == label + "0s"
-        markers[key] = "{" + arg + ", select, unmeasured {MARKER-MISSING-" + arg + "} other {MARKER-MEASURED {" + arg + "}}}"
+        markers[key] = (
+            "{"
+            + arg
+            + ", select, unmeasured {MARKER-MISSING-"
+            + arg
+            + "} other {MARKER-MEASURED {"
+            + arg
+            + "}}}"
+        )
     (root / "fr" / "tui.info.json").write_text(json.dumps(markers))
     monkeypatch.setattr(catalogues, "_CATALOGUES", root)
     set_active_locale("fr")
@@ -235,10 +275,13 @@ def test_missing_duration_is_whole_field_select_not_zero_or_latest_unknown(monke
 @pytest.mark.parametrize("width", [51, 126, 1000])
 def test_nested_actual_pid_remedy_survives_production_wrap(width) -> None:
     set_active_locale("ur")
-    snapshot = InfoSnapshot(sessions=SessionsInfo(
-        total=1, wedged=1,
-        lines=(SessionLine(pid=4243, state="wedged", heartbeat_age_s=65),),
-    ))
+    snapshot = InfoSnapshot(
+        sessions=SessionsInfo(
+            total=1,
+            wedged=1,
+            lines=(SessionLine(pid=4243, state="wedged", heartbeat_age_s=65),),
+        )
+    )
     clause = not_answering_clause(snapshot.sessions)
     body = _Body(width)
     body.note(clause)
@@ -256,13 +299,19 @@ def test_nested_message_preserves_actual_fallback_source(monkeypatch, tmp_path) 
         (root / locale).mkdir(parents=True)
     (root / "en" / "tui.info.json").write_text(json.dumps(source))
     # Synthetic outer glyphs with an English-only leaf, not native translation.
-    (root / "ur" / "tui.info.json").write_text(json.dumps({
-        "tui.info.not_answering_clause.full": "ا {remedy} ا {remedy}",
-    }))
+    (root / "ur" / "tui.info.json").write_text(
+        json.dumps(
+            {
+                "tui.info.not_answering_clause.full": "ا {remedy} ا {remedy}",
+            }
+        )
+    )
     monkeypatch.setattr(catalogues, "_CATALOGUES", root)
     set_active_locale("ur")
     leaf = info_text(tui_info.not_answering_clause_remedy_one(pid="4243"))
-    outer = info_text(tui_info.not_answering_clause_full(count=1, age="65s", pids="4243", remedy=leaf))
+    outer = info_text(
+        tui_info.not_answering_clause_full(count=1, age="65s", pids="4243", remedy=leaf)
+    )
     assert sum(part is leaf.parts[0] for part in outer.parts) == 2
     body = _Body(1000)
     body.note(outer)
@@ -274,9 +323,17 @@ def test_nested_message_preserves_actual_fallback_source(monkeypatch, tmp_path) 
 def test_source_identity_survives_same_narrow_input(locale) -> None:
     set_active_locale(locale)
     body = _Body(51)
-    _install_section(body, InfoSnapshot(install=InstallInfo(
-        version="0.90.0", is_git_snapshot=True, source_ref="a1b2c3d4e5f67890",
-    )), False)
+    _install_section(
+        body,
+        InfoSnapshot(
+            install=InstallInfo(
+                version="0.90.0",
+                is_git_snapshot=True,
+                source_ref="a1b2c3d4e5f67890",
+            )
+        ),
+        False,
+    )
     assert "a1b2c3d4e5f6" in body.to_text().plain
     assert all(row.cell_len <= 51 for row in body.lines)
 
@@ -287,10 +344,23 @@ def test_semantic_context_counterexamples_follow_actual_model_facts(monkeypatch,
     from local_operator.info.collect import build_subagent_tree
     from local_operator.info.copy import info_state
     from local_operator.session.runtime import registry, stall_watchdog
+    from local_operator.session.runtime.types import SessionRecord
 
     # Dead PID plus fresh heartbeat is stale; a live PID plus old heartbeat is
     # not. These facts, not the English word's everyday meaning, own translation.
-    record = SimpleNamespace(pid=4243, heartbeat_at=100.0)
+    # Use the registry's actual record contract, with the same PID/beat facts;
+    # default live-state fields must not turn a liveness probe into a mock API.
+    record = SessionRecord(
+        pid=4243,
+        heartbeat_at=100.0,
+        kind="tui",
+        session_id="synthetic-info",
+        conversation_name="",
+        cwd=str(tmp_path),
+        model_label="",
+        control_port=0,
+        control_key="",
+    )
     monkeypatch.setattr(registry, "pid_alive", lambda *a, **kw: False)
     dead = registry.classify(record, now=100.0, check_zombie=False)
     assert dead.state == "stale" and dead.heartbeat_age_s == 0
@@ -299,8 +369,13 @@ def test_semantic_context_counterexamples_follow_actual_model_facts(monkeypatch,
     assert registry.classify(record, now=1000.0, check_zombie=False).state == "wedged"
 
     # A held label may be conservative/unproven, not a diagnosed hung process.
-    text = stall_watchdog.FIRED_MARKER + " synthetic\n" + stall_watchdog.HELD_MARKER + "old format\n"
-    assert stall_watchdog.held_reading(tmp_path / "synthetic.dump", text) == stall_watchdog.HELD_UNPROVEN
+    text = (
+        stall_watchdog.FIRED_MARKER + " synthetic\n" + stall_watchdog.HELD_MARKER + "old format\n"
+    )
+    assert (
+        stall_watchdog.held_reading(tmp_path / "synthetic.dump", text)
+        == stall_watchdog.HELD_UNPROVEN
+    )
 
     # Five hidden siblings occupy one hidden level: deeper counts nodes.
     nodes = [SimpleNamespace(job_id="root", parent_job_id=None)]
@@ -309,9 +384,14 @@ def test_semantic_context_counterexamples_follow_actual_model_facts(monkeypatch,
     assert len(visible) == 1 and deepest == 1 and hidden == 5
 
     # A known runtime census can coexist with incomplete trajectory reporting.
-    snapshot = InfoSnapshot(sessions=SessionsInfo(
-        live=4, total=4, subagents_unreported=1, fleet_trajectories=7,
-    ))
+    snapshot = InfoSnapshot(
+        sessions=SessionsInfo(
+            live=4,
+            total=4,
+            subagents_unreported=1,
+            fleet_trajectories=7,
+        )
+    )
     rendered = build_info_report(snapshot, _live(), 126).plain
     assert str(info_text(tui_info.agents_summary_full(runtimes=4, bound="≥", total=7))) in rendered
     assert "≥4" not in rendered
@@ -326,10 +406,16 @@ def _unkeyed_custom_labels(source: str) -> list[str]:
     """
     found = []
     for node in ast.walk(ast.parse(source)):
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and isinstance(node.func.value, ast.Name) and node.func.value.id == "body"
-                and node.func.attr in {"kv", "header"} and node.args
-                and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "body"
+            and node.func.attr in {"kv", "header"}
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
             found.append(node.args[0].value)
     return found
 
