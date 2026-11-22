@@ -1,3 +1,0 @@
-[run_bounded] memory budget 4695 MiB (auto); sampled owned child group and escaped descendants
-check.py --update: baseline now 176 file(s)
-[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=7962a1d41a614ca283b2ef2960b91962 completion=/Users/damian/.local-operator/sessions/aefc1154704d/scratchpad/run-bounded-runs/7962a1d41a614ca283b2ef2960b91962.completion.json
