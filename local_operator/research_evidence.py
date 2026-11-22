@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import re
 import uuid
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ValidationError
@@ -30,6 +31,9 @@ from local_operator.harness.types import (
     Usage,
 )
 
+if TYPE_CHECKING:
+    from local_operator.session.transcript import TranscriptEntry
+
 logger = logging.getLogger(__name__)
 EvidenceKind = Literal["search_results", "paginated_web_text"]
 PURPOSE = "tool_conditioning"
@@ -38,6 +42,9 @@ COMPANION = "ca.anthropic.claude-haiku-5-5"
 CANADA = "ca-central-1"
 _MAIN = re.compile(r"ca\.anthropic\.claude-(?:sonnet|opus)-[\w.-]+", re.ASCII)
 _URL = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+_NON_PUBLIC_TLDS = {
+    "localhost", "local", "lan", "internal", "test", "invalid", "example", "onion",
+}
 # Even a validated selection is not an exhaustive extraction; don't ask the
 # model to paraphrase or decide that pagination/completeness no longer matters.
 _SYSTEM = (
@@ -54,16 +61,21 @@ _SYSTEM = (
 class PublicResearchPolicy:
     """Run-scoped authorization to send declared public evidence to a companion.
 
-    An exact MCP tool name is a caller attestation of a trusted, read-only
-    producer and of the declared result contract. Server annotations alone do
-    not authorize egress. The caller also attests that task_focus is public;
-    it must not include private instructions or credentials. Use raw mode
-    (or omit the policy) for full/exact/audit tasks.
+    An exact MCP tool name attests to a trusted read-only producer and its
+    result format, not to the provenance of a result. ``attest_public_source``,
+    when set, is a synchronous trusted caller/adapter check invoked for each
+    candidate with (tool_name, tool_call_id, source_url, source_text). Return
+    True only with independent knowledge that this exact text came from the
+    public source (including the effective origin after redirects). Neither
+    the result's own claims nor URL syntax can supply that knowledge. Without
+    an assertion for every source the original result is used. The caller
+    also attests task_focus is public. Use raw mode for full/exact/audit tasks.
     """
 
     task_focus: str
     tools: Mapping[str, EvidenceKind]
     mode: Literal["extract", "raw"] = "extract"
+    attest_public_source: Callable[[str, str, str, str], bool] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_focus, str) or not self.task_focus.strip():
@@ -135,18 +147,45 @@ def _public_url(text: Any) -> bool:
         parsed = urlsplit(text)
         # Unknown query keys and fragments can be bearer URLs. These fields
         # are not required for selection and must never leave as origin creds.
-        return bool(parsed.hostname) and not (
-            parsed.username is not None
-            or parsed.password is not None
-            or parsed.query
-            or parsed.fragment
-        )
+        host = (parsed.hostname or "").rstrip(".")
+        if not host or parsed.username is not None or parsed.password is not None:
+            return False
+        if parsed.query or parsed.fragment:
+            return False
+        # A syntactically eligible DNS name is not proof of public DNS or a
+        # public redirect target. Only the trusted adapter can attest to that.
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            labels = host.lower().split(".")
+            return (
+                len(labels) > 1
+                and all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", s) for s in labels)
+                and labels[-1][0].isalpha()
+                and labels[-1] not in _NON_PUBLIC_TLDS
+                and not host.lower().endswith(".home.arpa")
+            )
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+            address = address.ipv4_mapped
+        return address.is_global and not (address.is_multicast or address.is_reserved)
     except ValueError:
         return False
 
 
 def _public_text(text: str) -> bool:
     return all(_public_url(match.group()) for match in _URL.finditer(text))
+
+
+def _producer_rejected(record: dict[str, Any]) -> bool:
+    # These describe a producer limitation or failure, not pagination. Leave
+    # offset/next_offset and source_partial to the normal page contract.
+    error = record.get("error")
+    flags = ("capped", "truncated", "is_error", "isError")
+    return (
+        any(record.get(flag, False) is not False for flag in flags)
+        or (error is not None and error is not False)
+        or record.get("status", "ok") not in ("ok", "success")
+    )
 
 
 @dataclass(slots=True)
@@ -163,7 +202,7 @@ class _Evidence:
             )
         except (ValueError, RecursionError):
             return None
-        if not isinstance(obj, dict):
+        if not isinstance(obj, dict) or _producer_rejected(obj):
             return None
         if kind == "search_results":
             rows = obj.get("results")
@@ -171,6 +210,7 @@ class _Evidence:
                 return None
             if any(
                 not isinstance(row, dict)
+                or _producer_rejected(row)
                 or not isinstance(row.get("title"), str)
                 or not _public_url(row.get("url"))
                 or not isinstance(row.get("snippet"), str)
@@ -199,6 +239,11 @@ class _Evidence:
         ):
             return None
         return cls(obj, [page.split("\n")], kind)
+
+    def source_records(self) -> list[tuple[str, str]]:
+        if self.kind == "search_results":
+            return [(row["url"], row["snippet"]) for row in self.envelope["results"]]
+        return [(self.envelope["url"], self.envelope["content"])]
 
     def render(self, response: str) -> str | None:
         try:
@@ -261,14 +306,24 @@ async def read_receipts(transcript: Any) -> list[AuxiliaryUsageReceipt]:
                 read_custom_entries, transcript.directory, RECEIPT_TYPE, strict=True
             )
         )
+    return fold_receipts(rows)
+
+
+def fold_receipts(
+    newest_first: Iterable[TranscriptEntry], *, strict: bool = True
+) -> list[AuxiliaryUsageReceipt]:
+    """Take the latest durable row for each paid-or-possibly-paid request."""
     receipts: dict[str, AuxiliaryUsageReceipt] = {}
-    for row in rows:
+    for row in newest_first:
         if row.type != "custom" or row.payload.get("custom_type") != RECEIPT_TYPE:
             continue
         try:
             receipt = AuxiliaryUsageReceipt.model_validate(row.payload.get("details"))
         except ValidationError as error:
-            raise ValueError("Unreadable auxiliary billing receipt") from error
+            if strict:
+                raise ValueError("Unreadable auxiliary billing receipt") from error
+            logger.warning("Unreadable auxiliary billing receipt during spend recovery")
+            continue
         receipts.setdefault(receipt.request_id, receipt)
     return list(reversed(receipts.values()))
 
@@ -304,7 +359,7 @@ class PublicEvidenceConditioner:
         policy: PublicResearchPolicy,
         streamer: Callable[[ChatRequest, AbortSignal | None], AsyncIterator[StreamEvent]],
         transcript: Any,
-        on_settle: Callable[[Usage | None], None] | None = None,
+        on_settle: Callable[[AuxiliaryUsageReceipt], None] | None = None,
     ) -> None:
         self.policy = policy
         self.streamer = streamer
@@ -325,10 +380,12 @@ class PublicEvidenceConditioner:
         from local_operator.tools.builtin import TOOL_OUTPUT_LIMIT_CHARS
 
         kind = self.policy.tools.get(result.tool_name)
+        attest = self.policy.attest_public_source
         main = self.main
         if (
             self.policy.mode != "extract"
             or kind is None
+            or attest is None
             or main is None
             or main == self.unavailable
             or main.region != CANADA
@@ -351,6 +408,15 @@ class PublicEvidenceConditioner:
             return content
         evidence = _Evidence.parse(original, kind)
         if evidence is None:
+            return content
+        try:
+            if not all(
+                attest(result.tool_name, result.tool_call_id, url, text) is True
+                for url, text in evidence.source_records()
+            ):
+                return content
+        except Exception:  # noqa: BLE001 — verifier failure must not broaden egress
+            logger.debug("Public evidence provenance unavailable; keeping original")
             return content
         selection = await self._select(main, focus, evidence, original, result.tool_call_id, signal)
         return [TextContent(text=selection)] if selection is not None else content
@@ -507,5 +573,5 @@ class PublicEvidenceConditioner:
                 )
                 replacement = None
             if self.on_settle is not None:
-                self.on_settle(usage)
+                self.on_settle(receipt)
         return replacement

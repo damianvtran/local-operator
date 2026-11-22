@@ -6162,7 +6162,15 @@ class AnthropicClient:
         oauth_access: "OAuthAccess | None",
         sent: dict[str, Any],
     ) -> AsyncIterator[StreamEvent]:
-        stop_reason = "stop"
+        # The companion may replace raw evidence, so it cannot use the legacy
+        # EOF-as-stop behavior. Leave existing primary Anthropic turns alone.
+        strict_completion = (
+            request.model.provider == "bedrock"
+            and request._evidence_binding is not None
+            and request._evidence_binding.expected is not None
+        )
+        stop_reason = "incomplete" if strict_completion else "stop"
+        terminal = False
         # Stamped at construction, before the request goes out: the ``Usage`` is
         # filled in as the stream arrives, and a call's time-of-use window is a
         # property of the call (seconds of skew across a stream boundary cannot
@@ -6360,8 +6368,16 @@ class AnthropicClient:
                     if "output_tokens" in raw_usage:
                         output_reported = _reported_token_count(raw_usage, "output_tokens")
                         usage.output_tokens = int(raw_usage["output_tokens"])
+                elif event_type == "message_stop":
+                    terminal = stop_reason != "incomplete"
                 elif event_type == "error":
                     raise _anthropic_stream_error(event.get("error") or {})
+
+        if strict_completion and not (terminal and input_reported and output_reported):
+            # Never emit the provisional Usage: a missing counter is not zero,
+            # and downstream would otherwise price it in analytics and receipts.
+            yield StreamEndEvent(stop_reason="incomplete", served_model=served_model)
+            return
 
         mapped = {
             "end_turn": "stop",

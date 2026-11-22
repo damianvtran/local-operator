@@ -1,6 +1,7 @@
 """The tool-result seam, fail-closed policy, and SDK durable receipts."""
 
 import json
+import socket
 import sqlite3
 from types import SimpleNamespace
 from typing import Any, Literal, cast
@@ -120,6 +121,7 @@ async def append(
             "Find the vote's public outcome",
             {FETCH: "paginated_web_text", SEARCH: "search_results"},
             mode=mode,
+            attest_public_source=lambda *_: True,
         ),
         stream,
         wire.transcript,
@@ -263,14 +265,14 @@ def test_search_preserves_rank_titles_urls_dates_flags_and_every_row():
         },
     ]
     value = _Evidence.parse(
-        json.dumps({"results": rows, "total": 9, "capped": True}), "search_results"
+        json.dumps({"results": rows, "total": 9, "capped": False}), "search_results"
     )
     assert value is not None
     assert value.render("[[2],[]]") is None
     output = value.render("[[2],[1]]")
     assert output is not None
     decoded = json.loads(output.split("\n", 1)[1])
-    assert decoded["total"] == 9 and decoded["capped"] is True
+    assert decoded["total"] == 9 and decoded["capped"] is False
     for row, observed, line in zip(rows, decoded["results"], ["line 2", "line 4"], strict=True):
         assert line in observed.pop("snippet")
         assert observed == {key: data for key, data in row.items() if key != "snippet"}
@@ -333,10 +335,29 @@ def analytics_ledger(tmp_path):
         reset_recorder_for_test()
 
 
-@pytest.mark.parametrize("change_connection", [False, True])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "complete",
+        "identity",
+        "default",
+        "missing_provenance",
+        "unverified_search_row",
+        "local_origin",
+        "capped",
+        "truncated",
+        "producer_error",
+        "missing_message_stop",
+        "unexpected_eof",
+        "missing_usage",
+        "no_checkpoint",
+        "stale_checkpoint",
+        "abort_no_checkpoint",
+    ],
+)
 @pytest.mark.asyncio
 async def test_sdk_prompt_uses_real_bedrock_wire_and_single_ledger_id(
-    tmp_path, monkeypatch, change_connection, analytics_ledger
+    tmp_path, monkeypatch, case, analytics_ledger
 ):
     import httpx
 
@@ -345,6 +366,7 @@ async def test_sdk_prompt_uses_real_bedrock_wire_and_single_ledger_id(
     from local_operator.providers.bedrock.client import BedrockAnthropicClient
     from local_operator.sdk import SessionRoots, open_session
     from local_operator.session.session import Session
+    from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
     from tests.unit.providers.bedrock.eventstream import anthropic_events, stream_bytes
 
     home = tmp_path / "isolated-home"
@@ -356,13 +378,76 @@ async def test_sdk_prompt_uses_real_bedrock_wire_and_single_ledger_id(
     monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "synthetic-first-bearer")
     monkeypatch.chdir(work)
 
+    def deny_network(*args, **kwargs):
+        raise AssertionError("the isolated wire fixture must not use DNS or network sockets")
+
+    monkeypatch.setattr(socket, "getaddrinfo", deny_network)
+    monkeypatch.setattr(socket.socket, "connect", deny_network)
+    with pytest.raises(AssertionError, match="must not use DNS"):
+        socket.getaddrinfo("example.org", 443)
+
+    search = case == "unverified_search_row"
+    tool_name = SEARCH if search else FETCH
+    page_record = json.loads(page())
+    fixture_content = page_record["content"]
+    fixture_url = page_record["url"]
+    assertions = []
+    if case == "missing_provenance":
+        page_record["public_source"] = True  # Self-assertion is not provenance.
+    elif case == "local_origin":
+        page_record["url"] = "http://127.0.0.1/example"
+    elif case == "capped":
+        page_record["capped"] = True
+    elif case == "truncated":
+        page_record["truncated"] = True
+    elif case == "producer_error":
+        page_record["status"] = "error"
+    if search:
+        page_record = {
+            "results": [
+                {"url": fixture_url, "snippet": fixture_content, "title": "Verified"},
+                {"url": "https://example.org/unverified", "snippet": NEEDLE, "title": "Unverified"},
+            ]
+        }
+    source_key = (tool_name, "toolu_fixture", fixture_url, fixture_content)
+    original = json.dumps(page_record)
+
+    def attest(name, call_id, url, text):
+        assertions.append((name, call_id, url))
+        if case == "local_origin":
+            pytest.fail("non-public origins must be excluded before the adapter assertion")
+        return (name, call_id, url, text) == source_key
+
+    no_checkpoint = case in {"no_checkpoint", "abort_no_checkpoint"}
+    incomplete = case in {"missing_message_stop", "unexpected_eof", "missing_usage"}
+    accepted = case in {"complete", "no_checkpoint", "stale_checkpoint"}
+    no_attempt = case in {
+        "default",
+        "missing_provenance",
+        "unverified_search_row",
+        "local_origin",
+        "capped",
+        "truncated",
+        "producer_error",
+    }
     calls = []
 
-    def handler(request):
+    async def handler(request):
         body = json.loads(request.content)
         calls.append((request.url.host, request.url.path, body))
         if COMPANION in request.url.path:
-            events = anthropic_events(text="[[1]]", usage={"input_tokens": 2500}, output_tokens=4)
+            events = anthropic_events(
+                text="[[1]]",
+                usage={"input_tokens": 2500},
+                output_tokens=None if case == "missing_usage" else 4,
+            )
+            if case == "missing_message_stop":
+                events = events[:-1]
+            elif case == "unexpected_eof":
+                events = events[:-2]
+            elif case == "abort_no_checkpoint":
+                session.abort()
+                events = events[:-2]
         elif len(calls) == 1:
             block = [
                 {
@@ -370,7 +455,7 @@ async def test_sdk_prompt_uses_real_bedrock_wire_and_single_ledger_id(
                     "content_block": {
                         "type": "tool_use",
                         "id": "toolu_fixture",
-                        "name": FETCH,
+                        "name": tool_name,
                         "input": {},
                     },
                 },
@@ -397,24 +482,48 @@ async def test_sdk_prompt_uses_real_bedrock_wire_and_single_ledger_id(
         monkeypatch.setattr(SessionStreamFn, "_client_for", client_for)
 
         async def execute(call_id, args, signal, on_update, context):
-            if change_connection:
+            if case == "identity":
                 monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "synthetic-changed-bearer")
+            if case == "stale_checkpoint":
+                assert isinstance(session, Session)
+                await session._write_spend_record()
+                assert session.transcript.latest_custom(SESSION_SPEND_CUSTOM_TYPE)
             return ToolResult(
-                tool_call_id=call_id, tool_name=FETCH, content=[TextContent(text=page())]
+                tool_call_id=call_id,
+                tool_name=tool_name,
+                content=[TextContent(text=original)],
             )
+
+        append_custom = Transcript.append_custom
+
+        async def append_with_spend_fault(transcript, custom_type, details, **kwargs):
+            stale = case == "stale_checkpoint" and details.get("auxiliary_request_ids")
+            if custom_type == SESSION_SPEND_CUSTOM_TYPE and (no_checkpoint or stale):
+                raise OSError("synthetic spend writer fault")
+            return await append_custom(transcript, custom_type, details, **kwargs)
 
         roots = SessionRoots(
             config_dir=config, agent_home=agent_home, cwd=work, allow_volatile=True
         )
-        policy = PublicResearchPolicy("Find the public outcome", {FETCH: "paginated_web_text"})
-        spec = SessionSpec(hosting="bedrock", model=MAIN.model_id, public_research=policy)
+        policy = PublicResearchPolicy(
+            "Find the public outcome",
+            {FETCH: "paginated_web_text", SEARCH: "search_results"},
+            attest_public_source=None if case == "missing_provenance" else attest,
+        )
+        spec = SessionSpec(
+            hosting="bedrock",
+            model=MAIN.model_id,
+            world_root=work,
+            public_research=None if case == "default" else policy,
+        )
         observed = []
+        monkeypatch.setattr(Transcript, "append_custom", append_with_spend_fault)
         async with open_session(spec, roots=roots) as session:
             assert isinstance(session, Session)
             session.refresh_tools(
                 [
                     AgentTool(
-                        name=FETCH,
+                        name=tool_name,
                         parameters={"type": "object", "properties": {}},
                         execute=execute,
                         approval_tier="read",
@@ -426,42 +535,125 @@ async def test_sdk_prompt_uses_real_bedrock_wire_and_single_ledger_id(
                 await session.prompt("Look up the public outcome and report it.")
             finally:
                 unbind()
-            [receipt] = await auxiliary_usage(session)
-            [auxiliary] = [record for record in observed if record.purpose == "tool_conditioning"]
-            assert auxiliary.request_id == receipt.request_id
+            session_id = session.session_id
+            [tool_message] = [
+                msg for msg in session._context.messages
+                if isinstance(msg, Message) and msg.tool_call_id == "toolu_fixture"
+            ]
+            if not accepted:
+                assert tool_message.text == original
+            if session._spend_persist_task is not None:
+                await session._spend_persist_task
+            checkpoint = session.transcript.latest_custom(SESSION_SPEND_CUSTOM_TYPE)
+            if no_checkpoint:
+                assert checkpoint is None
+            elif case == "stale_checkpoint":
+                assert checkpoint and "auxiliary_request_ids" not in checkpoint
             recorder, db_path = analytics_ledger
             recorder.flush_for_test()
             with sqlite3.connect(db_path) as conn:
                 rows = conn.execute(
-                    "SELECT purpose, request_id, cost_known FROM calls WHERE session_id = ?",
-                    (session.session_id,),
+                    "SELECT purpose, request_id, cost_known, usage_reported, outcome, "
+                    "output_tokens FROM calls WHERE session_id = ?",
+                    (session_id,),
                 ).fetchall()
-            assert len(rows) == 3
-            assert [row for row in rows if row[0] == "tool_conditioning"] == [
-                ("tool_conditioning", receipt.request_id, int(not change_connection))
-            ]
-            assert len([record for record in observed if record.purpose == "turn"]) == 2
-            turns = [
-                m
-                for m in session._context.messages
-                if isinstance(m, Message) and m.role == "assistant"
-            ]
-            assert len(turns) == 2 and turns[-1].text == "Fixture answer"
-            assert session._last_usage is not None and session._last_usage.context_tokens == 1000
-            assert session.spend.calls == 3  # two main calls plus one auxiliary
+            receipts = await auxiliary_usage(session)
+            aux_rows = [row for row in rows if row[0] == "tool_conditioning"]
+            aux_observed = [record for record in observed if record.purpose == "tool_conditioning"]
             assert all(host == "bedrock-runtime.ca-central-1.amazonaws.com" for host, *_ in calls)
-            final_prompt = json.dumps(calls[-1][2])
-            if change_connection:
-                assert len(calls) == 2 and receipt.usage is None
-                assert OMITTED in final_prompt
+            if no_attempt:
+                assert not receipts and not aux_rows and not aux_observed
+                assert len(calls) == 2
+                assert OMITTED in json.dumps(calls[-1][2])
+                if search:
+                    assert assertions == [
+                        (SEARCH, "toolu_fixture", fixture_url),
+                        (SEARCH, "toolu_fixture", "https://example.org/unverified"),
+                    ]
+                return
+
+            [receipt] = receipts
+            [auxiliary] = aux_observed
+            assert auxiliary.request_id == receipt.request_id
+            if case == "abort_no_checkpoint":
+                assert len(calls) == 2 and COMPANION in calls[-1][1]
+                assert receipt.usage is None and receipt.outcome == "aborted"
+                assert auxiliary.outcome == "aborted" and not auxiliary.usage_reported
+                assert aux_rows == [("tool_conditioning", receipt.request_id, 0, 0, "aborted", 0)]
             else:
-                assert len(calls) == 3 and COMPANION in calls[1][1]
-                assert receipt.usage is not None and receipt.usage.model_id == COMPANION
-                assert receipt.usage.estimated_usd_cost is not None
-                assert not calls[1][2].get("tools")
-                raw = await raw_public_evidence(session, "toolu_fixture")
-                assert raw is not None and OMITTED in raw
-                assert NEEDLE in final_prompt and OMITTED not in final_prompt
+                assert len(rows) == 3
+                assert len([record for record in observed if record.purpose == "turn"]) == 2
+                turns = [
+                    m for m in session._context.messages
+                    if isinstance(m, Message) and m.role == "assistant"
+                ]
+                assert len(turns) == 2 and turns[-1].text == "Fixture answer"
+                assert session._last_usage is not None
+                assert session._last_usage.context_tokens == 1000
+                assert session.spend.calls == 3
+                final_prompt = json.dumps(calls[-1][2])
+                if accepted:
+                    assert len(calls) == 3 and COMPANION in calls[1][1]
+                    assert receipt.usage is not None and receipt.usage.model_id == COMPANION
+                    assert receipt.usage.estimated_usd_cost is not None
+                    assert auxiliary.usage_reported and auxiliary.outcome == "stop" and auxiliary.ok
+                    assert not calls[1][2].get("tools")
+                    raw = await raw_public_evidence(session, "toolu_fixture")
+                    assert raw == original
+                    assert NEEDLE in final_prompt and OMITTED not in final_prompt
+                    assert aux_rows == [("tool_conditioning", receipt.request_id, 1, 1, "stop", 4)]
+                else:
+                    outcome = "incomplete" if incomplete else "error"
+                    assert len(calls) == (3 if incomplete else 2)
+                    assert receipt.usage is None and receipt.outcome == outcome
+                    observed_outcome = outcome if incomplete else "ProviderError"
+                    assert auxiliary.outcome == observed_outcome and not auxiliary.usage_reported
+                    assert auxiliary.usage is None and not auxiliary.ok
+                    assert OMITTED in final_prompt
+                    assert aux_rows == [
+                        ("tool_conditioning", receipt.request_id, 0, 0, observed_outcome, 0)
+                    ]
+            if accepted and case == "complete":
+                assert checkpoint and checkpoint["auxiliary_request_ids"] == [receipt.request_id]
+
+        if case in {"complete", "no_checkpoint", "stale_checkpoint", "abort_no_checkpoint"}:
+            monkeypatch.setattr(Transcript, "append_custom", append_custom)
+            resume_spec = SessionSpec(
+                hosting="bedrock", model=MAIN.model_id, resume=session_id, world_root=work
+            )
+            async with open_session(resume_spec, roots=roots) as reopened:
+                assert isinstance(reopened, Session)
+                assert reopened._public_evidence is None
+                [recovered] = await auxiliary_usage(reopened)
+                assert recovered.request_id == receipt.request_id
+                if no_checkpoint:
+                    reopened.refresh_frontend_usage()
+                    for task in tuple(reopened._spend_tasks):
+                        await task
+                if reopened._spend_persist_task is not None:
+                    await reopened._spend_persist_task
+                recovered_checkpoint = reopened.transcript.latest_custom(SESSION_SPEND_CUSTOM_TYPE)
+                assert recovered_checkpoint is not None
+                assert recovered_checkpoint["auxiliary_request_ids"] == [receipt.request_id]
+                if case in {"complete", "no_checkpoint"}:
+                    assert reopened.spend.calls == 3  # Both main replies plus the companion.
+                if case == "stale_checkpoint":
+                    assert checkpoint is not None
+                    assert reopened.spend.calls == checkpoint["calls"] + 1
+                if accepted:
+                    entry = reopened.spend.by_identity[f"bedrock/{COMPANION}"]
+                    assert receipt.usage and receipt.usage.estimated_usd_cost is not None
+                    assert entry["calls"] == 1
+                    assert entry["micro"] == round(receipt.usage.estimated_usd_cost * 1_000_000)
+                    raw = await raw_public_evidence(reopened, "toolu_fixture")
+                    assert raw == original
+                else:
+                    assert reopened.spend.unpriced_calls == 1
+            async with open_session(resume_spec, roots=roots) as reopened_again:
+                assert isinstance(reopened_again, Session)
+                assert reopened_again.spend.calls == recovered_checkpoint["calls"]
+                assert reopened_again.spend.micro == recovered_checkpoint["micro"]
+                assert reopened_again.spend.unpriced_calls == recovered_checkpoint["unpriced_calls"]
 
 
 @pytest.mark.asyncio

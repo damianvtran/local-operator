@@ -386,6 +386,7 @@ if TYPE_CHECKING:
     from local_operator.harness.types import DurableWriteIntent
     from local_operator.harness.verifier import VerifierLimits, VerifierVerdict
     from local_operator.harness.verifier_evidence import VerifierEvidence
+    from local_operator.research_evidence import AuxiliaryUsageReceipt
     from local_operator.mcp.manager import McpManager
 
     # Type-only: the contract itself is built by the host that installs it
@@ -5194,6 +5195,8 @@ class Session:
         #: not call it a broken attach invariant (review R1-6). One-shot, cleared
         #: on every write, so a later unexplained decrease still warns.
         self._spend_downward_correction = False
+        self._auxiliary_spend_ids: set[str] = set()
+        self._restored_auxiliary_receipts = self._restore_auxiliary_spend()
         # -- the channel-spend ledger (design: docs/design/spend-channels.md) --
         # Folded from the journal's ``session_channel_spend.v1`` rows in ONE
         # construction pass, keyed by ``record_id`` with the highest ``rev``
@@ -16713,6 +16716,7 @@ class Session:
         if (
             isinstance(policy, PublicResearchPolicy)
             and policy.mode == "extract"
+            and policy.attest_public_source is not None
             and isinstance(self._stream_fn, SessionStreamFn)
         ):
             self._public_evidence = PublicEvidenceConditioner(
@@ -16720,17 +16724,54 @@ class Session:
             )
             self._context.condition_public_evidence = self._public_evidence
 
-    def _accrue_auxiliary_usage(self, usage: Usage | None) -> None:
-        # A receipt is not an assistant turn. Use the money-only accumulator,
-        # not the turn accrual path that also advances context/cache occupancy.
+    @staticmethod
+    def _book_auxiliary_usage(spend: SessionSpend, receipt: AuxiliaryUsageReceipt) -> None:
+        # Companion money does not advance assistant turns or context occupancy.
         from local_operator.session.channel_spend import usd_to_micro
-        from local_operator.session.spend import serving_identity
 
+        usage = receipt.usage
         if usage is None:
-            self.accrue_spend(None)
-            return
-        dollars = usage.usd_cost if usage.usd_cost is not None else usage.estimated_usd_cost
-        self.accrue_spend(usd_to_micro(dollars), serving_identity(usage), usage.billing_basis)
+            spend.accrue(None)
+        else:
+            dollars = usage.usd_cost if usage.usd_cost is not None else usage.estimated_usd_cost
+            spend.accrue(usd_to_micro(dollars), serving_identity(usage), basis=usage.billing_basis)
+
+    def _restore_auxiliary_spend(self) -> list[AuxiliaryUsageReceipt]:
+        from local_operator.research_evidence import RECEIPT_TYPE, fold_receipts
+
+        transcript = self._transcript
+        if transcript.latest_custom_entry(RECEIPT_TYPE) is None:
+            return []
+        # Bind the applied IDs to the actual aggregate, not journal position:
+        # an async aggregate write can commit after a receipt it didn't see.
+        if self._spend_recorded:
+            details = transcript.latest_custom(SESSION_SPEND_CUSTOM_TYPE) or {}
+            ids = details.get("auxiliary_request_ids")
+            if isinstance(ids, list):
+                self._auxiliary_spend_ids.update(value for value in ids if isinstance(value, str))
+        receipts = fold_receipts(reversed(transcript.entries()), strict=False)
+        changed = False
+        for receipt in receipts:
+            if receipt.request_id not in self._auxiliary_spend_ids:
+                self._book_auxiliary_usage(self.spend, receipt)
+                self._auxiliary_spend_ids.add(receipt.request_id)
+                changed = True
+        if self._spend_recorded:
+            if changed:
+                self.schedule_spend_persist()
+            return []
+        # If a live call beats the historical rebuild, the recovered auxiliary
+        # money must survive in a floor, even without the older main calls.
+        if changed:
+            self.spend.floor = True
+        return receipts
+
+    def _accrue_auxiliary_usage(self, receipt: AuxiliaryUsageReceipt) -> None:
+        if receipt.request_id not in self._auxiliary_spend_ids:
+            self._book_auxiliary_usage(self.spend, receipt)
+            self._auxiliary_spend_ids.add(receipt.request_id)
+            self._spend_live_calls += 1
+            self.schedule_spend_persist()
 
     def set_first_turn_mcp_wait(self, timeout_s: float | None) -> None:
         """Hold the first turn for EVERY configured MCP server, bounded; ``None`` opts out.
@@ -18088,6 +18129,8 @@ class Session:
         where a per-turn fat checkpoint was not.
         """
         details = self.spend.to_details()
+        if self._auxiliary_spend_ids:
+            details["auxiliary_request_ids"] = sorted(self._auxiliary_spend_ids)
         previous = self._spend_persisted_micro
         if details["micro"] < previous:
             if self._spend_downward_correction:
@@ -18685,7 +18728,7 @@ class Session:
         except Exception:  # noqa: BLE001 — an unpriced rebuild is not an error
             logger.debug("session spend rebuild pricing failed", exc_info=True)
             return
-        if not rows:
+        if not rows and not self._restored_auxiliary_receipts:
             return
         # ``floor`` is earned by a POSITIVE report that a money row is gone, never
         # by a compaction or prune marker (review R1-4): every writer in
@@ -18704,6 +18747,8 @@ class Session:
                 rebuilt.accrue(micro, identity)
             elif has_reported_tokens(row):
                 rebuilt.accrue(None, identity)
+        for receipt in self._restored_auxiliary_receipts:
+            self._book_auxiliary_usage(rebuilt, receipt)
         if not rebuilt.calls:
             return
         # Bail if anything NEWER landed while this ran: a record that reached the
