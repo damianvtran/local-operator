@@ -1,0 +1,18 @@
+{
+  "tui.tool_card.extra.compose.composed": "составлено {size}",
+  "tui.tool_card.extra.compose.composing": "составляется… {facts}",
+  "tui.tool_card.extra.compose.never_sent": "не отправлено · {facts}",
+  "tui.tool_card.extra.compose.nothing_composed": "ничего не составлено",
+  "tui.tool_card.extra.fetch.attempts": "{count, plural, one {{shown} попытка} few {{shown} попытки} many {{shown} попыток} other {{shown} попытки}}",
+  "tui.tool_card.extra.fetch.attempts_profiles": "{count, plural, one {{shown} попытка ({profiles})} few {{shown} попытки ({profiles})} many {{shown} попыток ({profiles})} other {{shown} попытки ({profiles})}}",
+  "tui.tool_card.extra.fetch.lines": "{count, plural, one {{shown} строка} few {{shown} строки} many {{shown} строк} other {{shown} строки}}",
+  "tui.tool_card.extra.search.provider": "Провайдер: {provider}",
+  "tui.tool_card.extra.search.provider_auth": "Провайдер: {provider} ({auth_mode})",
+  "tui.tool_card.extra.search.sources": "Источники:",
+  "tui.tool_card.extra.search.untitled": "Результат без названия",
+  "tui.tool_card.extra.send.failed_reason": "{word}: {cause}",
+  "tui.tool_card.extra.send.mode.now": "сейчас",
+  "tui.tool_card.extra.send.mode.quiet": "тихо",
+  "tui.tool_card.extra.send.mode.wake": "будить",
+  "tui.tool_card.extra.send.model": "модель"
+}

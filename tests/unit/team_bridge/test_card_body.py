@@ -1376,6 +1376,49 @@ async def test_compaction_releases_frozen_excerpt_decisions(tmp_path: Path, monk
 
 
 @pytest.mark.asyncio
+async def test_compaction_forgets_the_advisory_guidance_memo(tmp_path: Path, monkeypatch) -> None:
+    """Deferred #4374 minor: ``BridgeRuntime.advised_guidance`` says "this
+    session already shows the hub's guidance note". Compaction summarises the
+    tool results that carried it away, so the commit must drop THIS session's
+    entry (and only its own) or the note is never shown again in that context."""
+    from local_operator.compaction.api import CompactionSettings
+    from local_operator.harness.types import ModelSpec, StreamEndEvent, StreamTextDelta
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+    from local_operator.team_bridge import authority
+
+    monkeypatch.setattr(authority, "authority_fence", lambda runtime: None)
+    _sign_in_radient(tmp_path)
+
+    def stream(request, signal):
+        async def gen():
+            yield StreamTextDelta(delta="SUMMARY")
+            yield StreamEndEvent(stop_reason="stop")
+
+        return gen()
+
+    session = Session(
+        model=ModelSpec(provider="test", model_id="m", context_window=100_000),
+        stream_fn=stream,
+        tools=[],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: ["stable"],
+        compaction_settings=CompactionSettings(keep_recent_tokens=40),
+    )
+    memo = {session.session_id: "ab" * 32, "another_session": "cd" * 32}
+    session.bridge_runtime = SimpleNamespace(
+        config_dir=tmp_path, owner=_owner(), session_id=session.session_id, advised_guidance=memo
+    )
+    for index in range(3):
+        await session.prompt(f"question {index} " + "detail " * 30)
+    # Control: an ordinary turn never touches the memo.
+    assert session.session_id in memo
+
+    assert (await session.compact_now()).ran is True
+    assert memo == {"another_session": "cd" * 32}
+
+
+@pytest.mark.asyncio
 async def test_read_only_prompt_matches_main_turn_bridge_card_prefix_without_mutating_memo(
     tmp_path: Path, monkeypatch
 ) -> None:

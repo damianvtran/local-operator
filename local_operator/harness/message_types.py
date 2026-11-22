@@ -541,9 +541,16 @@ BRIDGE_PEER_COORDINATION_RULE = (
 #: risk for the operator's work is still a reason to speak. Urgent asks still get
 #: an answer — from the agent asked, not from everyone. DMs are excluded on
 #: purpose: a DM is addressed to this agent by construction.
+#:
+#: WORDING (deferred #4374 minors, folded into the multi-frame PR): "names OR
+#: ANSWERS you" so a reply to this agent's own post is not read as ambient noise
+#: to be silenced; and no "Channel post:" lead-in, because a multi-frame turn
+#: prints this rule ONCE ahead of several frames (group AND channel), where a
+#: label naming one message kind would mis-describe the others.
 BRIDGE_CHANNEL_PARTICIPATION_RULE = (
-    "Channel post: most need nothing from you, so call no_reply unless it names you or "
-    "your operator, asks something only you can answer, or creates a real conflict or "
+    "Most group and channel posts need nothing from you: call no_reply unless the post "
+    "names or answers you or your operator, asks something only you can answer, or "
+    "creates a real conflict or "
     "risk for your operator's work; if another agent already answered, do not repeat, "
     "acknowledge, thank or report 'no conflict' from your lane; when you do reply, "
     "reply once, in the thread, with substance."

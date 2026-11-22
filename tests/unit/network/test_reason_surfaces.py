@@ -324,6 +324,13 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "a local DaemonStatus.reason, quoted in central_services_incomplete_reason",
     ),
+    #   * ``_broker_roll_refresh`` — this device's own secret-broker roll outcome
+    #     (``secrets.roll.RollResult.reason``, a sentence authored for the reader,
+    #     never a peer token), folded into the failed step's detail.
+    ("local_operator/update.py", "_broker_roll_refresh", "reason"): (
+        1,
+        "this device's own broker-roll sentence (secrets.roll), never a mesh token",
+    ),
     # Assigned to the payload's ``code`` key, not to a line: the human half of that
     # refusal is ``message``.
     ("local_operator/network/cli.py", "_cmd_service", "reason"): (1, "a payload key, not a line"),

@@ -2147,6 +2147,13 @@ WAKE_CLASSES = ("passive", "ambient", "staggered")
 #: table growth; 24 h covers a working day of catch-up reads.
 DEFERRED_RESERVATION_TTL_S = 24 * 3600.0
 
+#: How many times an ambient-digest row may be CLAIMED for a multi-frame turn
+#: before a failed showing retires it ``ambient_not_shown`` instead of putting
+#: it back to ``deferred`` (:meth:`Store.release_digest_claim`). Two: one retry
+#: covers a transient drift; a row that fails twice is not worth re-billing on
+#: every later turn — it stays readable through ``channel_history``.
+DIGEST_MAX_ATTEMPTS = 2
+
 #: The hold-row upsert every writer shares (PR #3063 review m10): a hold
 #: re-written for the same message keeps the row's FIRST ``created_at`` — the
 #: age the owner sees is how long the message has waited, not how long since
@@ -4774,7 +4781,40 @@ class Store:
         exclude: frozenset[tuple[str, str]] = frozenset(),
         admitted_before: float | None = None,
     ) -> dict[str, Any] | None:
-        """The OLDEST pending reservation this session is designated to serve.
+        """The OLDEST eligible row: :meth:`pending_body_reservations_for` LIMIT 1."""
+
+        rows = self.pending_body_reservations_for(
+            owner,
+            designated_session,
+            now=now,
+            selected=selected,
+            exclude=exclude,
+            admitted_before=admitted_before,
+            limit=1,
+        )
+        return rows[0] if rows else None
+
+    def pending_body_reservations_for(
+        self,
+        owner: OwnerSnapshot,
+        designated_session: str,
+        *,
+        now: float | None = None,
+        selected: tuple[str, str] | None = None,
+        exclude: frozenset[tuple[str, str]] = frozenset(),
+        admitted_before: float | None = None,
+        limit: int = 1,
+        conversation_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """The OLDEST pending reservations this session is designated to serve.
+
+        ``limit``/``conversation_id`` exist for the multi-frame turn
+        (``pending_turn.PendingTurnBatch``): its companions are the next woken
+        rows of the PRIMARY's conversation, read through this same query so a
+        companion is fenced exactly like a primary (owner, generation, serving
+        session, live claims, deferred rows never selected).
+
+        The single-row description below is unchanged for ``limit=1``:
 
         WHY read-only and never creating: this is the eligibility check the
         Session runs before it attaches a request transform. A check that
@@ -4815,18 +4855,26 @@ class Store:
         if selected is not None:
             filters.append("AND conversation_id = ? AND message_id = ? ")
             bindings.extend(selected)
-        for conversation_id, message_id in sorted(exclude):
+        # Distinct loop names on purpose: binding ``conversation_id`` here once
+        # rebound the parameter below, so ANY exclusion silently scoped the read
+        # to the last excluded row's conversation and the drain skipped every
+        # other conversation's rows (PR #4382 Q1).
+        for excluded_conversation, excluded_message in sorted(exclude):
             filters.append("AND NOT (conversation_id = ? AND message_id = ?) ")
-            bindings.extend((conversation_id, message_id))
+            bindings.extend((excluded_conversation, excluded_message))
         if admitted_before is not None:
             filters.append("AND created_at <= ? ")
             bindings.append(float(admitted_before))
+        if conversation_id is not None:
+            filters.append("AND conversation_id = ? ")
+            bindings.append(conversation_id)
+        bounded = max(1, int(limit))
 
         with self._connect_readonly() as conn:
             if conn is None:
-                return None
+                return []
             if self._live_generation(conn, owner) != owner.enrollment_generation:
-                return None
+                return []
             # THE ROW'S SERVING SESSION is the session it was routed to, else
             # the designated one. The designated session is therefore BLIND to a
             # routed row, which is the point: a message routed to the session
@@ -4856,16 +4904,82 @@ class Store:
                 )
             else:
                 serving = "designated_session = ? "
-            return self._reservation(
-                conn.execute(
+            return [
+                dict(row)
+                for row in conn.execute(
                     "SELECT * FROM body_reservations WHERE owner_key = ? "
                     "AND credential_id = ? AND enrollment_generation = ? "
                     f"AND {serving}AND (state = 'pending' OR {expired_arm}) "
                     + "".join(filters)
-                    + "ORDER BY created_at ASC, rowid ASC LIMIT 1",
-                    bindings,
-                ).fetchone()
+                    + "ORDER BY created_at ASC, rowid ASC LIMIT ?",
+                    [*bindings, bounded],
+                ).fetchall()
+            ]
+
+    def deferred_body_reservations_for(
+        self,
+        owner: OwnerSnapshot,
+        designated_session: str,
+        *,
+        limit: int,
+        now: float | None = None,
+        exclude: frozenset[tuple[str, str]] = frozenset(),
+    ) -> list[dict[str, Any]]:
+        """The NEWEST ambient-digest candidates this session could show.
+
+        WHY a separate reader rather than a flag on the woken one: the two
+        answer different questions with opposite orders. Woken rows are FIFO
+        (oldest must not starve); a digest is "what has been said lately", so
+        newest first, bounded by the caller.
+
+        WHICH ROWS: ``deferred`` with ``wake_class`` ``passive`` or
+        ``ambient`` — plus a digest claim whose lease EXPIRED (a turn died while
+        showing it), which only this reader may re-offer: the woken reader's
+        expired-claim arm skips classed rows so a digest row is never served as
+        a full turn. ``staggered`` rows are EXCLUDED: one still owns a pending
+        urgent-failover wake, and claiming it would make
+        :meth:`promote_staggered_reservation` (``state = 'deferred'``) refuse,
+        silently cancelling that wake.
+
+        Same fencing as :meth:`pending_body_reservations_for`: read-only,
+        owner/credential/generation-bound, and the row's serving session.
+        """
+
+        moment = time.time() if now is None else float(now)
+        bindings: list[Any] = [
+            _owner_key(owner),
+            owner.credential_id,
+            owner.enrollment_generation,
+            designated_session,
+            moment,
+        ]
+        filters: list[str] = []
+        for excluded_conversation, excluded_message in sorted(exclude):
+            filters.append("AND NOT (conversation_id = ? AND message_id = ?) ")
+            bindings.extend((excluded_conversation, excluded_message))
+        with self._connect_readonly() as conn:
+            if conn is None or not self._has_wake_class_column(conn):
+                return []
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return []
+            serving = (
+                "COALESCE(routed_session, designated_session) = ? "
+                if self._has_routed_session_column(conn)
+                else "designated_session = ? "
             )
+            return [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM body_reservations WHERE owner_key = ? "
+                    "AND credential_id = ? AND enrollment_generation = ? "
+                    f"AND {serving}AND wake_class IN ('passive', 'ambient') "
+                    "AND (state = 'deferred' OR (state = 'claimed' "
+                    "AND claim_expires_at IS NOT NULL AND claim_expires_at < ?)) "
+                    + "".join(filters)
+                    + "ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                    [*bindings, max(0, int(limit))],
+                ).fetchall()
+            ]
 
     def claim_body_reservation(
         self,
@@ -4911,6 +5025,113 @@ class Store:
                     conversation_id,
                     message_id,
                     float(now),
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def claim_digest_reservation(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        conversation_id: str,
+        message_id: str,
+        claim_token: str,
+        turn_token: str,
+        now: float,
+        ttl: float,
+    ) -> bool:
+        """CAS one ambient-digest row (deferred, or an expired digest claim).
+
+        ``wake_class`` is KEPT on the claimed row: that is what keeps the woken
+        reader's expired-claim arm (and :meth:`claim_body_reservation`'s) from
+        ever turning a digest row into a full turn, and what routes its
+        release through :meth:`release_digest_claim` rather than to
+        ``pending``. Renew/complete are the ordinary claim-guarded ones.
+        """
+
+        self._reservation_field("claim_token", claim_token, _CLAIM_TOKEN)
+        self._reservation_field("turn_token", turn_token, _CLAIM_TOKEN)
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_wake_class_column(conn)
+            cursor = conn.execute(
+                "UPDATE body_reservations SET state = 'claimed', claim_token = ?, "
+                "turn_token = ?, claim_expires_at = ?, attempts = attempts + 1, "
+                "updated_at = ? WHERE owner_key = ? AND conversation_id = ? "
+                "AND message_id = ? AND wake_class IN ('passive', 'ambient') "
+                "AND (state = 'deferred' OR (state = 'claimed' "
+                "AND claim_expires_at IS NOT NULL AND claim_expires_at < ?))",
+                (
+                    claim_token,
+                    turn_token,
+                    float(now) + float(ttl),
+                    float(now),
+                    _owner_key(owner),
+                    conversation_id,
+                    message_id,
+                    float(now),
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def release_digest_claim(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        conversation_id: str,
+        message_id: str,
+        claim_token: str,
+        reason: str,
+        now: float,
+        max_attempts: int = DIGEST_MAX_ATTEMPTS,
+        count_attempt: bool = True,
+    ) -> bool:
+        """Return a digest claim to ``deferred`` — NEVER to ``pending``.
+
+        :meth:`release_body_claim` writes ``pending``, which would turn an
+        ambient post nobody was woken for into a full turn of its own (#4377
+        review, adjacent note). After ``max_attempts`` claims the row is
+        retired ``ambient_not_shown`` instead: a digest that keeps failing
+        (capacity, drift) must not ride every later turn forever, and the post
+        stays readable through ``channel_history``.
+
+        ``count_attempt=False`` un-counts the claim: the row was claimed but
+        then dropped for the digest's own bounds before any request carried it,
+        which is not a failed showing and must not age it toward retirement.
+        """
+
+        self._reservation_field("claim_token", claim_token, _CLAIM_TOKEN)
+        refund = 0 if count_attempt else 1
+        if reason not in BODY_HOLD_REASONS:
+            raise StoreRefused("invalid_body_reason", "reason")
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_wake_class_column(conn)
+            cursor = conn.execute(
+                "UPDATE body_reservations SET "
+                "state = CASE WHEN attempts - ? >= ? THEN 'retired' ELSE 'deferred' END, "
+                "terminal_code = CASE WHEN attempts - ? >= ? THEN 'ambient_not_shown' "
+                "ELSE terminal_code END, attempts = MAX(0, attempts - ?), "
+                "claim_token = NULL, turn_token = NULL, claim_expires_at = NULL, "
+                "last_error = ?, updated_at = ? WHERE owner_key = ? "
+                "AND conversation_id = ? AND message_id = ? AND state = 'claimed' "
+                "AND claim_token = ? AND wake_class IS NOT NULL",
+                (
+                    refund,
+                    int(max_attempts),
+                    refund,
+                    int(max_attempts),
+                    refund,
+                    reason,
+                    float(now),
+                    _owner_key(owner),
+                    conversation_id,
+                    message_id,
+                    claim_token,
                 ),
             )
             return cursor.rowcount == 1

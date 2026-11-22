@@ -109,6 +109,7 @@ from local_operator.network.handshake import (
     pair_offer_frame,
     pair_result_frame,
     pair_timeout_seconds,
+    prime_dummy_public_key,
     sas_matches,
     set_pair_keepalive,
 )
@@ -1510,12 +1511,12 @@ HANDSHAKE_REFUSED = "handshake_refused"
 #: ``store.TOMBSTONE_PRUNE_AGE_S`` (90 days), so the window, not the row, is the
 #: bound. After it the device gets the plain silent refusal again.
 #:
-#: KNOWN LIMIT (security P3 ruling, review R1-1/S2): the window holds only while the
-#: removed device is at most ONE rotation behind. After a second rotation inside it
-#: (another removal, a ``leave``, a ``panic``) the handshake's epoch check refuses
-#: the device before the tombstone probe runs, so it gets silence, same as before
-#: G9-B, until its hold ends. Closing that is a security-reviewed follow-up
-#: (``Handshake.read_hello``'s epoch check).
+#: The window holds however many rotations happened inside it (security P3 /
+#: review R1-1, closed in the G9-B follow-up): the handshake's step-4 epoch check
+#: (``Handshake.verify_auth``) runs the same tombstone probe before it refuses, so a
+#: device removed and then left behind by a second removal, a ``leave`` or a
+#: ``panic`` still proves its key and is told. Before that it got silence until its
+#: hold ended.
 REMOVAL_NOTICE_WINDOW_S = 7 * 24 * 60 * 60.0
 #: At most one notice per tombstoned key per this many seconds, per relay process;
 #: every other attempt in the window is the plain silent close. The value is the
@@ -5765,17 +5766,41 @@ class ServerPolicy(ListenerPolicy):
         # against ITS OWN record, which may not yet show this device removed, so the
         # check has to live here. Falling through to ``None`` keeps the probe on the
         # same one-verify path (the discarded key stands in), so this is silence.
-        me = self._record.self_member()
-        if me is None or not me.active:
-            return None
-        member = self._record.member(device_id)
-        if member is None or member.active or member.removed_at is None:
-            return None
-        if member.removed_by == device_id or device_id not in self._record.removed_ids:
-            return None
-        if time.time() - float(member.removed_at) > REMOVAL_NOTICE_WINDOW_S:
-            return None
-        return member.public_key or None
+        # Do not use ``member``/``self_member`` here: their first-match lookup
+        # skips later rows. Every claim scans every row/alias and revocation id,
+        # then evaluates the same eligibility checks, including on a dummy miss.
+        # This is a work-shape invariant, not a constant-time Python guarantee.
+        member = MemberRecord(device_id="", removed_at=0.0)
+        me = MemberRecord(device_id="", removed_at=0.0)
+        found = self_found = False
+        for row in self._record.members:
+            matches = row.device_id == device_id
+            self_matches = row.device_id == self._record.self_device_id
+            for previous_id in row.previous_ids:
+                matches |= previous_id == device_id
+                self_matches |= previous_id == self._record.self_device_id
+            if matches & (not found):
+                member = row
+            if self_matches & (not self_found):
+                me = row
+            found |= matches
+            self_found |= self_matches
+        revoked = False
+        for removed_id in self._record.removed_ids:
+            revoked |= removed_id == device_id
+        public_key = member.public_key
+        eligible = (
+            found
+            & self_found
+            & (me.removed_at is None)
+            & (me.lifecycle != "expired")
+            & (member.removed_at is not None)
+            & (member.removed_by != device_id)
+            & revoked
+            & bool(public_key)
+            & (time.time() - float(member.removed_at or 0.0) <= REMOVAL_NOTICE_WINDOW_S)
+        )
+        return public_key if eligible else None
 
     def invite_credential(self, network_id: str, invite_id: str) -> Credential | None:
         """The invite's MAC key, or ``None`` when the token may not be redeemed.
@@ -6208,6 +6233,10 @@ class RelayServer:
         #: memory, ids only, pruned past :data:`REMOVAL_NOTICE_INTERVAL_S`.
         self._removal_notices: dict[tuple[str, str], float] = {}
         self._removal_notices_lock = threading.Lock()
+        # Claim failure telemetry once even when different peer readers deliver
+        # notices concurrently. Never hold this lock across audit/disk I/O.
+        self._unrecorded_removals: set[str] = set()
+        self._unrecorded_removals_lock = threading.Lock()
         #: device_id -> {"build", "endpoint", "at"} for every member whose LISTENER
         #: answered this device's dial without a welcome proof (``listener_unproven``).
         #: STICKY ON PURPOSE, separate from ``redial``: the tracker's ``last_cause`` is
@@ -6494,6 +6523,10 @@ class RelayServer:
         # BEFORE the accept loop starts: a peer that handshakes in the first
         # millisecond must find this device's endpoints already on the self row.
         self.sync_self_endpoints()
+        # And the tombstone probe's stand-in key, for the same reason: minted here,
+        # once, so no inbound probe ever pays for a keygen (the timing equalisation
+        # in ``Handshake._probe_tombstone``) and no CLI import pays for it either.
+        prime_dummy_public_key()
         for target, name in (
             (self._accept_loop, "mesh-accept"),
             (self._control_loop, "mesh-control"),
@@ -7543,7 +7576,7 @@ class RelayServer:
         which ``_note_peer_endpoints`` records — healing the row on both sides.
         """
         for record in store.list_networks(self.root):
-            if record.trust != "active":
+            if record.trust != "active" or _self_removed(record):
                 continue
             for member in record.active_members():
                 if member.device_id == record.self_device_id:
@@ -7565,6 +7598,15 @@ class RelayServer:
             for device_id in self.redial.due():
                 if self._stop.is_set():
                     return
+                if self._named_only_where_self_removed(device_id):
+                    # THIS DEVICE WAS REMOVED from every network naming the peer
+                    # (#4394 review R2-4): a verified notice tombstoned our own row,
+                    # and nothing a dial can bring back changes that — re-admission is
+                    # a fresh invite. Stop scheduling it rather than re-dial a
+                    # member that will only refuse (or re-send the notice) every
+                    # backoff for the whole notice window.
+                    self.redial.forget(device_id)
+                    continue
                 if self._link_for(device_id) is not None:
                     # Admission already owns the connected transition under
                     # _links_lock. This lookup is only a scheduling hint: the link
@@ -7657,11 +7699,29 @@ class RelayServer:
                 unroutable.discard(device_id)
                 self.redial.kick(device_id)
 
-    def _members_named(self, device_id: str) -> list[MemberRecord]:
-        """Every active member row for ``device_id``, across this device's networks."""
-        rows: list[MemberRecord] = []
+    def _named_only_where_self_removed(self, device_id: str) -> bool:
+        """Whether every trusted network listing ``device_id`` active has removed US."""
+        named = False
         for record in store.list_networks(self.root):
             if record.trust != "active":
+                continue
+            member = record.member(device_id)
+            if member is None or not member.active:
+                continue
+            if not _self_removed(record):
+                return False
+            named = True
+        return named
+
+    def _members_named(self, device_id: str) -> list[MemberRecord]:
+        """Every active member row for ``device_id``, across this device's networks.
+
+        A network whose own self row is tombstoned names nobody this device may
+        dial (#4394 review R2-4; see ``_named_only_where_self_removed``).
+        """
+        rows: list[MemberRecord] = []
+        for record in store.list_networks(self.root):
+            if record.trust != "active" or _self_removed(record):
                 continue
             member = record.member(device_id)
             if member is not None and member.active:
@@ -8086,21 +8146,41 @@ class RelayServer:
             stage = "establish"
             result = handshake.establish()
         except MeshRefusal as refusal:
-            self._audit_handshake_refusal(
-                refusal,
-                network_id,
-                peer_addr,
-                mode,
-                # ``handshake`` is created INSIDE this ``try`` (it is the first
-                # thing that can refuse), so a refusal raised by its own
-                # construction has nothing to read: the row then says so rather
-                # than this handler failing the accept loop.
-                declared_device=handshake.peer_device_id if handshake is not None else "",
-                verified=handshake.auth_verified if handshake is not None else False,
-            )
-            if handshake is not None and handshake.removal_proven:
-                self._send_removal_notice(sock, handshake, network_id)
-            _close_quietly(sock)
+            # THE SOCKET IS ANSWERED AND CLOSED BEFORE THE AUDIT ROW IS WRITTEN (G9-B
+            # follow-up, the unknown-vs-known id timing oracle, #4394 QA O1). The
+            # measured gap was not in the handshake: ``handshake_refused`` is a
+            # DURABLE event (written through and fsynced), and the refusal coalescer
+            # (``_refusal_rows``) writes one only for a (code, claimed id, host, ...)
+            # tuple it has not seen in its window. Writing it before the close put
+            # that fsync — ~1.6 ms on an EBS-backed Linux dev host, ~2.5 ms in #4394's QA rig —
+            # inside the time a dialer observes, so a never-seen id read slower than
+            # a repeated one. Closing first removes every audit cost from the
+            # same-connection observation window in this handler, with no sleep, no
+            # jitter and no floor; the row, its text and its durability are unchanged,
+            # only its timing relative to the FIN. The notice (a proven tombstone's
+            # only reply) still goes out before the close, decided as before.
+            try:
+                if handshake is not None and handshake.removal_proven:
+                    self._send_removal_notice(sock, handshake, network_id)
+            except Exception as exc:  # noqa: BLE001 — a notice is only best-effort
+                logger.warning(
+                    "relay: removal notice failed network=%s exception=%s",
+                    network_id[:80],
+                    type(exc).__name__[:64],
+                )
+            finally:
+                # Exceptions raised inside this handler bypass its sibling excepts.
+                # A failed courtesy notice must not skip socket cleanup or telemetry.
+                _close_quietly(sock)
+                self._audit_handshake_refusal(
+                    refusal,
+                    network_id,
+                    peer_addr,
+                    mode,
+                    # Construction itself may refuse before ``handshake`` exists.
+                    declared_device=handshake.peer_device_id if handshake is not None else "",
+                    verified=handshake.auth_verified if handshake is not None else False,
+                )
             return
         except (wire.LinkCryptoError, ConnectionError, OSError, TimeoutError) as exc:
             # A CONNECTION THAT DIED BETWEEN ITS HELLO AND ITS WELCOME LEAVES A ROW
@@ -14779,8 +14859,9 @@ class RelayServer:
         network is marked ``stale: refused_by_peers`` exactly as a rotation frame
         naming this device does (``apply_epoch``'s ``removing_us`` branch). The
         epoch, secrets and member table are left alone: no rejoin, no rotation,
-        nothing deleted. Every session process then fails closed on its next
-        borrow or held serve (``MeshCredentialClient._self_membership_active``), and
+        nothing deleted. Once the self-tombstone saves, session processes fail
+        closed on their next borrow or held serve
+        (``MeshCredentialClient._self_membership_active``), and
         the credential client's own membership-loss path runs here too
         (``invalidate_membership``: persistent network deny, borrowed cache drop,
         GitHub revoke, held rows retired) so the offline hold ends now rather than at
@@ -14798,11 +14879,21 @@ class RelayServer:
         FAIL SAFE ON A RECORD ERROR (review R1-3, security S3): a verified notice is
         reason enough to drop borrowed bearers even when the self-tombstone cannot
         be saved — without it the lazy ``_self_membership_active`` gate never fires
-        either — so any write failure is logged and the drop still runs. No audit
-        row then: nothing transitioned on disk, and the next notice retries.
+        either — so any write failure is logged and the drop still runs. The
+        transition row waits for a save that succeeds (the next notice retries);
+        meanwhile the drop is audited as ``recorded: false`` (#4394 review R2-2), so
+        a record that NEVER saves — a corrupt file, a read-only disk — still leaves
+        audit evidence of the attempted credential drop, not only a WARNING line.
+        ONE audit ATTEMPT per network per relay process (a failing audit sink can
+        still lose that row): a record that keeps failing keeps this device
+        re-dialling (its self row still reads active), and a row per notice — one
+        every ``REMOVAL_NOTICE_INTERVAL_S`` for the whole window — is the R1-2 flood
+        again. The 300 s ``_refusal_rows`` window is no help there: it equals the
+        notice interval, so it would admit every one.
         """
         moment = time.time()
         transitioned = False
+        recorded = False
         epoch = 0
         try:
             with store.mutate(network_id, self.root) as record:
@@ -14818,6 +14909,7 @@ class RelayServer:
                 store.save(record, self.root)
                 epoch = record.epoch
                 transitioned = was_active
+                recorded = True
         except Exception as exc:  # noqa: BLE001 — the credential drop below must still run
             transitioned = False
             logger.warning(
@@ -14839,6 +14931,28 @@ class RelayServer:
                 network_id[:80],
                 type(exc).__name__[:64],
             )
+        if not recorded:
+            with self._unrecorded_removals_lock:
+                should_audit = network_id not in self._unrecorded_removals
+                self._unrecorded_removals.add(network_id)
+            if should_audit:
+                self.audit.record(
+                    AuditEvent(
+                        event="membership_ended",
+                        actor=ended.signer,
+                        subject=network_id,
+                        outcome="refused",
+                        network_id=network_id,
+                        epoch=epoch,
+                        cause="not_a_member",
+                        detail={
+                            "notice_epoch": ended.epoch,
+                            "credentials_dropped": dropped,
+                            "recorded": False,
+                        },
+                    )
+                )
+            return
         if not transitioned:
             return
         self.audit.record(
@@ -18050,6 +18164,16 @@ def _active_key_reader(record: NetworkRecord) -> Callable[[str], str | None]:
         return member.public_key or None
 
     return public_key_for
+
+
+def _self_removed(record: NetworkRecord) -> bool:
+    """Whether ``record`` holds THIS device's own row and that row is tombstoned.
+
+    A missing self row is not "removed": records built before the self row was
+    written (and test fixtures) must keep their old redial behaviour.
+    """
+    me = record.self_member()
+    return me is not None and not me.active
 
 
 def _current_member_id(record: NetworkRecord, device_id: str) -> str:

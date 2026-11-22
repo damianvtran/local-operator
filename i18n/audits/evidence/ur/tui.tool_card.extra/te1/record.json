@@ -1,0 +1,31 @@
+{
+  "locale": "ur",
+  "namespace": "tui.tool_card.extra",
+  "source_sha256": "a89883a2ea4462b720f39ec853b5569904920da2a7ca72f98855d28f19f8bd2c",
+  "context_sha256": "ef227e6333498cd9cfb4a82a1e4e8038e716264040cf0da0440b7721f5911b45",
+  "target_sha256": "28c426d5a221e84dd325c9422c645ec7de6214796a94b3b46b4d499d6b066569",
+  "translator": {
+    "agent": "translator (lopdev task subagent)",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-21",
+    "provenance": "identity and model as supplied in the audit brief; translator instance not independently observed by the auditor"
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev independent auditor subagent, extra-audit-ur), not the translator; did not edit values",
+    "session": "d7e65657d2db",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-21",
+    "result": "clean-with-findings",
+    "findings": 1,
+    "unresolved_blocker_major": 0,
+    "severity_counts": {"blocker": 0, "major": 0, "minor": 0, "nit": 1},
+    "finding_ids": ["UR-X1"],
+    "fallback_used": true,
+    "fallback_note": "Session started on openai/gpt-6.1-sol and fell back to anthropic/claude-opus-5-5 on a provider quota failure before any judging; the audit was performed by anthropic/claude-opus-5-5. Same model family as the translator, but a separate independent agent instance that did not author or edit the catalogue.",
+    "independent_from_translator": true,
+    "actual_model_source": "harness model-switch notice in the auditor's own session"
+  },
+  "status": "passed",
+  "round": "x1",
+  "note": "Independent full audit (round 1) of the new uncommitted tui.tool_card.extra namespace (16 keys) in worktree .worktrees/i18n-toolcard-followup @ 37892ab97f46. Checks: key set/order parity 16/16; message_arguments parity and order identical for all 16; no bidi control chars, no unsanctioned Latin; plural one/other (ur CLDR) without =N, rendered at 0/1/2/5/21; render_message for every key; rich cell_len within every maxCells; scripts/i18n/check.py --catalogues-only: 0 problems. Consistency: wake=بیداری matches tui.tool_card.status.send.wake_unconfirmed and the style guide; ماڈل per glossary; بلا عنوان matches tui.session_sidebar.row.untitled. One nit UR-X1 (compose.never_sent: کبھی نہیں بھیجی گئی → بھیجی ہی نہیں گئی; idiom + 19→17 cells; label is shed whole at narrow widths so no clipping). Native-speaker review and rendered-frame certification not claimed."
+}

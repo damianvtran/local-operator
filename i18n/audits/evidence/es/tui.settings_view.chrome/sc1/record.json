@@ -1,0 +1,49 @@
+{
+  "locale": "es",
+  "namespace": "tui.settings_view.chrome",
+  "source_sha256": "2e04f79550d0b09cd262c32850a31c20d5dec2b88b09facd2369d967bd5ee930",
+  "target_sha256": "0cc4db00639a26398634b6da75e557bb765264f51d985323569fb1df477916ec",
+  "context_sha256": "33a29a836b8de99019887c9025e98e2d9382b8799a8bfe9e4f189cbc86d0df7d",
+  "worktree_head": "3c1b6a24f035",
+  "translator": {
+    "agent": "translator (lopdev team)",
+    "model": "anthropic/claude-opus-5-5",
+    "fallback": "as reported by manager brief; not verified by auditor",
+    "date": "2026-11-21"
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team, session 4815c7661770, task chrome-audit-es; independent of the translator)",
+    "session": "4815c7661770",
+    "model": "anthropic/claude-opus-5-5",
+    "fallback": "session pinned openai/gpt-6.1-sol; quota HTTP 429 forced cross-vendor descent to anthropic/claude-opus-5-5 at the start of the audit; all semantic judgement made on anthropic/claude-opus-5-5",
+    "date": "2026-11-21",
+    "result": "passed",
+    "keys_read": 49,
+    "findings": 5,
+    "unresolved_blocker_major": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 3
+  },
+  "status": "passed",
+  "verdict": "clean-with-findings",
+  "checks": {
+    "key_set_and_order": "49/49 identical to en",
+    "message_arguments_parity": "49/49",
+    "plural": "3 plural keys (clause.would_remove, confirm.ask, value.chains) carry exactly one/many/other = plural_categories('es'); no =N; rendered at 0,1,3,1000000,1500000 -> other,one,other,many,other",
+    "render_message": "all 49 render in es with sample args",
+    "nfc_and_bidi": "all NFC, no bidi controls",
+    "cell_len_vs_maxCells": "rendered with real consumer args (esc/enter/d/r, '/approvals auto'); 0 over cap; at cap: footer.back_to_conversation 24/24, footer.move_cancel 14/14, gate_kept.medium 40/40 (en 41/40), hotkey.recording_detail 60/60 — each read in settings_view.py (footer sheds whole hints; gate_kept is a rung ladder; recording detail returned whole)",
+    "register": "tú imperatives throughout (pulsa, usa, defínelo, elimina, repite); “ ” quotes; ¿…? only on whole question confirm.ask; em dash spaced",
+    "glossary_shipped_consistency": "cadena/salto/cascada, ajuste, predeterminado, aflojar + /approvals auto, '{key} cancela' contract form all match shipped es tui.settings_view / tui.small / wire.settings"
+  },
+  "findings": [
+    {"id": "T1", "severity": "minor", "key": "tui.settings_view.chrome.clause.would_remove", "current": "… al próximo inicio …", "proposed": "… al próximo arranque …", "reason": "'inicio' collides with 'inicio de sesión' (login), which shipped es uses for 'próximo inicio de sesión' and heavily in wire.settings; launch is 'al arrancar' (7 shipped uses). No cap on this key."},
+    {"id": "T2", "severity": "minor", "key": "tui.settings_view.chrome.hotkey.desktop_detail / hold_detail / hold_refusal / recording_detail", "current": "app de escritorio / en la app", "proposed": "desktop_detail: 'Atajo global de la aplicación de escritorio — usa teclas que la terminal envíe o defínelo allí.' (95/96); hold_detail: 'Atajo global de la aplicación de escritorio — defínelo allí.' (60/60); or keep 'app' and record it in the es style guide as the width short form", "reason": "Glossary drift: the page's own section title is 'Aplicación de escritorio' (wire.settings.desktop.title; 18 shipped 'aplicación de escritorio' vs 5 'app de escritorio'); hold_refusal and recording_detail cannot take the long form within cap, so either swap where it fits or record 'app' as sanctioned."},
+    {"id": "T3", "severity": "nit", "key": "tui.settings_view.chrome.hotkey.hold_refusal", "current": "se define en la app de escritorio — la terminal no capta teclas mantenidas", "proposed": "se define en la app de escritorio: la terminal no capta un modificador mantenido", "reason": "en names a held modifier specifically; 'teclas mantenidas' generalizes it. Proposal is 79/80 cells."},
+    {"id": "T4", "severity": "nit", "key": "tui.settings_view.chrome.cascade.reset_refused", "current": "{reset_key} restablece un solo ajuste; …", "proposed": "{reset_key} restaura un solo ajuste; …", "reason": "The same r action is labelled 'restaurar' in footer.default (10-cell cap forbids 'restablecer' there), so the notice should use the same verb."},
+    {"id": "T5", "severity": "nit", "key": "tui.settings_view.chrome.hotkey.recording_detail", "current": "Atajo de dictado del escritorio — defínelo aquí o en la app.", "proposed": "Atajo de dictado (escritorio) — defínelo aquí o en la app.", "reason": "'del escritorio' can read as the OS desktop's dictation rather than the desktop app's; proposal is 58/60."}
+  ],
+  "note": "Independent read-only semantic audit of all 49 es values against en + .context.json, glossary.md, style-guides/es.md, shipped es tui.settings_view/tui.small/wire.settings, and composition in local_operator/tui/widgets/settings_view.py (footer ladder, gate_kept rungs, confirm ladder, capture contracts, cleanup clause). Mechanical checks run with ~/local-operator/.venv/bin/python, PYTHONPATH=worktree (script check.py beside this receipt). Same model family as translator; no native-speaker or rendered-frame evidence claimed. No repo edits."
+}

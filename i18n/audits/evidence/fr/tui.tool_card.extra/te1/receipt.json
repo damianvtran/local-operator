@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "audit_id": "te1",
+  "locale": "fr",
+  "namespace": "tui.tool_card.extra",
+  "record": "i18n/audits/evidence/fr/tui.tool_card.extra/te1/record.json",
+  "record_note": "record.json is the independent auditor's own machine-readable receipt, copied byte-for-byte from its session scratchpad (~/.local-operator/sessions/485aee114995/scratchpad/fr-tui.tool_card.extra-receipt.json)",
+  "record_sha256": "92444db02fbad73a19f5d52b0df8b44ac719f25be4d1bc11ab8cb18afdd00621",
+  "source_sha256": "a89883a2ea4462b720f39ec853b5569904920da2a7ca72f98855d28f19f8bd2c",
+  "context_sha256": "ef227e6333498cd9cfb4a82a1e4e8038e716264040cf0da0440b7721f5911b45",
+  "target_sha256": "d7264499007e3215b50b879219eddd37df49f5604784feeadee01d69addb99a5",
+  "verdict": "passed",
+  "commit_audited": "37892ab97f46 (worktree head; locale bytes uncommitted at audit time)",
+  "auditor": {
+    "agent": "translation-auditor (lopdev independent auditor subagent, task extra-audit-fr), not the translator; did not edit values",
+    "session": "485aee114995",
+    "model": "anthropic/claude-opus-5-5",
+    "pinned_model": "openai/gpt-6.1-sol",
+    "fallback_used": true
+  },
+  "ledger_receipt": {
+    "locale": "fr",
+    "namespace": "tui.tool_card.extra",
+    "source_sha256": "a89883a2ea4462b720f39ec853b5569904920da2a7ca72f98855d28f19f8bd2c",
+    "context_sha256": "ef227e6333498cd9cfb4a82a1e4e8038e716264040cf0da0440b7721f5911b45",
+    "target_sha256": "d7264499007e3215b50b879219eddd37df49f5604784feeadee01d69addb99a5",
+    "translator": {
+      "agent": "translator (lopdev task subagent, profile 'translator')",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-21",
+      "provenance": "identity and model as stated in the auditor's delegation brief; translator instance not observed by the auditor"
+    },
+    "auditor": {
+      "agent": "translation-auditor (lopdev independent auditor subagent, task extra-audit-fr), not the translator; did not edit values",
+      "session": "485aee114995",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-21",
+      "result": "clean-with-findings",
+      "findings": 1,
+      "unresolved_blocker_major": 0,
+      "severity_counts": {
+        "blocker": 0,
+        "major": 0,
+        "minor": 1,
+        "nit": 0
+      },
+      "finding_ids": [
+        "FRX-1"
+      ],
+      "fallback_used": true,
+      "fallback_note": "session started on openai/gpt-6.1-sol (itself a quota fallback); after HTTP 429 it fell back again, cross-vendor, to anthropic/claude-opus-5-5, which did the substantive audit. Same model family as the translator, different agent instance",
+      "independent_from_translator": true,
+      "actual_model_source": "auditor's own session model-switch notices",
+      "pinned_model": "openai/gpt-6.1-sol"
+    },
+    "status": "passed",
+    "note": "Independent full audit (round 1, te1) of the new tui.tool_card.extra namespace (16 keys), source commit 37892ab97f46 (rebased 690dc589139e, catalogue bytes unchanged). Auditor 485aee114995 pinned openai/gpt-6.1-sol, served by anthropic/claude-opus-5-5 as a disclosed quota fallback (same model as the translator; independence by separate agent instance only). Verdict clean-with-findings: 0 blocker, 0 major, 1 minor, 0 nit (FRX-1). target_sha256 re-derived against the committed file at ledger-write time. Record: i18n/audits/evidence/fr/tui.tool_card.extra/te1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+    "evidence": "i18n/audits/evidence/fr/tui.tool_card.extra/te1/record.json",
+    "round": "te1"
+  }
+}

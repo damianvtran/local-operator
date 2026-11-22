@@ -5294,6 +5294,9 @@ class Session:
         # turn. The reservation, not this task or the card text, owes the work.
         self._pending_body_followup_task: asyncio.Task[Any] | None = None
         self._pending_body_followup_again = False
+        #: Rows the last ``_open_pending_body_turn`` claimed (a batch's every
+        #: member); the drain adds them to its per-pass attempted set.
+        self._pending_body_tried: tuple[tuple[str, str], ...] = ()
         # Person prompts waiting for the turn lock (see
         # ``person_prompt_waiting``): the body path yields to them.
         self._person_prompts_waiting = 0
@@ -14005,6 +14008,27 @@ class Session:
             return None
         return self._enqueue_ask
 
+    def _integration_consent_seam(self) -> Any | None:
+        """The Team Integrations consent seam, or ``None`` where no person can grant.
+
+        Bound per turn beside the ask doors and ``None`` under the same queue
+        condition, plus for a delegated child: a child never files a consent
+        card on its parent's screen for work the person watching never asked
+        about (the ``_authorize_hub_pull`` rule), and a channel post that
+        reached a child must never reach an integration admin operation (RFC
+        §8.1, S-83). ``answered_ids`` is read LIVE, because the set is filled as
+        answer rows arrive during the run and reset when the next run starts.
+        """
+        if self._parent_session_id or self.ask_queue() is None:
+            return None
+        from local_operator.team_bridge.integration_consent import IntegrationConsent
+
+        return IntegrationConsent(
+            self.ask_queue,
+            lambda: set(self._run_answered_ask_ids),
+            session_id=str(self.session_id or ""),
+        )
+
     def _ask_withdraw_callable(self) -> Callable[..., Any] | None:
         """The tool's withdraw door, or ``None`` on the BLOCKING arm (design §12).
 
@@ -22092,6 +22116,7 @@ class Session:
         drain_steering_on_open: bool = False,
         pending_body_only: bool = False,
         pending_body_selected: tuple[str, str] | None = None,
+        pending_body_scope: tuple[float, frozenset[tuple[str, str]]] | None = None,
         initial_after_guard: Callable[[], list[AgentMessage]] | None = None,
     ) -> None:
         """Shared turn runner for wake deliveries (prompt() owns its own lock
@@ -22256,7 +22281,9 @@ class Session:
                     return
                 # The normal guard ran under the lock. Hydrate before opening
                 # a turn, so a refused body costs no empty model request.
-                await self._open_pending_body_turn(selected=pending_body_selected)
+                await self._open_pending_body_turn(
+                    selected=pending_body_selected, scope=pending_body_scope
+                )
                 opened_body = self._pending_body_turn
                 if opened_body is None:
                     return
@@ -22727,22 +22754,7 @@ class Session:
                 )
                 if row is None:
                     return None
-                facts = store.per_call_admission_state(
-                    runtime.owner,
-                    runtime.session_id,
-                    reservation=(str(row["conversation_id"]), str(row["message_id"])),
-                )
-                receipt = store.receipt_for_message(runtime.owner, str(row["message_id"]))
-                if (
-                    (not routed_only or row.get("routed_session") == runtime.session_id)
-                    and facts
-                    and facts.get("designation_matches")
-                    and facts.get("consent_version") == row["consent_version"]
-                    and facts.get("policy_epoch") == row["policy_epoch"]
-                    and receipt
-                    and receipt.get("verdict") == "allow"
-                    and receipt.get("body_sha256") == row["body_sha256"]
-                ):
+                if self._pending_body_row_valid(store, runtime, row, routed_only=routed_only):
                     return row
                 if selected is not None:
                     return None
@@ -22752,6 +22764,75 @@ class Session:
         except Exception:  # noqa: BLE001 — no readable authority means no automatic work
             logger.debug("bridge: follow-up authority unavailable")
             return None
+
+    @staticmethod
+    def _pending_body_row_valid(store: Any, runtime: Any, row: Any, *, routed_only: bool) -> bool:
+        """The per-row admission test: designation, consent, policy, receipt+sha.
+
+        ONE predicate for the drain's primary and for every multi-frame
+        companion/digest row (``PendingTurnBatch(admissible=...)``), so a row
+        can never ride a batch on weaker evidence than it would need alone.
+        """
+
+        facts = store.per_call_admission_state(
+            runtime.owner,
+            runtime.session_id,
+            reservation=(str(row["conversation_id"]), str(row["message_id"])),
+        )
+        receipt = store.receipt_for_message(runtime.owner, str(row["message_id"]))
+        return bool(
+            (not routed_only or row.get("routed_session") == runtime.session_id)
+            and facts
+            and facts.get("designation_matches")
+            and facts.get("consent_version") == row["consent_version"]
+            and facts.get("policy_epoch") == row["policy_epoch"]
+            and receipt
+            and receipt.get("verdict") == "allow"
+            and receipt.get("body_sha256") == row["body_sha256"]
+        )
+
+    def _pending_body_batch_admissible(self) -> Callable[[dict[str, Any]], bool]:
+        """The batch's per-row gate: the drain's own test, failing closed."""
+
+        from local_operator.team_bridge.host import (
+            outbound_tool_fence,
+            owner_fence_refusal,
+        )
+        from local_operator.team_bridge.store import Store
+
+        runtime = getattr(self, "bridge_runtime", None)
+        if runtime is None:
+            return lambda _row: False
+        routed_only = False
+        refusal = owner_fence_refusal(runtime)
+        if refusal is not None:
+            if refusal.get("code") != "not_designated" or outbound_tool_fence(runtime):
+                return lambda _row: False
+            routed_only = True
+        store = Store(runtime.config_dir)
+
+        def admissible(row: dict[str, Any]) -> bool:
+            try:
+                return self._pending_body_row_valid(store, runtime, row, routed_only=routed_only)
+            except Exception:  # noqa: BLE001 — unreadable authority = not admissible
+                return False
+
+        return admissible
+
+    def _multi_frame_turns_enabled(self, config_dir: Any) -> bool:
+        """``team_bridge.multi_frame_turns`` from the live config file (default on)."""
+
+        try:
+            from local_operator.config_watch import process_watcher
+            from local_operator.team_bridge.settings import TeamBridgeSettings
+
+            watcher = process_watcher(Path(config_dir))
+            watcher.poll_now()
+            return TeamBridgeSettings.from_values(watcher.values).multi_frame_turns
+        except Exception:  # noqa: BLE001 — an unreadable file keeps the default
+            from local_operator.team_bridge.settings import DEFAULT_MULTI_FRAME_TURNS
+
+            return DEFAULT_MULTI_FRAME_TURNS
 
     def _ensure_pending_body_followup(self) -> None:
         """Coalesce busy arrivals without cancelling work or creating a session.
@@ -22785,6 +22866,13 @@ class Session:
                 ) is not None:
                     identity = (row["conversation_id"], row["message_id"])
                     attempted.add(identity)
+                    # ONE batch per pass step: the guard re-checks the PRIMARY
+                    # only; companions/digest rows are re-proved row by row
+                    # inside ``PendingTurnBatch`` with the same admissibility
+                    # test. Every row the batch tried joins ``attempted`` so a
+                    # served companion is not this pass's next primary; a
+                    # companion released for capacity does NOT, so it is.
+                    self._pending_body_tried = ()
                     await self._prompt_messages(
                         [],
                         guard=lambda identity=identity: (
@@ -22793,7 +22881,9 @@ class Session:
                         guard_note="selected admitted bridge body no longer eligible",
                         pending_body_only=True,
                         pending_body_selected=identity,
+                        pending_body_scope=(horizon, frozenset(attempted)),
                     )
+                    attempted.update(self._pending_body_tried)
                     # Each attempt releases the ordinary turn lock. Selecting
                     # B explicitly prevents failed A being hydrated again here.
                     if self._person_is_waiting():
@@ -23068,7 +23158,12 @@ class Session:
 
         return transform
 
-    async def _open_pending_body_turn(self, *, selected: tuple[str, str] | None = None) -> None:
+    async def _open_pending_body_turn(
+        self,
+        *,
+        selected: tuple[str, str] | None = None,
+        scope: tuple[float, frozenset[tuple[str, str]]] | None = None,
+    ) -> None:
         """Claim this session's oldest pending BODY for the turn about to run.
 
         THE GATE IS THE ROW, NOT THE DESIGNATION (review round 2, MINOR D). The
@@ -23089,7 +23184,10 @@ class Session:
         if runtime is None:
             return
         try:
-            from local_operator.team_bridge.pending_turn import PendingTurn
+            from local_operator.team_bridge.pending_turn import (
+                PendingTurn,
+                PendingTurnBatch,
+            )
 
             captured_owner = runtime.owner
             captured_scope = (Path(runtime.config_dir), runtime.session_id, runtime.tenant_id)
@@ -23105,12 +23203,28 @@ class Session:
                     == captured_scope
                 )
 
-            turn = PendingTurn(
-                captured_owner,
-                runtime.session_id,
-                config_dir=runtime.config_dir,
-                binding_guard=binding_guard,
-            )
+            turn: Any
+            if self._multi_frame_turns_enabled(runtime.config_dir):
+                # Same surface as ``PendingTurn`` (open/transform/renew/settle/
+                # binding_intact), so nothing below or in the loop branches on
+                # which one it holds. ``off`` keeps one body per turn exactly.
+                horizon, exclude = scope if scope is not None else (time.time(), frozenset())
+                turn = PendingTurnBatch(
+                    captured_owner,
+                    runtime.session_id,
+                    config_dir=runtime.config_dir,
+                    binding_guard=binding_guard,
+                    admissible=self._pending_body_batch_admissible(),
+                    admitted_before=horizon,
+                    exclude=exclude,
+                )
+            else:
+                turn = PendingTurn(
+                    captured_owner,
+                    runtime.session_id,
+                    config_dir=runtime.config_dir,
+                    binding_guard=binding_guard,
+                )
             won = await turn.open(
                 budget=self._pending_body_budget(),
                 fetch=self._fetch_pending_body,
@@ -23119,6 +23233,8 @@ class Session:
         except Exception:  # noqa: BLE001 — an ordinary request is the fallback
             logger.debug("bridge: pending body unavailable", exc_info=True)
             return
+        # The drain folds these into its attempted set (see its comment).
+        self._pending_body_tried = tuple(getattr(turn, "identities", ()) or ())
         if won:
             self._pending_body_turn = turn
 
@@ -23161,6 +23277,21 @@ class Session:
             self._pending_body_verdict = None
             self._body_answered_turn = None
             self._body_turn_opening_tail = None
+
+    def _forget_bridge_guidance_memo(self) -> None:
+        """Drop this session's "guidance note already shown" record.
+
+        Keys mirror the writer in ``team_bridge.tool`` (the tool context's
+        session id, falling back to the runtime's), so both are cleared. Never
+        raises: a host without a bridge runtime simply has no memo.
+        """
+
+        runtime = getattr(self, "bridge_runtime", None)
+        memo = getattr(runtime, "advised_guidance", None)
+        if not isinstance(memo, dict):
+            return
+        for key in {self.session_id, str(getattr(runtime, "session_id", "") or "")}:
+            memo.pop(key, None)
 
     async def _settle_quiet_request(self) -> None:
         """Commit silence only at the HOST boundary, after compaction/obligations.
@@ -25163,6 +25294,9 @@ class Session:
             begin_site_request=(
                 self.begin_site_request if self._site_card_enqueue_callable() is not None else None
             ),
+            # Team Integrations: only a person's answer on a host-filed card
+            # can publish an app or mint a credential (RFC §8.2).
+            integration_consent=self._integration_consent_seam(),
             # THE ASK GATE'S DOOR (design docs/design/ask-gate.md §2.2): the
             # same two conditions as the two doors above, so its presence IS
             # "this ask would queue" — which is exactly the population the
@@ -31568,6 +31702,12 @@ class Session:
             excerpt_memo = getattr(self, "_bridge_excerpt_memo", None)
             if excerpt_memo is not None:
                 excerpt_memo.clear()
+            # The advisory-guidance memo (``BridgeRuntime.advised_guidance``)
+            # records "this session's context already shows that note". The
+            # summary just replaced the tool results that carried it, so the
+            # memo is now false: drop THIS session's entry and the next bridge
+            # result shows the note once more (deferred #4374 minor).
+            self._forget_bridge_guidance_memo()
             history_after = await self._offloaded(
                 compaction_api, "estimate_messages_tokens", self._render_for_compaction()
             )

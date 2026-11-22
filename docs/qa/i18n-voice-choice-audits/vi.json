@@ -1,0 +1,320 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "wire.settings",
+  "round": 1,
+  "audit_id": "voice-choice-vi-r1-6f7be3525e54",
+  "commit_audited": "0bf4305da8f4b113f3ce2120bfdf58845b3218c9",
+  "working_tree_note": "Eight uncommitted vi label changes relative to 4128f2a2; audited actual working-tree bytes, not a claim that HEAD contains translations.",
+  "base": "4128f2a2",
+  "allocation": "hotfix <=30 minutes; read-only bounded translation audit",
+  "source_sha256": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+  "context_sha256": "e5c44bf0a9bcfdfa159a5bbf1c5caffcde2318946561fa4d7550bc30255e85a1",
+  "target_sha256": "df178c2af51d345e5692e2fe68ac3b069907548424efb5bda5b5dc01bcee95f2",
+  "file_paths": {
+    "source": "local_operator/i18n/catalogues/en/wire.settings.json",
+    "context": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+    "target": "local_operator/i18n/catalogues/vi/wire.settings.json"
+  },
+  "translator": {
+    "agent": "separate translator agent; voice-choice vi contribution, as identified in delegator brief",
+    "session": null,
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "fallback": "provider quota fallback; reported by delegator, translator session not independently inspected",
+    "provenance_source": "delegator task brief"
+  },
+  "auditor": {
+    "agent": "translation-auditor (team lopdev), voice-audit-vi",
+    "session": "6f7be3525e54",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol due provider quota failure; host model-switch notice before linguistic audit",
+    "result": "clean",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "severity_counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    }
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "namespace_verdicts": {
+    "wire.settings": {
+      "verdict": "clean",
+      "contribution_keys_read": 8,
+      "unchanged_description_keys_read": 8,
+      "total_unique_keys_read": 16,
+      "scope": "Only eight contribution label values certified; no full-namespace recertification"
+    }
+  },
+  "keys": [
+    "wire.settings.speech_voice_tone.choice.warm.label",
+    "wire.settings.speech_voice_tone.choice.neutral.label",
+    "wire.settings.speech_voice_tone.choice.bright.label",
+    "wire.settings.speech_voice_tone.choice.calm.label",
+    "wire.settings.speech_voice_tone.choice.authoritative.label",
+    "wire.settings.speech_voice_expressiveness.choice.low.label",
+    "wire.settings.speech_voice_expressiveness.choice.medium.label",
+    "wire.settings.speech_voice_expressiveness.choice.high.label"
+  ],
+  "keys_audited": 8,
+  "contextual_keys_read": [
+    "wire.settings.speech_voice_tone.choice.warm.description",
+    "wire.settings.speech_voice_tone.choice.neutral.description",
+    "wire.settings.speech_voice_tone.choice.bright.description",
+    "wire.settings.speech_voice_tone.choice.calm.description",
+    "wire.settings.speech_voice_tone.choice.authoritative.description",
+    "wire.settings.speech_voice_expressiveness.choice.low.description",
+    "wire.settings.speech_voice_expressiveness.choice.medium.description",
+    "wire.settings.speech_voice_expressiveness.choice.high.description"
+  ],
+  "total_unique_keys_read": 16,
+  "findings": [],
+  "measured_at_utc": "2026-11-21T18:52:22.454650+00:00",
+  "checks": {
+    "semantic_idiom_register_glossary": "PASS: independently read all eight English/vi label pairs plus eight description pairs and all sixteen context entries; no English retained in these labels; natural Vietnamese adjectives/degree scale; no gender inflection or T/V address in labels. Scoped display-label direction overrides historic raw-config-token retention guidance.",
+    "exact_contribution_coverage": "PASS: actual vi JSON differs from 4128f2a2 in exactly the eight requested labels; all descriptions unchanged; full key order unchanged.",
+    "placeholder_icu_markup_order": "PASS 8/8: no brace placeholders, ICU branches/skeletons, markup, percent tokens or code spans in source or target; empty ordered token lists equal.",
+    "nfc": "PASS 8/8 precomposed Vietnamese labels.",
+    "configured_resolver_consumer": "PASS: isolated ConfigManager.set_config_value(language, vi), resolve.config_value()==vi, resolve.resolve_language()==vi, text.set_active_locale actual result, settings_io.SETTINGS Choice labels/descriptions equal catalogue and stable machine values preserved in tone warm/neutral/bright/calm/authoritative and expressiveness low/medium/high order.",
+    "negative_controls": "PASS: switch active locale to en returns English labels; re-resolve configured vi restores Vietnamese labels. Unsupported explicit language under empty Linux environment resolves en.",
+    "plurals": "N/A: no plural messages or counts in these eight labels. Vietnamese other-only rule read, not exercised because no branches.",
+    "rtl": "N/A: Vietnamese LTR. No bidi formatting controls present; Urdu logical bidi controls NOT RUN (different locale).",
+    "fit": "MEASURED with rich.cells.cell_len: label and label+two spaces+description, without row prefix/default marker. No per-field cap invented. Inspected real choice-row consumer: settings_view.py:3940-3947 ellipsis truncation, :4218-4243 label+default marker+description; no wrap. Longer neutral/bright/calm/medium labels flagged for independent rendered check, not treated as confirmed overflow.",
+    "pseudo_localization": "NOT RUN: outside bounded locale audit; no advertised one-command core workflow.",
+    "rendered_layout_visual_native_browser": "NOT RUN: independent QA owns real visual proof later; this receipt proves resolver strings and cell measures only, not screen fit or rendered frame.",
+    "tests_suite_install": "NOT RUN: explicitly excluded; no dependency installs or suites dispatched."
+  },
+  "source_preflight_note": "Preflight JSON was read as historical preparer input, not current audit evidence. Its missing contexts and context hash predate the sixteen new entries; current full context bytes independently match e5c44bf0a9bcfdfa159a5bbf1c5caffcde2318946561fa4d7550bc30255e85a1.",
+  "rows": [
+    {
+      "key": "wire.settings.speech_voice_tone.choice.warm.label",
+      "machine_value": "warm",
+      "english": "warm",
+      "target": "ấm áp",
+      "english_description": "Friendly and approachable.",
+      "target_description": "Thân thiện và dễ gần.",
+      "context": {
+        "role": "voice tone choice label",
+        "tone": "concise, adjectival",
+        "note": "A concise adjectival choice label for the voice tone; use a natural localized adjective or level term, not an untranslated identifier. Friendly and approachable, not a literal temperature. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+      },
+      "description_context": {
+        "role": "voice tone choice description",
+        "tone": "concise, plain, explanatory",
+        "note": "A brief user-facing explanation beside the choice label, not an instruction to the synthesizer. Preserve the meaning of the English explanation. Friendly and approachable, not a literal temperature. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+      },
+      "resolved_label": "ấm áp",
+      "resolved_description": "Thân thiện và dễ gần.",
+      "english_cells": 4,
+      "target_cells": 5,
+      "english_label_description_cells": 32,
+      "target_label_description_cells": 28,
+      "nfc": true,
+      "placeholder_order_source": [],
+      "placeholder_order_target": [],
+      "linguistic_judgment": "ấm áp is an idiomatic affectionate/welcoming vocal quality, not a temperature instruction; consistent with Thân thiện và dễ gần."
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.neutral.label",
+      "machine_value": "neutral",
+      "english": "neutral",
+      "target": "trung tính",
+      "english_description": "Even and unmarked.",
+      "target_description": "Đều và không điểm nhấn.",
+      "context": {
+        "role": "voice tone choice label",
+        "tone": "concise, adjectival",
+        "note": "A concise adjectival choice label for the voice tone; use a natural localized adjective or level term, not an untranslated identifier. Even and unmarked vocal tone, without a pronounced emotional colouring. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+      },
+      "description_context": {
+        "role": "voice tone choice description",
+        "tone": "concise, plain, explanatory",
+        "note": "A brief user-facing explanation beside the choice label, not an instruction to the synthesizer. Preserve the meaning of the English explanation. Even and unmarked vocal tone, without a pronounced emotional colouring. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+      },
+      "resolved_label": "trung tính",
+      "resolved_description": "Đều và không điểm nhấn.",
+      "english_cells": 7,
+      "target_cells": 10,
+      "english_label_description_cells": 27,
+      "target_label_description_cells": 35,
+      "nfc": true,
+      "placeholder_order_source": [],
+      "placeholder_order_target": [],
+      "linguistic_judgment": "trung tính naturally names an uncoloured/even vocal tone; no form-of-address or grammatical gender issue."
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.bright.label",
+      "machine_value": "bright",
+      "english": "bright",
+      "target": "tươi sáng",
+      "english_description": "Upbeat and energetic.",
+      "target_description": "Sôi nổi và tràn đầy năng lượng.",
+      "context": {
+        "role": "voice tone choice label",
+        "tone": "concise, adjectival",
+        "note": "A concise adjectival choice label for the voice tone; use a natural localized adjective or level term, not an untranslated identifier. Upbeat and energetic, not visual brightness. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+      },
+      "description_context": {
+        "role": "voice tone choice description",
+        "tone": "concise, plain, explanatory",
+        "note": "A brief user-facing explanation beside the choice label, not an instruction to the synthesizer. Preserve the meaning of the English explanation. Upbeat and energetic, not visual brightness. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+      },
+      "resolved_label": "tươi sáng",
+      "resolved_description": "Sôi nổi và tràn đầy năng lượng.",
+      "english_cells": 6,
+      "target_cells": 9,
+      "english_label_description_cells": 29,
+      "target_label_description_cells": 42,
+      "nfc": true,
+      "placeholder_order_source": [],
+      "placeholder_order_target": [],
+      "linguistic_judgment": "tươi sáng is an established positive, cheerful quality of giọng/giọng điệu, not merely a light-intensity setting. Adjacent Sôi nổi và tràn đầy năng lượng makes the upbeat delivery explicit; no forced synonym needed."
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.calm.label",
+      "machine_value": "calm",
+      "english": "calm",
+      "target": "điềm tĩnh",
+      "english_description": "Unhurried and steady.",
+      "target_description": "Thong thả và điềm tĩnh.",
+      "context": {
+        "role": "voice tone choice label",
+        "tone": "concise, adjectival",
+        "note": "A concise adjectival choice label for the voice tone; use a natural localized adjective or level term, not an untranslated identifier. Unhurried and steady vocal delivery. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+      },
+      "description_context": {
+        "role": "voice tone choice description",
+        "tone": "concise, plain, explanatory",
+        "note": "A brief user-facing explanation beside the choice label, not an instruction to the synthesizer. Preserve the meaning of the English explanation. Unhurried and steady vocal delivery. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+      },
+      "resolved_label": "điềm tĩnh",
+      "resolved_description": "Thong thả và điềm tĩnh.",
+      "english_cells": 4,
+      "target_cells": 9,
+      "english_label_description_cells": 27,
+      "target_label_description_cells": 34,
+      "nfc": true,
+      "placeholder_order_source": [],
+      "placeholder_order_target": [],
+      "linguistic_judgment": "điềm tĩnh is idiomatic for composed, steady delivery and matches the unchanged description."
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.authoritative.label",
+      "machine_value": "authoritative",
+      "english": "authoritative",
+      "target": "đĩnh đạc",
+      "english_description": "Confident and assured.",
+      "target_description": "Tự tin và chắc chắn.",
+      "context": {
+        "role": "voice tone choice label",
+        "tone": "concise, adjectival",
+        "note": "A concise adjectival choice label for the voice tone; use a natural localized adjective or level term, not an untranslated identifier. Confident and assured, not authoritarian or a claim of permission or factual authority. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+      },
+      "description_context": {
+        "role": "voice tone choice description",
+        "tone": "concise, plain, explanatory",
+        "note": "A brief user-facing explanation beside the choice label, not an instruction to the synthesizer. Preserve the meaning of the English explanation. Confident and assured, not authoritarian or a claim of permission or factual authority. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+      },
+      "resolved_label": "đĩnh đạc",
+      "resolved_description": "Tự tin và chắc chắn.",
+      "english_cells": 13,
+      "target_cells": 8,
+      "english_label_description_cells": 37,
+      "target_label_description_cells": 30,
+      "nfc": true,
+      "placeholder_order_source": [],
+      "placeholder_order_target": [],
+      "linguistic_judgment": "đĩnh đạc conveys poised, assured delivery; appropriate to Confident and assured and avoids authoritarian/quyền lực connotations."
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.low.label",
+      "machine_value": "low",
+      "english": "low",
+      "target": "thấp",
+      "english_description": "Restrained and plain.",
+      "target_description": "Tiết chế và giản dị.",
+      "context": {
+        "role": "voice expressiveness choice label",
+        "tone": "concise, adjectival",
+        "note": "A concise adjectival choice label for the voice expressiveness level; use a natural localized adjective or level term, not an untranslated identifier. Restrained and plain delivery with little expressive variation. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+      },
+      "description_context": {
+        "role": "voice expressiveness choice description",
+        "tone": "concise, plain, explanatory",
+        "note": "A brief user-facing explanation beside the choice label, not an instruction to the synthesizer. Preserve the meaning of the English explanation. Restrained and plain delivery with little expressive variation. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+      },
+      "resolved_label": "thấp",
+      "resolved_description": "Tiết chế và giản dị.",
+      "english_cells": 3,
+      "target_cells": 4,
+      "english_label_description_cells": 26,
+      "target_label_description_cells": 26,
+      "nfc": true,
+      "placeholder_order_source": [],
+      "placeholder_order_target": [],
+      "linguistic_judgment": "thấp is the natural degree label under Độ biểu cảm, not low pitch or volume; its restrained description disambiguates."
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.medium.label",
+      "machine_value": "medium",
+      "english": "medium",
+      "target": "trung bình",
+      "english_description": "Today's constant.",
+      "target_description": "Mức cố định hiện nay.",
+      "context": {
+        "role": "voice expressiveness choice label",
+        "tone": "concise, adjectival",
+        "note": "A concise adjectival choice label for the voice expressiveness level; use a natural localized adjective or level term, not an untranslated identifier. The middle level of expressiveness; the description refers to the existing standard delivery ('Today's constant'), not a calendar date, mathematical constant or a promise that the voice never varies. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+      },
+      "description_context": {
+        "role": "voice expressiveness choice description",
+        "tone": "concise, plain, explanatory",
+        "note": "A brief user-facing explanation beside the choice label, not an instruction to the synthesizer. Preserve the meaning of the English explanation. The middle level of expressiveness; the description refers to the existing standard delivery ('Today's constant'), not a calendar date, mathematical constant or a promise that the voice never varies. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+      },
+      "resolved_label": "trung bình",
+      "resolved_description": "Mức cố định hiện nay.",
+      "english_cells": 6,
+      "target_cells": 10,
+      "english_label_description_cells": 25,
+      "target_label_description_cells": 33,
+      "nfc": true,
+      "placeholder_order_source": [],
+      "placeholder_order_target": [],
+      "linguistic_judgment": "trung bình is the standard midpoint level in the thấp/trung bình/cao ordered scale."
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.high.label",
+      "machine_value": "high",
+      "english": "high",
+      "target": "cao",
+      "english_description": "Lively and expressive.",
+      "target_description": "Sinh động và biểu cảm.",
+      "context": {
+        "role": "voice expressiveness choice label",
+        "tone": "concise, adjectival",
+        "note": "A concise adjectival choice label for the voice expressiveness level; use a natural localized adjective or level term, not an untranslated identifier. Lively and expressive delivery, not increased volume or pitch. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+      },
+      "description_context": {
+        "role": "voice expressiveness choice description",
+        "tone": "concise, plain, explanatory",
+        "note": "A brief user-facing explanation beside the choice label, not an instruction to the synthesizer. Preserve the meaning of the English explanation. Lively and expressive delivery, not increased volume or pitch. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+      },
+      "resolved_label": "cao",
+      "resolved_description": "Sinh động và biểu cảm.",
+      "english_cells": 4,
+      "target_cells": 3,
+      "english_label_description_cells": 28,
+      "target_label_description_cells": 27,
+      "nfc": true,
+      "placeholder_order_source": [],
+      "placeholder_order_target": [],
+      "linguistic_judgment": "cao is the natural upper degree under Độ biểu cảm, with expressive rather than volume meaning supplied by the setting and description."
+    }
+  ],
+  "note": "Terminal clean linguistic verdict for the eight changed display labels. Zero findings. Native-human certification and rendered/layout pass not claimed. Auditor never edited repository; only scratch config and this receipt/script written."
+}

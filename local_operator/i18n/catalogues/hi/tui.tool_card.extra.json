@@ -1,0 +1,18 @@
+{
+  "tui.tool_card.extra.compose.composed": "{size} तैयार",
+  "tui.tool_card.extra.compose.composing": "तैयार हो रहा… {facts}",
+  "tui.tool_card.extra.compose.never_sent": "कभी नहीं भेजा · {facts}",
+  "tui.tool_card.extra.compose.nothing_composed": "कुछ तैयार नहीं",
+  "tui.tool_card.extra.fetch.attempts": "{count, plural, one {{shown} प्रयास} other {{shown} प्रयास}}",
+  "tui.tool_card.extra.fetch.attempts_profiles": "{count, plural, one {{shown} प्रयास ({profiles})} other {{shown} प्रयास ({profiles})}}",
+  "tui.tool_card.extra.fetch.lines": "{count, plural, one {{shown} पंक्ति} other {{shown} पंक्तियाँ}}",
+  "tui.tool_card.extra.search.provider": "प्रोवाइडर: {provider}",
+  "tui.tool_card.extra.search.provider_auth": "प्रोवाइडर: {provider} ({auth_mode})",
+  "tui.tool_card.extra.search.sources": "स्रोत:",
+  "tui.tool_card.extra.search.untitled": "शीर्षकहीन परिणाम",
+  "tui.tool_card.extra.send.failed_reason": "{word}: {cause}",
+  "tui.tool_card.extra.send.mode.now": "अभी",
+  "tui.tool_card.extra.send.mode.quiet": "चुपचाप",
+  "tui.tool_card.extra.send.mode.wake": "जागृति",
+  "tui.tool_card.extra.send.model": "मॉडल"
+}

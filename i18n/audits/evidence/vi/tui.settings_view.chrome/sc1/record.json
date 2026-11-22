@@ -1,0 +1,136 @@
+{
+ "locale": "vi",
+ "namespace": "tui.settings_view.chrome",
+ "worktree": "/Users/damian/local-operator/.worktrees/i18n-settings-leftovers",
+ "head": "3c1b6a24f035",
+ "source_sha256": "2e04f79550d0b09cd262c32850a31c20d5dec2b88b09facd2369d967bd5ee930",
+ "context_sha256": "33a29a836b8de99019887c9025e98e2d9382b8799a8bfe9e4f189cbc86d0df7d",
+ "target_sha256": "a6398844d9b339fe4c35bccff352d937b0cffa8729e53d2a8e430221869723b6",
+ "translator": {
+  "agent": "translator (lopdev task subagent)",
+  "model": "anthropic/claude-opus-5-5",
+  "provenance": "as stated in the delegation brief; not observed by the auditor"
+ },
+ "auditor": {
+  "agent": "translation-auditor (lopdev, task chrome-audit-vi), not the translator; did not edit values",
+  "session": "30fdad3ea509",
+  "model": "anthropic/claude-opus-5-5",
+  "date": "2026-11-21",
+  "fallback_used": true,
+  "fallback_note": "session pinned openai/gpt-6.1-sol; quota HTTP 429 caused cross-vendor fallback to anthropic/claude-opus-5-5, which performed the audit. Same model family as the translator: a separate agent instance with independent context, but not model-independent.",
+  "result": "clean-with-findings",
+  "findings": 6,
+  "unresolved_blocker_major": 0,
+  "severity_counts": {
+   "blocker": 0,
+   "major": 0,
+   "minor": 4,
+   "nit": 2
+  },
+  "finding_ids": [
+   "VI-01",
+   "VI-02",
+   "VI-03",
+   "VI-04",
+   "VI-05",
+   "VI-06"
+  ],
+  "independent_from_translator": true
+ },
+ "keys_read": 49,
+ "mechanical": {
+  "key_parity": "49/49, no missing/extra",
+  "message_arguments": "parity on all 49",
+  "plural": "CLDR vi = ('other',); value.chains, clause.would_remove, confirm.ask use other-only, no =N",
+  "nfc": "all values NFC",
+  "render_message": "all 49 render for counts 1,2,5",
+  "cell_len": "no key over maxCells; at cap: footer.back 8/8, gate_kept.long 61/61, gate_kept.medium 40/40 — consumer selects rungs by cell_len<=_detail_width() (settings_view.py ~5387) and footer ladders by width, so at-cap is fit",
+  "literal_tokens": "esc/enter/r/d, /approvals auto, lop sessions cleanup --dry-run, config.yml, <chain-key> <provider>/<model> all injected by placeholder; preserved",
+  "unsanctioned_english": "'auto' (style-guide config token), 'terminal' (shipped usage) only"
+ },
+ "findings": [
+  {
+   "id": "VI-01",
+   "severity": "minor",
+   "category": "glossary",
+   "keys": [
+    "tui.settings_view.chrome.cascade.malformed",
+    "tui.settings_view.chrome.cascade.cleared"
+   ],
+   "current": [
+    "cấu hình dự phòng bị hỏng — nhấn {key} để xóa",
+    "đã xóa cấu hình dự phòng bị hỏng"
+   ],
+   "proposed": [
+    "chuỗi dự phòng bị hỏng — nhấn {key} để xóa (38 cells ≤48)",
+    "đã xóa chuỗi dự phòng bị hỏng (29 ≤48)"
+   ],
+   "reason": "'cascade' ships as «chuỗi dự phòng» (wire.settings.retry_fallbackchains.label, the row this text sits under; wire.slash.failovers) and this file's own cascade.empty; «cấu hình dự phòng» is a second term on the same screen."
+  },
+  {
+   "id": "VI-02",
+   "severity": "minor",
+   "category": "glossary/idiom",
+   "keys": [
+    "tui.settings_view.chrome.hotkey.desktop_detail",
+    "tui.settings_view.chrome.hotkey.hold_detail",
+    "tui.settings_view.chrome.hotkey.hold_refusal"
+   ],
+   "current": "«ứng dụng máy tính»",
+   "proposed": "«ứng dụng desktop» (desktop_detail 94≤96; hold_detail '…ứng dụng desktop — đặt tại ứng dụng.' 58≤60; hold_refusal '…ở ứng dụng desktop — …' 78≤80)",
+   "reason": "The same settings page titles the section «Ứng dụng desktop» and its keymap help says «desktop» (wire.settings.desktop.title, keymap.push_to_talk/start_recording.help); «ứng dụng máy tính» also commonly reads as the Calculator app. Corpus elsewhere favours máy tính (22 vs 4), so on-screen consistency is the deciding reason."
+  },
+  {
+   "id": "VI-03",
+   "severity": "minor",
+   "category": "accuracy",
+   "keys": [
+    "tui.settings_view.chrome.hotkey.recording_detail"
+   ],
+   "current": "Phím tắt nhập bằng giọng nói — đặt ở đây hoặc ở ứng dụng.",
+   "proposed": "Phím tắt giọng nói (desktop) — đặt ở đây hoặc ở ứng dụng. (57≤60)",
+   "reason": "English opens with 'Desktop', the qualifier that says this shortcut acts in the desktop window, not the terminal (context note); the translation drops it."
+  },
+  {
+   "id": "VI-04",
+   "severity": "minor",
+   "category": "idiom",
+   "keys": [
+    "tui.settings_view.chrome.capture.takes_from"
+   ],
+   "current": "lấy {shortcut} khỏi “{victim}”",
+   "proposed": "lấy {shortcut} của “{victim}”",
+   "reason": "«lấy X khỏi Y» reads as 'take X out of Y' (a calque of 'from'); «lấy … của …» is the natural way to say the key is taken from another action."
+  },
+  {
+   "id": "VI-05",
+   "severity": "nit",
+   "category": "idiom",
+   "keys": [
+    "tui.settings_view.chrome.notice.discarded"
+   ],
+   "current": "đã bỏ — {save_key} để lưu, {cancel_key} hoặc rời đi để hủy",
+   "proposed": "đã bỏ thay đổi — {save_key} để lưu, {cancel_key} hoặc rời dòng để hủy (55≤74)",
+   "reason": "Bare «đã bỏ» has no object and can read 'gave up'; naming the change and the row is clearer at no width cost that matters."
+  },
+  {
+   "id": "VI-06",
+   "severity": "nit",
+   "category": "accuracy",
+   "keys": [
+    "tui.settings_view.chrome.cascade.reset_refused"
+   ],
+   "current": "{reset_key} đặt lại từng cài đặt; …",
+   "proposed": "{reset_key} chỉ đặt lại một cài đặt; … (74≤74, exactly at cap — detail line is ~74 cells at 80 columns; flag for rendered check or keep current)",
+   "reason": "«từng» means 'each, one by one'; the English point is that r resets a single setting, not the cascade, which «chỉ … một» states directly."
+  }
+ ],
+ "out_of_scope_notes": [
+  "English source tui.settings_view.chrome.gate_kept.medium renders 41 cells with command='/approvals auto' against its own maxCells 40 (source-side, not a vi defect)."
+ ],
+ "verdict_per_namespace": {
+  "tui.settings_view.chrome": "clean-with-findings"
+ },
+ "verdict": "clean-with-findings",
+ "note": "Native-speaker review and rendered-frame certification not claimed."
+}

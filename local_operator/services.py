@@ -2211,12 +2211,16 @@ def print_refreshes(refreshes: Sequence[ServiceRefresh]) -> None:
 #: reconcile by name. The reason is what ``lop services status`` and the
 #: update report print when the process is still on an older build.
 #:
-#: THE SECRET BROKER IS REPORT-ONLY, on purpose: it is not a supervised unit
-#: (``secrets.client.ensure_broker`` spawns it on demand), it holds live
-#: sessions' redaction registrations, and in the passphrase tier it holds the
-#: ONLY unwrapped copy of the master key — an update that stopped it would put
-#: a password dialog on the operator's screen. It exits on its own idle timer,
-#: and ``lop secret broker restart`` moves it on demand.
+#: THE SECRET BROKER IS ROLLED, NOT RESTARTED (2026-11-21): the refresh child's
+#: "secret broker" step (``update._refresh_secret_broker`` →
+#: ``secrets.roll.roll_broker``) replaces it with no credential gap when nothing
+#: would need the passphrase again and every registered session can
+#: re-register. It used to be report-only with "it moves when it idles out",
+#: which is false while any session is registered (``_should_idle_out``) — node2
+#: sat on 0.102.2 for 7+ days. When the roll defers, the step's own reason (the
+#: pids that must restart, or the unlocked passphrase tier) rides on the status
+#: and ``update._reconcile_with_processes`` keeps it; this text is the fallback
+#: ``lop services status`` prints for a stale broker process.
 _DAEMON_MODULES: dict[str, tuple[str, str]] = {
     "local_operator.wakes.supervisor": (
         "wakes supervisor",
@@ -2235,9 +2239,10 @@ _DAEMON_MODULES: dict[str, tuple[str, str]] = {
     ),
     "local_operator.secrets.brokerd": (
         "secret broker",
-        "not restarted by an update (it holds live sessions' registrations and, "
-        "in the passphrase tier, the unlocked key); it moves when it idles out, "
-        "or run `lop secret broker restart`",
+        "rolled by `lop update` only without a credential gap: it stays while the "
+        "hardened store is unlocked or while registered sessions run a build that "
+        "cannot re-register (the update report names them); `lop secret broker "
+        "restart` rolls it, or says why it cannot",
     ),
 }
 

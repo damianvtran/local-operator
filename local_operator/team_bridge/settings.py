@@ -324,6 +324,18 @@ DEFAULT_AMBIENT_TRIAGE = "on"
 DEFAULT_URGENT_FAILOVER_SECONDS = 330
 URGENT_FAILOVER_MAX_SECONDS = 600
 
+#: ``team_bridge.multi_frame_turns`` — serve several admitted bodies as ONE turn
+#: (``pending_turn.PendingTurnBatch``): the drain's next woken rows of the same
+#: conversation ride as companion frames, plus a bounded ambient digest of
+#: deferred posts. MEASURED (2026-11-21, this machine): 50.4% of inbound bridge
+#: messages arrive <=30 s after the previous one, bursts reach 35-47, and each
+#: body was its own full-context turn (~$0.17 at 260k-400k context), so a 5-post
+#: burst cost 5 consecutive turns that mostly ended in no_reply. ``off`` is the
+#: one-body-per-turn behaviour exactly. Config-file only, like the triage keys;
+#: a YAML boolean reads as the mode it spells (``off`` -> ``False``); anything
+#: else reads ON.
+DEFAULT_MULTI_FRAME_TURNS = True
+
 #: ``team_bridge.screening.*`` — the rolling-hour ceilings on SCREENING SPEND,
 #: now CONFIGURABLE. They were fixed class constants on ``Store`` (40/30/35/20,
 #: "the frozen §8 budget"); these are the 10x replacements and the shipped
@@ -374,6 +386,7 @@ HOLD_ALERT_AFTER_PATH = ("team_bridge", "hold_alert_after_minutes")
 AMBIENT_WAKE_DWELL_PATH = ("team_bridge", "ambient_wake_dwell_seconds")
 AMBIENT_TRIAGE_PATH = ("team_bridge", "ambient_triage")
 URGENT_FAILOVER_PATH = ("team_bridge", "urgent_failover_seconds")
+MULTI_FRAME_TURNS_PATH = ("team_bridge", "multi_frame_turns")
 HOLD_RELEASE_PATH = ("team_bridge", "hold_release")
 REVIEW_HELD_PATH = ("team_bridge", "review_held")
 SCREENING_HOLD_REVIEW_AFTER_PATH = ("team_bridge", "screening_hold_review_after_minutes")
@@ -644,6 +657,16 @@ def _ambient_triage(value: Any) -> str:
     return DEFAULT_AMBIENT_TRIAGE
 
 
+def _multi_frame_turns(value: Any) -> bool:
+    """ON unless the file says off (``false``/``"off"``); junk reads the default."""
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("off", "false"):
+        return False
+    return DEFAULT_MULTI_FRAME_TURNS
+
+
 def _screening_hold_review_after_minutes(value: Any) -> int:
     """Whole minutes in 0..10080, else the default (same rule as the alert)."""
 
@@ -881,6 +904,8 @@ class TeamBridgeSettings:
     ambient_wake_dwell_seconds: int = DEFAULT_AMBIENT_WAKE_DWELL_SECONDS
     ambient_triage: str = DEFAULT_AMBIENT_TRIAGE
     urgent_failover_seconds: int = DEFAULT_URGENT_FAILOVER_SECONDS
+    #: Several admitted bodies per turn (see ``DEFAULT_MULTI_FRAME_TURNS``).
+    multi_frame_turns: bool = DEFAULT_MULTI_FRAME_TURNS
     #: The stored "Screening model" preference as a ``(provider, model_id)``
     #: pair, or ``None`` for "no preference" (the shipped default). Shape-parsed
     #: by :func:`_screening_model`; the evaluated-table check happens in
@@ -962,6 +987,9 @@ class TeamBridgeSettings:
                 get(URGENT_FAILOVER_PATH, DEFAULT_URGENT_FAILOVER_SECONDS),
                 default=DEFAULT_URGENT_FAILOVER_SECONDS,
                 maximum=URGENT_FAILOVER_MAX_SECONDS,
+            ),
+            multi_frame_turns=_multi_frame_turns(
+                get(MULTI_FRAME_TURNS_PATH, DEFAULT_MULTI_FRAME_TURNS)
             ),
             screening_model=_screening_model(
                 get(SCREENING_MODEL_PATH, DEFAULT_TEAM_BRIDGE_SCREENING_MODEL)

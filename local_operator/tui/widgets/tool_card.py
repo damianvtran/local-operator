@@ -96,7 +96,7 @@ from bisect import bisect_right
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from rich.cells import cell_len
 from rich.style import Style
@@ -117,6 +117,7 @@ from local_operator.harness.types import INTERRUPTED_FAULTS
 from local_operator.i18n.keys import tui_profile_actions as _pa
 from local_operator.i18n.keys import tui_small as _x
 from local_operator.i18n.keys import tui_tool_card as _tc
+from local_operator.i18n.keys import tui_tool_card_extra as _tx
 from local_operator.i18n.keys import tui_tool_card_status as _ts
 from local_operator.i18n.text import active_locale, tr, tr_record
 from local_operator.tools import diff_archive
@@ -124,7 +125,12 @@ from local_operator.tools.diff_archive import DIFF_FULL_KEY
 from local_operator.tui import bindings
 from local_operator.tui import imagegen as imagegen_mod
 from local_operator.tui.glyphs import display_name, tool_icon
-from local_operator.tui.i18n_status import display_tr, localized_display
+from local_operator.tui.i18n_status import (
+    display_tr,
+    localized_display,
+    message_display,
+    strip_display_controls,
+)
 from local_operator.tui.widgets.transcript import (
     TOOL_NAME_COL,
     TOOL_NAME_COL_MAX,
@@ -144,7 +150,7 @@ from local_operator.tui.widgets.transcript import (
 # third-party import, is already a hard dependency of this app.
 from local_operator.web_fetch.failure import (
     RETRY_AFTER_NOTE_LEAD,
-    attempt_summary,
+    attempt_profile_labels,
     block_lead,
 )
 
@@ -180,6 +186,100 @@ def _more_marker(msg) -> str:
 # and nowhere else, so no composed string carries a second projection; a cut
 # through an isolate is closed again by :func:`truncate_cells`.
 _t_st = display_tr("tui.tool_card.status")
+
+# The card's remaining words (send mode markers, the model-switch marker, the
+# compose record, the web_fetch/web_search row fragments, the failed-send
+# reason pattern) live in a SECOND child namespace, `tui.tool_card.extra`, for
+# the reason `tui.tool_card.status` exists: both parents are audited, and adding
+# keys to either would stale every locale's ledger row for it. Same render
+# adapter as the status words, resolved at paint time. The technical params
+# (sizes, provider tokens, the backend's English failure cause, identity names)
+# become LTR islands for Urdu; `facts`/`word` are NOT listed because they carry
+# already-projected localized text, which an LTR island would mis-order.
+# `profiles` and `auth_mode` are NOT bare param islands: every locale wraps
+# them in parentheses, and an island must start after whitespace
+# (display.isolated_status_text), so the bare values raised "must include its
+# whole prefix" and crashed the Urdu fetch and search cards. The parenthesised
+# group is one island instead, and `{provider} ({auth_mode})` is ONE island
+# (two neighbouring LTR islands swap order in RTL, the reason `/login
+# {provider}` is whole). Templates whose params a message lacks are skipped and
+# the longest match wins, so the bare `{provider}` row still gets its island.
+# `cause` is not an island either: it is free English prose, measured EMPTY by
+# `_cap_failed_reason` and cut with a non-ASCII `…`, both of which the strict
+# token validator refuses -- in Urdu that was a crash on the failed-send row.
+_t_x = display_tr(
+    "tui.tool_card.extra",
+    technical_params=("size",),
+    technical_commands=("({profiles})", "{provider} ({auth_mode})", "{provider}"),
+)
+
+
+class _HeaderRow(NamedTuple):
+    """A structured search/fetch row and what KIND of row it is.
+
+    The body painters used to pick each row's ink by matching its English lead
+    (``Provider:``, ``Fetched:``, ``Rendered:``); once those leads are keyed a
+    translated row matched nothing and lost its dim/link treatment. The builder
+    knows what each row is, so it says so here, and the painter styles by this
+    record — never by the localized text.
+
+    ``signal`` is the sub-run of ``text`` painted in the signal ink (the attempt
+    count on a ``rendered`` row), located by value because THIS module composed
+    it into the row in the same call.
+    """
+
+    kind: str
+    text: str
+    signal: str = ""
+
+
+def _send_mode_word(args: Mapping[str, object]) -> str:
+    """The localized delivery-mode marker a send row leads with.
+
+    The TOKEN comes from the tool's own ``peer_send_mode_label`` so the card and
+    the approval prompt can never disagree about which mode a call names; only
+    the word painted for it is keyed. The token stays English everywhere it is
+    model-facing. An unknown future token paints as itself rather than vanishing.
+    """
+    from local_operator.tools.builtin import peer_send_mode_label
+
+    token = peer_send_mode_label(dict(args))
+    words = {
+        "now": _tx.send_mode_now,
+        "quiet": _tx.send_mode_quiet,
+        "wake": _tx.send_mode_wake,
+    }
+    message = words.get(token)
+    return _t_x(message()) if message else _scalar_text(token)
+
+
+def _model_marker() -> str:
+    """The marker a model-switch send row leads with until it settles."""
+    return _t_x(_tx.send_model())
+
+
+def _compose_record(compose_bytes: int) -> str:
+    """``<size> composed`` (or ``nothing composed``) for a never-sent row."""
+    if compose_bytes:
+        return _t_x(_tx.compose_composed(size=_format_bytes(compose_bytes)))
+    return _t_x(_tx.compose_nothing_composed())
+
+
+def _never_sent_text(compose_bytes: int, facts: str) -> str:
+    """``never sent · <facts>``, nesting an already-PAINTED record.
+
+    ``facts`` comes out of :func:`_compose_record` already projected: in Urdu it
+    is wrapped in isolates, and the outer paint refuses control characters, so
+    nesting it raw crashed every Urdu never-sent row. Its isolates are stripped
+    for the nest and the size is re-declared as the outer message's island.
+    """
+    size = _format_bytes(compose_bytes) if compose_bytes else ""
+    return message_display(
+        _tx.compose_never_sent(facts=strip_display_controls(facts)),
+        technical_literals=(size,) if size else (),
+    ).plain
+
+
 _profile_copy = tr_record("tui.profile_actions")
 
 #: Control-sequence stripping lives in `local_operator.ansi` because the
@@ -945,10 +1045,7 @@ def _send_summary(args: dict[str, object]) -> str:
     # names — two copies of that precedence would drift the first time a mode is
     # added. Imported in-function: this widget module must not pull the tool
     # module in at import time.
-    from local_operator.tools.builtin import (
-        peer_send_mode_label,
-        peer_send_target_label,
-    )
+    from local_operator.tools.builtin import peer_send_target_label
 
     # `who` may be a raw conversation substring, i.e. model-controlled text; it
     # goes through the same scalar flattening every other summary field does.
@@ -958,8 +1055,8 @@ def _send_summary(args: dict[str, object]) -> str:
         # A model switch carries no delivery mode — `wake` would claim a turn
         # was started — so the leading marker names the act instead. Once the
         # call settles the marker becomes the OUTCOME (`_switch_outcome_summary`).
-        return " · ".join(("model", who, f"→ {model}"))
-    mode = peer_send_mode_label(args)
+        return " · ".join((_model_marker(), who, f"→ {model}"))
+    mode = _send_mode_word(args)
     message = _scalar_text(args.get("message"))
     parts = [part for part in (mode, who, message) if part]
     return " · ".join(parts)
@@ -1040,14 +1137,14 @@ def _delivery_outcome_summary(summary: str, args: dict[str, object], details: ob
     state keeps the argument summary unchanged, which is what a card rebuilt from
     an older payload gets.
     """
-    from local_operator.tools.builtin import peer_send_mode_label
-
     if not isinstance(details, Mapping):
         return summary
     if details.get("duplicate_suppressed") is True:
         # Requested mode is not current execution: reuse performed no new act.
         # Put the discriminator first so right-truncation cannot hide it.
-        marker = _scalar_text(peer_send_mode_label(args))
+        # The marker is the LOCALIZED word `_send_summary` built the prefix
+        # with, in this same call and language, so the strip below is exact.
+        marker = _send_mode_word(args)
         prefix = f"{marker} · "
         rest = summary[len(prefix) :] if summary.startswith(prefix) else summary
         reused, no_wake = _t_st(_ts.send_receipt_reused()), _t_st(_ts.send_no_new_wake())
@@ -1061,7 +1158,7 @@ def _delivery_outcome_summary(summary: str, args: dict[str, object], details: ob
     #: own ``wake`` key for the status): it is what tells a quiet send from a
     #: wake send, and it is the only place that fact lives on this result.
     wake_requested = bool(details.get("wake"))
-    marker = _scalar_text(peer_send_mode_label(args))
+    marker = _send_mode_word(args)
     prefix = f"{marker} · "
     if not marker or not summary.startswith(prefix):
         return summary
@@ -1079,24 +1176,38 @@ def _delivery_outcome_summary(summary: str, args: dict[str, object], details: ob
     return f"{word} · {rest}"
 
 
-def _cap_failed_reason(reason: str, room: int) -> str:
+def _failed_reason_text(word: str, cause: str) -> str:
+    """``<word>: <cause>`` through the keyed pattern, so a locale owns its joiner.
+
+    zh-CN, for one, writes a full-width colon (``：``) with no space; a
+    hard-coded ``": "`` could not carry that. ``word`` arrives painted (Urdu
+    isolates included), so its controls are stripped before it nests; the
+    outer paint re-wraps the whole line.
+    """
+    return _t_x(_tx.send_failed_reason(word=strip_display_controls(word), cause=cause))
+
+
+def _cap_failed_reason(word: str, cause: str, room: int) -> str:
     """``<word>: <cause>`` inside ``room`` cells, the word never cut mid-string.
 
-    Split on the first ``": "`` -- the shape :meth:`ToolCard._send_failed_reason`
-    composes, so there is no second separator to confuse it -- and spend the room
-    on the word first. Too narrow even for the word means the ordinary truncation
-    (a cap of 8 cells cannot hold a 13-cell constant), which is the only case
-    where the discriminator still loses.
+    Composed from its PARTS rather than split back out of the painted string:
+    the joiner is localized (``tui.tool_card.extra.send.failed_reason``), so
+    partitioning on an English ``": "`` found no separator in a locale that
+    writes ``：`` and truncated the word itself. The room is spent on the word
+    first; the pattern's own overhead is measured with an empty cause, so it
+    holds whatever joiner the locale chose. Too narrow even for the word means
+    the ordinary truncation (a cap of 8 cells cannot hold a 13-cell constant),
+    which is the only case where the discriminator still loses.
     """
-    word, separator, cause = reason.partition(": ")
-    if not separator:
-        return truncate_cells(reason, room)
+    full = _failed_reason_text(word, cause)
+    if cell_len(full) <= room:
+        return full
     if cell_len(word) >= room:
         return truncate_cells(word, room)
-    budget = room - cell_len(word) - len(separator)
+    budget = room - cell_len(_failed_reason_text(word, ""))
     if budget < 2:
         return word
-    return f"{word}{separator}{truncate_cells(cause, budget)}"
+    return _failed_reason_text(word, truncate_cells(cause, budget))
 
 
 def _failed_delivery_reason(details: object) -> str:
@@ -1186,9 +1297,12 @@ def _switch_outcome_summary(summary: str, details: object) -> str:
     """
     outcome = details.get("outcome") if isinstance(details, Mapping) else None
     word = switch_outcome_words().get(outcome) if isinstance(outcome, str) else None
-    if not word or not summary.startswith("model · "):
+    # The marker is the localized word `_send_summary` led with, built in the
+    # same call and language as ``summary`` -- splitting text this module made.
+    marker = f"{_model_marker()} · "
+    if not word or not summary.startswith(marker):
         return summary
-    return f"{word} · {summary[len('model · '):]}"
+    return f"{word} · {summary[len(marker) :]}"
 
 
 def _summary_from_args(tool_name: str, args: dict[str, object]) -> str:
@@ -1329,6 +1443,16 @@ def _diff_counts(details: dict[str, Any] | None) -> tuple[int, int]:
 
 def _search_result_output(details: dict[str, Any] | None) -> list[str]:
     """Structured web-search rows: provider, page name, URL, and short snippet."""
+    return [row.text for row in _search_result_rows(details)]
+
+
+def _search_result_rows(details: dict[str, Any] | None) -> list[_HeaderRow]:
+    """:func:`_search_result_output`'s rows, each tagged with its kind.
+
+    ``provider``/``sources`` are the two metadata rows the body painter dims;
+    every other row is ``""`` and keeps the painter's value-shaped rules (a URL,
+    a numbered title, a snippet), none of which read localized words.
+    """
     if not isinstance(details, Mapping):
         return []
     sources = details.get("sources")
@@ -1337,12 +1461,21 @@ def _search_result_output(details: dict[str, Any] | None) -> list[str]:
 
     provider = _strip_control_sequences(str(details.get("provider") or "search"))
     auth_mode = _strip_control_sequences(str(details.get("auth_mode") or ""))
-    lines = [f"Provider: {provider}" + (f" ({auth_mode})" if auth_mode else ""), "Sources:"]
+    provider_row = _t_x(
+        _tx.search_provider_auth(provider=provider, auth_mode=auth_mode)
+        if auth_mode
+        else _tx.search_provider(provider=provider)
+    )
+    rows = [
+        _HeaderRow("provider", provider_row),
+        _HeaderRow("sources", _t_x(_tx.search_sources())),
+    ]
+    lines: list[str] = []
     for index, source in enumerate(sources, start=1):
         if not isinstance(source, Mapping):
             continue
         title = _strip_control_sequences(
-            " ".join(str(source.get("title") or "Untitled result").split())
+            " ".join(str(source.get("title") or _t_x(_tx.search_untitled())).split())
         )
         url = _strip_control_sequences(" ".join(str(source.get("url") or "").split()))
         snippet = _strip_control_sequences(" ".join(str(source.get("snippet") or "").split()))
@@ -1354,7 +1487,7 @@ def _search_result_output(details: dict[str, Any] | None) -> list[str]:
                 snippet = snippet[: SEARCH_EXPANDED_SNIPPET_CHARS - 1].rstrip() + "…"
             lines.append(f"   {snippet}")
     lines.append(_t(_x.tool_card_search_fetch_hint()))
-    return lines
+    return rows + [_HeaderRow("", line) for line in lines]
 
 
 def _is_fetch_details(tool_name: str, details: dict[str, Any] | None) -> bool:
@@ -1383,6 +1516,11 @@ def _is_fetch_details(tool_name: str, details: dict[str, Any] | None) -> bool:
 
 
 def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
+    """The fetch card's header rows as text; see :func:`_fetch_result_rows`."""
+    return [row.text for row in _fetch_result_rows(details)]
+
+
+def _fetch_result_rows(details: dict[str, Any] | None) -> list[_HeaderRow]:
     """Structured web-fetch rows: the request/final URL, status, and render meta.
 
     Rendered from ``details`` (which never reaches the provider) rather than the
@@ -1429,7 +1567,7 @@ def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
         fetched += "  " + _t_tc(_tc.fetch_final(url=final))
     if meta:
         fetched += f"  ·  {meta}"
-    rows: list[str] = []
+    rows: list[_HeaderRow] = []
     # F1: a non-2xx leads with a prominent error row (painted in the danger
     # treatment by the body painter) so a block/error page is visually distinct
     # from successful content — the card equivalent of the tool result's
@@ -1449,11 +1587,16 @@ def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
         if details.get("failure_kind") == "blocked" and vendor:
             clause = block_lead(str(vendor))
             rows.append(
-                _t(_x.tool_card_http_blocked(status=str(status), reason=reason, clause=clause))
+                _HeaderRow(
+                    "",
+                    _t(_x.tool_card_http_blocked(status=str(status), reason=reason, clause=clause)),
+                )
             )
         else:
-            rows.append(_t(_x.tool_card_http_error_page(status=str(status), reason=reason)))
-    rows.append(fetched)
+            rows.append(
+                _HeaderRow("", _t(_x.tool_card_http_error_page(status=str(status), reason=reason)))
+            )
+    rows.append(_HeaderRow("fetched", fetched))
 
     # D1/D7: ``Rendered: markdownify · 2 attempts (default, browser-profile) ·
     # 800 lines · 51.8 KB``. The escalation that WON is the case a reader most
@@ -1487,13 +1630,17 @@ def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
     # fields read as one decision, and ``summary`` can be gated on them.
     attempts_n = details.get("attempts")
     profiles_n = details.get("profiles")
-    summary = attempt_summary(
+    summary = _attempt_count_text(
         attempts_n if isinstance(attempts_n, int) else 1,
         profiles_n if isinstance(profiles_n, list) else (),
     )
     own_bits = (
         method,
-        f"{lines_n} lines" if isinstance(lines_n, int) else "",
+        (
+            _t_x(_tx.fetch_lines(count=lines_n, shown=str(lines_n)))
+            if isinstance(lines_n, int)
+            else ""
+        ),
         # D2: humanise (KB/MB) so the structured row agrees with the binary
         # notice body two lines below, which already prints e.g. "2.4 MB".
         # Suppressed for a replaced body: see the docstring (DN2).
@@ -1514,10 +1661,34 @@ def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
         if part
     )
     if render_bits:
-        rows.append(_t(_x.tool_card_rendered_row(bits=render_bits)))
+        # The attempt count rides along as the row's signal run: the painter
+        # inks it by this value instead of re-finding an English ``N attempts``.
+        rendered = _t(_x.tool_card_rendered_row(bits=render_bits))
+        signal = summary if summary and any(own_bits) else ""
+        rows.append(_HeaderRow("rendered", rendered, signal))
     if details.get("low_quality"):
-        rows.append(_t(_x.tool_card_low_quality_hint()))
+        rows.append(_HeaderRow("", _t(_x.tool_card_low_quality_hint())))
     return rows
+
+
+def _attempt_count_text(attempts: int, profiles: Sequence[str]) -> str:
+    """The card's localized twin of :func:`~local_operator.web_fetch.failure.attempt_summary`.
+
+    Same rules -- nothing for a single attempt, the identity sequence only when
+    it changed (``attempt_profile_labels`` owns that collapse) -- but the count
+    is an ICU plural in the active language. The English sentence stays the
+    model-facing copy in ``failure.py``; this is only what the card paints.
+    """
+    if attempts <= 1:
+        return ""
+    labels = attempt_profile_labels(profiles)
+    if labels:
+        return _t_x(
+            _tx.fetch_attempts_profiles(
+                count=attempts, shown=str(attempts), profiles=", ".join(labels)
+            )
+        )
+    return _t_x(_tx.fetch_attempts(count=attempts, shown=str(attempts)))
 
 
 #: Short reason phrases for the statuses a fetch card most often shows, kept in
@@ -1555,28 +1726,25 @@ _FETCH_HEADER_META_RE = re.compile(r"^\S.* · .*cache ")
 _FETCH_HEADER_NOTE_RE = re.compile(r"^\(The body below is the error response")
 
 
-#: The attempt summary clause on a painted fetch row, exactly as
-#: :func:`local_operator.web_fetch.failure.attempt_summary` writes it —
-#: ``· 2 attempts (default, browser-profile)``, or ``· 2 attempts`` when the
-#: retries never changed identity. Matched by VALUE rather than position, so the
-#: painter can lift it to ``signal`` (D9) without caring where D7 placed it in
-#: the row, and a future reorder cannot silently drop the escalation back into
-#: the metadata ink.
-_ATTEMPT_CLAUSE_RE = re.compile(r" · \d+ attempts?(?: \([^)]*\))?")
+def _split_attempt_clause(line: str, clause: str) -> tuple[str, str, str]:
+    """Split a ``rendered`` row into ``(before, clause, after)`` around its
+    attempt count, so the painter can lift it to ``signal`` (D9).
 
-
-def _split_attempt_clause(line: str) -> tuple[str, str, str]:
-    """Split a painted fetch row into ``(before, clause, after)`` around its
-    attempt summary.
-
-    ``clause`` is empty for a card that made one attempt — no summary is painted,
-    which is the common case — and for a terminal failure, whose count rides its
-    promoted lead instead of a ``Rendered:`` row.
+    ``clause`` is the count :func:`_fetch_result_rows` composed into this very
+    row (``_HeaderRow.signal``), so it is found by the value this module wrote,
+    in whatever language it was written -- the old English ``N attempts`` regex
+    matched nothing once the count was localized. Its leading `` · ``
+    joins the run, as the pattern's did, so English paints byte-identically.
+    Empty for a card that made one attempt, which is the common case.
     """
-    match = _ATTEMPT_CLAUSE_RE.search(line)
-    if match is None:
+    if not clause:
         return line, "", ""
-    return line[: match.start()], match.group(0), line[match.end() :]
+    head, found, tail = line.partition(clause)
+    if not found:
+        return line, "", ""
+    if head.endswith(" · "):
+        head, found = head[: -len(" · ")], f" · {found}"
+    return head, found, tail
 
 
 def _humanize_bytes(count: int) -> str:
@@ -2086,6 +2254,9 @@ class ToolCard(ExpandableActionBlock):
         self._localized_output_inputs: tuple[str, dict[str, Any] | None] | None = None
         #: The locale ``_output`` was composed under.
         self._output_locale = ""
+        #: Structured search/fetch rows by their composed text -> what kind of
+        #: row each is (see :class:`_HeaderRow`); empty for plain output.
+        self._header_marks: dict[str, _HeaderRow] = {}
         #: The write/edit tool's rendered unified diff (``details["diff"]``),
         #: colourised at render time. ``None`` (not []) when the tool reported
         #: no diff — a read or bash card expands to its raw output instead.
@@ -2177,6 +2348,10 @@ class ToolCard(ExpandableActionBlock):
         self._send_summary_details: object = None
         self._send_summary_built = ""
         self._send_summary_locale = ""
+        #: The never-sent record's summary and language, the same pair for the
+        #: same reason (:meth:`_compose_never_sent_summary`).
+        self._never_sent_built = ""
+        self._never_sent_locale = ""
         #: True when the result came back from a call that ran on a FRESH kernel
         #: after a reset (``details["kernel_reset"]``, set by ``tools/eval.py``
         #: only for a call that really ran). Read by the COLLAPSED row the way
@@ -2417,9 +2592,7 @@ class ToolCard(ExpandableActionBlock):
             self._compose_bytes = int(argument_bytes)
         self._set_peer_cycle_communication(None)
         self.never_sent = True
-        size = _format_bytes(self._compose_bytes) if self._compose_bytes else "nothing"
-        self._compose_facts = f"{size} composed"
-        self._summary = f"never sent · {self._compose_facts}"
+        self._compose_never_sent_summary()
         self._duration = None
         if kind in INTERRUPTED_FAULTS:
             self._interrupt_label = "interrupted"
@@ -2511,14 +2684,12 @@ class ToolCard(ExpandableActionBlock):
             # written. It keeps the size as a record of how far the model got.
             # (`queued` is the same record one state later: the dictation is
             # over, the call still never started, and the turn died first.)
-            size = _format_bytes(self._compose_bytes) if self._compose_bytes else "nothing"
             # Facts first, and `_compose_facts` set so the label-shed ladder can
             # reach this row too: gated on the composing STATE, the ladder built
             # for the live row could not touch the record it turns into, and
             # three materially different interrupted rows painted identically
             # from 40 columns down.
-            self._compose_facts = f"{size} composed"
-            self._summary = f"never sent · {self._compose_facts}"
+            self._compose_never_sent_summary()
             # The outcome column stays BLANK for this row. ``_elapsed`` here
             # measures from the moment the ROW was built — `ToolCard.__init__`
             # takes its own zero — so on this branch it is the dictation plus
@@ -2847,7 +3018,7 @@ class ToolCard(ExpandableActionBlock):
         # call…` read as wrong.
         facts = f"{_format_bytes(self._compose_bytes)} · {clock}" if self._compose_bytes else clock
         self._compose_facts = facts
-        self._summary = f"composing… {facts}"
+        self._summary = _t_x(_tx.compose_composing(facts=facts))
         self._refresh_row()
 
     def set_navigation_visible(self, visible: bool) -> None:
@@ -3426,9 +3597,10 @@ class ToolCard(ExpandableActionBlock):
         # of (agent review round 2, MINOR-1).
         self._send_mode_marker = ""
         if self._is_send:
-            from local_operator.tools.builtin import peer_send_mode_label
-
-            self._send_mode_marker = _scalar_text(peer_send_mode_label(self._args))
+            # Re-read (in the same language) whenever the summary is recomposed
+            # -- see `_compose_send_summary` -- so a live language switch never
+            # pairs a translated summary with an old-language marker.
+            self._send_mode_marker = _send_mode_word(self._args)
         if self._is_send:
             # Re-derived from the arguments every time, so a card that settles
             # twice (a replay over a live row) never stacks outcome words. The
@@ -3518,7 +3690,9 @@ class ToolCard(ExpandableActionBlock):
         must happen once per result belong in :meth:`_absorb_result`.
         """
         name = self.tool_name.lower()
-        search_output = _search_result_output(details) if name == "web_search" else []
+        search_rows = _search_result_rows(details) if name == "web_search" else []
+        search_output = [row.text for row in search_rows]
+        fetch_rows: list[_HeaderRow] = []
         # A web_fetch (and a `read <url>`, which records tool_name "read" but
         # carries a fetch's details shape) leads with structured header rows and
         # then the rendered preview body, so the card shows what was fetched and
@@ -3533,7 +3707,8 @@ class ToolCard(ExpandableActionBlock):
             # narrowing has to survive the type checker to keep the guards
             # readable (one alias instead of an isinstance per key).
             fetch_details = details if isinstance(details, Mapping) else {}
-            fetch_header = _fetch_result_output(details)
+            fetch_rows = _fetch_result_rows(details)
+            fetch_header = [row.text for row in fetch_rows]
             if fetch_header:
                 # D1: the structured rows above OWN the metadata (status, final
                 # URL, method, ctype, cache), so strip the model-facing preview's
@@ -3584,6 +3759,11 @@ class ToolCard(ExpandableActionBlock):
         # the fetch presentation without re-inspecting details every repaint.
         self._is_fetch_card = bool(fetch_output)
         self._output = search_output or fetch_output or self._clean_output(result_text)
+        # What each structured row IS, keyed by the exact text composed for it
+        # just above (in this call, in this language). The body painters style
+        # by this, never by matching a row's localized lead.
+        marked = search_rows if search_output else fetch_rows if fetch_output else []
+        self._header_marks = {row.text: row for row in marked if row.kind}
         # Only cards whose rows carry catalogue text need recomposing; a plain
         # output is the tool's own bytes and is never re-derived.
         self._localized_output_inputs = (
@@ -3603,6 +3783,21 @@ class ToolCard(ExpandableActionBlock):
         )
         self._send_summary_built = self._summary
         self._send_summary_locale = active_locale()
+        self._send_mode_marker = _send_mode_word(self._args)
+
+    def _compose_never_sent_summary(self) -> None:
+        """``never sent · <size> composed``, in the active language.
+
+        One composer for both endings that settle a never-sent row (retirement
+        and the terminal-frame path), recording what it built so
+        :meth:`_refresh_localized_summary` can repaint the record after a live
+        language change -- the row is terminal, so nothing else ever rewrites it.
+        ``_compose_facts`` keeps feeding the label-shed ladder.
+        """
+        self._compose_facts = _compose_record(self._compose_bytes)
+        self._summary = _never_sent_text(self._compose_bytes, self._compose_facts)
+        self._never_sent_built = self._summary
+        self._never_sent_locale = active_locale()
 
     def _refresh_localized_summary(self) -> None:
         """Recompose a settled send summary when the language changed since.
@@ -3617,6 +3812,12 @@ class ToolCard(ExpandableActionBlock):
             and self._send_summary_locale != active_locale()
         ):
             self._compose_send_summary()
+        elif (
+            self._never_sent_built
+            and self._summary == self._never_sent_built
+            and self._never_sent_locale != active_locale()
+        ):
+            self._compose_never_sent_summary()
 
     def _refresh_localized_output(self) -> None:
         """Recompose structured result rows when the language changed since."""
@@ -4790,7 +4991,7 @@ class ToolCard(ExpandableActionBlock):
         """
         if not self._delivery_failed_reason:
             return ""
-        return f"{send_not_delivered_word()}: {self._delivery_failed_reason}"
+        return _failed_reason_text(send_not_delivered_word(), self._delivery_failed_reason)
 
     def _promoted_lead(self) -> str:
         """The lead line the collapsed row claims, whichever state owns it."""
@@ -5103,7 +5304,10 @@ class ToolCard(ExpandableActionBlock):
                 ink = signal
             elif stripped[:1].isdigit() and ". " in stripped:
                 ink = fg
-            elif stripped.startswith(("Provider:", "Sources:")):
+            elif (mark := self._header_marks.get(line)) is not None and mark.kind in (
+                "provider",
+                "sources",
+            ):
                 ink = dim
             else:
                 # See `bindings.BY_ELEMENT["tool.search.snippet"].note`.
@@ -5174,6 +5378,9 @@ class ToolCard(ExpandableActionBlock):
             # keeps every origin byte on the clip rule unless a branch here has
             # positively identified the line as ours.
             our_note = False
+            # The structured row's recorded kind (header region only: a body
+            # line that happens to equal a header's text is origin content).
+            mark = self._header_marks.get(line) if is_header else None
             if stripped.startswith("⚠ HTTP"):
                 # See `bindings.BY_ELEMENT["tool.fetch.error"].note` (F1). D8: this
                 # classified row IS the card's headline now, so it reflows like the
@@ -5188,12 +5395,14 @@ class ToolCard(ExpandableActionBlock):
             elif is_header and stripped.startswith("⚠ "):
                 ink = danger
                 wrap = True
-            elif stripped.startswith("Fetched:"):
+            elif mark is not None and mark.kind == "fetched":
                 # See `bindings.BY_ELEMENT["tool.fetch.signal"].note` (D3).
+                # Recognised by the row's recorded kind, not its `Fetched:` lead,
+                # so a translated row keeps the treatment.
                 self._append_fetched_row(row, line, line_width, indent, dim, signal)
                 continue
-            elif stripped.startswith("Rendered:"):
-                self._append_rendered_row(row, line, line_width, indent, dim, signal)
+            elif mark is not None and mark.kind == "rendered":
+                self._append_rendered_row(row, line, line_width, indent, dim, signal, mark.signal)
                 continue
             elif stripped.startswith("Next step:"):
                 ink = signal
@@ -5299,6 +5508,7 @@ class ToolCard(ExpandableActionBlock):
         indent: str,
         dim: Style,
         signal: Style,
+        clause: str = "",
     ) -> None:
         """Paint the ``Rendered:`` row with its attempt summary in ``signal`` (D9).
 
@@ -5308,11 +5518,12 @@ class ToolCard(ExpandableActionBlock):
         make that findable, so it wears ``signal`` (4.32:1 light / 6.52:1 dark)
         rather than the row's pre-existing ``dim`` (3.32:1 light, below the body
         floor). One rule with D4: the sentence a reader may act on is ``signal``,
-        the metadata recedes. Match is by value (``_split_attempt_clause``), so
-        the clause is found wherever D7 places it in the row.
+        the metadata recedes. Match is by the value the row builder recorded
+        (``_split_attempt_clause``), so the clause is found wherever D7 places it
+        in the row, in any language.
         """
         row.append("\n" + indent, style=dim)
-        head, clause, tail = _split_attempt_clause(line)
+        head, clause, tail = _split_attempt_clause(line, clause)
         remaining = line_width
         for chunk, ink in ((head, dim), (clause, signal), (tail, dim)):
             if not chunk or remaining <= 0:
@@ -6131,7 +6342,9 @@ class ToolCard(ExpandableActionBlock):
                     # cell the finding is about: the 13-cell constant is what the
                     # cap exists to carry, and it fits at every width the row is
                     # drawn at, so the cause is what stops short.
-                    reason = _cap_failed_reason(reason, room)
+                    reason = _cap_failed_reason(
+                        send_not_delivered_word(), self._delivery_failed_reason, room
+                    )
                 elif abbreviates:
                     reason = truncate_cells(reason, room)
                 elif cell_len(reason) > room:

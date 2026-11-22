@@ -1,0 +1,28 @@
+{
+  "locale": "hi",
+  "namespace": "tui.settings_view.chrome",
+  "source_sha256": "2e04f79550d0b09cd262c32850a31c20d5dec2b88b09facd2369d967bd5ee930",
+  "target_sha256": "a3172ba4d3682606e1169eb0b010609b965011d3bb9ab2632c77a0580d60ebc6",
+  "context_sha256": "33a29a836b8de99019887c9025e98e2d9382b8799a8bfe9e4f189cbc86d0df7d",
+  "worktree": "~/local-operator/.worktrees/i18n-settings-leftovers @ 3c1b6a24f035 (hi file uncommitted)",
+  "translator": {"agent": "translator", "model": "anthropic/claude-opus-5-5", "fallback": "as reported by the delegator; not observed by the auditor"},
+  "auditor": {
+    "agent": "translation-auditor (lopdev team, task chrome-audit-hi, session a2e5ccd4b223; independent of the translator)",
+    "session": "a2e5ccd4b223",
+    "model": "anthropic/claude-opus-5-5",
+    "fallback": "session pinned openai/gpt-6.1-sol; provider quota 429 forced cross-vendor fallback to anthropic/claude-opus-5-5, which performed the semantic audit",
+    "date": "2026-11-21",
+    "result": "passed",
+    "findings": 2,
+    "unresolved_blocker_major": 0,
+    "blocker": 0, "major": 0, "minor": 1, "nit": 1
+  },
+  "keys_read": 49,
+  "checks": "Semantic read of all 49 keys vs en + context sidecar, hi style guide, glossary, shipped hi tui.settings_view/tui.small/wire.settings and other hi TUI footers; consumer settings_view.py read for footer joins (' '+label), gate_kept 3-rung ladder, confirm.ask/contract ladder, capture rungs, _render_value (value.auto/value.chains, clause.default raw), would_remove count. Mechanical (worktree code via .venv, PYTHONPATH=worktree): key set/order equal; message_arguments parity 49/49; plural categories {one,other} == CLDR hi, no =N; render_message for counts 0/1/2/5 OK; literal tokens esc/enter/ctrl+k//approvals auto/lop sessions cleanup --dry-run/<chain-key> <provider>/<model>/config.yml survive; rich cell_len < maxCells for every capped key (none at or over cap); NFC, no bidi controls, no unsanctioned Latin.",
+  "findings": [
+    {"id": "T1", "severity": "minor", "key": "tui.settings_view.chrome.value.auto", "current": "स्वतः", "proposed": "auto", "reason": "The value column shows this word for display.nerd_icons=None, but the shipped hi choice label for that same state (wire.settings.display_nerd_icons.choice.none.label) is the Latin 'auto', so the collapsed value and the expanded choice disagree (the consumer keeps on/off identical in both on purpose); it also leaks into clause.default as 'डिफ़ॉल्ट: स्वतः'. Alternatively localize the wire.settings choice label instead, which is outside this namespace."},
+    {"id": "T2", "severity": "nit", "key": "tui.settings_view.chrome.hotkey.hold_refusal", "current": "होल्ड कुंजियाँ डेस्कटॉप ऐप में सेट होती हैं — टर्मिनल दबाए रखा मॉडिफ़ायर नहीं पकड़ सकता", "proposed": "दबाए रखने वाली कुंजियाँ डेस्कटॉप ऐप में सेट होती हैं — टर्मिनल दबाए रखा मॉडिफ़ायर नहीं पकड़ सकता", "reason": "'होल्ड कुंजियाँ' is a calque; the shipped push-to-talk help says 'दबाए रखें', and the proposal fits the 80-cell budget."}
+  ],
+  "verdict": "clean-with-findings",
+  "note": "No blocker/major. Glossary checked: session→सत्र, chain→चेन, hop→हॉप (invariant, matches tui.small.hop_count), cascade→कैस्केड, key→कुंजी, preview→पूर्वावलोकन, launch→लॉन्च, ↑↓ move→खिसकाएँ (the established hi footer verb), approvals loosen→ढील (cli.group_help). Register: polite imperatives, आप-neutral, danda in full sentences, “ ” around {victim}. Single independent audit; no native-speaker or rendered-frame evidence claimed."
+}

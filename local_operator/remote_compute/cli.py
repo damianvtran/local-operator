@@ -58,7 +58,9 @@ from local_operator.i18n.keys import wire_remote_compute as _wr
 from local_operator.i18n.resolve import resolve_language
 from local_operator.i18n.text import tr
 from local_operator.network.types import MeshRefusal
-from local_operator.remote_compute import RunSpec, is_enabled, resolve_network
+from local_operator.remote_compute import RunSpec, is_enabled
+from local_operator.remote_compute import repo as repo_module
+from local_operator.remote_compute import resolve_network
 from local_operator.remote_compute.arguments import (
     LOCAL_ONLY_FLAGS,
     REMOTE_ONLY_FLAGS,
@@ -81,8 +83,10 @@ from local_operator.remote_compute.client import (
     run_outcome,
     run_status,
 )
+from local_operator.remote_compute.defaults import DEFAULT_MAX_HOURS, DEFAULT_SIZE
 from local_operator.remote_compute.errors import (
     CapacityUnavailable,
+    Conflict,
     IdempotencyConflict,
     InsufficientCredit,
     InvalidApiOverride,
@@ -90,10 +94,13 @@ from local_operator.remote_compute.errors import (
     InvalidRequest,
     NetworkMismatch,
     PreviewNotEnabled,
+    RunBusy,
     RunIdentityMismatch,
+    RunLimitReached,
     RunNotFound,
     Unreachable,
     UnreadableEnvelope,
+    UnusableRepo,
 )
 from local_operator.remote_compute.request import (
     RunCreateRequest,
@@ -151,9 +158,10 @@ SECRET_RUN_FIELDS = ("run_token", "tunnel")
 #:
 #: Held as ``None`` in the parser rather than as these values, so "not passed"
 #: stays distinguishable from "passed with the default" — which is what lets
-#: ``--size`` without ``--remote`` be refused instead of silently ignored.
-DEFAULT_SIZE = "m"
-DEFAULT_MAX_HOURS = 2.0
+#: ``--size`` without ``--remote`` be refused instead of silently ignored. The
+#: values themselves live in ``remote_compute.defaults`` because the desktop GUI
+#: composes the same body and must not import argparse to find them; the names
+#: stay exported from here, where the parser's help text reads them.
 
 
 def _refuse(message: str) -> int:
@@ -237,9 +245,31 @@ def _report(failure: BaseException) -> int:
         return _refuse(_t(_wr.unknown_run()))
     if isinstance(failure, IdempotencyConflict):
         return _refuse(_t(_wr.conflict()))
+    if isinstance(failure, RunLimitReached):
+        return _refuse(_t(_wr.run_limit()))
+    if isinstance(failure, RunBusy):
+        return _refuse(_t(_wr.run_busy()))
+    if isinstance(failure, Conflict):
+        return _refuse(_t(_wr.refusal_conflict()))
+    if isinstance(failure, UnusableRepo):
+        return _refuse(_repo_refusal(failure))
     if isinstance(failure, InvalidRequest):
         return _refuse(_t(_wr.invalid_request()))
     return _refuse(_t(_wr.failed(error=str(failure))))
+
+
+def _repo_refusal(failure: UnusableRepo) -> str:
+    """One sentence per reason a directory cannot be used for a remote run.
+
+    The client supplies the REASON rather than a sentence because these are keyed
+    messages (see ``errors.UnusableRepo``); this is the surface that owns their
+    wording, exactly as it does for a refused idempotency key.
+    """
+    if failure.reason == repo_module.REASON_UNPUSHED:
+        return _t(_wr.repo_unpushed_commit(detail=failure.detail))
+    if failure.reason == repo_module.REASON_NOT_HTTPS:
+        return _t(_wr.repo_not_https_remote())
+    return _t(_wr.repo_no_remote())
 
 
 def _credential() -> int:
