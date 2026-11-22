@@ -132,6 +132,12 @@ class OutlineRow:
     #: still running, or a row whose result never reached the transcript.
     duration_s: float | None = None
     summary: str = ""
+    #: The visible head of a notice's text, lower-cased, for the ONE question
+    #: the shape cannot answer: whether the notice says the turn FAILED or was
+    #: merely interrupted/cut off. An error notice is a failure signal; a
+    #: `turn cut off` row arrives in error ink too but is the user stopping or
+    #: the provider truncating, and the design keeps those neutral.
+    notice_head: str = ""
 
 
 @dataclass(frozen=True)
@@ -228,10 +234,15 @@ class Turn:
 
     @property
     def flat(self) -> bool:
-        """The turn holds exactly one run, so its bar's children are that run's
+        """The turn holds exactly ONE run, so its bar's children are that run's
         children: opening it steps straight to the calls instead of stacking a
-        second bar that says the same thing."""
-        return len(self.nodes) == 1 and isinstance(self.nodes[0], Run)
+        second bar that says the same thing.
+
+        Loose rows that a turn bar cannot cover (an error notice, a receipt)
+        do not earn the run a second bar of its own: the reader would see the
+        turn bar and, one row under it, a run bar with the identical tally.
+        """
+        return sum(isinstance(node, Run) for node in self.nodes) == 1
 
 
 @dataclass(frozen=True)
@@ -289,6 +300,7 @@ def summary_clauses(
     *,
     plural: Callable[[int], str] | None = None,
     failed: Callable[[int], str] | None = None,
+    kind_word: Callable[[str], str] | None = None,
 ) -> tuple[Clause, ...]:
     """The bar's left-hand summary, per the prototype's ``barSummaryST``.
 
@@ -309,13 +321,19 @@ def summary_clauses(
     singular/plural pair is used. ``failed`` renders the tally the same way
     (``✗ K failed``) and defaults to the English literal, so this module stays
     runnable without a catalogue while the widget paints keyed copy.
+    ``kind_word`` localizes a tool's short noun (``bash`` -> ``shell``) and
+    folds an MCP name through the same display-name path a tool row uses;
+    without it this module keeps its English fallback.
     ``noanswer`` marks a turn that died, which
     is the only state where the failure count earns danger ink.
     """
     count_clause = (plural or _english_actions)(facts.count)
     names: list[str] = []
     for name, _count in facts.kinds:
-        word = KIND_WORDS.get(name, name)
+        # The caller owns localization (``kind_word`` maps a tool onto the
+        # catalogue's short noun); without it this module keeps its English
+        # fallback so it stays runnable with no catalogue, like ``plural``.
+        word = kind_word(name) if kind_word is not None else KIND_WORDS.get(name, name)
         if word not in names:
             names.append(word)
 
@@ -383,7 +401,12 @@ def _turn_of(rows: Sequence[OutlineRow], start: int, end: int, live_index: int |
         None,
     )
     live = live_index is not None and start <= live_index < end
-    ended_failed = span[-1].kind == "notice_failed"
+    # THE TURN BAR ENDS AT THE ANSWER. A row after it is not work the answer
+    # condenses: a slash receipt, a system notice, a peer message or a wake
+    # that arrives while the agent is idle must stay visible, and opening the
+    # bar must not reveal a second bar over the same calls (the flat rule).
+    cover_end = final_index if final_index is not None else len(body)
+    pre_answer = body[:cover_end]
 
     nodes: list[Run | LooseRow] = []
     buffered: list[OutlineRow] = []
@@ -397,10 +420,7 @@ def _turn_of(rows: Sequence[OutlineRow], start: int, end: int, live_index: int |
             nodes.extend(LooseRow(row.id, row.kind) for row in buffered)
         buffered.clear()
 
-    for index, row in enumerate(body):
-        if index == final_index:
-            flush()
-            continue
+    for row in pre_answer:
         # A waiting call is approval-pending: it splits the run and stays a
         # readable row, because a fold must never hide a decision from the user.
         if row.kind == "tool" and row.state != "waiting":
@@ -414,10 +434,47 @@ def _turn_of(rows: Sequence[OutlineRow], start: int, end: int, live_index: int |
         key=f"tf:turn:{anchor.id if anchor is not None else span[0].id}",
         user_id=anchor.id if anchor is not None else None,
         final_id=body[final_index].id if final_index is not None else None,
-        died=not live and (final_index is None or ended_failed),
+        died=not live and _ended_in_failure(span),
         live=live,
-        facts=tool_facts([row for row in span if row.kind == "tool"]),
+        facts=tool_facts([row for row in pre_answer if row.kind == "tool"]),
         nodes=tuple(nodes),
+    )
+
+
+#: Notice heads that name a turn the harness ENDED in failure (the harness's
+#: error arm, in both its live and replay spellings).
+_FAILED_NOTICE_HEADS = ("turn failed", "stopped with an error")
+
+#: Heads that name a turn which stopped WITHOUT failing: the user interrupted
+#: it, the provider cut it off, or it spent its output budget. The design keeps
+#: these neutral — a danger tally and a "turn failed" foot would state an
+#: outcome nobody diagnosed.
+_NEUTRAL_NOTICE_HEADS = (
+    "turn cut off",
+    "interrupted",
+    "no answer: the model spent",
+)
+
+
+def _ended_in_failure(span: Sequence[OutlineRow]) -> bool:
+    """Whether a settled turn's rows end in a FAILURE notice.
+
+    "No answer" alone is not a failure: a steer, a stop and a cut-off all leave
+    a turn without an answer, and only the harness's own failed notice says the
+    turn died. A failed CALL is not enough either — the run folds and counts it.
+
+    The named failed head may sit before the closing incident row (a provider
+    failure replays as the raw `[session incident …]` record first and the
+    stop notice last), so the head test is unordered; the last-row test catches
+    the other spelling, `Stopped with an error — …`, which has no such head.
+    """
+    failed_notices = [row for row in span if row.kind == "notice_failed"]
+    if any(row.notice_head.startswith(_FAILED_NOTICE_HEADS) for row in failed_notices):
+        return True
+    return (
+        bool(span)
+        and span[-1].kind == "notice_failed"
+        and not span[-1].notice_head.startswith(_NEUTRAL_NOTICE_HEADS)
     )
 
 

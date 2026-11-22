@@ -987,11 +987,17 @@ def format_clock(seconds: float) -> str:
         # from a row whose duration was lost. Reads as "too fast to measure",
         # and is exactly DURATION_COL wide so the column still holds.
         return "<0.1s"
-    if seconds < 10:
-        return f"{seconds:.1f}s"
-    if seconds < 60:
-        return f"{seconds:.0f}s"
-    return format_duration(seconds)
+    # ROUND BEFORE CHOOSING THE BRANCH. The old order let 9.96 print `10.0s`
+    # (one cell wider than `10s`, beside rows that said `10s`) and 59.6 print
+    # `60s` where `format_duration(60)` is `1m` — the app disagreeing with
+    # itself at each boundary it just crossed.
+    tenths = round(seconds, 1)
+    if tenths < 10:
+        return f"{tenths:.1f}s"
+    whole = round(seconds)
+    if whole < 60:
+        return f"{whole}s"
+    return format_duration(whole)
 
 
 def monotonic_from_epoch(epoch: float, *, clock: Callable[[], float] = time.monotonic) -> float:
@@ -2089,6 +2095,18 @@ class ToolCard(ExpandableActionBlock):
             event.prevent_default()
             self._request_profile_revert()
             return
+        # THE FAILED-CALL CURSOR. `f`/`F` land the keyboard on the call; the
+        # next press arrives HERE, and the reader rightly expects the ladder to
+        # continue. The card claims the two keys only while the layer's cursor
+        # stands on it (``jump_from_card`` answers False otherwise), so typing
+        # a sentence that starts with f on any other card still reaches the
+        # composer through the base class's printable passthrough.
+        if event.is_printable and event.key in ("f", "F"):
+            layer = getattr(self, "fold_owner", None)
+            if layer is not None and layer.jump_from_card(self, 1 if event.key == "f" else -1):
+                event.stop()
+                event.prevent_default()
+                return
         super().on_key(event)
 
     #: Shared by every expandable action row; naming it here lets the base
@@ -5859,6 +5877,13 @@ class ToolCard(ExpandableActionBlock):
         # `_refresh_row` records the name column against, so the guard's question
         # and the builder's answer cannot be asked of two different widths (R2).
         width = row_body_width(width, self.fold_depth)
+        # The row is painted FROM `indent` (the fold step) and its right edge is
+        # the body width, so the indent is not free space: every segment that
+        # budgets the summary has to take it off first. It used to be taken off
+        # only after the fact, and a row whose summary hit its cap ended one
+        # cell right of a short row at the same level and two cells right at the
+        # next — the status column walked in steps inside one open fold.
+        avail = max(1, width - indent)
 
         # Status segment (right-aligned), capped at width // 3 (D8) and then
         # hard-clamped so no state can ever push the row past its card.
@@ -5878,7 +5903,7 @@ class ToolCard(ExpandableActionBlock):
         # card and clips the status off-screen.
         icon = tool_icon(self.tool_name)
         label = display_name(self.tool_name)
-        name_budget = width - (2 + status_cells + 2)
+        name_budget = avail - (2 + status_cells + 2)
         if name_budget < 2 and (
             self._state in ("error", "interrupted")
             or self._partial
@@ -5893,7 +5918,7 @@ class ToolCard(ExpandableActionBlock):
             # that makes the row worth reading: WHICH tool failed.
             status_runs = _clamp_runs(self._status_runs(status_cap, terse=True), max(0, width - 3))
             status_cells = sum(cell_len(text) for text, _style in status_runs)
-            name_budget = width - (2 + status_cells + 2)
+            name_budget = avail - (2 + status_cells + 2)
         if name_budget < 2:
             # Too narrow for even a shrunken name: degrade to icon + status
             # so the outcome column survives. This is the last rung.
@@ -5930,7 +5955,7 @@ class ToolCard(ExpandableActionBlock):
         # an inert row left a byte-identical frame.
         slot = ""
         slot_element = "tool.row.slot_offer"
-        remaining = max(0, width - prefix_cells - status_cells - 2)
+        remaining = max(0, avail - prefix_cells - status_cells - 2)
         # The imagegen variant's cancel affordance (see `IMAGE_INTERRUPT_HINT`).
         # It takes the slot ahead of the expand offer while the call can still
         # be stopped — "how do I stop this" is the load-bearing question on a
@@ -6235,7 +6260,7 @@ class ToolCard(ExpandableActionBlock):
                 word = running_label()
                 text = word if not cap or cap >= cell_len(word) else ""
                 return [(text, dim)]
-            text = format_duration(max(0, int(elapsed)))
+            text = format_clock(elapsed)
             return [("  ", dim), (text.rjust(DURATION_COL), dim)]
         core = self._outcome_runs(cap, terse=terse)
         diff = self._diff_runs()

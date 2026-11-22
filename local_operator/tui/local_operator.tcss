@@ -529,7 +529,7 @@ ToolCard.tool-error {
  * so the whole row lights on hover. Last rule wins over the state tints —
  * pointing at a row should always look the same. */
 ToolCard:hover, WakeBlock:hover, PeerMessageBlock:hover, QuietGroupBlock:hover,
-.interactive-notice:hover {
+FoldBarBlock:hover, .interactive-notice:hover {
     background: $lo-overlay;
 }
 
@@ -547,7 +547,7 @@ ToolCard:hover, WakeBlock:hover, PeerMessageBlock:hover, QuietGroupBlock:hover,
  * where the keyboard is, is the more load-bearing fact. Still no border —
  * elevation is a background step here as everywhere. */
 ToolCard:focus, WakeBlock:focus, PeerMessageBlock:focus, QuietGroupBlock:focus,
-.interactive-notice:focus {
+FoldBarBlock:focus, .interactive-notice:focus {
     background: $lo-tint-select;
 }
 

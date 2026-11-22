@@ -286,17 +286,19 @@ async def test_the_queued_row_stops_saying_composing_the_moment_dictation_ends()
         # a frozen frame is what a stopped claim LOOKS like, and a ticking one
         # is what they reported for thirty to sixty minutes. Compared on THE
         # ROW, not on the whole frame: the frame also carries the status bar's
-        # own clock and spinner, which tick for their own reasons. Compared on
-        # the row's WORDS: the fold's re-derive is coalesced to a frame, and the
-        # ledger lane re-fits around the step it takes, so the padding between
-        # the summary and the right-aligned status can change without the claim
-        # changing.
-        before = [" ".join(row.split()) for row in _rows_for(app, "wake")]
+        # own clock and spinner, which tick for their own reasons.
+        #
+        # EXACT bytes, and a settle frame first. The one thing that legitimately
+        # changes a row between arrival and a breath later is the fold's first
+        # derive re-fitting it into the step it now belongs to; asking after
+        # that frame is what makes the padded row a fair baseline, and once it
+        # is taken nothing may move — not even the padding (F9: the earlier
+        # word-normalised comparison could not tell a re-pad from a tick).
+        await _parked(pilot)
+        before = _rows_for(app, "wake")
         await asyncio.sleep(1.1)
         await _parked(pilot)
-        assert [
-            " ".join(row.split()) for row in _rows_for(app, "wake")
-        ] == before, "the queued row must not tick"
+        assert _rows_for(app, "wake") == before, "the queued row must not tick"
 
         # The band must not say the model is composing either — it reads the
         # same registry, and the row's claim is what it echoes.

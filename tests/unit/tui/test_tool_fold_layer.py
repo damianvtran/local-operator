@@ -24,6 +24,7 @@ from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.tool_card import DURATION_COL, ToolCard, row_indent
 from local_operator.tui.widgets.transcript import (
     FoldBarBlock,
+    NoticeBlock,
     PeerMessageBlock,
     QuietGroupBlock,
     TranscriptView,
@@ -303,7 +304,15 @@ async def test_a_dead_turn_pins_only_its_last_failure() -> None:
         assert [card.display for card in cards] == [False, False, True]
         row = bar._build_row(120).plain
         assert "2 failed" in row
-        assert bar._noanswer, "the tally is an alarm only on a turn that died"
+        # The pin is about REACHING the failure; the danger tally is about the
+        # harness having said the turn failed (L6). A stop with no failure
+        # notice keeps the tally muted, so the test states both halves.
+        assert not bar._noanswer, "a stop with no failure notice is not an alarm"
+
+        view.append_block(NoticeBlock("turn failed: boom", "error"))
+        await _settle(pilot)
+        alarm = next(bar for bar in _bars(view) if bar.kind == "run")
+        assert alarm._noanswer, "a real failure notice is the alarm"
 
 
 @pytest.mark.asyncio
@@ -556,10 +565,17 @@ async def test_a_wide_script_bar_drops_kinds_rather_than_the_failure_tally() -> 
         await _settle(pilot)
 
         (bar,) = _bars(view)
-        row = bar._build_row(60).plain
-        assert "…" not in row, "the bar ellipsized its summary instead of shedding kinds"
-        assert "读文件 +2" in row, row
-        assert "✗ 1 failed" in row, "the failure tally is never the clause to drop"
+        wide = bar._build_row(60).plain
+        assert "…" not in wide, "the bar ellipsized its summary instead of shedding kinds"
+        assert "读文件, 搜索, 网页" in wide, wide
+        assert "✗ 1 failed" in wide, "the failure tally is never the clause to drop"
+
+        # Narrower than the kinds fit: they go whole (never the tally), and the
+        # row is not left to the ellipsis.
+        narrow = bar._build_row(48).plain
+        assert "…" not in narrow, narrow
+        assert "读文件" not in narrow, narrow
+        assert "✗ 1 failed" in narrow, "the failure tally is never the clause to drop"
 
 
 @pytest.mark.asyncio
@@ -595,3 +611,288 @@ async def test_a_plain_tool_row_sits_in_the_bar_column_in_by_turn() -> None:
         bar.activate()
         await _settle(pilot)
         assert [lead(card._build_row(120).plain) for card in big] == [row_indent(120, 2)] * 3
+
+
+# ---------------------------------------------------------------------------
+# Remediation round 1 (L2-L16): the rules the review found the layer breaking.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rows_after_the_answer_are_outside_the_turn_bar() -> None:
+    """L2: a receipt or notice that arrives after the answer stays visible.
+
+    The turn bar condenses what the agent did BEFORE the answer. Rows that land
+    after it are the idling app's own receipts; nothing about the answer hides
+    them, and opening the bar must not reveal a second bar over the same calls.
+    """
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = app.query_one(TranscriptView)
+        _user(view, "anchor:u1")
+        cards = [_tool(view, f"t{index}", TOOLS[index]) for index in range(3)]
+        _answer(view)
+        await _settle(pilot)
+        assert [bar.kind for bar in _bars(view)] == ["turn"]
+
+        notice = NoticeBlock("after the answer", "info")
+        view.append_block(notice)
+        view.append_block(PeerMessageBlock("hello", SENDER))
+        await _settle(pilot)
+
+        assert notice.display, "a post-answer notice was hidden under the turn bar"
+        assert view.blocks()[-1].display, "a post-answer peer message was hidden"
+        assert [bar.kind for bar in _bars(view)] == [
+            "turn"
+        ], "opening the turn would show a duplicate run bar"
+        assert not any(card.display for card in cards)
+
+
+@pytest.mark.asyncio
+async def test_an_error_notice_inside_the_turn_is_never_covered() -> None:
+    """L2: an error notice mid-turn is a row the reader must see."""
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = app.query_one(TranscriptView)
+        _user(view, "anchor:u1")
+        cards = [_tool(view, f"t{index}", TOOLS[index]) for index in range(3)]
+        notice = NoticeBlock("provider error: rate limited", "error")
+        view.append_block(notice)
+        _answer(view)
+        await _settle(pilot)
+
+        bars = _bars(view)
+        assert bars and bars[0].kind == "turn"
+        assert notice.display, "the turn bar hid an error notice"
+        assert not any(card.display for card in cards)
+        assert not bars[0]._noanswer, "a recovered error is not a failed turn"
+
+
+@pytest.mark.asyncio
+async def test_an_opened_fold_ends_every_row_on_the_clock_column() -> None:
+    """L5: the status column and the bar's clock are one column at one level.
+
+    A summary the row truncates used to ignore the depth the row was drawn at,
+    so an open fold's rows ended at two different cells; the bar's own clock sat
+    two cells right of the rows it covered (L5/D3+D4).
+    """
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = app.query_one(TranscriptView)
+        _user(view, "anchor:u1")
+        cards = [
+            ToolCard("long", "bash", {"command": "cat " + "a-long-path/" * 12}),
+            ToolCard("short", "bash", {"command": "ls"}),
+            _tool(view, "failed", "bash", failed=True),
+        ]
+        for card in cards[:2]:
+            view.append_block(card)
+            card.restore(state="success", result_text="ok", duration_s=1.0)
+        _answer(view)
+        await _settle(pilot)
+        (bar,) = _bars(view)
+        bar.activate()
+        await _settle(pilot)
+
+        ends = {len(card._build_row(120).plain) for card in cards}
+        assert len(ends) == 1, f"the status column is jagged: {ends}"
+        assert ends == {
+            len(bar._build_row(120).plain)
+        }, "the bar's clock is not in the column of the rows it covers"
+
+
+@pytest.mark.asyncio
+async def test_a_focused_bar_carries_the_focus_tint() -> None:
+    """L4: a keyboard user must be able to see which bar has focus."""
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = app.query_one(TranscriptView)
+        _user(view, "anchor:u1")
+        first = [_tool(view, f"a{index}", TOOLS[index]) for index in range(3)]
+        _answer(view)
+        _user(view, "anchor:u2")
+        [_tool(view, f"b{index}", TOOLS[index]) for index in range(3)]
+        _answer(view)
+        await _settle(pilot)
+        turn_bars = [bar for bar in _bars(view) if bar.kind == "turn"]
+        assert len(turn_bars) == 2
+        focused, other = turn_bars
+        focused.focus()
+        await _settle(pilot)
+
+        assert focused.has_focus
+        assert str(focused.styles.background) != str(
+            other.styles.background
+        ), "a focused fold bar paints on the same ground as an unfocused one"
+        assert first  # seeded rows above are the fold's own
+
+
+def test_the_clock_rounds_before_choosing_its_branch() -> None:
+    """L13: 9.96s is `10s`, and 59.6s is `1m`, never a wider `10.0s`/`60s`."""
+    from local_operator.tui.widgets.tool_card import format_clock
+
+    assert format_clock(0.04) == "<0.1s"
+    assert format_clock(0.05) == "0.1s"
+    assert format_clock(9.94) == "9.9s"
+    assert format_clock(9.96) == "10s"
+    assert format_clock(12.95) == "13s"
+    assert format_clock(59.6) == "1m"
+    assert format_clock(60.0) == "1m"
+
+
+@pytest.mark.asyncio
+async def test_a_run_bar_drops_the_work_name_in_by_response() -> None:
+    """L15: layout B has no label; By turn's ledger still names the run."""
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = app.query_one(TranscriptView)
+        _user(view, "anchor:u1")
+        for index in range(3):
+            _tool(view, f"t{index}", TOOLS[index])
+        _narration(view)
+        for index in range(3):
+            _tool(view, f"u{index}", TOOLS[index])
+        _answer(view)
+        await _settle(pilot)
+        (turn_bar,) = [bar for bar in _bars(view) if bar.kind == "turn"]
+        assert "turn" in turn_bar._build_row(120).plain
+        first_run = next(bar for bar in _bars(view) if bar.kind == "run")
+        assert "work" in first_run._build_row(120).plain
+
+        view.set_display_mode("by-response")
+        await _settle(pilot)
+        (run_bar,) = [bar for bar in _bars(view) if bar.kind == "run"][:1]
+        row = run_bar._build_row(120).plain
+        assert "work" not in row, row
+        assert row.startswith("  ▸"), row
+
+
+@pytest.mark.asyncio
+async def test_bar_kinds_fold_mcp_names_and_speak_the_catalogue_nouns() -> None:
+    """L16: `mcp__linear_create_issue` reads as the call, `bash` as `shell`."""
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = app.query_one(TranscriptView)
+        view.set_display_mode("by-response")
+        _user(view, "anchor:u1")
+        for index, name in enumerate(("mcp__linear_create_issue", "bash", "task")):
+            _tool(view, f"t{index}", name)
+        await _settle(pilot)
+
+        (bar,) = _bars(view)
+        row = bar._build_row(120).plain
+        assert "mcp__" not in row, row
+        assert "create_issue" in row, row
+        assert "shell" in row, row
+        assert "subagents" in row, row
+
+
+@pytest.mark.asyncio
+async def test_a_live_turn_mounts_its_turn_bar_before_its_first_run() -> None:
+    """L8: paint order is the derived order, live and replayed alike.
+
+    A live tool-first turn grows its run bars before the answer exists; the turn
+    bar is created when the answer lands and used to mount AFTER them, so the
+    child sat above its parent and Up from the turn bar landed on it.
+    """
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = app.query_one(TranscriptView)
+        _user(view, "anchor:u1")
+        first = [_tool(view, f"t{index}", TOOLS[index]) for index in range(3)]
+        await _settle(pilot)
+        _narration(view)
+        second = [_tool(view, f"u{index}", TOOLS[index]) for index in range(3)]
+        _answer(view)
+        await _settle(pilot)
+
+        kinds = [bar.kind for bar in _bars(view)]
+        assert kinds == ["turn", "run", "run"], kinds
+        turn_bar = _bars(view)[0]
+        run_bar = _bars(view)[1]
+        assert view.children.index(turn_bar) < view.children.index(run_bar)
+
+        turn_bar.focus()
+        await _settle(pilot)
+        await pilot.press("up")
+        await _settle(pilot)
+        assert app.focused is not run_bar, "Up from the turn bar landed on its child"
+        assert app.focused not in first + second
+
+
+@pytest.mark.asyncio
+async def test_a_live_call_awaiting_approval_is_not_hidden_by_a_collapse() -> None:
+    """L9: the live card is `running`; the session's pending ids are the truth."""
+    from types import SimpleNamespace
+
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = app.query_one(TranscriptView)
+        # The layer reads the APP's session for the pending ids; this fixture
+        # mounts only a transcript, so the fake is attached by name.
+        setattr(app, "_session", SimpleNamespace(pending_display_tool_ids=lambda: {"gated"}))
+        _user(view, "anchor:u1")
+        before = [_running(view, f"r{index}", "read") for index in range(3)]
+        gated = _running(view, "gated", "write")
+        after = [_running(view, f"s{index}", "read") for index in range(3)]
+        await _settle(pilot)
+        run_bar = next(bar for bar in _bars(view) if bar.kind == "run")
+        run_bar.activate()
+        await _settle(pilot)
+        assert run_bar.expanded, "premise: the run is open"
+
+        run_bar.focus()
+        await _settle(pilot)
+        await pilot.press("left")
+        await _settle(pilot)
+
+        assert gated.display, "collapsing the run hid the call awaiting approval"
+        assert not any(card.display for card in before + after)
+
+
+@pytest.mark.asyncio
+async def test_a_derive_failure_keeps_the_previous_frame(caplog) -> None:
+    """L12: a layer bug is logged and degrades to the last frame, never the pump."""
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = app.query_one(TranscriptView)
+        _user(view, "anchor:u1")
+        for index in range(3):
+            _tool(view, f"t{index}", TOOLS[index])
+        _answer(view)
+        await _settle(pilot)
+        layer = view._tool_fold
+        before = [(bar.kind, bar.key) for bar in _bars(view)]
+        original = layer._derive_now
+
+        def explode() -> None:
+            raise RuntimeError("derive bug")
+
+        layer._derive_now = explode  # type: ignore[method-assign]
+        try:
+            layer.invalidate()
+            await _settle(pilot)
+        finally:
+            layer._derive_now = original  # type: ignore[method-assign]
+
+        assert [(bar.kind, bar.key) for bar in _bars(view)] == before
+        assert app.is_running, "the derive exception reached the app"
+        assert any("tool fold derive failed" in record.message for record in caplog.records)

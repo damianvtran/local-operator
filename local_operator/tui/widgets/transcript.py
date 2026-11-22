@@ -1274,6 +1274,17 @@ class ExpandableActionBlock(TranscriptBlock):
 
         return row_indent(self._built_width, self.fold_depth)
 
+    def set_fold_owner(self, owner: object) -> None:
+        """Remember the fold layer that owns this row's depth and gestures.
+
+        A ToolCard needs it for one thing: the ``f``/``F`` ladder hands the
+        keyboard to the CALL, and the next press arrives from the card. The card
+        accepts those keys only while the layer's cursor stands on it; otherwise
+        it forwards the character to the composer exactly as every other
+        printable does (see ``ToolCard.action_fold_jump_next``).
+        """
+        self.fold_owner = owner
+
     def set_fold_depth(self, depth: int) -> None:
         """Take the tool fold's display level, rebuilding only when it moved.
 
@@ -4675,6 +4686,9 @@ class FoldBarBlock(_SingleRowBarBlock):
         #: language switch repaints the word with no restate.
         self._kind = "run"
         self._tool_name = ""
+        #: The name column's text, decided by the layer (the run bar's word is
+        #: mode-dependent: By turn names it, By response's layout B does not).
+        self._label = ""
         self._facts: ToolFacts | None = None
         #: Whether the turn this bar lives in produced NO answer: the only
         #: state where the failure clause earns danger ink (a failure on an
@@ -4707,22 +4721,28 @@ class FoldBarBlock(_SingleRowBarBlock):
         kind: str,
         depth: int,
         tool_name: str,
+        label: str,
         facts: ToolFacts,
         noanswer: bool,
         live: ToolCard | None,
         live_summary: str,
     ) -> None:
         """Take the layer's latest derivation. Rebuilds only what moved."""
+        fold_depth = 2 if kind == "sub" else 1
         changed = (
             kind != self._kind
             or depth != self.depth
+            or fold_depth != self.fold_depth
             or tool_name != self._tool_name
+            or label != self._label
             or facts != self._facts
             or noanswer != self._noanswer
         )
         self._kind = kind
         self.depth = depth
+        self.fold_depth = fold_depth
         self._tool_name = tool_name
+        self._label = label
         self._facts = facts
         self._noanswer = noanswer
         live_changed = live is not self._live_card or live_summary != self._live_summary
@@ -4804,14 +4824,8 @@ class FoldBarBlock(_SingleRowBarBlock):
     # -- the row --------------------------------------------------------------
 
     def _row_name(self) -> str:
-        """The name column's word: the fold's own, or the tool a sub folds."""
-        from local_operator.tui.glyphs import display_name
-
-        if self._kind == "turn":
-            return _fold_t(tui_transcript_fold.turn())
-        if self._kind == "run":
-            return _fold_t(tui_transcript_fold.work())
-        return display_name(self._tool_name)
+        """The name column's text, resolved by the layer and painted as given."""
+        return self._label
 
     def _clauses(self, budget: int) -> tuple[Clause, ...]:
         """The summary grammar for this bar's kind, fitted to ``budget`` cells.
@@ -4850,8 +4864,32 @@ class FoldBarBlock(_SingleRowBarBlock):
             return _raw_t(tui_transcript.group_actions(count=count, label=self._count_label(count)))
 
         return summary_clauses(
-            facts, budget, self._noanswer, plural=plural, failed=self._failed_text
+            facts,
+            budget,
+            self._noanswer,
+            plural=plural,
+            failed=self._failed_text,
+            kind_word=self._kind_word,
         )
+
+    def _kind_word(self, tool_name: str) -> str:
+        """A tool's short noun on the summary: localized, never a raw MCP name.
+
+        The builtin nouns say what the tool DOES (``bash`` is a shell), and they
+        are catalogue copy so the seven shipped locales read them too. An MCP
+        tool has no catalogue noun, and its minted name (``mcp__linear_create…``)
+        is a wire identifier; it folds through the same display-name path the
+        tool row's own name column uses.
+        """
+        from local_operator.tui.glyphs import display_name
+
+        short = {
+            "bash": tui_transcript_fold.kind_shell(),
+            "task": tui_transcript_fold.kind_subagents(),
+            "hub": tui_transcript_fold.kind_messages(),
+            "send": tui_transcript_fold.kind_messages(),
+        }.get(tool_name)
+        return _fold_t(short) if short is not None else display_name(tool_name)
 
     def _failed_text(self, failed: int) -> str:
         return _fold_t(tui_transcript_fold.failed(label=self._count_label(failed)))
@@ -4918,7 +4956,15 @@ class FoldBarBlock(_SingleRowBarBlock):
         return "", dim
 
     def _build_row(self, width: int) -> Text:
-        """The single summary row — the one-row guarantee lives here."""
+        """The single summary row — the one-row guarantee lives here.
+
+        TWO RIGHT EDGES, ONE ROW. The left columns (indent, glyph, name) are
+        read at this bar's own fold level; the right-aligned clock is placed at
+        the level the rows it covers paint at, because that is the column the
+        reader aligns it with. Padding is computed against that edge, never
+        against the leftover, so focusing a bar (which paints the expand offer)
+        cannot shift the clock a cell sideways.
+        """
         from local_operator.tui import bindings
         from local_operator.tui.glyphs import FOLD_CLOSED_GLYPH, FOLD_OPEN_GLYPH
         from local_operator.tui.widgets.tool_card import (
@@ -4934,7 +4980,9 @@ class FoldBarBlock(_SingleRowBarBlock):
         muted = bindings.style("fold.bar.name")
 
         indent = row_indent(width, self.fold_depth)
-        width = row_body_width(width, self.fold_depth)
+        # The clock's column: a bar covers rows one level deeper, and those rows
+        # right-align their duration at this body width.
+        edge = row_body_width(width, self.fold_depth + 1)
         glyph = FOLD_OPEN_GLYPH if self._expanded else FOLD_CLOSED_GLYPH
         label = self._row_name()
         right_text, right_style = self._right_segment(width)
@@ -4953,36 +5001,39 @@ class FoldBarBlock(_SingleRowBarBlock):
             row.append(glyph + " ", style=dim)
             return row
 
-        name_col = min(self._name_col(width), name_budget)
-        name = truncate_cells(label, name_col)
-        name = name + " " * max(0, name_col - cell_len(name))
-        prefix_cells = 2 + name_col + 1
+        name_col = min(self._name_col(width), name_budget) if label else 0
+        name = truncate_cells(label, name_col) if name_col else ""
+        if name_col:
+            name = name + " " * max(0, name_col - cell_len(name))
+        prefix_cells = 2 + name_col + (1 if name_col else 0)
 
-        remaining = max(0, width - prefix_cells)
+        remaining = max(0, edge - indent - prefix_cells)
         slot = ""
         if self._hovered or self._focused:
             offer = COLLAPSE_HINT if self._expanded else EXPAND_HINT
             if remaining - (cell_len(offer) + 1) - right_cells >= _SUMMARY_FLOOR:
                 slot = offer
         slot_cells = cell_len(slot) + 1 if slot else 0
-        budget = max(0, remaining - slot_cells - right_cells)
+        # One pad cell is spent out of the budget, so a fitted summary can
+        # never push the right-aligned cells past the edge.
+        budget = max(0, remaining - slot_cells - right_cells - 1)
 
         row = Text(no_wrap=True, overflow="ellipsis")
         if indent:
             row.append(" " * indent, style=dim)
         row.append(glyph + " ", style=dim)
-        row.append(name + " ", style=muted)
+        if name_col:
+            row.append(name + " ", style=muted)
         self._append_clauses(row, budget, self._clauses(budget))
         if slot:
             used = cell_len(row.plain)
-            pad = max(1, width - used - cell_len(slot) - right_cells)
+            pad = max(0, edge - used - slot_cells - right_cells)
             row.append(" " * pad, style=dim)
             row.append(slot, style=dim)
         if right_text:
             used = cell_len(row.plain)
-            pad = max(1, width - used - right_cells)
-            row.append(" " * pad, style=dim)
-            row.append(" ", style=dim)
+            pad = max(0, edge - used - right_cells)
+            row.append(" " * pad + " ", style=dim)
             row.append(right_text, style=right_style)
         balance_display_line(row)
         return row
@@ -5161,15 +5212,25 @@ class TurnFootBlock(TranscriptBlock):
                 line = _fold_t(tui_transcript_fold.foot_failed_no_reason())
             # The glyph is glued to the first row only; the wrap measures the
             # sentence without it, then the hanging indent carries every
-            # continuation — a one-cell-first-column difference would read as a
-            # second row of the step rather than the same sentence continuing.
+            # continuation. The CONTINUATION rows are wrapped at the width that
+            # is left after the indent: wrapping the whole sentence at the full
+            # width and then prepending four cells made every continuation
+            # `width + 4`, which the renderer re-wrapped and the pinned height
+            # clipped (the tail of a provider error was simply gone).
             body = f"{ICON_ERROR} {line}"
-            rows = wrap_cells(body, max(1, width))
+            indent = min(self.WRAP_INDENT, max(0, width - 1))
+            cont_width = max(1, width - indent)
+            wrapped = wrap_cells(body, max(1, width))
+            if len(wrapped) > 1:
+                rest = " ".join(wrapped[1:])
+                rows = [wrapped[0], *wrap_cells(rest, cont_width)]
+            else:
+                rows = wrapped
             out = Text(no_wrap=True, overflow="ellipsis")
             for index, row_text in enumerate(rows):
                 if index:
                     out.append("\n")
-                    out.append(" " * self.WRAP_INDENT, style=bindings.style("fold.foot.failure"))
+                    out.append(" " * indent, style=bindings.style("fold.foot.failure"))
                     row_text = row_text.lstrip()
                 out.append(row_text, style=bindings.style("fold.foot.failure"))
             return out
@@ -5495,14 +5556,16 @@ def work_record_of_block(block: TranscriptBlock) -> WorkRecord:
     return WorkRecord(source_id, "notice")
 
 
-#: The stop-notice heads that name a turn which produced NOTHING (a failed or
-#: aborted turn, ``harness/rows.py::assistant_stop_notice``). The fold reads the
-#: row's TYPE and its kind first; these words are the last test because the
-#: notice's text is the one thing that says WHICH death it was, and only the
-#: failed one makes the failure tally an alarm rather than history. The strings
-#: are English by design — ``rows.py`` is model-and-phone-facing and its notices
-#: are not catalogue copy (the same exception ``quiet_groups.py`` records).
-_TURN_FAILED_HEADS: tuple[str, ...] = ("turn failed",)
+#: Notice heads that name a turn which stopped WITHOUT failing: the harness's
+#: cut-off spelling (`format_cut_off_notice`), the interruption arm, and a
+#: budget-exhausted turn. The outline reads the head because these arrive in
+#: error ink too; treating every error notice as a failed turn painted danger
+#: over a turn the user simply stopped.
+_TURN_NEUTRAL_HEADS: tuple[str, ...] = (
+    "turn cut off",
+    "interrupted",
+    "no answer: the model spent",
+)
 
 
 def _outline_row_id(block: TranscriptBlock) -> str:
@@ -5564,9 +5627,13 @@ def outline_row_of(block: TranscriptBlock) -> OutlineRow | None:
             kind = "other_visible"
         return OutlineRow(row_id, kind)
     if isinstance(block, NoticeBlock):
-        if block.notice_kind == "error" and block.text().strip().startswith(_TURN_FAILED_HEADS):
-            return OutlineRow(row_id, "notice_failed")
-        return OutlineRow(row_id, "other_visible")
+        text = block.text().strip()
+        head = text[:40].lower()
+        if block.notice_kind == "error" and not head.startswith(_TURN_NEUTRAL_HEADS):
+            # Any error notice is a failure SIGNAL; whether it ended the turn is
+            # the outline's question (``_ended_in_failure``), not this adapter's.
+            return OutlineRow(row_id, "notice_failed", notice_head=head)
+        return OutlineRow(row_id, "other_visible", notice_head=head)
     if isinstance(block, QuietGroupBlock):
         # A receipt bar stands for its own members and is one visible row to
         # this fold; the tools it hides are skipped by the layer (they belong
@@ -8319,19 +8386,43 @@ class TranscriptView(ScrollableContainer):
         return self._display_mode
 
     def notice(self, text: str, kind: str = "info") -> None:
-        """One transient notice row, via the app's one notice mechanism.
+        """One notice row, via the app's one notice mechanism.
 
-        The tool fold needs a sentence when a key finds nothing to jump to
-        (``No failed calls in this turn``), and a notice belongs to the APP's
-        ledger policy — it is the same row every other notice paints. The layer
-        is TUI-local and has no app import of its own, so the seam is here; a
-        detached view (a unit-built transcript with no OperatorApp) has nowhere
-        to put a notice and does nothing, which is the honest answer rather than
-        a second notice stack.
+        Reserved for sentences that BELONG in the ledger. A navigation key's
+        miss (``No failed calls in this turn``) is :meth:`transient_notice`: a
+        row appended per retry grew the conversation with the reader's own
+        keystrokes.
         """
         show = getattr(self.app, "_notice", None)
         if callable(show):
             show(text, kind)
+
+    def transient_notice(self, text: str) -> None:
+        """A sentence about the READER'S OWN gesture, not conversation history.
+
+        A toast: it must not append a transcript row (pressing ``f`` five times
+        on a clean turn appended five notices — and each one reshaped the runs
+        around it as an ``other_visible`` splitter), and it must stay out of the
+        rows the fold derives over. A detached view has no notifier and does
+        nothing, the same honest answer as :meth:`notice`.
+        """
+        notify = getattr(self.app, "notify", None)
+        if not callable(notify):
+            return
+        try:
+            notify(text, severity="information")
+        except Exception:  # noqa: BLE001 — a toast must never break the keypress
+            pass
+
+    def invalidate_tool_fold(self) -> None:
+        """Re-derive the tool fold after a fact it READS moved.
+
+        The layer derives from the rows on hand plus one live fact: which call,
+        if any, is parked on an approval gate. The gate opens and closes
+        outside any transcript append, so the app calls this at both edges;
+        otherwise a collapse could hide the very row the prompt is naming.
+        """
+        self._tool_fold.invalidate()
 
     def prepare_owned_head_page(
         self, blocks: list[TranscriptBlock], index: int, *, head_cut: bool

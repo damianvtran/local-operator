@@ -3550,7 +3550,7 @@ def test_a_running_rows_duration_advances_and_holds_the_settled_column() -> None
     use, so settling does not make the row jump.
     """
     card = ToolCard("t", "bash", {"command": "sleep 30"})
-    assert card._build_row(80).plain.rstrip().endswith("0s")
+    assert card._build_row(80).plain.rstrip().endswith("<0.1s")
 
     # A card built here started its own clock; ``_started`` is only ``None`` for
     # a card adopted through ``restore()``, which refuses to time a row it did
@@ -4118,7 +4118,7 @@ def test_an_unknown_start_mounts_clockless_where_none_still_means_begins_now() -
 
     ordinary = ToolCard("n", "bash", {"command": "sleep 30"}, clock=lambda: now[0])
     assert ordinary.started_at == 1_505.0, "the ordinary mount still takes the mount instant"
-    assert ordinary._build_row(80).plain.rstrip().endswith("0s")
+    assert ordinary._build_row(80).plain.rstrip().endswith("<0.1s")
 
 
 def test_a_row_that_watched_its_own_start_keeps_its_own_zero() -> None:
@@ -4133,7 +4133,7 @@ def test_a_row_that_watched_its_own_start_keeps_its_own_zero() -> None:
     card = ToolCard("t", "bash", {"command": "ls"}, clock=lambda: now[0])
     assert card.started_at == 3_000.0
     now[0] += 2.0
-    assert card._build_row(80).plain.rstrip().endswith("2s")
+    assert card._build_row(80).plain.rstrip().endswith("2.0s")
 
 
 def test_a_cut_off_turn_names_its_cards_cut_off() -> None:

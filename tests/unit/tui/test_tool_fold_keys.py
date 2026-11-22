@@ -25,7 +25,7 @@ from local_operator.tui import theme as theme_mod
 from local_operator.tui.tool_fold import ToolFoldLayer
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import Editor
-from local_operator.tui.widgets.tool_card import ToolCard
+from local_operator.tui.widgets.tool_card import ToolCard, row_indent
 from local_operator.tui.widgets.transcript import (
     GAP_CLASS,
     NoticeBlock,
@@ -126,18 +126,18 @@ async def test_f_and_F_walk_the_failed_calls_and_open_what_hides_them() -> None:
 
 @pytest.mark.asyncio
 async def test_f_says_so_once_when_the_turn_has_no_failure() -> None:
-    """A miss reports through the app's notice row, not a new transcript row."""
+    """A miss is a TOAST, not a transcript row (fix for the row-per-retry)."""
     from tests.unit.tui.conftest import StyledTranscriptApp
 
     app = StyledTranscriptApp()
     async with app.run_test(size=(120, 40)) as pilot:
         view = app.query_one(TranscriptView)
-        seen: list[tuple[str, str]] = []
+        seen: list[str] = []
 
-        def capture_notice(text: str, kind: str = "info") -> None:
-            seen.append((text, kind))
+        def capture_notice(text: str) -> None:
+            seen.append(text)
 
-        view.notice = capture_notice  # type: ignore[method-assign]
+        view.transient_notice = capture_notice  # type: ignore[method-assign]
         _user(view, "anchor:u1")
         [_tool(view, f"t{index}", TOOLS[index]) for index in range(4)]
         _answer(view)
@@ -150,7 +150,7 @@ async def test_f_says_so_once_when_the_turn_has_no_failure() -> None:
         await pilot.press("f")
         await _settle(pilot)
 
-        assert seen == [("No failed calls in this turn", "info")]
+        assert seen == ["No failed calls in this turn"]
         assert len(view.blocks()) == before, "a miss appended a transcript row"
 
 
@@ -242,10 +242,10 @@ async def test_a_fold_bar_claims_those_same_printables() -> None:
         view = app.query_one(TranscriptView)
         seen: list[str] = []
 
-        def capture_notice(text: str, kind: str = "info") -> None:
+        def capture_notice(text: str) -> None:
             seen.append(text)
 
-        view.notice = capture_notice  # type: ignore[method-assign]
+        view.transient_notice = capture_notice  # type: ignore[method-assign]
         _user(view, "anchor:u1")
         [_tool(view, f"t{index}", TOOLS[index]) for index in range(4)]
         _answer(view)
@@ -297,7 +297,7 @@ async def test_escape_never_closes_a_fold() -> None:
 
 @pytest.mark.asyncio
 async def test_tool_rows_and_bars_sit_two_cells_deeper_than_prose() -> None:
-    """The grid: bars at 2 cells, revealed rows at 4 — and the copy agrees."""
+    """The grid: bars at 2 cells, revealed rows at 4, a sub's members at 6."""
     from local_operator.tui.glyphs import display_name
     from tests.unit.tui.conftest import StyledTranscriptApp
 
@@ -317,17 +317,17 @@ async def test_tool_rows_and_bars_sit_two_cells_deeper_than_prose() -> None:
         run_bar.activate()  # open the run: the same-tool sub-bar appears
         await _settle(pilot)
         sub_bar = next(bar for bar in _bars(view) if bar.kind == "sub")
-        assert _plain(sub_bar).startswith("  "), "a sub-bar left the bar column"
+        assert _plain(sub_bar).startswith("    "), "a sub-bar nests one step under its run"
 
         sub_bar.activate()  # open the sub: the calls are revealed one level in
         await _settle(pilot)
         card = cards[0]
         assert card.display
         plain = _plain(card)
-        assert plain.startswith("    "), plain[:10]
+        assert plain.startswith("      "), plain[:10]
 
         gutter = card.copy_gutter(0)
-        assert gutter == 4 + ToolCard.ICON_COLS
+        assert gutter == row_indent(120, 3) + ToolCard.ICON_COLS
         copied = plain[gutter:]
         assert copied.startswith(display_name("bash")), (
             "the copy gutter ate the first character of the tool name: " f"{copied[:12]!r}"
@@ -506,3 +506,209 @@ async def test_by_turn_has_no_foot() -> None:
 
         assert _bars(view), "premise: the By-turn turn bar exists"
         assert _foots(view) == []
+
+
+# ---------------------------------------------------------------------------
+# Remediation round 1: the gestures and the foot against the reported repros.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("width", [60, 80, 100])
+async def test_a_long_failure_reason_wraps_and_paints_its_last_word(width: int) -> None:
+    """L3: the By-response failure foot never truncates the reason.
+
+    The old build wrapped every continuation at the full lane and then added a
+    four-cell hanging indent, so each continuation was wider than the block and
+    the pinned height clipped the tail. The last word is the assertion: it is
+    exactly what the repro lost.
+    """
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    words = " ".join(f"word{index}" for index in range(40))
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(width, 40)) as pilot:
+        view = app.query_one(TranscriptView)
+        view.set_display_mode("by-response")
+        _user(view, "anchor:u1")
+        for index in range(3):
+            _tool(view, f"t{index}", TOOLS[index])
+        view.append_block(NoticeBlock(f"turn failed: {words}", "error"))
+        await _settle(pilot)
+
+        (foot,) = _foots(view)
+        lines = _plain(foot).splitlines()
+        lane = foot._built_width
+        assert lane > 0
+        assert all(len(line) <= lane for line in lines), (lane, [len(line) for line in lines])
+        assert "word39" in _plain(foot), _plain(foot)
+        assert len(lines) >= 3, "premise: this reason needs wrapping"
+
+
+@pytest.mark.asyncio
+async def test_a_cut_off_turn_keeps_its_notice_and_gets_no_failed_foot() -> None:
+    """L6: a cut-off turn is neutral — no `✗ turn failed` foot, notice visible."""
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = app.query_one(TranscriptView)
+        view.set_display_mode("by-response")
+        _user(view, "anchor:u1")
+        for index in range(3):
+            _tool(view, f"t{index}", TOOLS[index])
+        notice = NoticeBlock(
+            "turn cut off — owner-lost. The transcript holds what it wrote before that "
+            "and nothing after.",
+            "error",
+        )
+        view.append_block(notice)
+        await _settle(pilot)
+
+        assert _foots(view) == [], "a cut-off turn was painted as a failed one"
+        assert notice.display, "the cut-off notice must stay visible"
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_dead_turn_states_its_reason_once() -> None:
+    """L10: both stored failure rows are replaced by the one foot."""
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    incident = (
+        "[session incident (openai/gpt-5)] provider error (HTTP 400): the upstream "
+        "model rejected the request. Take it into account before repeating."
+    )
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(100, 40)) as pilot:
+        view = app.query_one(TranscriptView)
+        view.set_display_mode("by-response")
+        _user(view, "anchor:u1")
+        for index in range(3):
+            _tool(view, f"t{index}", "bash", failed=index == 2)
+        failed_notice = NoticeBlock("turn failed", "error")
+        incident_notice = NoticeBlock(incident, "warning")
+        view.append_block(failed_notice)
+        view.append_block(incident_notice)
+        await _settle(pilot)
+
+        (foot,) = _foots(view)
+        assert "provider error (HTTP 400)" in _plain(foot)
+        assert not failed_notice.display
+        assert not incident_notice.display, "the raw incident row is a second copy"
+        assert _plain(foot).count("provider error") == 1
+
+
+@pytest.mark.asyncio
+async def test_f_reveals_the_failed_call_and_the_ladder_continues_from_the_card() -> None:
+    """L7: the jump shows its target, and a second `f` keeps walking."""
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(100, 14)) as pilot:
+        view = app.query_one(TranscriptView)
+        _user(view, "anchor:u1")
+        cards = [_tool(view, f"t{index}", TOOLS[index % len(TOOLS)]) for index in range(6)]
+        cards[0].restore(state="error", error="first", duration_s=1.0)
+        cards[4].restore(state="error", error="second", duration_s=1.0)
+        _answer(view)
+        await _settle(pilot)
+
+        (turn_bar,) = [bar for bar in _bars(view) if bar.kind == "turn"]
+        turn_bar.focus()
+        await _settle(pilot)
+        await pilot.press("f")
+        await _settle(pilot)
+
+        assert app.focused is cards[0], "f skipped the first call's failure"
+        assert view.block_row_on_screen(cards[0], 0) is not None, "the target is not on screen"
+
+        await pilot.press("f")
+        await _settle(pilot)
+        assert app.focused is cards[4], "the second f did not continue the ladder"
+
+
+@pytest.mark.asyncio
+async def test_f_is_scoped_to_the_focused_turn() -> None:
+    """L7: a clean turn does not teleport the reader into an old failure."""
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = app.query_one(TranscriptView)
+        misses: list[str] = []
+        view.transient_notice = lambda text: misses.append(text)  # type: ignore[method-assign]
+        _user(view, "anchor:u1")
+        first = [_tool(view, f"a{index}", TOOLS[index]) for index in range(3)]
+        first[1].restore(state="error", error="old", duration_s=1.0)
+        _answer(view)
+        _user(view, "anchor:u2")
+        [_tool(view, f"b{index}", TOOLS[index]) for index in range(3)]
+        _answer(view)
+        await _settle(pilot)
+
+        second_bar = next(bar for bar in _bars(view) if bar.kind == "turn" and "u2" in bar.key)
+        second_bar.focus()
+        await _settle(pilot)
+        await pilot.press("f")
+        await _settle(pilot)
+
+        assert app.focused is second_bar, "f left the clean turn for an old failure"
+        assert misses == ["No failed calls in this turn"], misses
+
+
+@pytest.mark.asyncio
+async def test_plus_keeps_the_bar_it_acted_on_on_screen() -> None:
+    """L7: `+` scrolls the transcript under the reader without losing the bar."""
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(100, 10)) as pilot:
+        view = app.query_one(TranscriptView)
+        for turn in range(4):
+            _user(view, f"anchor:u{turn}")
+            for index in range(3):
+                _tool(view, f"t{turn}{index}", TOOLS[index])
+            _answer(view)
+        await _settle(pilot)
+        bars = [bar for bar in _bars(view) if bar.kind == "turn"]
+        bar = bars[-1]
+        bar.focus()
+        await _settle(pilot)
+        await pilot.press("plus")
+        await _settle(pilot)
+
+        assert view.block_row_on_screen(bar, 0) is not None, "the bar scrolled off the top"
+
+
+@pytest.mark.asyncio
+async def test_minus_on_a_child_bar_restores_its_turn_and_right_skips_narration() -> None:
+    """L11: `-` is turn-scoped; `→` lands on the first focusable child."""
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = app.query_one(TranscriptView)
+        _user(view, "anchor:u1")
+        _narration(view)
+        cards = [_tool(view, f"t{index}", TOOLS[index]) for index in range(3)]
+        _narration(view, "checking again")
+        cards += [_tool(view, f"u{index}", TOOLS[index]) for index in range(3)]
+        _answer(view)
+        await _settle(pilot)
+
+        (turn_bar,) = [bar for bar in _bars(view) if bar.kind == "turn"]
+        turn_bar.focus()
+        await _settle(pilot)
+        await pilot.press("right")  # open
+        await _settle(pilot)
+        await pilot.press("right")  # step into the first child
+        await _settle(pilot)
+        run_bar = next(bar for bar in _bars(view) if bar.kind == "run")
+        assert app.focused is run_bar, "right landed on narration, not the child bar"
+
+        await pilot.press("left")  # close the run, focus steps out
+        await _settle(pilot)
+        await pilot.press("minus")
+        await _settle(pilot)
+        assert not run_bar.expanded
+        assert not any(card.display for card in cards), "- did not restore the turn's defaults"

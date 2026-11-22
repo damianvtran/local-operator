@@ -57,11 +57,13 @@ and no ToolCard is touched.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Sequence, cast
 
 from local_operator.i18n.keys import tui_transcript_fold
 from local_operator.i18n.text import tr
+from local_operator.tui.glyphs import display_name
 from local_operator.tui.tool_outline import (
     Outline,
     OutlineRow,
@@ -78,12 +80,24 @@ from local_operator.tui.widgets.transcript import (
     TranscriptBlock,
     TranscriptView,
     TurnFootBlock,
+    clean_turn_failure,
     outline_row_is_exempt,
     outline_row_of,
 )
 
 if TYPE_CHECKING:
     from local_operator.tui.widgets.tool_card import ToolCard
+
+logger = logging.getLogger(__name__)
+
+#: The row kinds a TURN bar may hide. Prose the turn went on after and the tool
+#: calls themselves condense into the answer; every other row in the span is
+#: something the reader must see — an error/failed notice, an ask or approval,
+#: an image, a receipt (peer/wake/monitor), a slash receipt, a streaming row —
+#: and stays visible even with every bar closed. The hard rule is "nothing the
+#: reader must see is ever hidden", and a positive list is the only version of
+#: it that a future row type cannot silently violate.
+TURN_COVERABLE_KINDS = frozenset({"tool", "prose_narration"})
 
 #: The cells a turn bar must hide before it pays for its own row. The prototype's
 #: ``hidden >= 3``: a bar over one tool row and one line of narration costs more
@@ -161,8 +175,12 @@ class _FootPlan:
     died: bool
     #: The raw failure notice text; the foot cleans it at paint time.
     reason: str
-    #: The notice row whose paint the foot replaces (empty when none did).
-    hides: str
+    #: The notice rows whose paint the foot replaces, in reading order. A dead
+    #: turn can replay TWO rows carrying the reason — the stop notice
+    #: (`turn failed`) and the raw `[session incident …]` record — so this is a
+    #: tuple: hiding one and painting the other under the foot stated the same
+    #: event three times on a resumed window.
+    hides: tuple[str, ...]
 
 
 def _turn_row_ids(turn: Turn) -> list[str]:
@@ -225,8 +243,17 @@ class ToolFoldLayer:
         #: Mounted feet, by key, and their last plans.
         self._feet: dict[str, TurnFootBlock] = {}
         self._foot_plans: dict[str, _FootPlan] = {}
-        #: Foot key -> the notice row id whose paint it currently withholds.
-        self._foot_applied: dict[str, str] = {}
+        #: The calls the session was parked on the last derive (approval gates):
+        #: read once per frame and shared by the outline adapter and the foot's
+        #: paused test.
+        self._pending_approvals: set[str] = set()
+        #: Row id -> the turn its part of the tree belongs to. The turn bar is
+        #: absent in By response, so the outline's parent pointers cannot answer
+        #: "which turn is this run in" there; this map can, and `f`/`F` need it
+        #: (a jump's ladder is scoped to the turn the reader is standing in).
+        self._row_turn: dict[str, str] = {}
+        #: Foot key -> the notice rows whose paint it currently withholds.
+        self._foot_applied: dict[str, tuple[str, ...]] = {}
         #: Set when the gap classes are stale (a mode switch, a bar mount or a
         #: visibility change); consumed by the next derive, which walks the
         #: child order once. Never set per append — append-time gaps are already
@@ -281,7 +308,9 @@ class ToolFoldLayer:
         self._rows.clear()
         self._order = []
         self._pinned = frozenset()
+        self._pending_approvals = set()
         self._bar_turn.clear()
+        self._row_turn.clear()
         self._row_depth.clear()
         self._id_of.clear()
         self._failed = ()
@@ -314,39 +343,53 @@ class ToolFoldLayer:
         return self._bars.get(plan.parent)
 
     def first_child(self, key: str) -> TranscriptBlock | None:
-        """The first thing under an OPEN bar: a child bar, else its first row."""
+        """The first FOCUSABLE thing under an OPEN bar: a child bar, else a row.
+
+        The first COVERED row is often narration — prose a bar hides but the
+        keyboard cannot stand on — and returning it made ``right`` on an open
+        turn bar a no-op: the caller focuses what it gets back, and a
+        non-focusable block silently refuses.
+        """
         plan = self._plans.get(key)
-        if plan is None or not plan.covered:
+        if plan is None:
             return None
-        first = plan.covered[0]
-        for child_key in plan.children:
-            child = self._bars.get(child_key)
-            if child is not None and self._plans.get(child_key) is not None:
-                if self._plans[child_key].anchor == first:
-                    return child
-        return self._rows.get(first)
+        for row_id in plan.covered:
+            for child_key in plan.children:
+                child = self._bars.get(child_key)
+                if child is not None and self._plans.get(child_key) is not None:
+                    if self._plans[child_key].anchor == row_id:
+                        return child
+            row = self._rows.get(row_id)
+            if row is not None and row.focusable:
+                return row
+        return None
 
     def jump_failed(self, delta: int) -> None:
-        """``f``/``F``: walk the transcript's failed calls, in document order.
+        """``f``/``F``: walk the failed calls of the turn the reader is IN.
 
         The target is opened to before it is focused: every bar that hides it
         takes the reader's open choice, in the same frame, so the keyboard lands
-        on a row that is already painted. Wrapping at the ends is the
-        prototype's behaviour and the reason there is no "no more" notice on a
-        transcript that HAS failures — the ladder is circular, which is how one
-        key reaches them all.
+        on a row that is already painted — and then the view is scrolled to put
+        that row on screen. Opening a bar can push its target above the viewport
+        while the tail anchor holds the bottom; a navigation key that changes
+        the transcript without showing what it changed reads as a dropped key.
 
-        A transcript with no failed call at all gets the one sentence the design
-        names, through the app's notice row. It is said in the layer rather than
-        painted as a transcript row: the reader pressed a NAVIGATION key, and a
-        row appended per miss would grow the conversation every time they
-        retried it.
+        SCOPED TO THE TURN, not the transcript. Wrapping across turns teleported
+        a reader standing in a clean turn into an old turn's failure with no
+        word of explanation, and the only miss copy said "in this turn" — which
+        was false. The ladder is circular inside the turn, which is how one key
+        reaches every failure the reader's own step contains.
+
+        A miss is a TOAST (:meth:`TranscriptView.transient_notice`), never a
+        transcript row: the reader pressed a navigation key, and a row appended
+        per retry grew the conversation with their own keystrokes.
         """
-        if not self._failed:
-            self._view.notice(_fold_t(tui_transcript_fold.no_failed()))
+        scoped = self._scoped_failures()
+        if not scoped:
+            self._view.transient_notice(_fold_t(tui_transcript_fold.no_failed()))
             return
 
-        target = self._next_failed(delta)
+        target = self._next_failed(delta, scoped)
         if target is None:
             return
         self._failed_cursor = target
@@ -367,10 +410,44 @@ class ToolFoldLayer:
         block = self._rows.get(target)
         if block is not None:
             block.focus()
+            self._view.reveal_block(block)
+            # Once more after the layout the opening just caused: the first
+            # call reads the pre-open region, and a row that was already
+            # painted (the `+` case) needs the truthful one.
+            self._view.call_after_refresh(lambda: self._view.reveal_block(block))
 
-    def _next_failed(self, delta: int) -> str | None:
-        """The failed id ``delta`` steps from the focus, wrapping at the ends."""
-        failed = list(self._failed)
+    def jump_from_card(self, card: "ToolCard", delta: int) -> bool:
+        """Continue the ladder from the CARD the last jump landed on.
+
+        Answers whether ``card`` is the layer's failed-call cursor. The card
+        claims ``f``/``F`` only on ``True``; every other card forwards the
+        character to the composer exactly as it forwards every printable.
+        """
+        row_id = self._id_of.get(id(card))
+        if row_id is None or row_id != self._failed_cursor:
+            return False
+        self.jump_failed(delta)
+        return True
+
+    def _scoped_failures(self) -> list[str]:
+        """The failed call ids in the turn the keyboard is standing in."""
+        turn_key = self._focused_turn()
+        if turn_key is None:
+            return list(self._failed)
+        return [row_id for row_id in self._failed if self._row_turn.get(row_id) == turn_key]
+
+    def _focused_turn(self) -> str | None:
+        """The turn the focused row belongs to, or None when it is not known."""
+        focused = self._focused()
+        if isinstance(focused, FoldBarBlock):
+            return self._bar_turn.get(focused.key)
+        if focused is None:
+            return None
+        row_id = self._id_of.get(id(focused))
+        return self._row_turn.get(row_id) if row_id is not None else None
+
+    def _next_failed(self, delta: int, failed: list[str]) -> str | None:
+        """The failed id ``delta`` steps from the focus, inside ``failed``."""
         focused = self._focused()
         current = self._id_of.get(id(focused)) if focused is not None else None
         if isinstance(focused, FoldBarBlock):
@@ -379,13 +456,27 @@ class ToolFoldLayer:
                 # Standing on a bar over the last jump's target: continue the
                 # ladder from the CALL, not from the bar's own first row.
                 current = self._failed_cursor
+                if current in failed:
+                    return failed[(failed.index(current) + delta) % len(failed)]
             elif plan is not None:
-                current = plan.anchor
+                # Standing on a bar: the bar sits ABOVE its anchor, so `f` must
+                # accept a failure AT the anchor (the operator's first browser
+                # press failed, and the old exclusive step skipped it); `F`
+                # still steps strictly back.
+                position = self._row_index(plan.anchor)
+                if delta > 0:
+                    for row_id in failed:
+                        if self._row_index(row_id) >= position:
+                            return row_id
+                    return failed[0]
+                for row_id in reversed(failed):
+                    if self._row_index(row_id) < position:
+                        return row_id
+                return failed[-1]
         if current in failed:
-            index = (failed.index(current) + delta) % len(failed)
-            return failed[index]
-        # Standing on a row that is not a failure (or on a bar): take the first
-        # failure after its seat for `f`, the last before it for `F`, wrapping.
+            return failed[(failed.index(current) + delta) % len(failed)]
+        # Standing on a row that is not a failure: take the first failure after
+        # its seat for `f`, the last before it for `F`, wrapping.
         try:
             position = self._row_order.index(current) if current is not None else -1
         except ValueError:
@@ -416,10 +507,19 @@ class ToolFoldLayer:
     ) -> None:  # noqa: A002 - the reader's state
         """``+``/``-``: open every level of this bar's turn, or restore defaults.
 
-        ``-`` DROPS the turn's explicit choices rather than forcing everything
-        closed: the design's word is "back to defaults", and a turn whose live
-        run defaulted open would mean something else under a blanket close. The
-        choices are per session (the layer's dict), never persisted — the
+        ``-`` DROPS the turn's explicit choices and then takes the DEFAULT for
+        each bar — never `_resolved_open`, whose focus protection would keep the
+        bar the keyboard stands on open and so leave the very turn the reader
+        asked to reset unfolded. Reaching this from a child bar therefore resets
+        the whole turn; the focus guard moves the keyboard to the bar that just
+        closed, so it is never left on an invisible row.
+
+        ``+`` finishes by scrolling the bar the reader pressed back into view:
+        opening a tall turn grows the transcript above the viewport while the
+        tail anchor holds the bottom, and the row the key was pressed on slid
+        off the top.
+
+        The choices are per session (the layer's dict), never persisted — the
         transcript reopens with the shipped defaults, like the receipt fold.
         """
         turn_key = self._bar_turn.get(bar.key)
@@ -434,9 +534,10 @@ class ToolFoldLayer:
                 continue
             if open:
                 self._open[key] = True
+                want = True
             else:
                 self._open.pop(key, None)
-            want = self._resolved_open(plan)
+                want = plan.default_open
             widget.set_open(want)
             if self._apply_visibility(plan, widget, want):
                 self._gaps_dirty = True
@@ -444,6 +545,9 @@ class ToolFoldLayer:
         if self._gaps_dirty:
             self._gaps_dirty = False
             self._view.reapply_gaps()
+        if open:
+            self._view.reveal_block(bar)
+            self._view.call_after_refresh(lambda: self._view.reveal_block(bar))
 
     def focus_neighbour(self, block: TranscriptBlock, delta: int) -> bool:
         """Walk the VISIBLE order — bars included — and focus the next row.
@@ -472,11 +576,29 @@ class ToolFoldLayer:
     # -- the derive -----------------------------------------------------------
 
     def _derive(self) -> None:
-        """Rebuild the outline from the view's rows and reconcile the screen."""
+        """Rebuild the outline from the view's rows and reconcile the screen.
+
+        GUARDED. This runs from ``call_after_refresh``, i.e. inside the message
+        pump: an exception here (a mount race, a duplicate row id) would reach
+        the pump and could take the app down. A layer bug must degrade to a
+        stale fold, never to a dead app — the same choice
+        ``OperatorApp._apply_transcript_display`` already makes for its live
+        apply. The previous frame's bars and vetoes are left standing; the next
+        append or finalize schedules another attempt.
+        """
         self._scheduled = False
+        try:
+            self._derive_now()
+        except Exception:  # noqa: BLE001 — see the docstring: log, keep the frame
+            logger.exception("tool fold derive failed; keeping the previous frame")
+
+    def _derive_now(self) -> None:
+        """The derive proper; see :meth:`_derive` for the pump guard."""
         blocks = self._view.blocks()
         receipt_members = self._receipt_members(blocks)
         live_block = self._view.pinned_tail()
+        pending_approvals = self._pending_approval_ids()
+        self._pending_approvals = pending_approvals
 
         rows: list[OutlineRow] = []
         by_id: dict[str, TranscriptBlock] = {}
@@ -496,6 +618,18 @@ class ToolFoldLayer:
             row = outline_row_of(block)
             if row is None:
                 continue
+            # A LIVE call parked on an approval gate is card-state `running`:
+            # `mark_waiting` is the replay vocabulary, not the live one. Present
+            # it as `waiting` to the outline so it splits its run and stays a
+            # row — approval-pending work is never hidden behind a fold, and a
+            # bare `left` on a live run bar used to hide the call the prompt was
+            # naming.
+            if (
+                pending_approvals
+                and row.kind == "tool"
+                and getattr(block, "tool_call_id", None) in pending_approvals
+            ):
+                row = replace(row, state="waiting")
             rows.append(row)
             by_id[row.id] = block
 
@@ -509,6 +643,12 @@ class ToolFoldLayer:
         self._pinned = pinned
         self._rows = by_id
         self._bar_turn = bar_turn
+        self._row_turn = {}
+        for turn in outline.turns:
+            for row_id in _turn_row_ids(turn):
+                self._row_turn[row_id] = turn.key
+            if turn.final_id is not None:
+                self._row_turn[turn.final_id] = turn.key
         self._failed = tuple(row.id for row in rows if row.kind == "tool" and row.state == "error")
         self._row_order = [row.id for row in rows]
         self._id_of = {id(block): row_id for row_id, block in by_id.items()}
@@ -538,9 +678,13 @@ class ToolFoldLayer:
                 depths[row_id] = 1
         for plan in plans:
             # Revealed under an open bar, or hidden under a closed one — either
-            # way it is one level below the bar's column when painted.
+            # way it is one level below the bar's column when painted. The bar's
+            # MOUNT depth (`plan.depth`, for sibling order) is not the fold
+            # level its rows take: turn/run bars both draw at level 1 and a sub
+            # bar (the prototype's +2) at level 2.
+            fold_depth = 2 if plan.kind == "sub" else 1
             for row_id in plan.covered:
-                depths[row_id] = 2
+                depths[row_id] = fold_depth + 1
         for row_id in pinned:
             # A pin is the failure a collapsed bar leaves visible, so it belongs
             # to that bar's group and takes the revealed column — but only when a
@@ -560,6 +704,27 @@ class ToolFoldLayer:
                 members.update(id(member) for member in block.members())
         return members
 
+    def _pending_approval_ids(self) -> set[str]:
+        """The calls the session is parked on for an approval decision.
+
+        Read from the app's session rather than a widget flag: the LIVE card's
+        state stays `running` until the answer arrives (only the replay path
+        calls `mark_waiting`), so the card alone cannot answer this question.
+        A detached view or a fake session without the accessor answers "none",
+        which is the safe direction: no exemption, no invented pending call.
+        """
+        try:
+            session = getattr(self._view.app, "_session", None)
+        except Exception:  # noqa: BLE001 — a view with no app has no session
+            return set()
+        pending = getattr(session, "pending_display_tool_ids", None)
+        if not callable(pending):
+            return set()
+        try:
+            return {str(call_id) for call_id in cast("set[str]", pending())}
+        except Exception:  # noqa: BLE001 — an unreadable session is not a gate
+            return set()
+
     def _plans_of(
         self,
         outline: Outline,
@@ -574,7 +739,12 @@ class ToolFoldLayer:
         foot line each settled turn earns.
         """
         row_of = {row.id: row for row in rows}
-        exempt = {row.id for row in rows if outline_row_is_exempt(by_id[row.id])}
+        # `waiting` is approval-pending work: never hidden, always a splitter.
+        # The state is presented by the adapter for both the replay card and a
+        # live card the session says is parked on a gate.
+        exempt = {
+            row.id for row in rows if row.state == "waiting" or outline_row_is_exempt(by_id[row.id])
+        }
         pinned = self._pins(outline, row_of)
         mode = self._view.display_mode
 
@@ -602,8 +772,15 @@ class ToolFoldLayer:
                 bar_turn[plan.key] = _turn_key
 
             body = _turn_row_ids(turn)
+            # A turn bar covers the WORK of the turn, never a row the reader
+            # must read: error/failed notices, receipts, asks and images stay
+            # visible with every bar closed (the positive list is the rule).
             covered = tuple(
-                row_id for row_id in body if row_id not in exempt and row_id not in pinned
+                row_id
+                for row_id in body
+                if row_id not in exempt
+                and row_id not in pinned
+                and row_of[row_id].kind in TURN_COVERABLE_KINDS
             )
             turn_bar: _BarPlan | None = None
             # A PAGE-SEAM TURN GETS NO TURN BAR. Its prompt row is in the part of
@@ -711,18 +888,20 @@ class ToolFoldLayer:
         if self._view.display_mode != "by-response":
             return []
 
-        # The LAST row of each turn, in document order. Read from the rows
-        # rather than from ``Turn`` alone: an answered turn's final row is
-        # ``final_id``, a dead turn's is its notice, and ``nodes`` holds the
-        # notice even when the answer came first — the rows are the one place
-        # the whole span is visible.
+        # The LAST row of each turn, and the rows of each turn, in document
+        # order. Read from the rows rather than from ``Turn`` alone: an answered
+        # turn's final row is ``final_id``, a dead turn's is its closing notice,
+        # and the failure's two restatements can straddle them — the rows are
+        # the one place the whole span is visible.
         last_of_turn: dict[str, str] = {}
+        rows_of_turn: dict[str, list[OutlineRow]] = {}
         current: str | None = None
         for row in rows:
             if row.kind == "user":
                 current = f"tf:turn:{row.id}"
             if current is not None:
                 last_of_turn[current] = row.id
+                rows_of_turn.setdefault(current, []).append(row)
 
         feet: list[_FootPlan] = []
         for turn in outline.turns:
@@ -733,20 +912,19 @@ class ToolFoldLayer:
             # an outcome the reader is being asked to decide.
             if self._turn_is_paused(turn, by_id):
                 continue
+            # A segment that neither answered nor failed (a steer, a stop, a
+            # cut-off) is not a closed step: `✓` would claim it succeeded and
+            # `✗ turn failed` would state an outcome nobody diagnosed. Its own
+            # notice — a cut-off row — stays visible in the transcript instead.
+            if turn.final_id is None and not turn.died:
+                continue
             anchor = last_of_turn.get(turn.key)
             if anchor is None:
                 continue
+            hides: tuple[str, ...] = ()
             reason = ""
-            hides = ""
-            # The reason is the turn's closing ERROR notice, whatever head it
-            # arrived under: `turn failed` is the harness's plain arm, and a
-            # provider incident arrives as `[session incident …] category: raw`
-            # (which the outline's `notice_failed` classification does not
-            # match). The foot cleans either form for display.
-            anchor_block = by_id.get(anchor)
-            if isinstance(anchor_block, NoticeBlock) and anchor_block.notice_kind == "error":
-                reason = anchor_block.text()
-                hides = anchor
+            if turn.died:
+                hides, reason = self._failure_reason(rows_of_turn.get(turn.key, ()), by_id)
             feet.append(
                 _FootPlan(
                     key=f"tf:foot:{turn.user_id}",
@@ -760,13 +938,51 @@ class ToolFoldLayer:
         return feet
 
     @staticmethod
-    def _turn_is_paused(turn: Turn, by_id: dict[str, TranscriptBlock]) -> bool:
-        """True when a call in ``turn`` is waiting for the reader's approval."""
+    def _failure_reason(
+        rows: Sequence[OutlineRow], by_id: dict[str, TranscriptBlock]
+    ) -> tuple[tuple[str, ...], str]:
+        """The notices a dead turn's foot restates, and the richest reason.
+
+        A provider failure replays as TWO stored rows — the stop notice
+        (`turn failed`) and the raw `[session incident …]` record — while the
+        foot is a third statement of the same event. Hiding only one left the
+        reason painted three times on a resumed window. The reason is the
+        RICHEST cleaned text, not the first: the stop notice often carries the
+        bare word, and the incident carries the provider's own sentence.
+        """
+        hides: list[str] = []
+        reason = ""
+        for index, row in enumerate(rows):
+            block = by_id.get(row.id)
+            if not isinstance(block, NoticeBlock):
+                continue
+            text = block.text()
+            head = " ".join(text.split()).lower()
+            restates = head.startswith(("turn failed", "[session incident"))
+            # The live arm's other spelling, `Stopped with an error — …`, has no
+            # special head; it is identified by being the turn's LAST row.
+            if not restates and not (block.notice_kind == "error" and index == len(rows) - 1):
+                continue
+            hides.append(row.id)
+            cleaned = clean_turn_failure(text)
+            if len(cleaned) > len(reason):
+                reason = cleaned
+        return tuple(hides), reason
+
+    def _turn_is_paused(self, turn: Turn, by_id: dict[str, TranscriptBlock]) -> bool:
+        """True when a call in ``turn`` is waiting for the reader's approval.
+
+        Two spellings: the replay card says `waiting`, the LIVE card stays
+        `running` while the gate is open (the session's pending ids are the
+        authority there). Either way the turn is parked on a question, not dead.
+        """
         from local_operator.tui.widgets.tool_card import ToolCard
 
         for row_id in _turn_row_ids(turn):
             block = by_id.get(row_id)
-            if isinstance(block, ToolCard) and block.state == "waiting":
+            if not isinstance(block, ToolCard):
+                continue
+            if block.state == "waiting" or block.tool_call_id in self._pending_approvals:
                 return True
         return False
 
@@ -803,17 +1019,23 @@ class ToolFoldLayer:
             )
 
     def _pins(self, outline: Outline, row_of: dict[str, OutlineRow]) -> frozenset[str]:
-        """The LAST failed call of each dead turn: the design's one exemption.
+        """The LAST failed call of a turn that ended without an answer.
 
-        A dead turn has no bar of its own (a turn bar needs an answer), so the
+        Such a turn has no bar of its own (a turn bar needs an answer), so the
         pin is what keeps the reason its run failed reachable without unfolding
         every level. Only the last: pinning all sixteen failures of a
         browser-batch turn would rebuild the screenshot problem the fold exists
         to answer.
+
+        "Ended without an answer" is the LAST settled turn, not every segment a
+        steer left behind: a mid-turn steer is followed by a user row and the
+        agent is still working, so its failures stay folded and counted (L6).
         """
         pinned: set[str] = set()
-        for turn in outline.turns:
-            if not turn.died or not turn.facts.failed:
+        for index, turn in enumerate(outline.turns):
+            last = index == len(outline.turns) - 1
+            ended_without_answer = last and not turn.live and turn.final_id is None
+            if not (turn.died or ended_without_answer) or not turn.facts.failed:
                 continue
             failed = [row_id for row_id in _turn_row_ids(turn) if row_of[row_id].state == "error"]
             if failed:
@@ -872,13 +1094,14 @@ class ToolFoldLayer:
                 kind=plan.kind,
                 depth=plan.depth,
                 tool_name=plan.tool_name,
+                label=self._bar_label(plan),
                 facts=plan.facts,
                 noanswer=plan.noanswer,
                 live=live[0],
                 live_summary=live[1],
             )
             if created:
-                self._view.mount(bar, before=anchor)
+                self._view.mount(bar, before=self._bar_mount_seat(plan, anchor))
                 self._gaps_dirty = True
             open_state = self._resolved_open(plan)
             bar.set_open(open_state)
@@ -906,6 +1129,48 @@ class ToolFoldLayer:
         if retry:
             self.invalidate()
 
+    def _bar_label(self, plan: _BarPlan) -> str:
+        """The bar's name column, decided HERE because it is layout policy.
+
+        By turn names the run bar ``work`` (the ledger it sits in); By
+        response's layout B drops that word — four identical cells on every run
+        bar of a skimmable step list say nothing, and the prototype has no label
+        there. A turn bar always names the turn, and a sub bar names its tool
+        through the row's own display name.
+        """
+        if plan.kind == "turn":
+            return _fold_t(tui_transcript_fold.turn())
+        if plan.kind == "run":
+            if self._view.display_mode == "by-turn":
+                return _fold_t(tui_transcript_fold.work())
+            return ""
+        return display_name(plan.tool_name)
+
+    def _bar_mount_seat(self, plan: _BarPlan, anchor: TranscriptBlock) -> TranscriptBlock:
+        """Where a new bar goes: before its anchor, after any shallower bar.
+
+        A live turn's run bar is mounted while the turn is still open; the turn
+        bar only exists once the answer lands, so mounting it ``before=anchor``
+        placed it AFTER its own first run bar (painted run, turn, run) and Up
+        from the turn bar landed on its child instead of leaving the turn. Plans
+        arrive in document order, so a bar mounted later is never shallower than
+        an existing sibling at the same anchor: seat it before the earliest
+        mounted sibling that is DEEPER, else before the anchor.
+        """
+        order = {id(child): index for index, child in enumerate(self._view.children)}
+        seat: TranscriptBlock | None = None
+        seat_index: int | None = None
+        for key, bar in self._bars.items():
+            other = self._plans.get(key)
+            if other is None or other.anchor != plan.anchor or other.depth <= plan.depth:
+                continue
+            index = order.get(id(bar))
+            if index is None:
+                continue
+            if seat_index is None or index < seat_index:
+                seat, seat_index = bar, index
+        return seat if seat is not None else anchor
+
     def _apply_depths(self) -> None:
         """Give every ledger row the inset the step it belongs to earned.
 
@@ -925,6 +1190,7 @@ class ToolFoldLayer:
         """
         for row_id, block in self._rows.items():
             if isinstance(block, ExpandableActionBlock):
+                block.set_fold_owner(self)
                 block.set_fold_depth(self._row_depth.get(row_id, 0))
 
     def _apply_ink(self) -> None:
@@ -967,32 +1233,33 @@ class ToolFoldLayer:
             self._apply_foot_veto(plan, foot)
 
     def _apply_foot_veto(self, plan: _FootPlan, foot: TurnFootBlock) -> None:
-        """Hide the turn-failed notice the foot restates (By response only)."""
+        """Hide every notice the foot restates (By response only)."""
         veto = f"{FOOT_VETO_PREFIX}{plan.key}"
-        applied = self._foot_applied.get(plan.key, "")
+        applied = self._foot_applied.get(plan.key, ())
         if applied and applied != plan.hides:
-            block = self._rows.get(applied)
-            if block is not None:
-                block.fold_vetoes.discard(veto)
-                block.sync_display()
+            for row_id in applied:
+                block = self._rows.get(row_id)
+                if block is not None:
+                    block.fold_vetoes.discard(veto)
+                    block.sync_display()
             self._foot_applied.pop(plan.key, None)
             self._gaps_dirty = True
         if not plan.hides or applied == plan.hides:
             return
-        block = self._rows.get(plan.hides)
-        if block is None:
-            return
-        block.fold_vetoes.add(veto)
-        block.sync_display()
+        for row_id in plan.hides:
+            block = self._rows.get(row_id)
+            if block is None:
+                continue
+            block.fold_vetoes.add(veto)
+            block.sync_display()
         self._foot_applied[plan.key] = plan.hides
         self._gaps_dirty = True
 
     def _remove_foot(self, key: str) -> None:
-        """Release the notice a foot hid, then unmount it."""
+        """Release the notices a foot hid, then unmount it."""
         foot = self._feet.pop(key, None)
-        hides = self._foot_applied.pop(key, "")
-        if hides:
-            block = self._rows.get(hides)
+        for row_id in self._foot_applied.pop(key, ()):
+            block = self._rows.get(row_id)
             if block is not None:
                 block.fold_vetoes.discard(f"{FOOT_VETO_PREFIX}{key}")
                 block.sync_display()

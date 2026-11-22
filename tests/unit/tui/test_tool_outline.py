@@ -292,16 +292,32 @@ def test_a_failed_call_stays_inside_its_run_and_is_counted_on_it() -> None:
     assert run.facts.failed == 1
 
 
-def test_a_turn_with_no_answer_or_with_a_failed_notice_died() -> None:
+def test_a_turn_dies_only_when_a_failure_notice_says_so() -> None:
+    """No answer alone is not a failure: a steer, a stop and a cut-off stay neutral."""
     silent = outline_of([user(), tool("t1"), tool("t2"), tool("t3")]).turns[0]
-    notified = outline_of(
-        [user(), tool("t1"), tool("t2"), tool("t3"), OutlineRow("n", "notice_failed")]
+    failed = outline_of(
+        [
+            user(),
+            tool("t1"),
+            tool("t2"),
+            tool("t3"),
+            OutlineRow("n", "notice_failed", notice_head="turn failed"),
+        ]
+    ).turns[0]
+    cut_off = outline_of(
+        [
+            user(),
+            tool("t1"),
+            tool("t2"),
+            OutlineRow("n", "notice_failed", notice_head="turn cut off — provider"),
+        ]
     ).turns[0]
 
-    assert silent.died and silent.final_id is None
-    assert notified.died and notified.final_id is None
+    assert not silent.died and silent.final_id is None
+    assert failed.died and failed.final_id is None
+    assert not cut_off.died, "a cut-off turn must stay neutral"
     assert not silent.has_turn_bar
-    assert not notified.has_turn_bar
+    assert not failed.has_turn_bar
 
 
 def test_an_answered_settled_turn_has_a_turn_bar_and_has_not_died() -> None:
@@ -317,7 +333,10 @@ def test_a_live_turn_has_no_turn_bar_and_never_reads_as_dead() -> None:
     closed = outline_of(rows).turns[0]
     live = outline_of(rows, live_from="u").turns[0]
 
-    assert closed.died and live.live and not live.died
+    # A settled turn with no answer and no failure notice is not "dead": the
+    # harness never said it failed (L6). The live one is settling still.
+    assert not closed.died and closed.final_id is None
+    assert live.live and not live.died
     assert not live.has_turn_bar
     assert live.key == closed.key
 
@@ -345,9 +364,25 @@ def test_a_turn_with_exactly_one_run_is_flat() -> None:
     mixed = outline_of(
         [user(), prose("n"), tool("t1"), tool("t2"), tool("t3"), prose("a", "prose_final")]
     ).turns[0]
+    two_runs = outline_of(
+        [
+            user(),
+            tool("t1"),
+            tool("t2"),
+            tool("t3"),
+            prose("n"),
+            tool("t4"),
+            tool("t5"),
+            tool("t6"),
+            prose("a", "prose_final"),
+        ]
+    ).turns[0]
 
     assert alone.flat
-    assert not mixed.flat
+    # A loose narration line does not earn the run a second bar: the turn bar's
+    # children are still that run's children.
+    assert mixed.flat
+    assert not two_runs.flat
 
 
 def test_turn_facts_cover_loose_calls_not_only_runs() -> None:
