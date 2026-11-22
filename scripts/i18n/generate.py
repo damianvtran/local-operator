@@ -381,9 +381,15 @@ def _render_keys_module(namespace: str, messages: dict[str, str]) -> str:
                 # the module still lints and stays `black --check`-clean AS
                 # GENERATED instead of needing a hand edit the drift gate
                 # would reject.
-                items = "".join(
-                    f'            "{name}": {safe},\n' for safe, (name, _) in zip(sanitised, params)
-                )
+                # A single placeholder can still overflow after the mapping is
+                # exploded. Parenthesise its value, as Black does, without
+                # changing the identifier or the message's argument mapping.
+                items = ""
+                for safe, (name, _) in zip(sanitised, params):
+                    item = f'            "{name}": {safe},\n'
+                    if len(item.rstrip("\n")) > 100:
+                        item = f'            "{name}": (\n                {safe}\n            ),\n'
+                    items += item
                 mapping = f"        {{\n{items}        }},"
             call = f'    return Msg(\n        "{key}",\n{mapping}\n    )'
         header = f"def {fname}({signature}) -> Msg:"

@@ -1,0 +1,772 @@
+{
+  "locale": "fr",
+  "namespace": "tui.info",
+  "stage": "translator authoring remediation; NOT independent audit/native clearance",
+  "agent": "info-remediate-fr",
+  "session": "4c438522c145",
+  "model": "openai/gpt-6.1-sol",
+  "fallback_from": "anthropic/claude-opus-5-5; operator host model-switch notice: provider failure quota",
+  "date": "2026-11-21",
+  "head": "8f1e45a3a98ca9f8b7312b6707c36e21b758966d",
+  "source_sha256": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+  "context_sha256": "aee21715fca769227b3bda5b500a5e81e51763cf86817f741baff8b1a5ef0ae7",
+  "before_sha256": "c57433a8f818a7aa95ac804ffc778c50203ddc26cab40925755175ba94379f14",
+  "target_sha256": "f27b54408cc8b9efbe08aabdc341544f7853196f029dd9f2a03e0f81c57898fe",
+  "changed_keys": [
+    "tui.info.fleet_caveats.lower_bound",
+    "tui.info.agents.retained_full",
+    "tui.info.agents.tree_counts",
+    "tui.info.not_answering_clause.no_rows",
+    "tui.info.not_answering_clause.full",
+    "tui.info.tree_lines.deeper",
+    "tui.info.export.build_age",
+    "tui.info.export.uptime",
+    "tui.info.export.session_counts",
+    "tui.info.export.tree_counts",
+    "tui.info.state.stale"
+  ],
+  "key_count": 277,
+  "unrelated_values_unchanged": true,
+  "key_order_and_format_preserved": true,
+  "finding_authority": "i18n/audits/evidence/pr4420-initial-native-fr-r1.json",
+  "decisions": {
+    "FR1": "implemented singular/plural agreement inside retained branches in both fields",
+    "FR2": "implemented décomptes and données chiffrées in all four proposed keys; initial brief mislabeled FR2 as trajectory/runtime distinction",
+    "FR3": "implemented masqué/masqués for hidden descendant node count, not depth",
+    "FR4": "deferred fit-only; original meaning-correct seuil atteint, laissé actif preserved; no rendered evidence and no semantic truncation",
+    "source_selects": "whole-field inconnu agrees with âge; inconnue agrees with durée; full known line retained in other",
+    "changed_context_stale": "processus disparu explicitly means PID gone, not expired heartbeat",
+    "changed_context_lower_bound": "total des trajectoires explicitly scopes lower bound to trajectories, never runtime count"
+  },
+  "glossary_choices": [
+    "vous/professional sentence-case register retained",
+    "runtime retained per fr style-guide documented technical vocabulary",
+    "décomptes for reported counts; données chiffrées for heartbeat-reported metrics",
+    "No new glossary term invented",
+    "Human duration units use existing audited s/min/h/j wire.session_status catalogue; those files unchanged"
+  ],
+  "controls": {
+    "interpreter": "/Users/damian/local-operator/.venv/bin/python",
+    "pythonpath": "/Users/damian/local-operator/.worktrees/i18n-info-readout",
+    "changed_keys_only": true,
+    "counts": [
+      0,
+      1,
+      2,
+      5,
+      11,
+      21,
+      1000,
+      1000000
+    ],
+    "results": [
+      {
+        "key": "tui.info.fleet_caveats.lower_bound",
+        "count": 0,
+        "category": "one",
+        "output": "0 session utilise une ancienne compilation et ne signale pas ses sous-agents — le total des trajectoires est une borne inférieure.",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.fleet_caveats.lower_bound",
+        "count": 1,
+        "category": "one",
+        "output": "1 session utilise une ancienne compilation et ne signale pas ses sous-agents — le total des trajectoires est une borne inférieure.",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.fleet_caveats.lower_bound",
+        "count": 2,
+        "category": "other",
+        "output": "2 sessions utilisent une ancienne compilation et ne signalent pas leurs sous-agents — le total des trajectoires est une borne inférieure.",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.fleet_caveats.lower_bound",
+        "count": 5,
+        "category": "other",
+        "output": "5 sessions utilisent une ancienne compilation et ne signalent pas leurs sous-agents — le total des trajectoires est une borne inférieure.",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.fleet_caveats.lower_bound",
+        "count": 11,
+        "category": "other",
+        "output": "11 sessions utilisent une ancienne compilation et ne signalent pas leurs sous-agents — le total des trajectoires est une borne inférieure.",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.fleet_caveats.lower_bound",
+        "count": 21,
+        "category": "other",
+        "output": "21 sessions utilisent une ancienne compilation et ne signalent pas leurs sous-agents — le total des trajectoires est une borne inférieure.",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.fleet_caveats.lower_bound",
+        "count": 1000,
+        "category": "other",
+        "output": "1 000 sessions utilisent une ancienne compilation et ne signalent pas leurs sous-agents — le total des trajectoires est une borne inférieure.",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.fleet_caveats.lower_bound",
+        "count": 1000000,
+        "category": "many",
+        "output": "1 000 000 de sessions utilisent une ancienne compilation et ne signalent pas leurs sous-agents — le total des trajectoires est une borne inférieure.",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.fleet_caveats.lower_bound",
+        "missing_argument": "PASS",
+        "actual": "message argument 'count' was not supplied (have: none)"
+      },
+      {
+        "key": "tui.info.agents.retained_full",
+        "count": 0,
+        "category": "one",
+        "output": "0 terminé (conservé)",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.agents.retained_full",
+        "count": 1,
+        "category": "one",
+        "output": "1 terminé (conservé)",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.agents.retained_full",
+        "count": 2,
+        "category": "other",
+        "output": "2 terminés (conservés)",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.agents.retained_full",
+        "count": 5,
+        "category": "other",
+        "output": "5 terminés (conservés)",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.agents.retained_full",
+        "count": 11,
+        "category": "other",
+        "output": "11 terminés (conservés)",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.agents.retained_full",
+        "count": 21,
+        "category": "other",
+        "output": "21 terminés (conservés)",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.agents.retained_full",
+        "count": 1000,
+        "category": "other",
+        "output": "1 000 terminés (conservés)",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.agents.retained_full",
+        "count": 1000000,
+        "category": "many",
+        "output": "1 000 000 terminés (conservés)",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.agents.retained_full",
+        "missing_argument": "PASS",
+        "actual": "message argument 'settled' was not supplied (have: none)"
+      },
+      {
+        "key": "tui.info.agents.tree_counts",
+        "count": 0,
+        "category": "one",
+        "output": "L’arbre des sous-agents est propre à chaque processus : seul celui de cette session est affiché. Les autres sessions communiquent leurs décomptes.",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.agents.tree_counts",
+        "count": 1,
+        "category": "one",
+        "output": "L’arbre des sous-agents est propre à chaque processus : seul celui de cette session est affiché. Les autres sessions communiquent leurs décomptes.",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.agents.tree_counts",
+        "count": 2,
+        "category": "other",
+        "output": "L’arbre des sous-agents est propre à chaque processus : seul celui de cette session est affiché. Les autres sessions communiquent leurs décomptes.",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.agents.tree_counts",
+        "count": 5,
+        "category": "other",
+        "output": "L’arbre des sous-agents est propre à chaque processus : seul celui de cette session est affiché. Les autres sessions communiquent leurs décomptes.",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.agents.tree_counts",
+        "count": 11,
+        "category": "other",
+        "output": "L’arbre des sous-agents est propre à chaque processus : seul celui de cette session est affiché. Les autres sessions communiquent leurs décomptes.",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.agents.tree_counts",
+        "count": 21,
+        "category": "other",
+        "output": "L’arbre des sous-agents est propre à chaque processus : seul celui de cette session est affiché. Les autres sessions communiquent leurs décomptes.",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.agents.tree_counts",
+        "count": 1000,
+        "category": "other",
+        "output": "L’arbre des sous-agents est propre à chaque processus : seul celui de cette session est affiché. Les autres sessions communiquent leurs décomptes.",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.agents.tree_counts",
+        "count": 1000000,
+        "category": "many",
+        "output": "L’arbre des sous-agents est propre à chaque processus : seul celui de cette session est affiché. Les autres sessions communiquent leurs décomptes.",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.not_answering_clause.no_rows",
+        "count": 0,
+        "category": "one",
+        "output": "0 session ne répond pas ; ses données chiffrées datent de son dernier signe de vie",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.not_answering_clause.no_rows",
+        "count": 1,
+        "category": "one",
+        "output": "1 session ne répond pas ; ses données chiffrées datent de son dernier signe de vie",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.not_answering_clause.no_rows",
+        "count": 2,
+        "category": "other",
+        "output": "2 sessions ne répondent pas ; leurs données chiffrées datent de leur dernier signe de vie",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.not_answering_clause.no_rows",
+        "count": 5,
+        "category": "other",
+        "output": "5 sessions ne répondent pas ; leurs données chiffrées datent de leur dernier signe de vie",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.not_answering_clause.no_rows",
+        "count": 11,
+        "category": "other",
+        "output": "11 sessions ne répondent pas ; leurs données chiffrées datent de leur dernier signe de vie",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.not_answering_clause.no_rows",
+        "count": 21,
+        "category": "other",
+        "output": "21 sessions ne répondent pas ; leurs données chiffrées datent de leur dernier signe de vie",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.not_answering_clause.no_rows",
+        "count": 1000,
+        "category": "other",
+        "output": "1 000 sessions ne répondent pas ; leurs données chiffrées datent de leur dernier signe de vie",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.not_answering_clause.no_rows",
+        "count": 1000000,
+        "category": "many",
+        "output": "1 000 000 de sessions ne répondent pas ; leurs données chiffrées datent de leur dernier signe de vie",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.not_answering_clause.no_rows",
+        "missing_argument": "PASS",
+        "actual": "message argument 'count' was not supplied (have: none)"
+      },
+      {
+        "key": "tui.info.not_answering_clause.full",
+        "count": 0,
+        "category": "one",
+        "output": "0 session ne répond pas — dernier signe de vie du runtime il y a «age» (pid «pids») ; ses données chiffrées datent de ce signe de vie. «remedy»",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.not_answering_clause.full",
+        "count": 1,
+        "category": "one",
+        "output": "1 session ne répond pas — dernier signe de vie du runtime il y a «age» (pid «pids») ; ses données chiffrées datent de ce signe de vie. «remedy»",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.not_answering_clause.full",
+        "count": 2,
+        "category": "other",
+        "output": "2 sessions ne répondent pas — dernier signe de vie du runtime il y a «age» (pid «pids») ; leurs données chiffrées datent de ces signes de vie. «remedy»",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.not_answering_clause.full",
+        "count": 5,
+        "category": "other",
+        "output": "5 sessions ne répondent pas — dernier signe de vie du runtime il y a «age» (pid «pids») ; leurs données chiffrées datent de ces signes de vie. «remedy»",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.not_answering_clause.full",
+        "count": 11,
+        "category": "other",
+        "output": "11 sessions ne répondent pas — dernier signe de vie du runtime il y a «age» (pid «pids») ; leurs données chiffrées datent de ces signes de vie. «remedy»",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.not_answering_clause.full",
+        "count": 21,
+        "category": "other",
+        "output": "21 sessions ne répondent pas — dernier signe de vie du runtime il y a «age» (pid «pids») ; leurs données chiffrées datent de ces signes de vie. «remedy»",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.not_answering_clause.full",
+        "count": 1000,
+        "category": "other",
+        "output": "1 000 sessions ne répondent pas — dernier signe de vie du runtime il y a «age» (pid «pids») ; leurs données chiffrées datent de ces signes de vie. «remedy»",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.not_answering_clause.full",
+        "count": 1000000,
+        "category": "many",
+        "output": "1 000 000 de sessions ne répondent pas — dernier signe de vie du runtime il y a «age» (pid «pids») ; leurs données chiffrées datent de ces signes de vie. «remedy»",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.not_answering_clause.full",
+        "missing_argument": "PASS",
+        "actual": "message argument 'count' was not supplied (have: age, pids, remedy)"
+      },
+      {
+        "key": "tui.info.tree_lines.deeper",
+        "count": 0,
+        "category": "one",
+        "output": "  + 0 masqué",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.tree_lines.deeper",
+        "count": 1,
+        "category": "one",
+        "output": "  + 1 masqué",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.tree_lines.deeper",
+        "count": 2,
+        "category": "other",
+        "output": "  + 2 masqués",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.tree_lines.deeper",
+        "count": 5,
+        "category": "other",
+        "output": "  + 5 masqués",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.tree_lines.deeper",
+        "count": 11,
+        "category": "other",
+        "output": "  + 11 masqués",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.tree_lines.deeper",
+        "count": 21,
+        "category": "other",
+        "output": "  + 21 masqués",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.tree_lines.deeper",
+        "count": 1000,
+        "category": "other",
+        "output": "  + 1 000 masqués",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.tree_lines.deeper",
+        "count": 1000000,
+        "category": "many",
+        "output": "  + 1 000 000 masqués",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.tree_lines.deeper",
+        "missing_argument": "PASS",
+        "actual": "message argument 'deeper' was not supplied (have: none)"
+      },
+      {
+        "key": "tui.info.export.build_age",
+        "count": 0,
+        "category": "one",
+        "output": "  âge de la compilation  «build_age_s»",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.build_age",
+        "count": 1,
+        "category": "one",
+        "output": "  âge de la compilation  «build_age_s»",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.build_age",
+        "count": 2,
+        "category": "other",
+        "output": "  âge de la compilation  «build_age_s»",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.build_age",
+        "count": 5,
+        "category": "other",
+        "output": "  âge de la compilation  «build_age_s»",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.build_age",
+        "count": 11,
+        "category": "other",
+        "output": "  âge de la compilation  «build_age_s»",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.build_age",
+        "count": 21,
+        "category": "other",
+        "output": "  âge de la compilation  «build_age_s»",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.build_age",
+        "count": 1000,
+        "category": "other",
+        "output": "  âge de la compilation  «build_age_s»",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.build_age",
+        "count": 1000000,
+        "category": "many",
+        "output": "  âge de la compilation  «build_age_s»",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.build_age",
+        "missing_argument": "PASS",
+        "actual": "message argument 'build_age_s' was not supplied (have: none)"
+      },
+      {
+        "key": "tui.info.export.uptime",
+        "count": 0,
+        "category": "one",
+        "output": "  durée d’activité  «uptime_s»",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.uptime",
+        "count": 1,
+        "category": "one",
+        "output": "  durée d’activité  «uptime_s»",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.uptime",
+        "count": 2,
+        "category": "other",
+        "output": "  durée d’activité  «uptime_s»",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.uptime",
+        "count": 5,
+        "category": "other",
+        "output": "  durée d’activité  «uptime_s»",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.uptime",
+        "count": 11,
+        "category": "other",
+        "output": "  durée d’activité  «uptime_s»",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.uptime",
+        "count": 21,
+        "category": "other",
+        "output": "  durée d’activité  «uptime_s»",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.uptime",
+        "count": 1000,
+        "category": "other",
+        "output": "  durée d’activité  «uptime_s»",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.uptime",
+        "count": 1000000,
+        "category": "many",
+        "output": "  durée d’activité  «uptime_s»",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.uptime",
+        "missing_argument": "PASS",
+        "actual": "message argument 'uptime_s' was not supplied (have: none)"
+      },
+      {
+        "key": "tui.info.export.session_counts",
+        "count": 0,
+        "category": "one",
+        "output": "  cette session     0 en cours · 0 en attente · 0 terminé (conservé)",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.session_counts",
+        "count": 1,
+        "category": "one",
+        "output": "  cette session     1 en cours · 1 en attente · 1 terminé (conservé)",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.session_counts",
+        "count": 2,
+        "category": "other",
+        "output": "  cette session     2 en cours · 2 en attente · 2 terminés (conservés)",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.session_counts",
+        "count": 5,
+        "category": "other",
+        "output": "  cette session     5 en cours · 5 en attente · 5 terminés (conservés)",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.session_counts",
+        "count": 11,
+        "category": "other",
+        "output": "  cette session     11 en cours · 11 en attente · 11 terminés (conservés)",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.session_counts",
+        "count": 21,
+        "category": "other",
+        "output": "  cette session     21 en cours · 21 en attente · 21 terminés (conservés)",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.session_counts",
+        "count": 1000,
+        "category": "other",
+        "output": "  cette session     1 000 en cours · 1 000 en attente · 1 000 terminés (conservés)",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.session_counts",
+        "count": 1000000,
+        "category": "many",
+        "output": "  cette session     1 000 000 en cours · 1 000 000 en attente · 1 000 000 terminés (conservés)",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.session_counts",
+        "missing_argument": "PASS",
+        "actual": "message argument 'running' was not supplied (have: queued, settled)"
+      },
+      {
+        "key": "tui.info.export.tree_counts",
+        "count": 0,
+        "category": "one",
+        "output": "  (seul l’arbre de cette session est affiché ; les autres sessions communiquent leurs décomptes)",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.tree_counts",
+        "count": 1,
+        "category": "one",
+        "output": "  (seul l’arbre de cette session est affiché ; les autres sessions communiquent leurs décomptes)",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.tree_counts",
+        "count": 2,
+        "category": "other",
+        "output": "  (seul l’arbre de cette session est affiché ; les autres sessions communiquent leurs décomptes)",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.tree_counts",
+        "count": 5,
+        "category": "other",
+        "output": "  (seul l’arbre de cette session est affiché ; les autres sessions communiquent leurs décomptes)",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.tree_counts",
+        "count": 11,
+        "category": "other",
+        "output": "  (seul l’arbre de cette session est affiché ; les autres sessions communiquent leurs décomptes)",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.tree_counts",
+        "count": 21,
+        "category": "other",
+        "output": "  (seul l’arbre de cette session est affiché ; les autres sessions communiquent leurs décomptes)",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.tree_counts",
+        "count": 1000,
+        "category": "other",
+        "output": "  (seul l’arbre de cette session est affiché ; les autres sessions communiquent leurs décomptes)",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.tree_counts",
+        "count": 1000000,
+        "category": "many",
+        "output": "  (seul l’arbre de cette session est affiché ; les autres sessions communiquent leurs décomptes)",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.state.stale",
+        "count": 0,
+        "category": "one",
+        "output": "processus disparu",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.state.stale",
+        "count": 1,
+        "category": "one",
+        "output": "processus disparu",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.state.stale",
+        "count": 2,
+        "category": "other",
+        "output": "processus disparu",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.state.stale",
+        "count": 5,
+        "category": "other",
+        "output": "processus disparu",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.state.stale",
+        "count": 11,
+        "category": "other",
+        "output": "processus disparu",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.state.stale",
+        "count": 21,
+        "category": "other",
+        "output": "processus disparu",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.state.stale",
+        "count": 1000,
+        "category": "other",
+        "output": "processus disparu",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.state.stale",
+        "count": 1000000,
+        "category": "many",
+        "output": "processus disparu",
+        "pseudo": "PASS"
+      },
+      {
+        "key": "tui.info.export.build_age",
+        "input": "unmeasured",
+        "output": "  âge de la compilation  inconnu"
+      },
+      {
+        "key": "tui.info.export.build_age",
+        "input": "2 h 5 min",
+        "output": "  âge de la compilation  2 h 5 min"
+      },
+      {
+        "key": "tui.info.export.build_age",
+        "input": "0 s",
+        "output": "  âge de la compilation  0 s"
+      },
+      {
+        "key": "tui.info.export.uptime",
+        "input": "unmeasured",
+        "output": "  durée d’activité  inconnue"
+      },
+      {
+        "key": "tui.info.export.uptime",
+        "input": "2 h 5 min",
+        "output": "  durée d’activité  2 h 5 min"
+      },
+      {
+        "key": "tui.info.export.uptime",
+        "input": "0 s",
+        "output": "  durée d’activité  0 s"
+      }
+    ],
+    "pseudo": "AST literal expansion and real runtime formatter; signatures/selector structure unchanged. No visual-fit claim.",
+    "rtl": "French LTR; changed values contain no authored bidi controls. No native shaping run."
+  },
+  "overflow_risks": [
+    "FR4 held status remains a flagged narrow-row risk; no measured fit assertion",
+    "données chiffrées increases caveat width; terminal fitting/wrapping needs independent rendered validation",
+    "age de la compilation whole clipboard field is unbounded; no terminal-fit claim"
+  ],
+  "not_run": [
+    "pytest",
+    "App",
+    "browser",
+    "native rendering/shaping",
+    "build",
+    "whole checks",
+    "generation",
+    "CI",
+    "independent translation audit",
+    "ledger updates",
+    "new dependencies",
+    "git commit/push/stage/rebase"
+  ]
+}

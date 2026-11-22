@@ -1,0 +1,57 @@
+{
+  "reviewer": "reviewer / pr4420-code-R2-converged / bfcecbb00dd2",
+  "actual_model": "openai/gpt-6.1-sol",
+  "fallback_from": "anthropic/claude-opus-5-5",
+  "fallback_evidence": "Host user-channel model switch: provider failure: quota, before code inspection and execution in this round.",
+  "round": 2,
+  "scope": "e9e6c3711149..db684f29e586eea63c9428ab11f56a9008cf2645",
+  "worktree": "~/local-operator/.worktrees/i18n-info-readout",
+  "head": "db684f29e586eea63c9428ab11f56a9008cf2645",
+  "verdict": "clean",
+  "blocker": 0,
+  "major": 0,
+  "qualification": "Hindi fifth-key writer Opus header is not verified serving-model identity; retain the original as a historical claim, not verified author-model proof. No linguistic reaudit or eligibility attestation by this reviewer.",
+  "reviewed": [
+    "Original R1 PR review R1/R2/R3 and remediation comment 7072008983; C1/C2/C3 in manager brief are aliases, not actual review IDs.",
+    "Owned remediation in info/copy.py, info/render.py, i18n/messages.py, i18n/runtime.py, i18n/text.py, InfoPanel and changed tests.",
+    "Nonmechanical convergence receipt/rebase proof/patch-line-delta/retention-proof from session 8ccbbb5535af. The six changed patch lines are import/context and Text-to-InfoRow differences, not a mechanical repin.",
+    "Merged InfoPanel available-update warning AST is identical to upstream 9a7f612c7281bf604e25e23c68003279bb165717. Refresh hooks, typed Info rows and prior history remain present.",
+    "keys/__init__.py exports equal the exact union of previous feature head (184 exports) and upstream (187 exports): 188 exports, including tui_info. generate.py --check independently reports 201 artifacts byte-identical.",
+    "No envelope schema change: RenderedMessage parts are internal; envelope still returns code, params, text; runtime string renderer joins parts. Targeted message tests pass."
+  ],
+  "execution": [
+    {
+      "command": "PYTHONPATH=<worktree> <primary-venv>/python -m pytest -n 0 -p no:cacheprovider tests/unit/i18n/test_info_readout.py tests/unit/i18n/test_runtime.py tests/unit/tui/test_info_panel.py::test_update_status_copy_follows_live_locale_and_cell_width tests/unit/tui/test_info_panel.py::test_an_available_update_renders_the_remedy_whole -q",
+      "actual": "70 passed, 2 Pydantic deprecation warnings in 4.16s",
+      "exit": 0
+    },
+    {
+      "command": "PYTHONPATH=<worktree> <primary-venv>/python -m pytest -n 0 -p no:cacheprovider tests/unit/i18n/test_messages.py tests/unit/tui/test_info_i18n_refresh.py -q",
+      "actual": "22 passed, 2 Pydantic deprecation warnings in 11.60s",
+      "exit": 0
+    },
+    {
+      "command": "Independent foreground helper probes: real build_export missing-versus-zero, _install_section identity fitting, not_answering_clause -> _Body.note -> to_text; previous-head AST function controls loaded from git show e9e6c3711149",
+      "actual": "Eight locales: exactly two clipboard fields differ for missing versus measured zero, marker absent, control-free export. Full displayed 12-character source identity survives widths 51/60/80/120 with every row <= width. Urdu actual-PID force command island survives widths 51/126/1000. Old build_export reproduces French English-unknown leak; old _install_section crops identity at 51; old not_answering_clause loses whole command island at 1000. Old-function controls run against current compatible catalogues/models, not an old-tree full App.",
+      "exit": 0
+    },
+    {
+      "command": "PYTHONDONTWRITEBYTECODE=1 <primary-venv>/python scripts/i18n/generate.py --check",
+      "actual": "generate.py --check: 201 artifact(s) byte-identical",
+      "exit": 0
+    }
+  ],
+  "evidence_integrity": {
+    "retention": "Independently hashed all 78 retention-proof files; zero mismatches. One git diff --quiet 2a19f1b378723b175dae3aca1833ced4328a74f2 HEAD -- <all 78 paths> exits 0.",
+    "r2_rollup": "Opened and hash-verified all 14 archived originals: 11 passed, 2 failed, 1 blocked; not promoted to 14 passes.",
+    "history": "Opened all 24 integration_evidence references and verified SHA256 against actual bytes. Also verified all 24 immutable_originals+r3_originals references in final integration receipt. Counts: fr 3 passed; es 3 passed; zh 3 failed+2 passed; vi 3 passed; hi 1 failed+2 passed; ru 1 failed+2 passed; ur 1 failed+2 passed+1 blocked. Unknown-model failed Chinese A remains null and failed.",
+    "dry_run": "Historical append --dry-run/apply method is reported by pr4420-final-integration-375f43e81aa6.json and PR remediation, not independently rerun by reviewer; existing rows must not be appended again.",
+    "citation_triage": "Load-bearing archived originals, retention files and convergence proof files were opened successfully. An exploratory guessed filename pr4420-native-ledger-append-2a19.json was absent and is NOT cited as evidence. Scratch source paths inside archived semantic reports were not exhaustively re-opened; semantic decisions are attributed to their named independent auditors."
+  },
+  "environment": "Each pytest/helper child used its own synthetic HOME/config below reviewer scratchpad; CMUX_* and XPC_FLAGS stripped; NO_COLOR unset; TERM=xterm-256color; PYTHONDONTWRITEBYTECODE=1; PYTHONPATH pinned to worktree. local_operator.__file__ verified at worktree. No git/gh under isolated HOME, OS clipboard writes, native/browser/Electron, server, dependency install, full suite, branch/ref move or product edit. All tests/probes foreground and exited.",
+  "setup_failures": [
+    "Initial per-file git-show retention probe exceeded its 120-second subprocess budget. Replaced with hash verification plus one batched git diff; succeeded. Not reported as a test pass.",
+    "First history metadata printer assumed optional round field and raised KeyError on historical vi entry; rerun with get() completed all 24 references. No product defect or data modification."
+  ],
+  "limits": "This code review does not grant whole-interface English-free clearance, fresh linguistic audits, native Urdu shaping, visual approval or merge/release approval. Q1/D1/U1 rendered first-frame and actual fr->zh/ur flow evidence remain independently owned by QA/design/UX. No fresh screenshots were produced by this reviewer. Required CI is manager-owned and not asserted green here."
+}

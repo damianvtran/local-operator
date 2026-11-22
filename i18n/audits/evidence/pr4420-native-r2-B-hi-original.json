@@ -1,0 +1,134 @@
+{
+  "locale": "hi",
+  "namespace": "tui.info",
+  "source_sha256": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+  "context_sha256": "aee21715fca769227b3bda5b500a5e81e51763cf86817f741baff8b1a5ef0ae7",
+  "target_sha256": "1a841571a322478b0294935ea760abe48d7984accd3fd5839d47af7d129697d2",
+  "reviewed_commit": "2c282261f27b66390061563359f9cf72f2520538",
+  "round": 2,
+  "scope": "e9e6c3711149..2c282261f27b",
+  "status": "passed",
+  "translator": {
+    "agent": "mixed authors; see translation_authorship",
+    "model": "mixed: openai/gpt-6.1-sol and anthropic/claude-opus-5-5",
+    "date": "2026-11-21"
+  },
+  "auditor": {
+    "agent": "translation-auditor / info-r2-cache-B-hi / session 3a194798c645",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "result": "passed",
+    "findings": 0,
+    "minor_findings": 1,
+    "nit_findings": 0,
+    "fallback_from": "anthropic/claude-opus-5-5",
+    "host_provenance": "Fresh user-channel host model switch: You are now running as openai/gpt-6.1-sol (was anthropic/claude-opus-5-5). Reason: provider failure: quota. This is the model actually used for this audit, not inferred from a role header or R1 history. Parent to cross-check fresh role/model row."
+  },
+  "note": "Independent B first-participation full current namespace semantic/safety audit: 277 fresh English/Hindi/context reads, zero semantic results retained from another auditor. Current namespace passes with zero unresolved blocker/major findings and one non-gating retained fit concern, freshly measured. No current A/B partner reports read. Source and target read only from explicitly authorized audited input captures after verifying raw cache SHA, canonical map SHA, pinned whole-file hash/source binding, and context SHA. No product catalogue prose via raw-file fallback. Original R1 failed receipt is historical and unchanged; this is a NEW current receipt. Semantic/ICU audit only: not whole-interface, native-renderer, design, RTL-fit, merge, eligibility or release clearance. No app/browser/server, kill/stop command, live settings/API, pytest/full check, Git mutation, generation or ledger mutation was performed.",
+  "coverage": {
+    "keys_read": 277,
+    "fresh_semantic_keys": 277,
+    "retained_semantic_keys": 0,
+    "current_changed_target_keys": 5,
+    "changed_source_fields_reviewed": ["tui.info.export.build_age", "tui.info.export.uptime"],
+    "changed_contexts_reviewed": ["tui.info.status.bound_held", "tui.info.install.build_age", "tui.info.latest.checked_full", "tui.info.latest.checked_short", "tui.info.session.started", "tui.info.fleet_caveats.lower_bound", "tui.info.latest_line.checked", "tui.info.not_answering_clause.full", "tui.info.tree_lines.deeper", "tui.info.export.build_age", "tui.info.export.uptime", "tui.info.state.stale"],
+    "per_key_read_manifest": "hi-r2-B-controls.json:keys_checked (277 IDs); all were independently read side by side in this session, including expanded spilled portions",
+    "r1_ledger_used": "i18n/audits/evidence/pr4420-initial-native-hi-r1.json; prior findings/provenance only, not current semantic authority"
+  },
+  "translation_authorship": {
+    "source_of_provenance": "i18n/audits/evidence/pr4420-integration-preflight.json:locales.hi; corroborated candidate-pin locales.hi and original R1 translator receipt",
+    "per_key_override": {
+      "tui.info.fleet_caveats.lower_bound": {"agent": "translator / info-remediate-hi / ad9306355f35", "model": "openai/gpt-6.1-sol"},
+      "tui.info.tree_lines.deeper": {"agent": "translator / info-remediate-hi / ad9306355f35", "model": "openai/gpt-6.1-sol"},
+      "tui.info.export.build_age": {"agent": "translator / info-remediate-hi / ad9306355f35", "model": "openai/gpt-6.1-sol"},
+      "tui.info.export.uptime": {"agent": "translator / info-remediate-hi / ad9306355f35", "model": "openai/gpt-6.1-sol"},
+      "tui.info.state.stale": {"agent": "translator / info-remediate-hi / ad9306355f35", "model": "anthropic/claude-opus-5-5"}
+    },
+    "all_other_key_ids": {
+      "definition": "hi-r2-B-controls.json:keys_checked minus the five per_key_override IDs, exactly 272 keys; these are original translator authorship, NOT retained semantic approvals",
+      "agent": "i18n-translator / info-hi / session 1b869b8efad8",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21"
+    }
+  },
+  "input_evidence": {
+    "authorized_cache_manifest": "i18n/audits/evidence/pr4420-audited-input-cache/manifest.json",
+    "en_cache_sha256": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+    "en_canonical_map_sha256": "c06de4b6d6b19d71ff4fc20128937f72d6d18fc7757854f493e8e3834bb1423c",
+    "hi_cache_sha256": "c7a03ed90357d0dc111b7ad0aeefee400ec9a51cd238c32f0a0edc0187303103",
+    "hi_canonical_map_sha256": "80ba124bd6cf00cb45add707b08108ac3f9ed619c41a25796f41b2495a49afba",
+    "verified_here": "Both cache byte digests and canonical map digests verified against manifest; both original product files hash-only verified against sealed whole-file digests; no original values printed. Context bytes verified and metadata decoded locally as explicitly authorized. Manifest head equals sealed candidate SHA. No Git prose or timestamp fanout.",
+    "worktree": "/Users/damian/local-operator/.worktrees/i18n-info-readout"
+  },
+  "semantic_safety_evidence": [
+    {"key": "tui.info.fleet_caveats.lower_bound", "verdict": "clean", "reason": "कुल ट्रैजेक्टरी का आँकड़ा न्यूनतम सीमा now attaches the lower bound to trajectories, not separately counted runtime processes. Both plural branches preserve missing reporting, not measured zero; count 0/1/2/5/11/21/1000 formatted successfully."},
+    {"key": "tui.info.tree_lines.deeper", "verdict": "clean", "reason": "# और उप-एजेंट नीचे counts hidden descendants, not extra depth levels. Checked current context example plus collect.py:1028-1136, where below_cap increments per hidden node independently of deepest."},
+    {"key": "tui.info.state.stale", "verdict": "clean", "reason": "प्रोसेस अब मौजूद नहीं denotes process absence, not an expired heartbeat or guessed exit intention. collect.py:469-473 explicitly excludes stale because the PID is gone; live/wedged remain runtime populations."},
+    {"key": "tui.info.status.bound_held", "verdict": "clean", "reason": "समय-सीमा बीती; चालू says bound elapsed and still alive; does not diagnose a hang/stall/unresponsiveness or authorize stopping. Read complete changed HELD_PROVEN/HELD_UNPROVEN context and separately reviewed all five not_answering_clause keys. Kill-ladder remedies remain tied to not-answering facts, preserve signals and in-flight-turn loss; no such command was executed."},
+    {"keys": ["tui.info.export.build_age", "tui.info.export.uptime"], "verdict": "clean", "reason": "Whole missing fields बिल्ड की उम्र अज्ञात / चलने की अवधि अज्ञात are grammatical Hindi; अज्ञात is invariant, so no gender mismatch. Stable unmeasured selectors and other-branch string interpolations are exact. Real pure formatter outputs distinguish unknown, 0 सेकंड and 2 मिनट; no unmeasured sentinel leaks."},
+    {"key": "tui.info.label.answering", "verdict": "clean", "reason": "जवाब दे रहा है labels the model answering. Confirmed actual UI caller info_panel.py:936-942 renders process.effective_model when different, not a session-status field."},
+    {"key": "tui.info.env.credentials_set", "verdict": "clean", "reason": "# सेट is an accepted technical Hindi configured/set label in a credentials context, not नियुक्त/appointed; adjacent empty state says none stored. Actual caller info_panel.py:1829 counts stored names. Credential label matches binding glossary (verified equality without disclosing any credential value)."}
+  ],
+  "format_controls": {
+    "script": "audit_hi_controls.py",
+    "evidence": "hi-r2-B-controls.json",
+    "command": "PYTHONDONTWRITEBYTECODE=1 ~/local-operator/.venv/bin/python <own scratch>/audit_hi_controls.py",
+    "exit": 0,
+    "parser_argument_kind_select_arm_and_skeleton_parity": 277,
+    "plural_nodes": 47,
+    "select_nodes": 25,
+    "count_bearing_plural_branches": 94,
+    "render_cases": 1989,
+    "missing_argument_negative_cases": 116,
+    "count_matrix": [0, 1, 2, 5, 11, 21, 1000],
+    "extra_hi_matrix": {"0.5": "one", "1.5": "other"},
+    "cldr_result": "Hindi 0 and 1 -> one; 2/5/11/21/1000 -> other; one and other present and count rendered in all 47 plural nodes",
+    "whole_missing_known_zero_duration_cases": 6,
+    "changed_literal_only_pseudo_cases": 5,
+    "protected_token_instances": 12,
+    "authored_bidi_controls": 0,
+    "native_RTL_fit_claim": false,
+    "source_loading": "Exact pinned formatter/runtime source compiled into isolated synthetic modules; no application/catalogue/config imports. Source SHA digests in controls evidence. Formatter data loaded from existing generated tables only.",
+    "initial_control_error": "First control run reached CLDR summary then failed because probe called plural_category with reversed arguments; read actual signature, corrected own scratch harness only, reran complete control twice successfully. No product change."
+  },
+  "minor_findings": [
+    {
+      "id": "B-HI-M1",
+      "severity": "minor",
+      "key": "tui.info.agents.queued_count_terse",
+      "current": "{fleet_subagents_queued}कतार",
+      "proposed": "Retain explicit कतार meaning; perform a native rendered fit check before claiming this narrow rung fits. No speculative one-letter abbreviation proposed.",
+      "reason": "Fresh formatter + rich.cells.cell_len measures 3कतार at 4 cells versus 3q at 2; original R1 identifies this caller as the final approximately 2-cell queued-note rung, but this audit did not render it and does not assert observed clipping.",
+      "scope_disposition": "Carried historical non-gating fit concern from HI-4, independently remeasured; no third style/remediation wave requested and no invented blocker."
+    }
+  ],
+  "subarea_verdicts": {
+    "heading": {"keys_read": 7, "verdict": "clean"},
+    "label": {"keys_read": 35, "verdict": "clean"},
+    "status": {"keys_read": 9, "verdict": "clean"},
+    "install": {"keys_read": 17, "verdict": "clean"},
+    "latest": {"keys_read": 10, "verdict": "clean"},
+    "kind_of_runtime": {"keys_read": 8, "verdict": "clean"},
+    "import_path": {"keys_read": 6, "verdict": "clean"},
+    "kind": {"keys_read": 7, "verdict": "clean"},
+    "session": {"keys_read": 6, "verdict": "clean"},
+    "approval": {"keys_read": 4, "verdict": "clean"},
+    "redirect": {"keys_read": 3, "verdict": "clean"},
+    "sessions": {"keys_read": 11, "verdict": "clean"},
+    "fleet_caveats": {"keys_read": 1, "verdict": "clean"},
+    "agents": {"keys_read": 38, "verdict": "clean with one non-gating fit follow-up"},
+    "env": {"keys_read": 18, "verdict": "clean"},
+    "report": {"keys_read": 3, "verdict": "clean"},
+    "info_hint": {"keys_read": 2, "verdict": "clean"},
+    "action_copy_report": {"keys_read": 2, "verdict": "clean"},
+    "latest_line": {"keys_read": 3, "verdict": "clean"},
+    "not_answering_clause": {"keys_read": 5, "verdict": "clean"},
+    "tree_lines": {"keys_read": 1, "verdict": "clean"},
+    "export": {"keys_read": 60, "verdict": "clean"},
+    "count": {"keys_read": 4, "verdict": "clean"},
+    "state": {"keys_read": 12, "verdict": "clean"},
+    "leaving": {"keys_read": 3, "verdict": "clean"},
+    "update": {"keys_read": 2, "verdict": "clean"}
+  },
+  "overall_verdict": "PASS — current Hindi tui.info namespace, 277/277 fresh semantic reads, zero unresolved blockers/majors, terminal semantic round with one non-gating native-fit follow-up. Not native-renderer or whole-interface clearance."
+}

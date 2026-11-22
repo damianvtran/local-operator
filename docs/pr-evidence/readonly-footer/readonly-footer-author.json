@@ -1,0 +1,258 @@
+{
+  "schema": 1,
+  "scope": "tui.editor_readonly.hint",
+  "namespace": "tui.editor_readonly",
+  "author": {
+    "agent": "translator",
+    "session": "9309411c87eb",
+    "model": "openai/gpt-6.1-sol",
+    "provenance": "Host model-switch notice: temporary fallback from anthropic/claude-opus-5-5 due provider quota; authorship occurred after switch. No independent provider telemetry."
+  },
+  "source_head": "1ad0b8c8547243f8257ee8838fbb35ed795b13f3",
+  "observed_head": "1ad0b8c8547243f8257ee8838fbb35ed795b13f3",
+  "inputs_sha256": {
+    "local_operator/i18n/catalogues/en/tui.editor_readonly.json": "a2a8bfb8a250b38e3a950bb2b02d885ec76cc726d77521086801099b6e99b5f2",
+    "local_operator/i18n/catalogues/en/tui.editor_readonly.context.json": "46c48a659223ad5e4861a1407c2c7a685183b9c7caecf6e19f53adb8131389ee"
+  },
+  "entries": [
+    {
+      "locale": "fr",
+      "author": {
+        "agent": "translator",
+        "session": "9309411c87eb",
+        "model": "openai/gpt-6.1-sol",
+        "provenance": "Host model-switch notice: temporary fallback from anthropic/claude-opus-5-5 due provider quota; authorship occurred after switch. No independent provider telemetry."
+      },
+      "path": "local_operator/i18n/catalogues/fr/tui.editor_readonly.json",
+      "sha256": "98e716bcdc26c724f9e556e3ed366349cf0a596a8dc81bb350fc95a9f39d0ad5",
+      "key_count": 1,
+      "keyset": [
+        "tui.editor_readonly.hint"
+      ],
+      "value": "Lecture seule · {key} retour",
+      "backtranslation": "Read-only · {key} return",
+      "placeholder": {
+        "name": "key",
+        "kind": "string",
+        "occurrences": 1,
+        "unchanged": true
+      },
+      "nfc": true,
+      "authored_format_controls": 0,
+      "render_argument": {
+        "key": "esc"
+      },
+      "width_cells": 26,
+      "overflow_risk": "No mechanical overflow against 40 columns; actual content width/padding and shaping need rendered review.",
+      "width_method": "rich.cells.cell_len with key=esc; mechanical estimate, not production rendered fit"
+    },
+    {
+      "locale": "zh-CN",
+      "author": {
+        "agent": "translator",
+        "session": "9309411c87eb",
+        "model": "openai/gpt-6.1-sol",
+        "provenance": "Host model-switch notice: temporary fallback from anthropic/claude-opus-5-5 due provider quota; authorship occurred after switch. No independent provider telemetry."
+      },
+      "path": "local_operator/i18n/catalogues/zh-CN/tui.editor_readonly.json",
+      "sha256": "de698b3c4f9a184351bd627147bfe086da057890e287e01a78d87539471fa65f",
+      "key_count": 1,
+      "keyset": [
+        "tui.editor_readonly.hint"
+      ],
+      "value": "只读 · {key}返回",
+      "backtranslation": "Read-only · {key} return",
+      "placeholder": {
+        "name": "key",
+        "kind": "string",
+        "occurrences": 1,
+        "unchanged": true
+      },
+      "nfc": true,
+      "authored_format_controls": 0,
+      "render_argument": {
+        "key": "esc"
+      },
+      "width_cells": 14,
+      "overflow_risk": "No mechanical overflow against 40 columns; actual content width/padding and shaping need rendered review.",
+      "width_method": "rich.cells.cell_len with key=esc; mechanical estimate, not production rendered fit"
+    },
+    {
+      "locale": "es",
+      "author": {
+        "agent": "translator",
+        "session": "9309411c87eb",
+        "model": "openai/gpt-6.1-sol",
+        "provenance": "Host model-switch notice: temporary fallback from anthropic/claude-opus-5-5 due provider quota; authorship occurred after switch. No independent provider telemetry."
+      },
+      "path": "local_operator/i18n/catalogues/es/tui.editor_readonly.json",
+      "sha256": "d92fbdd397bbf7dd424c51c79b302c3b1b35b155a97a30cd5fd0973dbe1d950b",
+      "key_count": 1,
+      "keyset": [
+        "tui.editor_readonly.hint"
+      ],
+      "value": "Solo lectura · {key} volver",
+      "backtranslation": "Read-only · {key} return",
+      "placeholder": {
+        "name": "key",
+        "kind": "string",
+        "occurrences": 1,
+        "unchanged": true
+      },
+      "nfc": true,
+      "authored_format_controls": 0,
+      "render_argument": {
+        "key": "esc"
+      },
+      "width_cells": 25,
+      "overflow_risk": "No mechanical overflow against 40 columns; actual content width/padding and shaping need rendered review.",
+      "width_method": "rich.cells.cell_len with key=esc; mechanical estimate, not production rendered fit"
+    },
+    {
+      "locale": "ru",
+      "author": {
+        "agent": "translator",
+        "session": "9309411c87eb",
+        "model": "openai/gpt-6.1-sol",
+        "provenance": "Host model-switch notice: temporary fallback from anthropic/claude-opus-5-5 due provider quota; authorship occurred after switch. No independent provider telemetry."
+      },
+      "path": "local_operator/i18n/catalogues/ru/tui.editor_readonly.json",
+      "sha256": "07740014857374da1b9bec31999f65955e6a6069faf97fa753e109e28f88d1e0",
+      "key_count": 1,
+      "keyset": [
+        "tui.editor_readonly.hint"
+      ],
+      "value": "Только чтение · {key} назад",
+      "backtranslation": "Read-only · {key} back",
+      "placeholder": {
+        "name": "key",
+        "kind": "string",
+        "occurrences": 1,
+        "unchanged": true
+      },
+      "nfc": true,
+      "authored_format_controls": 0,
+      "render_argument": {
+        "key": "esc"
+      },
+      "width_cells": 25,
+      "overflow_risk": "No mechanical overflow against 40 columns; actual content width/padding and shaping need rendered review.",
+      "width_method": "rich.cells.cell_len with key=esc; mechanical estimate, not production rendered fit"
+    },
+    {
+      "locale": "vi",
+      "author": {
+        "agent": "translator",
+        "session": "9309411c87eb",
+        "model": "openai/gpt-6.1-sol",
+        "provenance": "Host model-switch notice: temporary fallback from anthropic/claude-opus-5-5 due provider quota; authorship occurred after switch. No independent provider telemetry."
+      },
+      "path": "local_operator/i18n/catalogues/vi/tui.editor_readonly.json",
+      "sha256": "86c9aa76cd934591e291b4140ef3cc1b391662fe8f94d8db6646b7bc89366198",
+      "key_count": 1,
+      "keyset": [
+        "tui.editor_readonly.hint"
+      ],
+      "value": "Chỉ đọc · {key} quay lại",
+      "backtranslation": "Read-only · {key} return",
+      "placeholder": {
+        "name": "key",
+        "kind": "string",
+        "occurrences": 1,
+        "unchanged": true
+      },
+      "nfc": true,
+      "authored_format_controls": 0,
+      "render_argument": {
+        "key": "esc"
+      },
+      "width_cells": 22,
+      "overflow_risk": "No mechanical overflow against 40 columns; actual content width/padding and shaping need rendered review.",
+      "width_method": "rich.cells.cell_len with key=esc; mechanical estimate, not production rendered fit"
+    },
+    {
+      "locale": "hi",
+      "author": {
+        "agent": "translator",
+        "session": "9309411c87eb",
+        "model": "openai/gpt-6.1-sol",
+        "provenance": "Host model-switch notice: temporary fallback from anthropic/claude-opus-5-5 due provider quota; authorship occurred after switch. No independent provider telemetry."
+      },
+      "path": "local_operator/i18n/catalogues/hi/tui.editor_readonly.json",
+      "sha256": "6a682bddc90feaa5627dd033b11a30c6fa4e6bb53c623e0c09fa500d30bbae7f",
+      "key_count": 1,
+      "keyset": [
+        "tui.editor_readonly.hint"
+      ],
+      "value": "केवल पढ़ने के लिए · {key} लौटें",
+      "backtranslation": "For reading only · {key} return",
+      "placeholder": {
+        "name": "key",
+        "kind": "string",
+        "occurrences": 1,
+        "unchanged": true
+      },
+      "nfc": true,
+      "authored_format_controls": 0,
+      "render_argument": {
+        "key": "esc"
+      },
+      "width_cells": 21,
+      "overflow_risk": "No mechanical overflow against 40 columns; actual content width/padding and shaping need rendered review.",
+      "width_method": "rich.cells.cell_len with key=esc; mechanical estimate, not production rendered fit"
+    },
+    {
+      "locale": "ur",
+      "author": {
+        "agent": "translator",
+        "session": "9309411c87eb",
+        "model": "openai/gpt-6.1-sol",
+        "provenance": "Host model-switch notice: temporary fallback from anthropic/claude-opus-5-5 due provider quota; authorship occurred after switch. No independent provider telemetry."
+      },
+      "path": "local_operator/i18n/catalogues/ur/tui.editor_readonly.json",
+      "sha256": "c423782b7450e73a070fa4f774a8c2324f89629909698d2a27175ced2e717817",
+      "key_count": 1,
+      "keyset": [
+        "tui.editor_readonly.hint"
+      ],
+      "value": "صرف پڑھنے کے لیے · {key} واپس",
+      "backtranslation": "For reading only · {key} back",
+      "placeholder": {
+        "name": "key",
+        "kind": "string",
+        "occurrences": 1,
+        "unchanged": true
+      },
+      "nfc": true,
+      "authored_format_controls": 0,
+      "render_argument": {
+        "key": "esc"
+      },
+      "width_cells": 27,
+      "overflow_risk": "No mechanical overflow against 40 columns; actual content width/padding and shaping need rendered review.",
+      "width_method": "rich.cells.cell_len with key=esc; mechanical estimate, not production rendered fit"
+    }
+  ],
+  "frame_context": {
+    "source": "Manager brief; not viewed independently by translator",
+    "before": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-valid-comparison-1.png",
+    "constraint": "Short one-line state plus return hint within existing 40-column split; English is 20 cells, not a hard cap."
+  },
+  "context": "Composer is noneditable while read-only view has focus; esc returns to chat, not a permission or access-role change.",
+  "references": [
+    "i18n/glossary.md",
+    "i18n/style-guides/{locale}.md",
+    "local_operator/i18n/catalogues/{locale}/tui.chrome.bindings.json",
+    "docs/i18n-readonly-footer-source.md:10-42"
+  ],
+  "validation": "Authorship and mechanical checks only. Independent A/B language audits and production rendered width/RTL review remain outstanding. CLDR plural/select branches N/A: literal plus one string placeholder.",
+  "exclusions": [
+    "No independent language self-audit",
+    "No native-speaker or native/rendered approval claimed",
+    "No full app/browser/native/test/build/generation",
+    "No English/context/generated/shipped/ledger/allowance/version/code/docs edits",
+    "No staging/commit/push"
+  ],
+  "terms": "No invented product terminology. Read-only state: Lecture seule / 只读 / Solo lectura / Только чтение / Chỉ đọc / केवल पढ़ने के लिए / صرف پڑھنے کے لیے. Return action: retour / 返回 / volver / назад / quay lại / लौटें / واپس. Respectful Hindi imperative, Urdu short action noun; no pronouns required.",
+  "source_and_context_unchanged": true
+}

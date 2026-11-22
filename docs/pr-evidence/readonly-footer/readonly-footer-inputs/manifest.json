@@ -1,0 +1,130 @@
+{
+  "schema": 1,
+  "kind": "approved-reader-input-manifest-not-audit",
+  "head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer",
+  "serial_single_key_calls": 8,
+  "records": [
+    {
+      "locale": "fr",
+      "envelope": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/docs/pr-evidence/readonly-footer/readonly-footer-inputs/fr-approved.json",
+      "envelope_sha256": "72e168b6412717b5fa40a0d91f60a09c54e1eb2e459b6950c4cf8fa55a3182af",
+      "target_path": "local_operator/i18n/catalogues/fr/tui.editor_readonly.json",
+      "target_raw_sha256": "98e716bcdc26c724f9e556e3ed366349cf0a596a8dc81bb350fc95a9f39d0ad5",
+      "canonical_map_sha256": "26fb16974301080b3da6088beb7fac1b51fe7e9582e1009bb97d8e9e51ab908e",
+      "tool_sha256": "3b2875a26533320336019bac95a6f6f67b8677f1edf0b3f0f67a1a685552c5af",
+      "checkout_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+      "repository": "damianvtran/local-operator",
+      "key_count": 1,
+      "arguments": [
+        "key"
+      ]
+    },
+    {
+      "locale": "zh-CN",
+      "envelope": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/docs/pr-evidence/readonly-footer/readonly-footer-inputs/zh-CN-approved.json",
+      "envelope_sha256": "cc7480401a450fc0199ed5d991589d0b758be1b1367ed880e50e45cad0497623",
+      "target_path": "local_operator/i18n/catalogues/zh-CN/tui.editor_readonly.json",
+      "target_raw_sha256": "de698b3c4f9a184351bd627147bfe086da057890e287e01a78d87539471fa65f",
+      "canonical_map_sha256": "48f44363629d04eb0577268730ae02937ae6f93a9a42b939e7832a5136542d56",
+      "tool_sha256": "c897b4774e1f1af0553ff40e704151ee49304f667a29253d908957a706d726e6",
+      "checkout_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+      "repository": "damianvtran/local-operator",
+      "key_count": 1,
+      "arguments": [
+        "key"
+      ]
+    },
+    {
+      "locale": "es",
+      "envelope": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/docs/pr-evidence/readonly-footer/readonly-footer-inputs/es-approved.json",
+      "envelope_sha256": "73771856905d96fdde3bb386ea2105d152066bfc3de49098ab8b29977e968cd1",
+      "target_path": "local_operator/i18n/catalogues/es/tui.editor_readonly.json",
+      "target_raw_sha256": "d92fbdd397bbf7dd424c51c79b302c3b1b35b155a97a30cd5fd0973dbe1d950b",
+      "canonical_map_sha256": "54ea7faed1b2f54979550e21751d26fe2304090bac4f9b329b2c7e726b034e4c",
+      "tool_sha256": "2c7c4f51b63192dacfe61350bcdc1caf451b2c5dc3feb3436caa3813691dac21",
+      "checkout_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+      "repository": "damianvtran/local-operator",
+      "key_count": 1,
+      "arguments": [
+        "key"
+      ]
+    },
+    {
+      "locale": "ru",
+      "envelope": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/docs/pr-evidence/readonly-footer/readonly-footer-inputs/ru-approved.json",
+      "envelope_sha256": "d32529ca7b42417865366f9e625fde110dfcabc95073d565732d42d55e73f03b",
+      "target_path": "local_operator/i18n/catalogues/ru/tui.editor_readonly.json",
+      "target_raw_sha256": "07740014857374da1b9bec31999f65955e6a6069faf97fa753e109e28f88d1e0",
+      "canonical_map_sha256": "e60f924b70dcdd7219a7f8f916422b82b3c825126b5b6da4d9976c640de38f30",
+      "tool_sha256": "d7891bfdd66a3056b15b4f26d8a7b9806240beb380c0cd783dce042db573fa51",
+      "checkout_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+      "repository": "damianvtran/local-operator",
+      "key_count": 1,
+      "arguments": [
+        "key"
+      ]
+    },
+    {
+      "locale": "vi",
+      "envelope": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/docs/pr-evidence/readonly-footer/readonly-footer-inputs/vi-approved.json",
+      "envelope_sha256": "780feb55304cfaa7a3cedbc7a6cd8cee5617050c5e0bd5606d1c1087e296a7b9",
+      "target_path": "local_operator/i18n/catalogues/vi/tui.editor_readonly.json",
+      "target_raw_sha256": "86c9aa76cd934591e291b4140ef3cc1b391662fe8f94d8db6646b7bc89366198",
+      "canonical_map_sha256": "917051d8def3d93700c0844f056743b554f41d0a12836cb1640d9d5930561d71",
+      "tool_sha256": "786f6c632cc957d975b2a07a14e8e2b8738eb5ee664d68a74231d87e60f184ba",
+      "checkout_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+      "repository": "damianvtran/local-operator",
+      "key_count": 1,
+      "arguments": [
+        "key"
+      ]
+    },
+    {
+      "locale": "hi",
+      "envelope": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/docs/pr-evidence/readonly-footer/readonly-footer-inputs/hi-approved.json",
+      "envelope_sha256": "89429d964f6cb1aacc5f272c35c3ce1789f537b84e6e8021f859b905977dc402",
+      "target_path": "local_operator/i18n/catalogues/hi/tui.editor_readonly.json",
+      "target_raw_sha256": "6a682bddc90feaa5627dd033b11a30c6fa4e6bb53c623e0c09fa500d30bbae7f",
+      "canonical_map_sha256": "13b669eb0d421ca462f1e2d000d16be7a8b32d56f35e44d6146235a596d34b23",
+      "tool_sha256": "eed451f224aec89332799d8c8985ad6175f2ded129e0e2969b5b123200bfc39e",
+      "checkout_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+      "repository": "damianvtran/local-operator",
+      "key_count": 1,
+      "arguments": [
+        "key"
+      ]
+    },
+    {
+      "locale": "ur",
+      "envelope": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/docs/pr-evidence/readonly-footer/readonly-footer-inputs/ur-approved.json",
+      "envelope_sha256": "ef0e3e31445ac886ecf7d64d65c0640e0260a44be1c24486c7aa4eda559cf18d",
+      "target_path": "local_operator/i18n/catalogues/ur/tui.editor_readonly.json",
+      "target_raw_sha256": "c423782b7450e73a070fa4f774a8c2324f89629909698d2a27175ced2e717817",
+      "canonical_map_sha256": "8f6223efb6683b12ae2ef98cfefcef6462dd5a7df47c313d873e99857ae71543",
+      "tool_sha256": "5d52bb74e5ac14df50c2932755936a94b85ca692bbdfc97eaf5e8fde3c2f3360",
+      "checkout_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+      "repository": "damianvtran/local-operator",
+      "key_count": 1,
+      "arguments": [
+        "key"
+      ]
+    },
+    {
+      "locale": "en",
+      "envelope": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/docs/pr-evidence/readonly-footer/readonly-footer-inputs/en-approved.json",
+      "envelope_sha256": "85c75ba6e6531d39c980bfcc6a864063561d9fe34a59cbdcdfdf4f823f336cc0",
+      "target_path": "local_operator/i18n/catalogues/en/tui.editor_readonly.json",
+      "target_raw_sha256": "a2a8bfb8a250b38e3a950bb2b02d885ec76cc726d77521086801099b6e99b5f2",
+      "canonical_map_sha256": "7b75636967456bcf77c28c1bf5913b245445660be9d773d4a12760fa59452003",
+      "tool_sha256": "137f679301489fa98caa9ba206f11a6fb1cd5257145684254175230476aafbd2",
+      "checkout_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+      "repository": "damianvtran/local-operator",
+      "key_count": 1,
+      "arguments": [
+        "key"
+      ]
+    }
+  ],
+  "exclusions": "No language audit, native approval, ledger or eligibility result. All seven authors session 9309411c87eb; integrator 61203766acfe excluded from self-audit. English/code source author excluded too."
+}

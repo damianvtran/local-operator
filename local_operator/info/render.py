@@ -36,13 +36,16 @@ import os
 import time
 from pathlib import Path
 
+from local_operator.i18n.keys import tui_info as _ik
+from local_operator.i18n.keys import tui_small as _x
+from local_operator.info.copy import info_duration, info_state
+from local_operator.info.copy import info_text as _i
 from local_operator.info.model import (
     UNKNOWN,
     InfoSnapshot,
     SessionsInfo,
     SubagentLine,
     format_bytes,
-    format_duration,
     is_shadowed_install,
 )
 
@@ -164,16 +167,22 @@ def _latest_line(snapshot: InfoSnapshot) -> str:
         # design, so a failed version probe beside a cached NEWER release
         # reported currency. Both halves fail together on a broken install,
         # which is the state /info is opened in (review round 1, M3).
-        return "unknown (installed version unreadable)"
+        return _i(_ik.latest_line_installed_unreadable())
     if install.latest_known is None:
-        return "unknown (never checked)"
+        return _i(_ik.latest_line_never_checked())
     from local_operator.update import TTL_S
 
     age = install.latest_age_s
     if age is None:
         return install.latest_known
-    stale = " (stale)" if age > TTL_S else ""
-    return f"{install.latest_known} · checked {format_duration(age)} ago{stale}"
+    stale = _i(_ik.latest_stale()) if age > TTL_S else ""
+    return _i(
+        _ik.latest_line_checked(
+            latest_known=str(install.latest_known),
+            age=info_duration(age),
+            stale=str(stale),
+        ),
+    )
 
 
 #: Nouns whose plural is not ``+ "s"``. A map rather than a second helper so
@@ -242,35 +251,27 @@ def not_answering_clause(sessions: SessionsInfo | None) -> str:
         # these runtimes is as of a heartbeat that stopped — but the age, the
         # pid and the remedy are the parts that need a row, and inventing a pid
         # would be worse than the vaguer sentence.
-        return (
-            f"{plural(count, 'session')} {'is' if one else 'are'} not "
-            f"answering; {'its' if one else 'their'} counts are as of "
-            f"{'its' if one else 'their'} last heartbeat"
-        )
+        return _i(_ik.not_answering_clause_no_rows(count=count))
     worst = max(rows, key=lambda line: line.heartbeat_age_s)
     listed = min(len(rows), _NOT_ANSWERING_PIDS)
     pids = ", ".join(str(line.pid) for line in rows[:listed])
     if count > listed:
-        pids += f" and {count - listed} more"
+        pids += _i(_ik.not_answering_clause_more(remaining=str(count - listed)))
     # The remedy names ONE pid on the single-row sentence and a PATTERN when the
     # row list is longer: the old form listed up to three pids and then handed
     # the reader a command for an arbitrary one of them (review round 2, N2).
     remedy = (
-        f"'lop stop --pid {worst.pid}' asks it to stop and signals it if it will "
-        f"not answer, '/stop {worst.pid}' from this screen does the same, and "
-        f"'lop stop --pid {worst.pid} --force' signal-stops the process, discarding "
-        f"its in-flight turn, for an owner that is still beating but silent"
+        _i(_ik.not_answering_clause_remedy_one(pid=str(worst.pid)))
         if one
-        else "'lop stop --pid N', once per pid above, asks each to stop and signals "
-        "it if it will not answer, '/stop N' from this screen does the same, and "
-        "'lop stop --pid N --force' signal-stops the process, discarding its "
-        "in-flight turn, for an owner that is still beating but silent"
+        else _i(_ik.not_answering_clause_remedy_many())
     )
-    return (
-        f"{plural(count, 'session')} {'is' if one else 'are'} not answering — "
-        f"last runtime heartbeat {format_duration(worst.heartbeat_age_s)} ago "
-        f"(pid {pids}); {'its counts are' if one else 'their counts are'} as of "
-        f"{'that heartbeat' if one else 'those heartbeats'}. {remedy}"
+    return _i(
+        _ik.not_answering_clause_full(
+            count=count,
+            age=info_duration(worst.heartbeat_age_s),
+            pids=str(pids),
+            remedy=remedy,
+        ),
     )
 
 
@@ -279,9 +280,9 @@ def _tree_lines(tree: tuple[SubagentLine, ...], deeper: int) -> list[str]:
     for node in tree:
         indent = "  " * node.depth
         role = f" [{node.agent_role}]" if node.agent_role else ""
-        out.append(f"  {indent}- {node.label or node.job_id}{role}: {node.status}")
+        out.append(f"  {indent}- {node.label or node.job_id}{role}: {info_state(node.status)}")
     if deeper:
-        out.append(f"  + {deeper} deeper")
+        out.append(_i(_ik.tree_lines_deeper(deeper=deeper)))
     return out
 
 
@@ -311,57 +312,118 @@ def build_export(snapshot: InfoSnapshot) -> str:
         )
         if part
     )
-    lines: list[str] = ["## Install"]
+    lines: list[str] = [_i(_ik.export_heading_install())]
     lines += [
-        f"  version           {_value(install.version)}",
-        f"  latest known      {_latest_line(snapshot)}",
-        f"  install kind      {_value(install.kind)}",
-        f"  install path      {_value(relativise_home(install.prefix))}",
-        f"  interpreter       {_value(relativise_home(install.executable))}",
+        _i(_ik.export_version(version=str(_value(install.version)))),
+        _i(_ik.export_latest_known(latest_line=str(_latest_line(snapshot)))),
+        _i(_ik.export_install_kind(kind=str(_value(install.kind)))),
+        _i(_ik.export_install_path(prefix=str(_value(relativise_home(install.prefix))))),
+        _i(_ik.export_interpreter(executable=str(_value(relativise_home(install.executable))))),
         # Included unconditionally, and marked when it diverges: a maintainer
         # reading a bug report needs to know the reporter's runtime was running
         # a checkout rather than the version the first line claims.
-        f"  running code      {_value(relativise_home(install.import_path))}"
-        + (
-            "  (NOT under the install path — a checkout is shadowing it)"
-            if is_shadowed_install(install)
-            else "  (an editable checkout, as expected)" if install.import_path_foreign else ""
+        _i(
+            _ik.export_running_code(
+                import_path=str(_value(relativise_home(install.import_path))),
+                has_is_shadowed_install=str("yes" if is_shadowed_install(install) else "no"),
+                has_import_path_foreign=str("yes" if install.import_path_foreign else "no"),
+            ),
         ),
-        f"  source            {'git snapshot' if install.is_git_snapshot else 'PyPI wheel'}"
-        + (f" @ {install.source_ref[:12]}" if install.source_ref else ""),
-        f"  build age         {format_duration(install.build_age_s)}",
-        "  python            "
-        + (
-            f"{install.python_version} ({install.python_implementation})"
-            if install.python_version and install.python_implementation
-            else _value(install.python_version or install.python_implementation)
+        _i(
+            _ik.export_source(
+                has_is_git_snapshot=str("yes" if install.is_git_snapshot else "no"),
+                has_source_ref=str("yes" if install.source_ref else "no"),
+                source_ref=str(install.source_ref[:12]),
+            ),
         ),
-        f"  platform          {_value(install.platform)} · {_value(install.machine)}",
+        _i(
+            _ik.export_build_age(
+                build_age_s=(
+                    info_duration(install.build_age_s)
+                    if install.build_age_s is not None
+                    else "unmeasured"
+                )
+            )
+        ),
+        _i(
+            _ik.export_python(
+                has_install_python_version_and_install_python_implementation=str(
+                    ("yes" if (install.python_version and install.python_implementation) else "no"),
+                ),
+                python_version=str(install.python_version),
+                python_implementation=str(install.python_implementation),
+                install_python_version_or_install_python_implementation=str(
+                    _value(
+                        (install.python_version or install.python_implementation),
+                    ),
+                ),
+            ),
+        ),
+        _i(
+            _ik.export_platform(
+                platform=str(_value(install.platform)),
+                machine=str(_value(install.machine)),
+            ),
+        ),
         "",
-        "## This session",
-        f"  session id        {_value(process.session_id)}",
-        f"  kind              {_value(process.kind)}",
-        f"  pid               {process.pid}",
-        f"  model             {_value(process.model_label)}",
-        f"  effective model   {_value(process.effective_model or process.model_label)}",
-        f"  uptime            {format_duration(process.uptime_s)}",
-        f"  working dir       {_value(relativise_home(process.cwd))}",
-        f"  config dir        {_value(relativise_home(process.config_dir))}"
-        + ("  (redirected)" if process.config_dir_redirected else ""),
-        f"  cache dir         {_value(relativise_home(process.cache_dir))}",
-        f"  agent home        {_value(relativise_home(process.agent_home))}"
-        + ("  (redirected)" if process.agent_home_redirected else ""),
-        f"  log dir           {_value(relativise_home(process.log_dir))}",
-        f"  control port      {process.control_port if process.control_port else '—'}",
-        f"  protocol          {process.protocol if process.protocol else '—'}",
+        _i(_ik.export_heading_session()),
+        _i(_ik.export_session_id(session_id=str(_value(process.session_id)))),
+        _i(_ik.export_kind(kind=str(_value(process.kind)))),
+        _i(_ik.export_pid(pid=str(process.pid))),
+        _i(_ik.export_model(model_label=str(_value(process.model_label)))),
+        _i(
+            _ik.export_effective_model(
+                process_effective_model_or_process_model_label=str(
+                    _value(
+                        (process.effective_model or process.model_label),
+                    ),
+                ),
+            ),
+        ),
+        _i(
+            _ik.export_uptime(
+                uptime_s=(
+                    info_duration(process.uptime_s)
+                    if process.uptime_s is not None
+                    else "unmeasured"
+                )
+            )
+        ),
+        _i(_ik.export_working_dir(cwd=str(_value(relativise_home(process.cwd))))),
+        _i(
+            _ik.export_config_dir(
+                config_dir=str(_value(relativise_home(process.config_dir))),
+                has_config_dir_redirected=str("yes" if process.config_dir_redirected else "no"),
+            ),
+        ),
+        _i(_ik.export_cache_dir(cache_dir=str(_value(relativise_home(process.cache_dir))))),
+        _i(
+            _ik.export_agent_home(
+                agent_home=str(_value(relativise_home(process.agent_home))),
+                has_agent_home_redirected=str("yes" if process.agent_home_redirected else "no"),
+            ),
+        ),
+        _i(_ik.export_log_dir(log_dir=str(_value(relativise_home(process.log_dir))))),
+        _i(
+            _ik.export_control_port(
+                has_control_port=str("yes" if process.control_port else "no"),
+                control_port=str(process.control_port),
+            ),
+        ),
+        _i(
+            _ik.export_protocol(
+                has_protocol=str("yes" if process.protocol else "no"),
+                protocol=str(process.protocol),
+            ),
+        ),
         "",
-        "## Sessions on this machine",
+        _i(_ik.export_heading_sessions()),
     ]
 
     if not sessions.available:
-        lines.append("  unavailable — the session registry could not be scanned")
+        lines.append(_i(_ik.export_sessions_unavailable()))
     elif not sessions.lines:
-        lines.append("  none")
+        lines.append(_i(_ik.export_sessions_empty()))
     else:
         # The prose says what the evidence supports; the bracketed token per row
         # below stays the STATE WORD, printed verbatim so a reader can grep it
@@ -370,8 +432,14 @@ def build_export(snapshot: InfoSnapshot) -> str:
         # the desktop catalogue's ``status.code``, and renaming it would change a
         # value to restate a sentence. Every SENTENCE is honest.
         lines.append(
-            f"  {sessions.live} live · {sessions.wedged} not answering · "
-            f"{sessions.total} total" + (" · BUILD SKEW" if sessions.build_skew else "")
+            _i(
+                _ik.export_sessions_summary(
+                    live=sessions.live,
+                    wedged=str(sessions.wedged),
+                    total=sessions.total,
+                    has_build_skew=str("yes" if sessions.build_skew else "no"),
+                ),
+            )
         )
         for line in sessions.lines:
             mark = "*" if line.is_self else "-"
@@ -382,32 +450,47 @@ def build_export(snapshot: InfoSnapshot) -> str:
             # taken for this one, and "busy" is the record's PRE-silence flag —
             # the row exists to remove unqualified progress, so it must not end
             # by asserting activity. It ends on the facts it exists for.
-            fields = [f"{mark} [{line.state}] {name}", line.kind, f"pid {line.pid}"]
-            fields.append(format_duration(line.uptime_s))
+            fields = [
+                f"{mark} [{line.state}] {name}",
+                line.kind,
+                _i(_ik.export_pid_fallback(pid=str(line.pid))),
+            ]
+            fields.append(info_duration(line.uptime_s))
             if line.state == "wedged":
                 # The measured half of "not answering", beside the state token
                 # rather than only in the caveat below: a pasted export is read
                 # on its own, and `[wedged]` with no age beside it is exactly
                 # the bare verdict the wording on every other surface avoids.
-                fields.append(f"last heartbeat {format_duration(line.heartbeat_age_s)} ago")
+                fields.append(
+                    _i(
+                        _x.info_panel_last_heartbeat_ago(
+                            age=info_duration(line.heartbeat_age_s),
+                        ),
+                    ),
+                )
             else:
                 fields.append(format_bytes(line.footprint_bytes or line.rss_bytes))
                 if line.busy:
-                    fields.append("busy")
+                    fields.append(_i(_x.info_panel_busy_word()))
             if line.pending:
-                fields.append(f"needs {line.pending}")
+                fields.append(_i(_x.info_panel_needs_pending(pending=str(line.pending))))
             lines.append("  " + " · ".join(fields))
             lines.append(f"      {relativise_home(line.cwd)} · {line.model_label or '—'}")
 
-    lines += ["", "## Agents and subagents"]
+    lines += ["", _i(_ik.export_heading_agents())]
     if sessions.available:
         # The fleet answer FIRST: it is the question the section is opened
         # with, and the per-session detail below it is the breakdown.
         # ``live + wedged``: both name a running pid and both contribute to the
         # sum below, so the denominator printed here has to match it.
         lines.append(
-            f"  runtimes          {sessions.live + sessions.wedged} total — "
-            f"{sessions.live} live · {sessions.wedged} not answering"
+            _i(
+                _ik.export_runtimes(
+                    sessions_live_sessions_wedged=sessions.live + sessions.wedged,
+                    live=sessions.live,
+                    wedged=str(sessions.wedged),
+                ),
+            )
         )
         # Same rule as the screen: the sum runs over runtimes that REPORTED, so
         # when some did not the total is a floor, and when none did there is no
@@ -421,8 +504,12 @@ def build_export(snapshot: InfoSnapshot) -> str:
         # merely when nobody reported.
         if sessions.subagents_unreported and not sessions.fleet_trajectories:
             lines.append(
-                f"  trajectories      — ({sessions.subagents_unreported} of "
-                f"{sessions.live + sessions.wedged} runtimes did not report)"
+                _i(
+                    _ik.export_trajectories_unreported(
+                        subagents_unreported=str(sessions.subagents_unreported),
+                        sessions_live_sessions_wedged=sessions.live + sessions.wedged,
+                    ),
+                )
             )
         else:
             bound = ">=" if sessions.subagents_unreported else ""
@@ -430,9 +517,11 @@ def build_export(snapshot: InfoSnapshot) -> str:
             # pasted verbatim into issues, and ``1 sessions + 1 subagents`` —
             # the state every fresh install passes through — reads as a
             # template nobody finished rather than as a measurement.
-            addends = (
-                f"{plural(sessions.fleet_session_trajectories, 'session')} + "
-                f"{plural(sessions.fleet_subagents_running, 'subagent')}"
+            addends = _i(
+                _ik.agents_addends(
+                    sessions=sessions.fleet_session_trajectories,
+                    subagents=sessions.fleet_subagents_running,
+                ),
             )
             # Named beside the total, never added to it — see the panel's copy
             # of this rule. A queued child spends nothing, so it is not a
@@ -440,40 +529,59 @@ def build_export(snapshot: InfoSnapshot) -> str:
             # ``queued`` rows, is the export repeating a contradiction the
             # screen no longer makes.
             if sessions.fleet_subagents_queued:
-                addends += f" · {sessions.fleet_subagents_queued} queued"
+                addends += _i(
+                    _ik.export_queued_suffix(
+                        fleet_subagents_queued=sessions.fleet_subagents_queued,
+                    ),
+                )
             lines.append(
-                f"  trajectories      {bound}{sessions.fleet_trajectories} total — {addends}"
+                _i(
+                    _ik.export_trajectories(
+                        bound=str(bound),
+                        fleet_trajectories=sessions.fleet_trajectories,
+                        addends=str(addends),
+                    ),
+                )
             )
-    lines.append(f"  profiles          {agents.profiles}")
-    lines.append(f"  teams             {agents.teams}")
+    lines.append(_i(_ik.export_profiles(profiles=str(agents.profiles))))
+    lines.append(_i(_ik.export_teams(teams=str(agents.teams))))
     if agents.roster_unread:
         # An unreadable roster is not a roster of zero, in the export exactly
         # as on screen — this text is what lands in a bug report, where a
         # fabricated zero is hardest to challenge.
-        lines.append("  this session      — (could not read the roster)")
+        lines.append(_i(_ik.export_roster_unreadable()))
     else:
         lines.append(
-            f"  this session      {agents.running} running · {agents.queued} queued · "
-            f"{agents.settled} settled (retained)"
+            _i(
+                _ik.export_session_counts(
+                    running=agents.running,
+                    queued=agents.queued,
+                    settled=agents.settled,
+                ),
+            )
         )
     if agents.max_running is not None:
         lines.append(
-            f"  capacity          {agents.max_running} concurrent"
-            + ("  (AT CAPACITY)" if agents.at_capacity else "")
+            _i(
+                _ik.export_capacity(
+                    max_running=agents.max_running,
+                    has_at_capacity=str("yes" if agents.at_capacity else "no"),
+                ),
+            )
         )
     if agents.tree:
-        lines.append(f"  tree (this session only, depth {agents.max_depth}):")
+        lines.append(_i(_ik.export_tree_heading(max_depth=str(agents.max_depth))))
         lines += _tree_lines(agents.tree, agents.deeper)
     elif agents.roster_unread:
-        lines.append("  roster unreadable — no tree")
+        lines.append(_i(_ik.export_tree_unreadable()))
     else:
-        lines.append("  no subagents launched in this session")
+        lines.append(_i(_ik.export_tree_empty()))
     # Stated, not implied: the COUNTS above are fleet-wide and the TREE is not,
     # so a report showing one tree could otherwise be read as the whole story.
     if agents.cross_session_known:
-        lines.append("  (only this session's tree is drawn; other sessions report counts)")
+        lines.append(_i(_ik.export_tree_counts()))
     else:
-        lines.append("  (other sessions report busy/pending and memory only)")
+        lines.append(_i(_ik.export_tree_legacy()))
     # Both caveats qualify the SAME total, so they are collected and emitted as
     # one parenthetical rather than as two stacked ones: a host that is both
     # mid-upgrade and holding a wedged pid printed two bracketed apologies in a
@@ -487,12 +595,7 @@ def build_export(snapshot: InfoSnapshot) -> str:
         # Inflected, like the panel's copy: this text is pasted into an issue
         # verbatim, and "1 sessions run ... and do not report" reads as a
         # template nobody finished rather than as a measurement.
-        one = sessions.subagents_unreported == 1
-        caveats.append(
-            f"{sessions.subagents_unreported} session{'' if one else 's'} "
-            f"{'runs' if one else 'run'} an older build and "
-            f"{'does' if one else 'do'} not report subagents — lower bound"
-        )
+        caveats.append(_i(_ik.export_lower_bound(count=sessions.subagents_unreported)))
     if sessions.available and sessions.wedged:
         # PARITY with the panel, which has said this since the counts landed,
         # now through ONE shared sentence: the totals above deliberately include
@@ -513,25 +616,53 @@ def build_export(snapshot: InfoSnapshot) -> str:
 
     lines += [
         "",
-        "## Environment",
-        f"  terminal          {env.term or '—'}"
-        + (f" · {env.terminal_size[0]}x{env.terminal_size[1]}" if env.terminal_size else "")
-        + (f" · {env.colorterm}" if env.colorterm else ""),
-        f"  multiplexer       {env.multiplexer or 'none'}",
-        f"  tty               {'yes' if env.is_tty else 'no'}",
-        f"  theme             {env.theme or '—'}",
-        f"  approvals         {env.approval_mode or '—'}",
-        f"  browser           {env.browser_backend or 'none'}"
-        + (f" · {env.browser_name}" if env.browser_name else ""),
-        "  mobile            "
-        + (
-            ("installed" if env.mobile_installed else "not installed")
-            + (" · healthy" if env.mobile_healthy else "")
-            + (f" · port {env.mobile_port}" if env.mobile_installed and env.mobile_port else "")
+        _i(_ik.export_heading_environment()),
+        _i(
+            _ik.export_terminal(
+                env_term_or=str(env.term or "—"),
+                has_terminal_size=str("yes" if env.terminal_size else "no"),
+                terminal_size=str(env.terminal_size[0]) if env.terminal_size else "",
+                env_terminal_size=str(env.terminal_size[1]) if env.terminal_size else "",
+                has_colorterm=str("yes" if env.colorterm else "no"),
+                colorterm=str(env.colorterm),
+            ),
         ),
-        f"  mcp               {env.mcp_connected}/{env.mcp_configured} connected"
-        + (" · still connecting" if env.mcp_settling else "")
-        + (f" · {env.mcp_failed} failed" if env.mcp_failed and not env.mcp_settling else ""),
+        _i(
+            _ik.export_multiplexer(
+                env_multiplexer_or_none=str(env.multiplexer or _i(_ik.env_none())),
+            ),
+        ),
+        _i(_ik.export_tty(has_is_tty=str(("yes" if env.is_tty else "no")))),
+        _i(_ik.export_theme(env_theme_or=str(env.theme or "—"))),
+        _i(_ik.export_approvals(env_approval_mode_or=str(env.approval_mode or "—"))),
+        _i(
+            _ik.export_browser(
+                env_browser_backend_or_none=str(env.browser_backend or _i(_ik.env_none())),
+                has_browser_name=str("yes" if env.browser_name else "no"),
+                browser_name=str(env.browser_name),
+            ),
+        ),
+        _i(
+            _ik.export_mobile(
+                has_mobile_installed=str("yes" if env.mobile_installed else "no"),
+                has_mobile_healthy=str("yes" if env.mobile_healthy else "no"),
+                has_env_mobile_installed_and_env_mobile_port=str(
+                    ("yes" if (env.mobile_installed and env.mobile_port) else "no"),
+                ),
+                mobile_port=str(env.mobile_port),
+            ),
+        ),
+        _i(
+            _ik.export_mcp(
+                mcp_connected=str(env.mcp_connected),
+                mcp_configured=str(env.mcp_configured),
+                has_mcp_settling=str("yes" if env.mcp_settling else "no"),
+                has_env_mcp_failed_and_not_env_mcp_settling=str(
+                    ("yes" if (env.mcp_failed and not env.mcp_settling) else "no"),
+                ),
+                mcp_failed=env.mcp_failed,
+            ),
+        ),
     ]
     # Failures are suppressed while SETTLING for the reason McpStartupOutcome
     # states: naming a server as failed mid-handshake produces bug reports about
@@ -539,16 +670,21 @@ def build_export(snapshot: InfoSnapshot) -> str:
     if env.mcp_failures and not env.mcp_settling:
         for name, message in env.mcp_failures:
             lines.append(f"      {name}: {relativise_home_everywhere(message)}")
-    lines.append(f"  guides            {env.guides}")
-    lines.append(f"  skills            {env.skills}")
+    lines.append(_i(_ik.export_guides(guides=str(env.guides))))
+    lines.append(_i(_ik.export_skills(skills=str(env.skills))))
     # NAMES ONLY, and this is the line the redaction test reads.
     lines.append(
-        f"  credentials       {len(env.credential_keys)} keys"
-        + (f": {', '.join(env.credential_keys)}" if env.credential_keys else "")
+        _i(
+            _ik.export_credentials(
+                count=len(env.credential_keys),
+                has_credential_keys=str("yes" if env.credential_keys else "no"),
+                join=str(", ".join(env.credential_keys)),
+            ),
+        )
     )
 
     if snapshot.degraded:
-        lines += ["", "## Could not read"]
+        lines += ["", _i(_ik.export_heading_degraded())]
         for name, reason in snapshot.degraded:
             lines.append(f"  {name}: {relativise_home_everywhere(reason)}")
 
@@ -576,11 +712,12 @@ def build_export(snapshot: InfoSnapshot) -> str:
     stamp = (
         time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(snapshot.captured_at))
         if snapshot.captured_at
-        else "unknown"
+        else _i(_ik.latest_unknown())
     )
+    summary = _i(_ik.export_summary(stamp=str(stamp)))
     return (
         f"{head}\n\n"
-        f"<details><summary>/info report — captured {stamp}</summary>\n\n"
+        f"<details><summary>{summary}</summary>\n\n"
         f"```text\n{body}\n```\n\n"
         "</details>\n"
     )

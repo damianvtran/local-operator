@@ -1,0 +1,70 @@
+{
+  "schema": 1,
+  "kind": "private-semantic-admission-integration-not-rendered-approval",
+  "base": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer",
+  "rows": 7,
+  "each_audit_fresh_keys": 1,
+  "each_audit_total_keys": 1,
+  "retained_keys": 0,
+  "source_inputs_sha256": {
+    "local_operator/i18n/catalogues/en/tui.editor_readonly.json": "a2a8bfb8a250b38e3a950bb2b02d885ec76cc726d77521086801099b6e99b5f2",
+    "local_operator/i18n/catalogues/en/tui.editor_readonly.context.json": "46c48a659223ad5e4861a1407c2c7a685183b9c7caecf6e19f53adb8131389ee"
+  },
+  "auditor_sessions": [
+    "1282ebc28f39",
+    "1be17b0ed9f1"
+  ],
+  "target_author_session": "9309411c87eb",
+  "integrator_session": "61203766acfe",
+  "baseline_shipped": [
+    "en",
+    "fr",
+    "es",
+    "zh-CN",
+    "ru",
+    "vi",
+    "ur",
+    "hi"
+  ],
+  "result_shipped": [
+    "en",
+    "fr",
+    "es",
+    "zh-CN",
+    "ru",
+    "vi",
+    "ur",
+    "hi"
+  ],
+  "shipped_byte_identical": true,
+  "protected_existing_paths_checked": 2294,
+  "commands": "docs/pr-evidence/readonly-footer/readonly-footer-integration-commands.json",
+  "limitations": [
+    "No native/rendered after-frame; Urdu glyph shaping unverified",
+    "No code review, QA, CI, PR, push or release",
+    "Bounded commands use command-status: cleanup unknown on Darwin, not certified"
+  ],
+  "before_frame": {
+    "path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-valid-comparison-1.png",
+    "source": "Manager-supplied previous frame, not recaptured or visually approved by integrator"
+  },
+  "generator_artifacts_written": 201,
+  "generated_tracked_byte_delta_paths": [],
+  "resolver_proof": "docs/pr-evidence/readonly-footer/readonly-footer-resolver-proof.json",
+  "check_results": [
+    {
+      "label": "check ordinary",
+      "returncode": 0,
+      "seconds": 160.956,
+      "summary": "check.py: ok — 242 file(s) scanned, 2755 literal(s) at or below the baseline, catalogues consistent; 114 advisory finding(s) (report-only until activated)"
+    },
+    {
+      "label": "check strict origin/main",
+      "returncode": 0,
+      "seconds": 189.817,
+      "summary": "check.py: ok — 242 file(s) scanned, 2755 literal(s) at or below the baseline, catalogues consistent; 114 advisory finding(s) (report-only until activated)"
+    }
+  ],
+  "security_held_locales": []
+}
