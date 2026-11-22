@@ -262,8 +262,7 @@ def write_entry(
     clear: tuple[str, ...] = (),
 ) -> Path | None:
     """Write (replace) one session's entry. Returns the path, or ``None``
-    when ``schedules`` is empty — an empty list means *remove* the entry, so
-    "no file" and "no wakes" stay the same statement.
+    when no schedules or goal-only park/stop marker remain.
 
     ``preserve`` is an existing entry whose unknown keys should survive the
     rewrite (today: ``stopped_at``, which a later change uses to keep a
@@ -278,15 +277,17 @@ def write_entry(
     """
     rows = [_schedule_dict(s) for s in schedules]
     path = entry_path(config_dir, session_id)
-    if not rows:
-        remove_entry(config_dir, session_id)
-        return None
     entry: dict[str, Any] = {}
     if preserve:
         # Unknown keys ride along untouched; the fields below are rewritten
         # from the caller's (authoritative) values regardless of what the
         # old file said.
         entry.update({k: v for k, v in preserve.items() if k not in clear})
+    if not (entry.get("stopped_at") or entry.get("parked_at")):
+        entry.pop("goal_only", None)
+    if not rows and not entry.get("goal_only"):
+        remove_entry(config_dir, session_id)
+        return None
     entry.update(
         {
             "schema": INDEX_SCHEMA,

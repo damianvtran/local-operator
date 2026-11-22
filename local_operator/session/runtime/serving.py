@@ -758,6 +758,7 @@ class _PromptCommand:
     #: delivery, a compaction) before handing this command to ``Session.prompt``.
     #: See ``ServingSessionHandle.prompt``'s ``wait_for_turn``.
     wait_for_turn: bool = True
+    goal_context: tuple[str, int] | None = None
     #: The terminal event's own error text, when this command's turn failed.
     #: Recorded by the drain's outcome observer because ``completed`` carries only
     #: the VERDICT: a ``wait_complete`` caller that got a bare "did not complete"
@@ -1221,6 +1222,8 @@ class ServingSessionHandle(SessionHandle):
         #: Whether the goal judge may still admit continuation turns. Only a
         #: headless run closes it (:meth:`close_goal_continuations`).
         self._goal_continuations_open = True
+        self._goal_stopping = False
+        self._goal_recovery_queued = False
         self._active_prompt_command_id: str | None = None
         self._desktop_mcp: Any = None
         self._desktop_cwd = cwd
@@ -3772,6 +3775,8 @@ class ServingSessionHandle(SessionHandle):
         now requires positive evidence for ``interrupted``) would have to guess.
         """
         self._note_deliberate_stop()
+        self._goal_stopping = True
+        self._goal_continuations_open = False
         self._deny_pending_gates()
         trigger = self.on_stop_requested
         if trigger is not None:
@@ -4457,6 +4462,7 @@ class ServingSessionHandle(SessionHandle):
         wait_for_turn: bool = True,
         owner_typed: bool = True,
         mesh_origin: Mapping[str, Any] | None = None,
+        _goal_context: tuple[str, int] | None = None,
         _file_admission: Any = None,
         input_surface: str | None = None,
     ) -> str:
@@ -4651,6 +4657,11 @@ class ServingSessionHandle(SessionHandle):
         # expired), the runtime re-admits this same spool itself
         # (``process._refresh_for``), so the queue is never a promise to a
         # successor that does not come.
+        if _goal_context is not None and not self._goal_prompt_current(_goal_context):
+            # Unlike an operator prompt, a continuation must never be spooled
+            # to a successor: the verdict belongs to this owner's context.
+            self._refuse_admitted(command_id)
+            raise RuntimeError("goal continuation no longer current")
         if self._updating:
             if blocks or document_blocks_decoded:
                 # An inbox row is text, so carrying an image- or document-
@@ -4788,6 +4799,7 @@ class ServingSessionHandle(SessionHandle):
             completed,
             harness_injected,
             wait_for_turn,
+            goal_context=_goal_context,
             input_mode=input_mode,
             input_path=input_path,
             audio=audio_blocks_decoded,
@@ -4892,6 +4904,24 @@ class ServingSessionHandle(SessionHandle):
                 self._goal_loop.state = dict(store.state.loop)
         return self._goal_loop
 
+    def _goal_context_available(self) -> bool:
+        return not (
+            self._disposing
+            or self._draining
+            or self._updating
+            or self._retiring_cause
+            or self._goal_stopping
+        )
+
+    def _goal_prompt_current(self, context: tuple[str, int]) -> bool:
+        return (
+            not (self._disposing or self._draining or self._updating or self._retiring_cause)
+            and self._goal_continuations_open
+            and not self._loop_owns_the_verdict()
+            and self._session.goal_status == "active"
+            and (self._session.goal_token, self._session.goal_turn_serial) == context
+        )
+
     def _goal_judge_driver(self):
         """The standing goal's judge — the sibling of :meth:`_loop_driver`.
 
@@ -4963,6 +4993,8 @@ class ServingSessionHandle(SessionHandle):
                         command_id=command_id,
                         wait_complete=True,
                         harness_injected=True,
+                        owner_typed=False,
+                        _goal_context=(self._session.goal_token, self._session.goal_turn_serial),
                     )
                 except BaseException:
                     # The judge never retries: it publishes `waiting` and re-arms
@@ -5014,6 +5046,8 @@ class ServingSessionHandle(SessionHandle):
                 judge_state=lambda: self._session.goal_judge_state,
                 loop_running=self._loop_owns_the_verdict,
                 continuations=lambda: self._goal_continuations_open,
+                context_available=self._goal_context_available,
+                recovery_idle=lambda: not self.is_conversationally_active(),
             )
         return self._goal_judge
 
@@ -5113,38 +5147,39 @@ class ServingSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — the event path never fails on this feature
             logger.debug("supplement trigger failed", exc_info=True)
 
-    def rearm_goal_judge(self) -> None:
-        """Trigger 3, once per boot: re-engage a goal whose judge was in flight.
-
-        Called through ``server._handle_call_on_session_loop`` immediately after
-        the fold subscription is installed, so this runs once per OWNED session,
-        on that session's loop, after the restored record is readable. The rule
-        of who re-arms lives in the driver (RULINGS R3): a ``waiting``/``stalled``
-        goal is NOT re-armed by a restart, because nothing was in flight and
-        *checkpoint state is not an instruction to spend more tokens*.
-
-        Synchronous by design: the plan that holds it cannot await, so it
-        schedules the probe as a background task on this loop.
-        """
-        # A session outside the record's contract has no judge to re-arm, and
-        # scheduling a task that would fail on that read is how the
-        # `test_exec_mode` cells got an unretrieved exception instead of a
-        # verdict — checked BEFORE the task exists, so nothing outlives this
-        # call (QA round 1, Q3).
-        driver = self._goal_judge_driver()
-        if driver is None:
+    def tick_goal_recovery(self) -> None:
+        """Nudge the workload loop without making the serving heartbeat await it."""
+        if self._goal_recovery_queued or self._loop.is_closed():
             return
-        # ASK THE PROBE'S OWN QUESTION FIRST, because scheduling is not free:
-        # ``_background_tasks`` is the set ``is_busy`` reads as "work a clean exit
-        # would destroy", and a probe that would immediately find nothing in
-        # flight still puts a task in it. That made an idle runtime report busy
-        # for as long as the no-op took — the commonest boot of all is a session
-        # that never used ``/goal`` — and ``is_busy`` is what ``is_pristine`` and
-        # the reaper read, so an empty conversation could not be recognised as
-        # pristine and retired. Refusing HERE keeps the task set meaning what it
-        # says; a goal that IS in flight is unaffected, because this is the same
-        # ``needs_rearm`` predicate the probe itself applies.
-        if not driver.needs_rearm():
+        self._goal_recovery_queued = True
+
+        def probe() -> None:
+            try:
+                self.rearm_goal_judge()
+            except Exception:  # noqa: BLE001 — recovery probes must not break serving
+                logger.debug("goal recovery probe failed", exc_info=True)
+            finally:
+                self._goal_recovery_queued = False
+
+        try:
+            self._loop.call_soon_threadsafe(probe)
+        except RuntimeError:  # loop closed between the probe and the enqueue
+            self._goal_recovery_queued = False
+
+    def rearm_goal_judge(self) -> None:
+        """Probe on boot and heartbeat, on the session's owning loop."""
+        from local_operator.session.goal_judge import owns_the_session
+
+        if (
+            not self._goal_continuations_open
+            or not self._goal_context_available()
+            or not owns_the_session(self._session)
+            or self.is_busy()
+        ):
+            return
+        driver = self._goal_judge_driver()
+        due = getattr(self._session, "goal_recovery_due", None)
+        if driver is None or not driver.needs_rearm() or not callable(due) or not due():
             return
         task = asyncio.ensure_future(driver.rearm_on_resume())
         self._background_tasks.add(task)
@@ -5244,6 +5279,9 @@ class ServingSessionHandle(SessionHandle):
         A long-lived runtime never calls this and keeps the full chain.
         """
         self._goal_continuations_open = False
+        disable = getattr(self._session, "disable_goal_recovery", None)
+        if callable(disable):
+            disable()
 
     @_on_session_loop
     async def settle_goal_judge_headless(self) -> None:
@@ -5713,6 +5751,10 @@ class ServingSessionHandle(SessionHandle):
                     # ``wait_for_turn=False`` existed. A streaming turn still takes
                     # the immediate refusal and the steer path.
                     await self._await_turn_lock_free()
+                if command.goal_context is not None and not self._goal_prompt_current(
+                    command.goal_context
+                ):
+                    raise RuntimeError("goal continuation no longer current")
                 parameters = inspect.signature(self._session.prompt).parameters
                 if "message_id" in parameters:
                     fields: dict[str, Any] = {
@@ -13191,6 +13233,7 @@ async def spawn_owned_session(
     birth_fast: bool = False,
     resume: str | None = None,
     model_selection_override: bool = True,
+    goal_wake_due: int | None = None,
 ) -> ServingSessionHandle:
     """Build a session for the phone with the CLI's composition root.
 
@@ -13290,6 +13333,7 @@ async def spawn_owned_session(
         birth_effort=birth_effort,
         birth_fast=birth_fast,
         model_selection_override=model_selection_override,
+        goal_wake_due=goal_wake_due,
     )
 
     # PAY THE COMPOSITION ROOT'S IMPORTS HERE, AND IN A THREAD.
