@@ -46,6 +46,20 @@ from tests.unit.tui.test_tool_fold_layer import (
 TOOLS = ("read", "bash", "glob", "grep", "edit")
 
 
+def _plain(block: TranscriptBlock) -> str:
+    """The rows a block paints, as text.
+
+    ``renderable`` is Textual's ``RenderableType`` union; every block this file
+    reads builds a ``Text``, so the union is narrowed once here instead of at
+    each assertion that only wants to know what the row says.
+    """
+    from rich.text import Text
+
+    rendered = block.renderable
+    assert isinstance(rendered, Text), rendered
+    return rendered.plain
+
+
 def _foots(view: TranscriptView) -> list[TurnFootBlock]:
     return [child for child in view.children if isinstance(child, TurnFootBlock)]
 
@@ -297,19 +311,19 @@ async def test_tool_rows_and_bars_sit_two_cells_deeper_than_prose() -> None:
         await _settle(pilot)
 
         run_bar = next(bar for bar in _bars(view) if bar.kind == "run")
-        assert run_bar.renderable.plain.startswith("  "), run_bar.renderable.plain[:8]
+        assert _plain(run_bar).startswith("  "), _plain(run_bar)[:8]
         assert not cards[0].display
 
         run_bar.activate()  # open the run: the same-tool sub-bar appears
         await _settle(pilot)
         sub_bar = next(bar for bar in _bars(view) if bar.kind == "sub")
-        assert sub_bar.renderable.plain.startswith("  "), "a sub-bar left the bar column"
+        assert _plain(sub_bar).startswith("  "), "a sub-bar left the bar column"
 
         sub_bar.activate()  # open the sub: the calls are revealed one level in
         await _settle(pilot)
         card = cards[0]
         assert card.display
-        plain = card.renderable.plain
+        plain = _plain(card)
         assert plain.startswith("    "), plain[:10]
 
         gutter = card.copy_gutter(0)
@@ -360,6 +374,7 @@ async def test_narration_is_muted_in_by_response_and_text_ink_in_by_turn() -> No
     from tests.unit.tui.conftest import StyledTranscriptApp
 
     def ink_at(block: AssistantBlock, needle: str) -> str:
+        from rich.style import Style
         from rich.text import Text
 
         text = block.renderable
@@ -367,7 +382,10 @@ async def test_narration_is_muted_in_by_response_and_text_ink_in_by_turn() -> No
         index = text.plain.index(needle)
         for span in text.spans:
             if span.start <= index < span.end:
-                color = span.style.color
+                # A span's style is a Style OR a style STRING; only the former
+                # carries a resolved colour.
+                style = span.style
+                color = style.color if isinstance(style, Style) else None
                 return color.name if color is not None else ""
         return ""
 
@@ -417,7 +435,7 @@ async def test_the_foot_totals_a_settled_turn_and_is_absent_while_live() -> None
         (foot,) = _foots(view)
         # The tool row's own grammar (`format_clock`): three seconds reads
         # `3.0s`, the same trailing clock a member row shows.
-        assert foot.renderable.plain == "✓ 3 actions · 3.0s", foot.renderable.plain
+        assert _plain(foot) == "✓ 3 actions · 3.0s", _plain(foot)
 
 
 @pytest.mark.asyncio
@@ -443,7 +461,7 @@ async def test_a_dead_turn_gets_a_wrapped_foot_and_its_notice_is_replaced() -> N
         await _settle(pilot)
 
         (foot,) = _foots(view)
-        plain = foot.renderable.plain
+        plain = _plain(foot)
         lines = plain.splitlines()
         assert plain.startswith("✗ turn failed · ")
         assert len(lines) > 1, f"the reason did not wrap at 80 cols: {plain!r}"

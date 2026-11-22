@@ -294,9 +294,9 @@ async def test_the_queued_row_stops_saying_composing_the_moment_dictation_ends()
         before = [" ".join(row.split()) for row in _rows_for(app, "wake")]
         await asyncio.sleep(1.1)
         await _parked(pilot)
-        assert [" ".join(row.split()) for row in _rows_for(app, "wake")] == before, (
-            "the queued row must not tick"
-        )
+        assert [
+            " ".join(row.split()) for row in _rows_for(app, "wake")
+        ] == before, "the queued row must not tick"
 
         # The band must not say the model is composing either — it reads the
         # same registry, and the row's claim is what it echoes.

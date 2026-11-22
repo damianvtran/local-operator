@@ -470,18 +470,16 @@ def test_a_wide_script_summary_drops_kinds_instead_of_ellipsizing() -> None:
     survives at the same budget.
     """
     facts = ToolFacts(16, (("bash", 10), ("read", 3), ("grep", 3)), 3, None, None)
-    wide = {
-        "plural": lambda n: f"{n}项操作",
-        "failed": lambda n: f"✗ {n}项失败",
-    }
+    plural = lambda n: f"{n}项操作"  # noqa: E731
+    tally = lambda n: f"✗ {n}项失败"  # noqa: E731
 
-    everything = cells(facts, 10_000, **wide)
+    everything = cells(facts, 10_000, plural=plural, failed=tally)
     assert "read" in everything and "grep" in everything
     # The under-count, stated exactly: the all-kinds summary FITS a 34-cell
     # budget by character count and overruns it by six cells on screen.
     assert len(everything) <= 34 < cell_len(everything)
 
-    rendered = cells(facts, 34, **wide)
+    rendered = cells(facts, 34, plural=plural, failed=tally)
     assert cell_len(rendered) <= 34, rendered
     assert "read" not in rendered and "grep" not in rendered, rendered
     assert rendered.endswith("✗ 3项失败"), rendered

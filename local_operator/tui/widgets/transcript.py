@@ -1304,7 +1304,7 @@ class ExpandableActionBlock(TranscriptBlock):
         inset = detail_indent(width, self.fold_depth)
         return inset, " " * inset
 
-    def _detail_layout(self, width: int) -> tuple[int, int]:
+    def _detail_layout(self, width: int) -> tuple[int, str]:
         """The expanded body's text measure and lead, at ``width``."""
         inset, lead = self._detail_inset(width)
         return max(1, width - 2 - inset), lead
