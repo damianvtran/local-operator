@@ -1751,7 +1751,12 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # docstring describes.
         prefixes_text=True,
         argument_shape=ArgumentShape.ANY,
-        desktop_destination="appearance",
+        # NOT offered on the desktop: the setting is TUI-only (operator
+        # decision, 2026-11-22), and this row's copy lives in
+        # `tui.transcript_display` while the desktop/phone bundles are typed
+        # and built from `wire.*` alone — a published row would hand those
+        # surfaces a code they cannot resolve, the defect
+        # `tests/unit/i18n/test_slash_description_locale.py` pins.
     ),
     # The listing is the receipt.
     SlashCommand(

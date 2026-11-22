@@ -11,7 +11,8 @@
         }
       ],
       "references": {
-        "settings_io.py": 884
+        "settings_io.py": 884,
+        "tui/app.py": 1
       }
     },
     "wire.settings.hub_defaults": {
@@ -226,7 +227,7 @@
         }
       ],
       "references": {
-        "slash_commands.py": 54
+        "slash_commands.py": 55
       }
     },
     "wire.slash.library": {
@@ -304,6 +305,20 @@
       ],
       "references": {
         "settings_io.py": 12
+      }
+    },
+    "wire.settings.transcript_display": {
+      "reason": "transcript layout row label/help and its two choice labels/descriptions rendered by settings_io._t as plain strings; the slash command reuses the rendered label as a receipt, never a code",
+      "render_points": [
+        {
+          "path": "local_operator/settings_io.py",
+          "symbol": "settings_io._t",
+          "note": "the `display.transcript_display` row's label/help/choices merged into the settings registry as plain strings; /v1/settings carries the strings, never a code"
+        }
+      ],
+      "references": {
+        "settings_io.py": 8,
+        "tui/app.py": 4
       }
     },
     "wire.language_receipts": {

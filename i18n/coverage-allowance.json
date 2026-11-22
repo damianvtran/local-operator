@@ -1,5 +1,104 @@
 {
   "schema": 1,
   "note": "Shrink-only coverage allowance. Each entry records the exact, sorted, duplicate-free set of English key IDs that its (locale, namespace) does not yet carry, plus the owner and payoff date for that debt. tests/unit/i18n/test_language_manifest.py fails on any missing key NOT listed here — including a new key added to an already-incomplete namespace — and on any listed key that is no longer missing, so this file can only shrink. Adding an entry is a reviewed decision: it must name an owner and a payoff (ticket reference or ISO date) and reviewers must reject growth not tied to a real plan.",
-  "pairs": []
+  "pairs": [
+    {
+      "locale": "es",
+      "namespace": "tui.transcript_display",
+      "reason": "new English copy in this PR (transcript layout switch and its /transcript command); translations are dispatched as the PR's translator pass",
+      "owner": "Ben Tran",
+      "payoff": "2026-11-25",
+      "missing": [
+        "tui.transcript_display.save_failed",
+        "tui.transcript_display.set",
+        "tui.transcript_display.slash",
+        "tui.transcript_display.unknown",
+        "tui.transcript_display.usage"
+      ]
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.transcript_display",
+      "reason": "new English copy in this PR (transcript layout switch and its /transcript command); translations are dispatched as the PR's translator pass",
+      "owner": "Ben Tran",
+      "payoff": "2026-11-25",
+      "missing": [
+        "tui.transcript_display.save_failed",
+        "tui.transcript_display.set",
+        "tui.transcript_display.slash",
+        "tui.transcript_display.unknown",
+        "tui.transcript_display.usage"
+      ]
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.transcript_display",
+      "reason": "new English copy in this PR (transcript layout switch and its /transcript command); translations are dispatched as the PR's translator pass",
+      "owner": "Ben Tran",
+      "payoff": "2026-11-25",
+      "missing": [
+        "tui.transcript_display.save_failed",
+        "tui.transcript_display.set",
+        "tui.transcript_display.slash",
+        "tui.transcript_display.unknown",
+        "tui.transcript_display.usage"
+      ]
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.transcript_display",
+      "reason": "new English copy in this PR (transcript layout switch and its /transcript command); translations are dispatched as the PR's translator pass",
+      "owner": "Ben Tran",
+      "payoff": "2026-11-25",
+      "missing": [
+        "tui.transcript_display.save_failed",
+        "tui.transcript_display.set",
+        "tui.transcript_display.slash",
+        "tui.transcript_display.unknown",
+        "tui.transcript_display.usage"
+      ]
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.transcript_display",
+      "reason": "new English copy in this PR (transcript layout switch and its /transcript command); translations are dispatched as the PR's translator pass",
+      "owner": "Ben Tran",
+      "payoff": "2026-11-25",
+      "missing": [
+        "tui.transcript_display.save_failed",
+        "tui.transcript_display.set",
+        "tui.transcript_display.slash",
+        "tui.transcript_display.unknown",
+        "tui.transcript_display.usage"
+      ]
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.transcript_display",
+      "reason": "new English copy in this PR (transcript layout switch and its /transcript command); translations are dispatched as the PR's translator pass",
+      "owner": "Ben Tran",
+      "payoff": "2026-11-25",
+      "missing": [
+        "tui.transcript_display.save_failed",
+        "tui.transcript_display.set",
+        "tui.transcript_display.slash",
+        "tui.transcript_display.unknown",
+        "tui.transcript_display.usage"
+      ]
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.transcript_display",
+      "reason": "new English copy in this PR (transcript layout switch and its /transcript command); translations are dispatched as the PR's translator pass",
+      "owner": "Ben Tran",
+      "payoff": "2026-11-25",
+      "missing": [
+        "tui.transcript_display.save_failed",
+        "tui.transcript_display.set",
+        "tui.transcript_display.slash",
+        "tui.transcript_display.unknown",
+        "tui.transcript_display.usage"
+      ]
+    }
+  ]
 }

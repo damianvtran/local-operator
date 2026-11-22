@@ -110,6 +110,10 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.settings",
         "wire.settings.keymap",
         "wire.settings.hub_defaults",
+        # The transcript layout switch (`display.transcript_display`) is its own
+        # child for the same reason: its six keys never move wire.settings'
+        # audited source hash.
+        "wire.settings.transcript_display",
         # The org Agent Hub section (Radient Team only) is its own child so its
         # copy never moves the audited wire.settings locale hashes.
         "wire.settings.hub_org",

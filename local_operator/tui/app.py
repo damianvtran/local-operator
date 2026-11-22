@@ -48830,20 +48830,22 @@ class OperatorApp(App[None]):
         """
         from local_operator import settings_io
         from local_operator.i18n.keys import tui_transcript_display as display_copy
-        from local_operator.i18n.keys import wire_settings as setting_copy
+        from local_operator.i18n.keys import (
+            wire_settings_transcript_display as setting_copy,
+        )
         from local_operator.tui.settings import (
             TRANSCRIPT_DISPLAY_MODES,
             transcript_display_mode,
         )
 
         say = tr("tui.transcript_display")
+        # The setting's own child namespace, not its parent: a `tr` resolver
+        # reads ONE catalogue file, so `tr("wire.settings")` would not see a
+        # key that lives in `wire.settings.transcript_display`.
+        describe_mode = tr("wire.settings.transcript_display")
         labels = {
-            "by-turn": tr("wire.settings")(
-                setting_copy.display_transcript_display_choice_by_turn_label()
-            ),
-            "by-response": tr("wire.settings")(
-                setting_copy.display_transcript_display_choice_by_response_label()
-            ),
+            "by-turn": describe_mode(setting_copy.choice_by_turn_label()),
+            "by-response": describe_mode(setting_copy.choice_by_response_label()),
         }
         wanted = arg.strip().casefold()
         if not wanted:
@@ -49115,14 +49117,16 @@ class OperatorApp(App[None]):
         language) and ``detail`` carries the current marker only; the value a
         selection writes is the row's name.
         """
-        from local_operator.i18n.keys import wire_settings as setting_copy
+        from local_operator.i18n.keys import (
+            wire_settings_transcript_display as setting_copy,
+        )
         from local_operator.tui.settings import TRANSCRIPT_DISPLAY_MODES
 
         descriptions = {
-            "by-turn": setting_copy.display_transcript_display_choice_by_turn_description(),
-            "by-response": setting_copy.display_transcript_display_choice_by_response_description(),
+            "by-turn": setting_copy.choice_by_turn_description(),
+            "by-response": setting_copy.choice_by_response_description(),
         }
-        describe = tr("wire.settings")
+        describe = tr("wire.settings.transcript_display")
         current = transcript_display_mode()
         return [
             ArgumentChoice(
