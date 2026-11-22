@@ -1,5 +1,5 @@
 {
- "_comment": "Per-file test durations in seconds, used ONLY as relative weights to balance the CI shards. Regenerate with scripts/gen_test_durations.py; see scripts/shard_tests.py for why a file missing from this manifest still runs. Relay cwd-move weight added from run 41336683897, junit-e2e-ubuntu-latest-0.xml: three passing cases total 14.958s; existing weights and fallback unchanged. test_signal_drain_evidence_e2e.py weight 4.5 is a LOCAL measurement (7 passed; setup 4.12 + calls ~0.17 + teardowns, --durations=0 on macOS), not a CI junit sum: it spawns no runtime and exists so the fallback weight is not charged to it. Desktop Radient team-trial weight added from run 41829915943, junit-e2e-ubuntu-latest-1.xml: thirteen passing cases total 5.874s; existing weights and fallback unchanged. test_settings_intents_e2e.py weight 22.714 is a LOCAL measurement (1 passed; junit testcase time on macOS under heavy host load), not a CI junit sum: the file is new and no CI e2e run has measured it yet.",
+ "_comment": "Per-file test durations in seconds, used ONLY as relative weights to balance the CI shards. Regenerate with scripts/gen_test_durations.py; see scripts/shard_tests.py for why a file missing from this manifest still runs. Relay cwd-move weight added from run 41336683897, junit-e2e-ubuntu-latest-0.xml: three passing cases total 14.958s; existing weights and fallback unchanged. test_signal_drain_evidence_e2e.py weight 4.5 is a LOCAL measurement (7 passed; setup 4.12 + calls ~0.17 + teardowns, --durations=0 on macOS), not a CI junit sum: it spawns no runtime and exists so the fallback weight is not charged to it. Desktop Radient team-trial weight added from run 41829915943, junit-e2e-ubuntu-latest-1.xml: thirteen passing cases total 5.874s; existing weights and fallback unchanged. test_settings_intents_e2e.py weight 22.714 is a LOCAL measurement (1 passed; junit testcase time on macOS under heavy host load), not a CI junit sum: the file is new and no CI e2e run has measured it yet. test_desktop_ask_control_only.py weight 1.853 is a LOCAL measurement (1 passed; summed JUnit testcase time, setup/call/teardown, macOS 2026-11-21, source 7754c98 plus test-fixture-only CI remediation), not a CI measurement: no CI e2e run has measured the new file yet; existing weights and fallback unchanged.",
  "durations": {
   "tests/e2e/test_ask_tool_e2e.py": 2.925,
   "tests/e2e/test_browser_ownership.py": 1.0,
@@ -8,6 +8,7 @@
   "tests/e2e/test_cut_off_turns_e2e.py": 50.058,
   "tests/e2e/test_cwd_move_relay_e2e.py": 14.958,
   "tests/e2e/test_desktop_api.py": 1.0,
+  "tests/e2e/test_desktop_ask_control_only.py": 1.853,
   "tests/e2e/test_desktop_controls.py": 11.663,
   "tests/e2e/test_desktop_feed.py": 25.539,
   "tests/e2e/test_desktop_goal_mid_turn.py": 1.0,
