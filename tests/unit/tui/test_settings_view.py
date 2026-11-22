@@ -188,8 +188,10 @@ async def test_localized_enum_browsing_preserves_wire_values(
             if initial == "removed-choice":
                 assert all(c.value != initial for c in sv_mod._choices_for(setting))
                 for offset, row in enumerate(view._rows):
-                    if row.kind == "choice" and row.setting.key == key:
-                        assert "●" not in view._row_text(row, offset, 116).plain
+                    if row.kind == "choice":
+                        assert row.setting is not None
+                        if row.setting.key == key:
+                            assert "●" not in view._row_text(row, offset, 116).plain
             await pilot.press("escape")
             assert (path.read_bytes() if path.exists() else None) == original
             _select(view, key)

@@ -834,7 +834,7 @@ _ENUM_LABEL_CASES = (
 @pytest.mark.parametrize("locale", ("en", "fr", "es", "zh-CN", "ru", "vi", "ur", "hi"))
 def test_enum_summary_uses_registered_label_in_every_locale(locale: str) -> None:
     """Actual shipped copy, not synthetic parity: picker, summary and raw slot agree."""
-    from local_operator.i18n.messages import render_record
+    from local_operator.i18n.messages import Msg, render_record
     from local_operator.tui.i18n_status import localized_display
 
     previous = text.active_locale()
@@ -848,7 +848,8 @@ def test_enum_summary_uses_registered_label_in_every_locale(locale: str) -> None
                 for c in setting.resolved_choices
                 if type(c.value) is type(value) and c.value == value
             )
-            message = choice.label.message
+            message = getattr(choice.label, "message", None)
+            assert isinstance(message, Msg)
             record = render_record(message.code, message.params, locale=locale)
             expected = localized_display(record.text, source_locale=record.source_locale).plain
             assert sv_mod._render_value(value, setting=setting) == expected, (locale, key)
