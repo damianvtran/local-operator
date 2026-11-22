@@ -170,7 +170,10 @@ def test_mcp_only_session_drops_class_prose_and_keeps_the_always_on_rules() -> N
     for marker in _ALWAYS_ON_MARKERS:
         assert marker in head, marker
     assert "use\n  your web search tools for third-party errors" in head
-    assert "- **Parallelize independent work:** batch calls.\n" in head
+    assert (
+        "- **Batch only needed independent calls:** avoid speculative multi-page fetches "
+        "before reading the strongest lead.\n"
+    ) in head
     assert "never print credentials, tokens or keys.\n" in head
     # Wave 5's short arms, each in place of the workspace prose it replaces.
     assert "\nAct directly with your tools; use them before answering from memory.\n\n" in head

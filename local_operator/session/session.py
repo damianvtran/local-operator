@@ -7637,6 +7637,19 @@ class Session:
         self._state_baseline_from_replay = False
         return list(self._frozen_system_blocks)
 
+    def _system_blocks_are_frozen(self) -> bool:
+        """Whether this session's system blocks are currently epoch-frozen.
+
+        True only when the system-blocks provider opted into append-only state
+        AND an epoch has been frozen (either persisted on turn 1 or replayed
+        from the transcript). Standalone / non-append-only providers keep
+        returning ``False`` so trailing volatile blocks remain unmarked.
+        """
+        return bool(
+            getattr(getattr(self, "_system_blocks_provider", None), "append_only_state", False)
+            and getattr(self, "_frozen_system_blocks", None) is not None
+        )
+
     def _system_state_delta(
         self, desired: list[str]
     ) -> tuple[dict[str, dict[str, str]], str | None]:
@@ -23789,6 +23802,10 @@ class Session:
                 # waiting for another user message. The loop keeps the turn-start
                 # snapshot as a fallback if this host resolver ever fails.
                 get_system_blocks=self._prepare_system_blocks,
+                # Explicit epoch-freeze signal for provider cache placement:
+                # evaluated per call after ``_prepare_system_blocks`` so turn 1
+                # already marks the single trailing frozen system block.
+                get_system_blocks_frozen=self._system_blocks_are_frozen,
                 # The tools array, re-read per provider step and latched to one
                 # publish per turn; see ``_wire_tools``. The loop's tool
                 # RESOLUTION deliberately keeps reading the live
@@ -33061,6 +33078,7 @@ class Session:
             model=self._model,
             purpose="aside",
             system_blocks=list(blocks),
+            system_blocks_frozen=self._system_blocks_are_frozen(),
             messages=messages,
             # Live tools (not []): keep the aside on the SAME cache prefix the
             # working turn builds. See the docstring for why this is a cache
@@ -33199,6 +33217,7 @@ class Session:
             model=self._model,
             purpose="clearance",
             system_blocks=list(blocks),
+            system_blocks_frozen=self._system_blocks_are_frozen(),
             messages=messages,
             # Live tools (not []): the same cache-prefix rule the aside states
             # at length — the tools block leads the prefix, so an empty array
@@ -33352,6 +33371,7 @@ class Session:
             model=self._model,
             purpose="compaction_advisor",
             system_blocks=list(blocks),
+            system_blocks_frozen=self._system_blocks_are_frozen(),
             messages=messages,
             # Same array as the running turn (not []): the tools block is the
             # FRONT of the provider cache prefix, so sending [] would change

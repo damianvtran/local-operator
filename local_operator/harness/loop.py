@@ -4483,6 +4483,14 @@ class AgentLoop:
     # (``_abortable_stream`` is a module-level helper; see below the class.)
 
     @staticmethod
+    def _host_system_blocks_frozen(config: LoopConfig) -> bool:
+        """Whether the host reports its resolved system blocks as epoch-frozen."""
+        reader = config.get_system_blocks_frozen
+        if reader is None:
+            return False
+        return bool(reader())
+
+    @staticmethod
     def _host_context_tokens_hint(config: LoopConfig) -> int | None:
         """The host's cross-turn context-size seed, or ``None`` when it has
         none — a zero is treated as "nothing reported" because a provider
@@ -4893,6 +4901,7 @@ class AgentLoop:
             request = ChatRequest(
                 model=model,
                 system_blocks=system_blocks,
+                system_blocks_frozen=self._host_system_blocks_frozen(config),
                 messages=list(converted),
                 tools=(
                     list(config.get_tools())
