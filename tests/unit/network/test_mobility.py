@@ -1744,6 +1744,96 @@ def test_an_offload_refreshes_definitions_on_the_destination_before_the_invite(
     assert "definitions_notice" not in (result.get("carry") or {}), result
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("destination", ["missing", "conflict", "match"])
+async def test_recall_requires_the_source_team_definition(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, destination: str
+) -> None:
+    """Drive real relay recall and inspect runtime attachment in-process."""
+    from local_operator.agents import AgentRegistry
+    from local_operator.resume import write_session_attachment
+    from local_operator.session.goal import GoalState
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+    from local_operator.teams import TeamEditFields, TeamRegistry
+    from tests.unit.session.test_session import MODEL, ScriptedStream
+
+    def open_session(root: Path, directory: Path) -> tuple[Session, GoalState]:
+        goal = GoalState()
+        return (
+            Session(
+                model=MODEL,
+                stream_fn=ScriptedStream([[]]),
+                tools=[],
+                transcript=Transcript(directory),
+                system_blocks_provider=lambda: [],
+                goal_state=goal,
+                team_registry=TeamRegistry(root),
+                agent_registry=AgentRegistry(root),
+            ),
+            goal,
+        )
+
+    def attachment(session: Session, goal: GoalState) -> tuple[str, str, bool]:
+        return goal.team_brief, session._team_manager_name(), session._readonly_shell
+
+    owner, receiver, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    source = _owned_session(owner)
+    source_fields = TeamEditFields(
+        name="identity-test", manager="manager", instructions="source brief"
+    )
+    TeamRegistry(owner.root).create_team(source_fields)
+    write_session_attachment(source, team="identity-test", agent="", goal="")
+
+    registry = TeamRegistry(receiver.root)
+    registry.create_team(
+        TeamEditFields(name="local-control", manager="manager", instructions="local brief")
+    )
+    if destination == "conflict":
+        registry.create_team(
+            TeamEditFields(name="identity-test", manager="scout", instructions="destination brief")
+        )
+    elif destination == "match":
+        registry.create_team(source_fields)
+    existing_dir = _owned_session(receiver, "101010101010", rows=0)
+    existing_team = "local-control" if destination == "missing" else "identity-test"
+    write_session_attachment(existing_dir, team=existing_team, agent="", goal="")
+    existing, existing_goal = open_session(receiver.root, existing_dir)
+    before = attachment(existing, existing_goal)
+    arrived = None
+    try:
+        result = _move(receiver, SESSION, monkeypatch=monkeypatch)
+        moved_dir = receiver.root / "sessions" / SESSION
+        observed: Any = (result["ok"], result.get("message"))
+        if moved_dir.is_dir():
+            arrived, arrived_goal = open_session(receiver.root, moved_dir)
+            brief, manager, read_only = attachment(arrived, arrived_goal)
+            observed = (result["ok"], brief, manager, read_only)
+
+        # Check both the existing live session and a fresh restore from the
+        # local registry; neither may be changed by comparison on arrival.
+        assert attachment(existing, existing_goal) == before
+        reopened, reopened_goal = open_session(receiver.root, existing_dir)
+        try:
+            assert attachment(reopened, reopened_goal) == before
+        finally:
+            await reopened.dispose()
+        if destination == "match":
+            assert arrived is not None, result
+            assert observed == (True, before[0], "manager", False)
+            assert "source brief" in before[0]
+        else:
+            assert observed[0] is False, observed
+            assert "identity-test" in str(observed[1]), observed
+            assert arrived is None
+            assert source.is_dir()
+    finally:
+        if arrived is not None:
+            await arrived.dispose()
+        await existing.dispose()
+
+
 def test_a_failed_definitions_refresh_names_the_stale_copy_but_still_moves(
     pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
