@@ -594,6 +594,9 @@ _BIND_RETRY_INITIAL_S = 0.1
 _BIND_RETRY_FACTOR = 1.7
 _BIND_RETRY_DELAY_CAP_S = 0.5
 
+_RuntimeLocator = Callable[[], tuple[SessionRecord | None, int | None]]
+_PublicationWaiter = Callable[[_RuntimeLocator, float], Awaitable[SessionRecord]]
+
 #: Backoff for RETRYING the canonical re-sync a degraded delta owes, when that
 #: re-sync fails against a socket that is still up (the owner busy, a transient
 #: RPC error). Retrying is not optional bookkeeping: the degraded frame consumed
@@ -3810,7 +3813,12 @@ class AttachedSession:
             fields["files"] = files
         return await client.request_ack_with_duplicate("steer" if steer else "prompt", **fields)
 
-    async def bind_runtime(self, *, deadline: float | None = None) -> None:
+    async def bind_runtime(
+        self,
+        *,
+        deadline: float | None = None,
+        wait_for_publication: _PublicationWaiter | None = None,
+    ) -> None:
         """Bind a viewer before an explicitly requested owner control operation.
 
         ``deadline`` (``time.monotonic()``) replaces the foreground envelope with
@@ -3818,6 +3826,8 @@ class AttachedSession:
         the remote pilot (``network/cli.py``, ``PILOT_BIND_TIMEOUT_S``), which has
         no "next keystroke rejoins it" and whose failure means the act was not
         delivered. Everyone else keeps the short foreground default.
+        ``wait_for_publication`` is a narrower opt-in for a cold send: after
+        engage, the caller may wait once for discovery inside that deadline.
         """
         if deadline is None:
             # THE DEFAULT CALL SHAPE IS main's, EXACTLY: ``_ensure_bound()``. The TUI
@@ -3829,7 +3839,10 @@ class AttachedSession:
             # 43112570841). Only a caller with its own budget changes the shape.
             await self._ensure_bound()
             return
-        await self._ensure_bound(deadline=deadline)
+        if wait_for_publication is None:
+            await self._ensure_bound(deadline=deadline)
+        else:
+            await self._ensure_bound(deadline=deadline, wait_for_publication=wait_for_publication)
 
     async def update_desktop_watch(
         self, *, visible: bool, can_notify: bool, timeout: float | None = None
@@ -4951,7 +4964,11 @@ class AttachedSession:
             logger.debug("warm engage failed for %s", self._session_id, exc_info=True)
 
     async def _ensure_bound(
-        self, *, foreground: bool = True, deadline: float | None = None
+        self,
+        *,
+        foreground: bool = True,
+        deadline: float | None = None,
+        wait_for_publication: _PublicationWaiter | None = None,
     ) -> None:
         """Attach to a runtime, starting one if none exists. Idempotent.
 
@@ -5022,8 +5039,12 @@ class AttachedSession:
                 # suites park this seam with a ``(*, foreground)`` double, and an
                 # unconditional ``deadline=None`` made every warm raise TypeError.
                 await self._bind_under_lock(foreground=foreground)
-            else:
+            elif wait_for_publication is None:
                 await self._bind_under_lock(foreground=foreground, deadline=deadline)
+            else:
+                await self._bind_under_lock(
+                    foreground=foreground, deadline=deadline, wait_for_publication=wait_for_publication
+                )
             # Cover every winning-owner path, including another attach/recovery
             # completing during an await. A failed model RPC is not a failed
             # socket bind and must remain a visible, retryable pending intent.
@@ -5105,7 +5126,13 @@ class AttachedSession:
                 if not self._foreground_waiting:
                     self._foreground_arrived.clear()
 
-    async def _bind_under_lock(self, *, foreground: bool, deadline: float | None = None) -> None:
+    async def _bind_under_lock(
+        self,
+        *,
+        foreground: bool,
+        deadline: float | None = None,
+        wait_for_publication: _PublicationWaiter | None = None,
+    ) -> None:
         """The engage/retry body of :meth:`_ensure_bound`, holding ``_bind_lock``.
 
         Split out so the waiter accounting around the acquire reads as one
@@ -5298,6 +5325,13 @@ class AttachedSession:
             # down turns on the difference between "no owner" and "an owner that
             # published no live record" (§3.4).
             record, owner = await asyncio.to_thread(self._owner.locate)
+            if wait_for_publication is not None and not self._disposed:
+                # Only the send caller opts in, only after a successful engage,
+                # and only once. This can read the published record; it must
+                # neither engage again nor attempt to deliver the pending act.
+                wait, wait_for_publication = wait_for_publication, None
+                if record is None:
+                    record = await wait(self._owner.locate, _effective_deadline())
             if self._disposed:
                 # Same rule as the guard at the top of the loop: never
                 # swallow a failure an earlier attempt already produced.
