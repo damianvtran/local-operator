@@ -1701,6 +1701,7 @@ class AttachedSession:
         # later phase for the same id must always pass.
         self._live_message_phase: dict[str, int] = {}
         self._handlers: list[EventHandler] = []
+        self._event_observers: list[EventHandler] = []
         #: In-flight owner switch requests (``_switch_on_owner``), held so the
         #: tasks are not collected before their notice is delivered.
         self._switch_tasks: set[asyncio.Task[None]] = set()
@@ -7477,6 +7478,8 @@ class AttachedSession:
         self._buffered_events[insert_at:insert_at] = seeded
         self._ready_for_events = True
         self._runtime_ready.set()
+        for event in seeded:
+            self._notify_event_handlers(self._event_observers, event)
         self._drain_buffered_events()
         self._maybe_start_gate()
 
@@ -7860,7 +7863,7 @@ class AttachedSession:
             return
         buffered, self._buffered_events = self._buffered_events, []
         for event in buffered:
-            self._emit_or_buffer(event)
+            self._emit_or_buffer(event, notify_observers=False)
 
     def _on_frontend_sync(self, data: dict[str, Any]) -> None:
         future = self._frontend_future
@@ -8193,13 +8196,15 @@ class AttachedSession:
             kept.append(event)
         self._buffered_events = kept
 
-    def _emit_or_buffer(self, event: AgentEvent[Any]) -> None:
+    def _emit_or_buffer(self, event: AgentEvent[Any], *, notify_observers: bool = True) -> None:
         if not self._ready_for_events or not self._handlers:
             self._buffered_events.append(event)
+            if notify_observers:
+                self._notify_event_handlers(self._event_observers, event)
             return
-        self._deliver(event)
+        self._deliver(event, notify_observers=notify_observers)
 
-    def _deliver(self, event: AgentEvent[Any]) -> None:
+    def _deliver(self, event: AgentEvent[Any], *, notify_observers: bool = True) -> None:
         """Hand ``event`` to every subscribed handler now, buffering nothing.
 
         With NO subscriber the event is DROPPED, not parked — that is the
@@ -8208,7 +8213,13 @@ class AttachedSession:
         LATER runtime's turn (see ``_end_turn_locally``), and parking the event
         for a future subscriber recreates exactly that hazard one seam over.
         """
-        for handler in list(self._handlers):
+        if notify_observers:
+            self._notify_event_handlers(self._event_observers, event)
+        self._notify_event_handlers(self._handlers, event)
+
+    @staticmethod
+    def _notify_event_handlers(handlers: list[EventHandler], event: AgentEvent[Any]) -> None:
+        for handler in list(handlers):
             result = handler(event)
             if inspect.isawaitable(result):
                 asyncio.create_task(_await_handler(result))
@@ -12108,6 +12119,22 @@ class AttachedSession:
         def unsubscribe() -> None:
             if handler in self._handlers:
                 self._handlers.remove(handler)
+
+        return unsubscribe
+
+    def _observe_events(self, handler: EventHandler) -> Callable[[], None]:
+        """Tap current backlog and new frames without becoming the first consumer.
+
+        Diagnostics see arrivals even during sync; the caller still owns the
+        ordered replay. Draining to that caller must not notify observers again.
+        """
+        self._event_observers.append(handler)
+        for event in tuple(self._buffered_events):
+            self._notify_event_handlers([handler], event)
+
+        def unsubscribe() -> None:
+            if handler in self._event_observers:
+                self._event_observers.remove(handler)
 
         return unsubscribe
 

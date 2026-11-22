@@ -997,7 +997,9 @@ async def open_session(
     so tool calls, output validation, turn usage, and terminal status log to
     ``logging.getLogger("local_operator.sdk")`` at ``INFO`` level (unsubscribed
     before ``dispose()``). Default ``False`` emits nothing and adds no
-    subscription.
+    subscription. Configure a handler in your app (for example,
+    ``logging.basicConfig()`` in a standalone script), then enable INFO with
+    ``logging.getLogger("local_operator.sdk").setLevel(logging.INFO)``.
 
     The environment is scoped to ``roots`` for the whole ``async with`` body:
     construction, the caller's turns, and every lazy resolver in between see
@@ -1436,41 +1438,18 @@ _TRACE_ARG_STRING_LIMIT = 160
 _TRACE_ARGS_JSON_LIMIT = 512
 #: Snippet cap for tool output/errors, validation errors, and terminal errors.
 _TRACE_SNIPPET_LIMIT = 160
-#: Container breadth/depth caps so pathological tool args cannot stall tracing.
-_TRACE_CONTAINER_MAX_ITEMS = 64
+#: Container depth cap and scrub budget so pathological payloads cannot stall
+#: tracing. An incomplete input (e.g. a PEM missing its closing line) cannot
+#: be scrubbed reliably, so the entire field is withheld beyond this budget.
 _TRACE_CONTAINER_MAX_DEPTH = 6
-#: Environment variable name substrings whose values are treated as secrets and
-#: scrubbed before any trace line is emitted.
-_TRACE_SECRET_ENV_MARKERS: tuple[str, ...] = (
-    "KEY",
-    "TOKEN",
-    "SECRET",
-    "PASSWORD",
-    "AUTHORIZATION",
-)
-#: Minimum secret length for env-var value scrubbing so short flags/words like
-#: ``"true"`` or ``"dev"`` are never mangled across ordinary log lines.
-_TRACE_SECRET_MIN_LEN = 8
-#: Floor on the pre-redaction prefix window for very large strings so a secret
-#: crossing the display truncation boundary is always redacted in full without
-#: scanning multi-megabyte payloads.
-_TRACE_REDACT_WINDOW_FLOOR = 4096
+_TRACE_REDACT_SCAN_LIMIT = 4096
 
 
 def _env_secret_values() -> list[str]:
-    """Collect non-empty env values (>= 8 chars) whose names signal credentials.
+    """Read fresh so credentials injected after SDK import are still scrubbed."""
+    from local_operator.redaction_shapes import is_credential_name
 
-    Read fresh per event rather than cached at import time so credentials
-    injected after ``import local_operator.sdk`` are still scrubbed.
-    """
-    secrets: list[str] = []
-    for name, value in os.environ.items():
-        if not value or len(value) < _TRACE_SECRET_MIN_LEN:
-            continue
-        upper = name.upper()
-        if any(marker in upper for marker in _TRACE_SECRET_ENV_MARKERS):
-            secrets.append(value)
-    return secrets
+    return [value for name, value in os.environ.items() if value and is_credential_name(name)]
 
 
 def _redact_trace_text(text: str, env_secrets: list[str]) -> str:
@@ -1487,77 +1466,110 @@ def _redact_trace_text(text: str, env_secrets: list[str]) -> str:
     return scrub_secrets(text, env_secrets)
 
 
+def _printable_trace_text(text: str) -> str:
+    # Escape terminal, bidi, and other nonprintable characters only AFTER
+    # redaction has seen their original spelling.
+    return "".join(char if char.isprintable() else ascii(char)[1:-1] for char in text)
+
+
 def _truncate_text(text: str, limit: int) -> str:
-    """Collapse whitespace to one line and cap length to ``limit`` chars."""
-    single_line = " ".join(text.split())
+    single_line = _printable_trace_text(" ".join(text.split()))
     if len(single_line) <= limit:
         return single_line
-    return single_line[: max(1, limit - 3)].rstrip() + "..."
+    return single_line[: limit - 3].rstrip() + "..."
+
+
+def _redact_trace_field(text: str, env_secrets: list[str]) -> str:
+    from local_operator.redaction_shapes import REDACTION_MARKER
+
+    if len(text) > _TRACE_REDACT_SCAN_LIMIT:
+        return REDACTION_MARKER
+    return _redact_trace_text(text, env_secrets)
 
 
 def _redact_and_truncate(text: str, limit: int, env_secrets: list[str]) -> str:
-    """Redact BEFORE truncating so a secret crossing ``limit`` never leaks a prefix.
-
-    Very large payloads (e.g. multi-MB file reads) are windowed to at least
-    ``limit + max_secret_len + 512`` chars (floor 4096) before scrubbing so any
-    secret starting inside the visible span is seen whole without scanning MBs.
-    """
-    if not text:
-        return ""
-    max_secret_len = max((len(s) for s in env_secrets), default=0)
-    window = max(limit + max_secret_len + 512, _TRACE_REDACT_WINDOW_FLOOR)
-    pre_clipped = len(text) > window
-    candidate = text[:window] if pre_clipped else text
-    cleaned = _redact_trace_text(candidate, env_secrets)
-    single_line = " ".join(cleaned.split())
-    if len(single_line) > limit:
-        return single_line[: max(1, limit - 3)].rstrip() + "..."
-    if pre_clipped:
-        return single_line[: max(1, limit - 3)].rstrip() + "..."
-    return single_line
+    return _truncate_text(_redact_trace_field(text, env_secrets), limit)
 
 
-def _sanitize_arg_value(value: Any, env_secrets: list[str], *, depth: int = 0) -> Any:
-    """Recursively redact and bound tool argument values before JSON encoding."""
-    if depth >= _TRACE_CONTAINER_MAX_DEPTH:
-        return "..."
-    if isinstance(value, str):
-        return _redact_and_truncate(value, _TRACE_ARG_STRING_LIMIT, env_secrets)
-    if isinstance(value, dict):
-        out: dict[str, Any] = {}
-        for idx, (k, v) in enumerate(value.items()):
-            if idx >= _TRACE_CONTAINER_MAX_ITEMS:
-                out["..."] = f"{len(value) - _TRACE_CONTAINER_MAX_ITEMS} more"
-                break
-            key_str = _redact_and_truncate(str(k), _TRACE_ARG_STRING_LIMIT, env_secrets)
-            out[key_str] = _sanitize_arg_value(v, env_secrets, depth=depth + 1)
-        return out
-    if isinstance(value, (list, tuple)):
-        items = [
-            _sanitize_arg_value(item, env_secrets, depth=depth + 1)
-            for item in value[:_TRACE_CONTAINER_MAX_ITEMS]
-        ]
-        if len(value) > _TRACE_CONTAINER_MAX_ITEMS:
-            items.append(f"...({len(value) - _TRACE_CONTAINER_MAX_ITEMS} more)")
-        return items
-    return value
+def _format_trace_args(args: Any, env_secrets: list[str]) -> str:
+    from local_operator.redaction_shapes import REDACTION_MARKER, is_credential_name
+
+    remaining = _TRACE_REDACT_SCAN_LIMIT
+
+    def project(value: Any, depth: int = 0) -> Any:
+        nonlocal remaining
+        remaining -= len(value) + 1 if isinstance(value, str) else 1
+        if remaining < 0 or depth > _TRACE_CONTAINER_MAX_DEPTH:
+            raise ValueError("trace argument exceeds scrub budget")
+        if isinstance(value, dict):
+            return {
+                project(key, depth + 1): (
+                    REDACTION_MARKER
+                    if isinstance(key, str) and is_credential_name(key)
+                    else project(item, depth + 1)
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [project(item, depth + 1) for item in value]
+        if value is None or isinstance(value, (str, bool, int, float)):
+            return value
+        raise ValueError("trace argument is not JSON data")
+
+    def clip(value: Any) -> Any:
+        if isinstance(value, str):
+            return _redact_and_truncate(value, _TRACE_ARG_STRING_LIMIT, env_secrets)
+        if isinstance(value, list):
+            return [clip(item) for item in value]
+        if isinstance(value, dict):
+            return {clip(key): clip(item) for key, item in value.items()}
+        return value
+
+    try:
+        # Direct credential keys own their entire subtree. Run the shared
+        # shape pass on complete JSON as well: e.g. a name/value pair needs
+        # both siblings intact. Only then shorten individual display values.
+        raw = json.dumps(project(args), ensure_ascii=False)
+        if len(raw) > _TRACE_REDACT_SCAN_LIMIT:
+            return REDACTION_MARKER
+        scrubbed = json.loads(_redact_trace_text(raw, env_secrets))
+    except (TypeError, ValueError):
+        return REDACTION_MARKER
+    return _truncate_text(json.dumps(clip(scrubbed), ensure_ascii=False), _TRACE_ARGS_JSON_LIMIT)
 
 
 def _extract_tool_result_text(result: Any) -> str:
     """Read plain text from a ``ToolResult`` without serializing private fields."""
     if result is None:
         return ""
-    text_attr = getattr(result, "text", None)
-    if isinstance(text_attr, str):
-        return text_attr
+    # Real ToolResult.text joins all blocks eagerly; check the blocks before
+    # making a copy of a result that cannot fit the scrub budget.
     content = getattr(result, "content", None)
     if isinstance(content, list):
-        return "".join(
-            block_text
-            for block in content
-            if isinstance(block_text := getattr(block, "text", None), str)
-        )
-    return ""
+        from local_operator.redaction_shapes import REDACTION_MARKER
+
+        pieces: list[str] = []
+        size = 0
+        for block in content:
+            block_text = getattr(block, "text", None)
+            if isinstance(block_text, str) and block_text:
+                size += len(block_text)
+                if size > _TRACE_REDACT_SCAN_LIMIT:
+                    return REDACTION_MARKER
+                pieces.append(block_text)
+        return "".join(pieces)
+    text_attr = getattr(result, "text", None)
+    return text_attr if isinstance(text_attr, str) else ""
+
+
+def _trace_tool_label(event: Any, env_secrets: list[str]) -> str:
+    tool_name = _redact_and_truncate(
+        str(getattr(event, "tool_name", "") or "unknown"), _TRACE_SNIPPET_LIMIT, env_secrets
+    )
+    call_id = str(getattr(event, "tool_call_id", "") or "")
+    scrubbed_id = _redact_trace_field(call_id, env_secrets)
+    short_id = _printable_trace_text(" ".join(scrubbed_id.split()))[:_TRACE_CALL_ID_LEN]
+    return f"{tool_name} ({short_id})" if short_id else tool_name
 
 
 def format_event_trace(event: Any) -> str | None:
@@ -1581,34 +1593,16 @@ def format_event_trace(event: Any) -> str | None:
     env_secrets = _env_secret_values()
 
     if event_type == "tool_execution_start":
-        tool_name = str(getattr(event, "tool_name", "") or "unknown")
-        call_id = str(getattr(event, "tool_call_id", "") or "")
-        short_id = call_id[:_TRACE_CALL_ID_LEN]
-        id_part = f" ({short_id})" if short_id else ""
+        label = _trace_tool_label(event, env_secrets)
         args_raw = getattr(event, "args", None)
-        sanitized = _sanitize_arg_value({} if args_raw is None else args_raw, env_secrets)
-        args_json = json.dumps(
-            sanitized,
-            ensure_ascii=False,
-            separators=(", ", ": "),
-            default=str,
-        )
-        # Scrub serialized JSON BEFORE truncating so key-context shapes like
-        # ``{"api_key": "..."}`` are matched as a pair.
-        args_json = _truncate_text(
-            _redact_trace_text(args_json, env_secrets),
-            _TRACE_ARGS_JSON_LIMIT,
-        )
-        line = f"[tool:start] {tool_name}{id_part} {args_json}"
+        args_json = _format_trace_args({} if args_raw is None else args_raw, env_secrets)
+        line = f"[tool:start] {label} {args_json}"
 
     elif event_type == "tool_execution_end":
-        tool_name = str(getattr(event, "tool_name", "") or "unknown")
-        call_id = str(getattr(event, "tool_call_id", "") or "")
-        short_id = call_id[:_TRACE_CALL_ID_LEN]
-        id_part = f" ({short_id})" if short_id else ""
+        label = _trace_tool_label(event, env_secrets)
         result = getattr(event, "result", None)
         is_error = bool(getattr(event, "is_error", False) or getattr(result, "is_error", False))
-        status = "error" if is_error else "ok"
+        status = "error" if is_error else "returned"
         duration = getattr(event, "duration_s", None)
         if duration is None and result is not None:
             duration = getattr(result, "duration_s", None)
@@ -1620,7 +1614,7 @@ def format_event_trace(event: Any) -> str | None:
             else ""
         )
         tail = f" | {snippet}" if snippet else ""
-        line = f"[tool:end] {tool_name}{id_part} {status}{dur_part}{tail}"
+        line = f"[tool:end] {label} {status}{dur_part}{tail}"
 
     elif event_type == "output_validation":
         fmt = str(getattr(event, "format", "") or "")
@@ -1632,7 +1626,7 @@ def format_event_trace(event: Any) -> str | None:
         error_raw = str(getattr(event, "error", "") or "")
         parts = ["[output_validation]"]
         if fmt:
-            parts.append(fmt)
+            parts.append(_redact_and_truncate(fmt, _TRACE_SNIPPET_LIMIT, env_secrets))
         parts.append(f"attempt={attempt}/{max_attempts}")
         parts.append(f"status={status}")
         if error_raw:
@@ -1650,7 +1644,9 @@ def format_event_trace(event: Any) -> str | None:
             or (getattr(message, "model", None) if message is not None else None)
         )
         if model_id:
-            parts.append(f"model={model_id}")
+            parts.append(
+                f"model={_redact_and_truncate(str(model_id), _TRACE_SNIPPET_LIMIT, env_secrets)}"
+            )
         if usage is not None:
             in_tok = getattr(usage, "input_tokens", 0)
             cache_read = getattr(usage, "cache_read_tokens", 0)
@@ -1671,7 +1667,8 @@ def format_event_trace(event: Any) -> str | None:
         cut_off = str(getattr(event, "cut_off", "") or "")
         if error_raw:
             status = "aborted error" if aborted else "error"
-            model_part = f" model={failing_model}" if failing_model else ""
+            safe_model = _redact_and_truncate(failing_model, _TRACE_SNIPPET_LIMIT, env_secrets)
+            model_part = f" model={safe_model}" if safe_model else ""
             err_text = _redact_and_truncate(error_raw, _TRACE_SNIPPET_LIMIT, env_secrets)
             line = f"[agent:end] {status}{model_part} | {err_text}"
         elif aborted:
@@ -1691,7 +1688,7 @@ def format_event_trace(event: Any) -> str | None:
 
     # Final safety sweep guarantees single-line, redacted output even if a
     # secret spans formatted fields.
-    return " ".join(_redact_trace_text(line, env_secrets).splitlines())
+    return _printable_trace_text(" ".join(_redact_trace_text(line, env_secrets).splitlines()))
 
 
 def trace_events(
@@ -1718,6 +1715,12 @@ def trace_events(
 
     def _on_event(event: Any) -> None:
         try:
+            if (
+                stream is None
+                and target_logger is not None
+                and not target_logger.isEnabledFor(logging.INFO)
+            ):
+                return
             line = format_event_trace(event)
             if line is None:
                 return
@@ -1731,7 +1734,12 @@ def trace_events(
         except Exception:  # noqa: BLE001 — tracing must never break session dispatch
             pass
 
-    raw_unsub: Callable[[], None] | None = session.subscribe(_on_event)
+    # The attached viewer gives its first regular consumer sole ownership of
+    # the replay buffer. Tracing must not take that consumer's place.
+    observe = getattr(session, "_observe_events", None)
+    raw_unsub: Callable[[], None] | None = (
+        observe(_on_event) if callable(observe) else session.subscribe(_on_event)
+    )
     unsubscribed = False
 
     def _unsubscribe() -> None:

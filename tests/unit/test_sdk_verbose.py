@@ -21,10 +21,12 @@ from __future__ import annotations
 import io
 import json
 import logging
+import random
+import string
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, AsyncIterator, Callable
 
 import pytest
 
@@ -32,9 +34,14 @@ from local_operator import sdk
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentStartEvent,
+    ChatRequest,
     Message,
     MessageUpdateEvent,
     OutputValidationEvent,
+    StreamEndEvent,
+    StreamEvent,
+    StreamStartEvent,
+    StreamToolCallDelta,
     TextContent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
@@ -44,7 +51,7 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.redaction_shapes import REDACTION_MARKER
-from local_operator.session.spec import SessionRoots, SessionSpec
+from local_operator.session.spec import ApprovalPolicy, SessionRoots, SessionSpec
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -129,7 +136,7 @@ def test_format_tool_execution_start_bounds_wide_arg_payloads() -> None:
     assert line.endswith("...")
 
 
-def test_format_tool_execution_end_ok_and_error_with_duration() -> None:
+def test_format_tool_execution_end_returned_and_error_with_duration() -> None:
     ok_event = ToolExecutionEndEvent(
         tool_call_id="call_1234567890abcdef",
         tool_name="read",
@@ -145,7 +152,7 @@ def test_format_tool_execution_end_ok_and_error_with_duration() -> None:
     assert ok_line is not None
     assert "\n" not in ok_line
     assert "read" in ok_line
-    assert "ok" in ok_line
+    assert " returned " in ok_line
     assert "0.012s" in ok_line
     assert "first line second line" in ok_line
     assert "y" * 200 not in ok_line
@@ -169,6 +176,12 @@ def test_format_tool_execution_end_ok_and_error_with_duration() -> None:
     assert "error" in err_line
     assert "0.250s" in err_line
     assert "Permission denied: /etc/shadow" in err_line
+
+    # bash reports a process exit code in the text, not as a tool error.
+    ok_event.result.content = [TextContent(text="exit code: 7")]
+    returned = sdk.format_event_trace(ok_event)
+    assert returned is not None
+    assert " returned " in returned and "exit code: 7" in returned
 
 
 def test_format_output_validation_ok_retry_and_exhausted() -> None:
@@ -284,12 +297,12 @@ def test_format_event_trace_redacts_env_secrets_and_credential_shapes(
     secret_tok = "tok-super-secret-value-abcd"
     secret_pwd = "MyP@ssw0rdSecret!"
     secret_auth = "Basic dXNlcjpzZWNyZXRwYXNz"
-    short_val = "short12"  # 7 chars (< 8): must NOT mangle ordinary words
+    short_val = "short12"
     monkeypatch.setenv("CUSTOM_API_KEY", secret_key)
     monkeypatch.setenv("SERVICE_TOKEN", secret_tok)
     monkeypatch.setenv("DB_PASSWORD", secret_pwd)
     monkeypatch.setenv("HTTP_AUTHORIZATION", secret_auth)
-    monkeypatch.setenv("SHORT_TOKEN", short_val)
+    monkeypatch.setenv("SHORT_PASSWORD", short_val)
     monkeypatch.setenv("PUBLIC_APP_MODE", "ordinary_public_value_12345")
 
     start = ToolExecutionStartEvent(
@@ -309,7 +322,7 @@ def test_format_event_trace_redacts_env_secrets_and_credential_shapes(
     assert secret_auth not in start_line
     assert "raw_unregistered_bearer_token_999999" not in start_line
     assert REDACTION_MARKER in start_line
-    assert short_val in start_line
+    assert short_val not in start_line
     assert "ordinary_public_value_12345" in start_line
 
     # Error strings in tool_execution_end and agent_end must also be redacted.
@@ -360,6 +373,72 @@ def test_format_event_trace_redacts_secret_crossing_truncation_boundary(
 # --- trace_events helper ----------------------------------------------------------
 
 
+def test_format_event_trace_withholds_credential_subtrees_before_clipping() -> None:
+    value = "".join(random.Random(4427).choices(string.ascii_letters + string.digits, k=420))
+    event = ToolExecutionStartEvent(
+        tool_call_id="call_fixture",
+        tool_name="fixture",
+        args={"api_key": value, "nested": [{"db_password": {"unknown": [value]}}], "public": "ok"},
+    )
+
+    line = sdk.format_event_trace(event)
+    assert line is not None
+    assert value[:12] not in line
+    assert '"api_key": "' + REDACTION_MARKER + '"' in line
+    assert '"db_password": "' + REDACTION_MARKER + '"' in line
+    assert '"public": "ok"' in line
+
+
+def test_format_event_trace_scrubs_complete_name_value_pair() -> None:
+    value = "".join(random.Random(4428).choices(string.ascii_letters + string.digits, k=420))
+    event = ToolExecutionStartEvent(
+        tool_call_id="call_fixture",
+        tool_name="fixture",
+        args={"env": [{"value": value, "name": "DB_PASSWORD"}]},
+    )
+
+    line = sdk.format_event_trace(event)
+    assert line is not None
+    assert value[:12] not in line
+    assert f'"value": "{REDACTION_MARKER}"' in line
+    assert '"name": "DB_PASSWORD"' in line
+
+
+def test_format_event_trace_withholds_over_window_payload() -> None:
+    pem = "-----BEGIN PRIVATE KEY-----\nsynthetic-pem-body\n" + ("A" * 5000)
+    pem += "\n-----END PRIVATE KEY-----"
+    event = AgentEndEvent(error=pem)
+
+    line = sdk.format_event_trace(event)
+    assert line is not None
+    assert "synthetic-pem-body" not in line
+    assert "BEGIN PRIVATE KEY" not in line
+    assert REDACTION_MARKER in line
+
+
+def test_format_event_trace_redacts_call_id_before_shortening(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    value = "syntheticId943AbCd21"
+    monkeypatch.setenv("FIXTURE_API_KEY", value)
+    event = ToolExecutionStartEvent(tool_call_id=value, tool_name="fixture", args={})
+
+    line = sdk.format_event_trace(event)
+    assert line is not None
+    assert value[:12] not in line
+    assert REDACTION_MARKER in line
+
+
+def test_format_event_trace_does_not_emit_raw_control_characters() -> None:
+    controls = "\x1b[31m\x00\x07\x7f\x9b\u2028\u202e"
+    event = AgentEndEvent(error=f"left{controls}right")
+
+    line = sdk.format_event_trace(event)
+    assert line is not None
+    assert "left" in line and "right" in line
+    assert not any(char in line for char in controls if not char.isprintable())
+
+
 def test_trace_events_logs_to_default_logger_and_unsubscribes_idempotently(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -390,9 +469,7 @@ def test_trace_events_supports_stream_and_custom_logger() -> None:
     stub = _StubSession()
     buf = io.StringIO()
     unsub = sdk.trace_events(stub, stream=buf)
-    stub.emit(
-        OutputValidationEvent(format="json", attempt=2, max_attempts=3, ok=True)
-    )
+    stub.emit(OutputValidationEvent(format="json", attempt=2, max_attempts=3, ok=True))
     unsub()
 
     output = buf.getvalue().splitlines()
@@ -439,50 +516,113 @@ def test_trace_events_survives_broken_stream_without_breaking_dispatch() -> None
 
 @pytest.mark.asyncio
 async def test_open_session_verbose_default_silent_and_opt_in_traces_real_turn(
-    scratch: SessionRoots, caplog: pytest.LogCaptureFixture
+    scratch: SessionRoots, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    spec = SessionSpec(hosting="test", model="mock")
+    from local_operator.providers.clients import MockClient
 
-    # Default (verbose=False): completely silent on local_operator.sdk.
+    value = "qA!7-zX"  # Synthetic short env credential; only used in capture assertions.
+    control = "\x1b[31m"
+    monkeypatch.setenv("SDK_QA_PASSWORD", value)
+    path = Path(scratch.cwd) / "fixture.txt"
+    path.write_text(f"visible {value} {control}text\n", encoding="utf-8")
+    spec = SessionSpec(
+        hosting="test",
+        model="mock",
+        tools=("read", "bash"),
+        approvals=ApprovalPolicy.declared(("read", "bash")),
+    )
+    real_stream = MockClient.stream
+
+    async def tool_stream(
+        self: MockClient, request: ChatRequest, *args: Any, **kwargs: Any
+    ) -> AsyncIterator[StreamEvent]:
+        if request.wire_messages()[-1].role != "user":
+            async for event in real_stream(self, request, *args, **kwargs):
+                yield event
+            return
+        yield StreamStartEvent(response_id="fixture-response")
+        for index, (name, arguments) in enumerate(
+            [("read", {"path": str(path)}), ("bash", {"command": "exit 7"})]
+        ):
+            yield StreamToolCallDelta(index=index, id=f"call_{name}", name=name)
+            yield StreamToolCallDelta(index=index, argument_delta=json.dumps(arguments))
+        yield StreamEndEvent(stop_reason="toolUse", usage=Usage(input_tokens=1, output_tokens=1))
+
+    monkeypatch.setattr(MockClient, "stream", tool_stream)
     with caplog.at_level(logging.INFO, logger="local_operator.sdk"):
         async with sdk.open_session(spec, roots=scratch) as session:
-            await session.prompt("hello silent")
+            await session.prompt("read the fixture and exercise an exit status")
     assert not [rec for rec in caplog.records if rec.name == "local_operator.sdk"]
 
-    # verbose=True: emits real turn_end and agent_end trace lines via logging.
-    caplog.clear()
+    output = io.StringIO()
     with caplog.at_level(logging.INFO, logger="local_operator.sdk"):
         async with sdk.open_session(spec, roots=scratch, verbose=True) as session:
-            await session.prompt("hello verbose")
-            # Emit a tool_execution_start/end pair on the live session to verify
-            # tool traces flow through the same subscription too.
-            await session._emit(  # type: ignore[attr-defined]
-                ToolExecutionStartEvent(
-                    tool_call_id="call_live123456", tool_name="read", args={"path": "README.md"}
-                )
-            )
-            await session._emit(  # type: ignore[attr-defined]
-                ToolExecutionEndEvent(
-                    tool_call_id="call_live123456",
-                    tool_name="read",
-                    result=ToolResult(
-                        tool_call_id="call_live123456",
-                        tool_name="read",
-                        content=[TextContent(text="ok content")],
-                    ),
-                    duration_s=0.005,
-                )
-            )
-        # After exiting open_session, the trace subscription must be removed.
+            unsubscribe = sdk.trace_events(session, stream=output)
+            try:
+                await session.prompt("read the fixture and exercise an exit status")
+            finally:
+                unsubscribe()
         after_count = len([r for r in caplog.records if r.name == "local_operator.sdk"])
         await session._emit(AgentEndEvent())  # type: ignore[attr-defined]
         assert len([r for r in caplog.records if r.name == "local_operator.sdk"]) == after_count
 
     sdk_lines = [r.getMessage() for r in caplog.records if r.name == "local_operator.sdk"]
-    assert any("[turn:end]" in line for line in sdk_lines), sdk_lines
-    assert any("[agent:end]" in line and "completed" in line for line in sdk_lines), sdk_lines
-    assert any("[tool:start]" in line and "read" in line for line in sdk_lines), sdk_lines
-    assert any("[tool:end]" in line and "0.005s" in line for line in sdk_lines), sdk_lines
+    assert output.getvalue().splitlines() == sdk_lines
+    assert any(line.startswith("[turn:end]") for line in sdk_lines)
+    assert any(line.startswith("[agent:end] completed") for line in sdk_lines)
+    read_line = next(line for line in sdk_lines if line.startswith("[tool:end] read "))
+    assert "visible" in read_line and REDACTION_MARKER in read_line
+    assert value not in read_line and control not in read_line
+    assert all(char.isprintable() for char in read_line)
+    bash_line = next(line for line in sdk_lines if line.startswith("[tool:end] bash "))
+    assert " returned " in bash_line and "exit code: 7" in bash_line
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verbose", [False, True])
+async def test_open_session_attached_trace_preserves_backlog_and_logs_each_frame_once(
+    scratch: SessionRoots,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    verbose: bool,
+) -> None:
+    from local_operator.session.attached import AttachedSession
+
+    viewer = AttachedSession(
+        config_dir=scratch.config_dir, session_id="viewer", takeover_factory=lambda: None
+    )
+    viewer._ready_for_events = True
+    start = ToolExecutionStartEvent(tool_call_id="call_backlog", tool_name="read", args={})
+    before_subscribe = ToolExecutionStartEvent(
+        tool_call_id="call_pending", tool_name="read", args={}
+    )
+    live = ToolExecutionStartEvent(tool_call_id="call_live", tool_name="read", args={})
+    viewer._emit_or_buffer(start)
+
+    async def build(*args: Any, **kwargs: Any) -> AttachedSession:
+        return viewer
+
+    monkeypatch.setattr(sdk, "_build_session", build)
+    with caplog.at_level(logging.INFO, logger="local_operator.sdk"):
+        async with sdk.open_session(
+            SessionSpec(resume="viewer"), roots=scratch, mode="attach", verbose=verbose
+        ) as session:
+            viewer._emit_or_buffer(before_subscribe)
+            async with sdk.events(session) as stream:
+                viewer._emit_or_buffer(live)
+                assert await anext(stream) == start
+                assert [await anext(stream) for _ in range(2)] == [before_subscribe, live]
+        viewer._emit_or_buffer(live)
+
+    lines = [rec.getMessage() for rec in caplog.records if rec.name == "local_operator.sdk"]
+    assert lines == (
+        [
+            f"[tool:start] read ({event.tool_call_id}) {{}}"
+            for event in (start, before_subscribe, live)
+        ]
+        if verbose
+        else []
+    )
 
 
 @pytest.mark.asyncio
