@@ -270,7 +270,7 @@ def test_backpressured_descriptor_abandons_exact_prefix(attribute, stop, monkeyp
                 assert result.reason == ("deadline" if stop == "deadline" else "cancelled")
                 assert 0 < result.accepted_bytes == sum(accepted) < len(sealed)
                 raw = receive_all(peer)
-                assert raw == sealed[:result.accepted_bytes]
+                assert raw == sealed[: result.accepted_bytes]
                 with pytest.raises(ConnectionError):
                     FrameReader(peer, buffered=raw).read_record_payload(time.monotonic() + 1)
                 assert original.fileno() >= 0 and original.recv(1) == b""
