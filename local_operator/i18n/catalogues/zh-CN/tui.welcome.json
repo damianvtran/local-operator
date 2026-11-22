@@ -29,5 +29,5 @@
   "tui.welcome.tip.shell": "!在空输入框运行shell命令",
   "tui.welcome.tip.subagents": "要求并行工作，智能体就会派出子智能体",
   "tui.welcome.tip.team": "/team <name> <message>把工作发给manager",
-  "tui.welcome.tip.transcript_scroll": "⌥J/K可在输入时滚动对话"
+  "tui.welcome.tip.transcript_scroll": "option+k/j可在输入时滚动对话"
 }

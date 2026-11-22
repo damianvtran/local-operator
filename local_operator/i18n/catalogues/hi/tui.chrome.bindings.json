@@ -3,7 +3,7 @@
   "tui.chrome.bindings.legend_app_ctrl_b": "सत्र सूची दिखाएँ या छिपाएँ",
   "tui.chrome.bindings.legend_app_ctrl_c": "टर्न बाधित करें; दो बार: बाहर",
   "tui.chrome.bindings.legend_app_ctrl_g": "उप-एजेंट पैनल क्रम से बदलें",
-  "tui.chrome.bindings.legend_app_ctrl_home_end": "ट्रांसक्रिप्ट के शुरू या अंत पर जाएँ (alt+g/G)",
+  "tui.chrome.bindings.legend_app_ctrl_home_end": "शुरू/अंत; option+k/j या ctrl+]/\\ स्क्रॉल",
   "tui.chrome.bindings.legend_app_ctrl_l": "ट्रांसक्रिप्ट साफ़ करें (इतिहास रहेगा)",
   "tui.chrome.bindings.legend_app_ctrl_n_ctrl_s": "नया सत्र शुरू करें / पुराना फिर शुरू करें",
   "tui.chrome.bindings.legend_app_ctrl_t": "कार्य सूची पैनल फैलाएँ या समेटें",

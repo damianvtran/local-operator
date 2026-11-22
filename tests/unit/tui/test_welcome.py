@@ -1430,11 +1430,17 @@ def test_a_narrow_terminal_omits_the_tip_rather_than_wrapping_it() -> None:
 def test_every_tip_names_something_this_build_answers() -> None:
     """A splash advertising a command the app rejects is worse than a blank row,
     and this is the one screen a first-run user reads word for word — so every
-    leading ``/token`` is checked against the real command table."""
+    leading ``/token`` is checked against the real command table.
+
+    The lookbehind is load-bearing: a slash keyboard-pair separator
+    (`option+k/j`) is not a command, and the bare ``/[a-z]+`` pattern read the
+    `j` as one. A command token starts a word, so a slash preceded by another
+    word character is part of a chord, not a command.
+    """
     known = {command.name for command in SLASH_COMMANDS}
     known |= {alias for command in SLASH_COMMANDS for alias in command.aliases}
     for tip in TIPS:
-        for token in re.findall(r"/[a-z]+", tip):
+        for token in re.findall(r"(?<!\w)/[a-z]+", tip):
             assert token[1:] in known, f"{tip!r} names a command that does not exist: {token}"
 
 

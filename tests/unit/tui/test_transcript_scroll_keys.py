@@ -13,6 +13,8 @@ text and selection. Nothing here asserts a duration.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -23,8 +25,9 @@ from textual.widgets import Static
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.subagent_view import SubagentTranscriptView
 from local_operator.tui.widgets.transcript import (
-    JUMP_CHIP_ICON_WIDTH,
-    JUMP_CHIP_SHORT_WIDTH,
+    JUMP_CHIP_GLYPH,
+    JUMP_CHIP_PAD_CELLS,
+    JUMP_CHIP_RIGHT_MARGIN,
     JumpToLatestChip,
     TranscriptView,
     UserBlock,
@@ -34,6 +37,24 @@ from tests.unit.tui.test_band_panels import FakeSession as BandFakeSession
 from tests.unit.tui.test_band_panels import _async_factory, _fake_jobs, _Job
 
 DRAFT = "half a thought"
+
+
+@pytest.fixture(autouse=True)
+def _own_analytics_writer(tmp_path: Path) -> Iterator[None]:
+    """Stop the process-wide analytics writer this module's send path starts.
+
+    A real ``_submit_prompt`` lazily starts ``lo-analytics-writer`` (a daemon
+    thread), and the suite's thread-leak reporter pins it on whichever test
+    started it — here, ``test_sending_while_scrolled_up_snaps_to_the_bottom``.
+    Same shape as ``tests/unit/aida/test_cos_prompt_name.py``: give the module
+    its own isolated store and close the writer at teardown (QA round 1, Q1).
+    """
+    from local_operator.analytics.recorder import reset_recorder_for_test
+    from local_operator.analytics.store import AnalyticsStore
+
+    recorder = reset_recorder_for_test(AnalyticsStore(tmp_path / "analytics-test.db"))
+    yield
+    recorder.close()
 
 
 async def _settle(pilot: Any, times: int = 4) -> None:
@@ -219,21 +240,41 @@ async def test_the_chip_shifts_no_layout_and_only_its_own_box_takes_clicks() -> 
         chip.display = True
         await _settle(pilot)
 
-        # Content-sized: the box is exactly its label, so the last row of
-        # conversation text beside it stays clickable.
-        assert chip.size.width == cell_len(chip._label), (chip.size.width, chip._label)
-        assert chip.region.x > view.scrollable_content_region.width - chip.size.width - 3
+        # Content-sized PLATE: the label plus one cell of padding either side
+        # (and the right margin), so the last row of conversation text beside
+        # it stays clickable and the label never abuts covered text.
+        assert chip.outer_size.width == cell_len(chip._label) + 2 * JUMP_CHIP_PAD_CELLS, (
+            chip.outer_size.width,
+            chip._label,
+        )
+        region = view.scrollable_content_region
+        assert chip.region.right == region.right - JUMP_CHIP_RIGHT_MARGIN
+        assert chip.outer_size.width < region.width
 
 
-def test_the_label_sheds_with_the_content_width() -> None:
+def test_the_label_sheds_exactly_when_its_plate_no_longer_fits() -> None:
+    """The rungs are the labels' widths, not constants (design round 1, D4).
+
+    The full label is 16 cells in `en` but 22 in `es`/`fr`, so a fixed
+    24-cell rung shed it early and a longer translation would shed the wrong
+    way. Swept over 18..40 cells: the widest label whose PLATE (label plus
+    both padding cells) still leaves the one-cell right margin is the one
+    painted, and nothing ever asks for more room than the region has.
+    """
     chip = JumpToLatestChip()
-    assert chip.label_for_width(80) == "↓ Jump to latest"
-    assert chip.label_for_width(JUMP_CHIP_SHORT_WIDTH - 1) == "↓ Latest"
-    assert chip.label_for_width(JUMP_CHIP_ICON_WIDTH - 1) == "↓"
-    # Even the icon rung carries the sentence as its tooltip, so a narrow
-    # frame still has the accessible words.
-    chip.apply_label(JUMP_CHIP_ICON_WIDTH - 1)
-    assert chip.tooltip == "↓ Jump to latest"
+    full = f"{JUMP_CHIP_GLYPH} Jump to latest"
+    short = f"{JUMP_CHIP_GLYPH} Latest"
+    overhead = 2 * JUMP_CHIP_PAD_CELLS + JUMP_CHIP_RIGHT_MARGIN
+    for width in range(18, 41):
+        label = chip.label_for_width(width)
+        assert cell_len(label) + overhead <= width, (width, label)
+        expected = full if cell_len(full) + overhead <= width else short
+        assert label == expected, (width, label, expected)
+    # The labelling still bottoms out at the glyph when even the short label
+    # cannot fit, and the tooltip keeps the sentence (the accessible words).
+    assert chip.label_for_width(cell_len(short)) == JUMP_CHIP_GLYPH
+    chip.apply_label(cell_len(short))
+    assert chip.tooltip == f"{JUMP_CHIP_GLYPH} Jump to latest"
 
 
 @pytest.mark.asyncio
@@ -424,6 +465,44 @@ async def test_the_subagent_page_scrolls_its_own_transcript() -> None:
 
         assert body.scroll_y == before - 2, "the visible page's transcript moved"
         assert main.scroll_y == main_y, "the hidden parent transcript did not"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_home_still_retires_a_wedged_parent_lease_with_a_page_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``ctrl+home``'s lease recovery survives an open subagent page (F3).
+
+    The round-1 cut skipped ``_break_abandoned_paging_lease`` whenever a
+    subagent page was open, which removed the parent transcript's documented
+    keyboard recovery for a wedged fetch. The helper is a no-op when nothing
+    is leased, so the call must be unconditional; this pins it while the page
+    (not the parent) is the scroll target.
+    """
+    session = BandFakeSession()
+    session.jobs = _fake_jobs(_Job("sub-1", "audit the ingest path"))
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        app._append_block(UserBlock("audit the ingest path"))
+        app._refresh_band()
+        await _settle(pilot)
+        app._open_subagent_view("sub-1")
+        await _settle(pilot, 6)
+        page = app._subagent_view
+        assert page is not None
+
+        calls: list[Any] = []
+        monkeypatch.setattr(
+            app, "_break_abandoned_paging_lease", lambda source: calls.append(source) or False
+        )
+        await pilot.press("ctrl+home")
+        await _settle(pilot, 2)
+
+        assert calls == [app._interaction], "the parent's lease retirement is not skipped"
 
 
 def test_the_chip_is_a_transcript_child_not_a_screen_chip() -> None:

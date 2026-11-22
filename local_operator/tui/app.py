@@ -49619,10 +49619,13 @@ class OperatorApp(App[None]):
         The page under the reader's eyes is the target: an open subagent page
         owns the keyboard and its body is the transcript being read, so
         reaching for the hidden parent's top would be a no-op on the visible
-        frame.
+        frame. The parent's abandoned paging lease is retired FIRST, page open
+        or not: ``_break_abandoned_paging_lease`` is a no-op when nothing is
+        leased, and this chord is the documented keyboard recovery for a
+        wedged fetch — gating it on the page would remove the only recovery
+        for the parent transcript (review round 1, F3).
         """
-        if self._subagent_view is None:
-            self._break_abandoned_paging_lease(self._interaction)
+        self._break_abandoned_paging_lease(self._interaction)
         self._reader_transcript_view().action_scroll_home()
 
     def action_transcript_end(self) -> None:
@@ -59017,11 +59020,19 @@ class OperatorApp(App[None]):
         # resume notice that appears when the reader is already stuck. One row
         # for both ends, naming what each is FOR rather than the direction:
         # "top" is where a resumed conversation's older history is loaded from.
-        # The `alt+g`/`alt+shift+g` pair rides the same two bindings, so it is
-        # folded into this row's key and description rather than spending a
-        # second row this zero-headroom frame does not have. 65 composed cells
-        # against the 74-cell ceiling this block documents.
-        lines.append(_key_row("ctrl+home/end", "jump to the transcript top or end; alt+g/G too"))
+        # The row also carries the two-row scroll pair and its no-setup
+        # fallback: `alt+<letter>` chords are invisible until the user learns
+        # them (the splash tip is one of eighteen, rotating), and on a terminal
+        # that does not send Meta they type a character instead — so the
+        # working `ctrl+]`/`ctrl+\` pair is named HERE, where a stuck reader
+        # already looks, rather than only on a Hotkeys page eight sections
+        # down (UX round 1, U1/U2). The `alt+g`/`alt+shift+g` mnemonic pair is
+        # left to the guide: ctrl+home/end already says what the row does, and
+        # the scroll chords earn the cells. Lowercase `option` matches the
+        # block's own `option+left/right` rows (design round 1, D6).
+        # 66 composed cells (20-cell name column + 46) against the 74-cell
+        # ceiling this block documents.
+        lines.append(_key_row("ctrl+home/end", "jump to top/end; scroll option+k/j or ctrl+]/\\"))
         # The second row is the KEYBOARD half of the head notice's offer, and
         # it is here rather than in the notice for a reason both the design and
         # UX rounds endorsed: the copy must not recite a chord, and `ctrl+home`

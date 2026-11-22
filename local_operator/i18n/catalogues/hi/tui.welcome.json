@@ -29,5 +29,5 @@
   "tui.welcome.tip.shell": "! खाली इनपुट फ़ील्ड में एक शेल कमांड चलाता है",
   "tui.welcome.tip.subagents": "समानांतर काम माँगें और एजेंट कई उप-एजेंट लगा देता है",
   "tui.welcome.tip.team": "/team <name> <message> मैनेजर को काम भेजता है",
-  "tui.welcome.tip.transcript_scroll": "⌥J/K टाइप करते समय बातचीत स्क्रॉल करता है"
+  "tui.welcome.tip.transcript_scroll": "option+k/j टाइप करते समय बातचीत स्क्रॉल करता है"
 }

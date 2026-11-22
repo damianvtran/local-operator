@@ -127,6 +127,26 @@ def test_danger_reads_on_its_own_tint(name: str) -> None:
     )
 
 
+def test_the_jump_chip_reads_on_its_plate(name: str | None = None) -> None:
+    """The transcript's ``↓ Jump to latest`` chip pairs ``fg`` with ``overlay``.
+
+    Design round 1 (D2): the first cut painted the accent on ``raised``, which
+    is 3.96:1 on the brand LIGHT ramp — under the repo's own 4.0 state-hue
+    floor and under AA — and `_FG_FLOORS` could not catch it because the chip's
+    ground is the elevation rung, not ``bg``/``surface``. The chip is a
+    control, so its ink is the neutral ``fg`` and the plate is ``overlay``
+    (D1/D3); this pins the pair at AA on every registered ramp, INCLUDING the
+    host-derived ones (`test_host_theme.py` calls these checks by name).
+    """
+    for name in ([name] if name else _ALL_THEMES):
+        tokens = theme.theme_spec(name).tokens
+        ratio = contrast(tokens["fg"], tokens["overlay"])
+        assert ratio >= 4.5, (
+            f"{name}: the jump chip's fg {tokens['fg']} on overlay {tokens['overlay']}: "
+            f"{ratio:.2f} < 4.5 — the chip label is unreadable on its own plate"
+        )
+
+
 def test_the_ask_panel_reads_on_its_own_ground(name: str | None = None) -> None:
     """The ask drawer's state inks pair with ITS ground, not with `bg`/`surface`.
 

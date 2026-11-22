@@ -790,3 +790,38 @@ def test_the_transcript_scroll_rows_are_registered_and_reach_their_actions() -> 
         action = keymap.BY_ID[action_id]
         assert (action.scope, action.action, action.default) == ("app", method, default)
         assert callable(getattr(OperatorApp, f"action_{method}"))
+
+
+def test_only_the_transcript_rows_accept_a_printable_option_chord() -> None:
+    """``<modifier>+<printable>`` is scoped to the rows the editor claims (F2).
+
+    ``alt+k`` is not a Textual ``Keys`` member, so the transcript defaults
+    needed the widened grammar — but widening it for EVERY app row turns a
+    save-time refusal into a silent dead binding: ``keymap.quick_send`` on
+    ``alt+z`` would save and then type ``z`` into the composer, because no
+    editor claim covers that action (``Editor._on_key`` claims exactly the
+    ``keymap_transcript_`` ids). Measured against the real vocabulary: the
+    baseline refused it, so the refusals below are the pre-PR behaviour.
+    """
+    assert keymap.validate_key("alt+z", action_id="keymap.transcript_up") is None
+    assert keymap.validate_key("alt+l", action_id="keymap.transcript_half_down") is None
+    assert keymap.validate_key("alt+z") is not None, "no action id must not widen"
+    for action_id in ("keymap.quick_send", "keymap.new_session", "keymap.resume"):
+        assert keymap.validate_key("alt+z", action_id=action_id) is not None, action_id
+    # The punctuation fallbacks are real ``Keys`` members, so they were and
+    # remain valid for every app row — the gate is on the widening, not on
+    # what Textual can already name.
+    assert keymap.validate_key("ctrl+right_square_bracket", action_id="keymap.quick_send") is None
+
+
+def test_key_display_spells_the_punctuation_chords_as_keycaps() -> None:
+    """`/settings` → Hotkeys must not print Textual's internal names (D5).
+
+    The row's value goes through this ONE app-scope display path, so the two
+    non-keycap names are mapped here rather than on one page: a reader who is
+    told `ctrl+]` in /help and the docs must find the same chord on the remap
+    page, not `ctrl+right_square_bracket`.
+    """
+    assert keymap.format_key_display("alt+k,ctrl+right_square_bracket") == "alt+k,ctrl+]"
+    assert keymap.format_key_display("ctrl+backslash") == "ctrl+\\"
+    assert keymap.format_key_display("ctrl+home") == "ctrl+home"

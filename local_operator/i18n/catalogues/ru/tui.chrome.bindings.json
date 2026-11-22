@@ -3,7 +3,7 @@
   "tui.chrome.bindings.legend_app_ctrl_b": "показать или скрыть список сессий",
   "tui.chrome.bindings.legend_app_ctrl_c": "прервать ход; дважды — выход",
   "tui.chrome.bindings.legend_app_ctrl_g": "панель субагентов по кругу",
-  "tui.chrome.bindings.legend_app_ctrl_home_end": "к началу или концу транскрипта (alt+g/G)",
+  "tui.chrome.bindings.legend_app_ctrl_home_end": "к началу/концу; прокрутка option+k/j или ctrl+]/\\",
   "tui.chrome.bindings.legend_app_ctrl_l": "очистить транскрипт (история цела)",
   "tui.chrome.bindings.legend_app_ctrl_n_ctrl_s": "новая сессия / возобновить сессию",
   "tui.chrome.bindings.legend_app_ctrl_t": "развернуть/свернуть панель задач",

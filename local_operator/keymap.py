@@ -547,8 +547,22 @@ def alternates(text: str) -> frozenset[str]:
 #: Modifier names Textual puts on a key before the base key name.
 _KEY_MODIFIERS = frozenset({"alt", "ctrl", "shift", "super"})
 
+#: The ONLY action ids whose grammar accepts ``<modifier>+<printable>``.
+#:
+#: The transcript scroll rows need it: their default chords are ``alt+<letter>``,
+#: which Textual delivers but its ``Keys`` vocabulary does not enumerate, and
+#: ``widgets/editor.py`` claims exactly those ids (its ``keymap_transcript_``
+#: prefix, the same spelling) from the live binding map so the letter is not
+#: inserted into the draft. Every OTHER app row must keep the old refusal:
+#: accepting ``alt+z`` for, say, ``keymap.quick_send`` would save cleanly and
+#: then type ``z``, because no editor claim covers it — a dead binding the
+#: user only discovers when the key never fires (review round 1, F2).
+_PRINTABLE_CHORD_ID_PREFIX = "keymap.transcript_"
 
-def _is_valid_single_key(key: str, vocabulary: frozenset[str]) -> bool:
+
+def _is_valid_single_key(
+    key: str, vocabulary: frozenset[str], *, allow_printable_chord: bool = False
+) -> bool:
     """Whether ``key`` names something a terminal can actually send."""
     if not key:
         return False
@@ -560,10 +574,12 @@ def _is_valid_single_key(key: str, vocabulary: frozenset[str]) -> bool:
     # delivers it, yet it is not a ``Keys`` member, so the vocabulary branch
     # alone refused the transcript-scroll defaults and every user remap onto a
     # chord the runtime honours. Accept exactly the shape Textual itself
-    # normalizes: known modifiers in front of one printable character.
+    # normalizes: known modifiers in front of one printable character — and
+    # only for the actions whose editor claim makes that chord real.
     *modifiers, base = key.split("+")
     if (
-        modifiers
+        allow_printable_chord
+        and modifiers
         and all(modifier in _KEY_MODIFIERS for modifier in modifiers)
         and len(base) == 1
         and base.isprintable()
@@ -617,7 +633,11 @@ def validate_key(value: Any, *, scope: str = "app", action_id: str | None = None
             # settings row, so it is refused with the reason rather than
             # accepted as a technically-valid key.
             return "a plain character types into the composer — add ctrl, alt or super"
-        if not _is_valid_single_key(part, vocabulary):
+        if not _is_valid_single_key(
+            part,
+            vocabulary,
+            allow_printable_chord=(action_id or "").startswith(_PRINTABLE_CHORD_ID_PREFIX),
+        ):
             return "not a key this terminal can send — try ctrl+n, f5, or press a key to capture"
     return None
 
@@ -1133,17 +1153,42 @@ def effective_key(action: KeyAction, values: Mapping[str, Any]) -> str:
     return resolved.get(action.id, action.default)
 
 
+#: Textual key names that are not keycaps a user can find on a keyboard,
+#: mapped to the spelling `/help` and the docs use for the same chord.
+_DISPLAY_KEY_ALIASES = {
+    "left_square_bracket": "[",
+    "right_square_bracket": "]",
+    "backslash": "\\",
+}
+
+
 def format_key_display(key: str) -> str:
     """``key`` in Textual's own footer vocabulary (``escape`` -> ``esc``).
 
     Routed through ``textual.keys.format_key`` so the settings page, the tips
-    and Textual's own surfaces cannot spell the same key two ways.
+    and Textual's own surfaces cannot spell the same key two ways. Two of its
+    names are not keycaps a user can find on a keyboard —
+    ``ctrl+right_square_bracket`` and ``ctrl+backslash`` — so those are
+    spelled the way `/help` and the docs spell the same chords (``ctrl+]``,
+    ``ctrl+\\``). This is the ONE app-scope display path (`/settings` →
+    Hotkeys, capture echoes and every tip go through it), which is why the
+    alias belongs here and not on one page (design round 1, D5).
     """
     try:
         from textual.keys import format_key
     except Exception:  # noqa: BLE001 — no Textual: the raw spelling is honest
         return key
-    return ",".join(format_key(part) for part in key.split(",") if part)
+    shown: list[str] = []
+    for part in key.split(","):
+        if not part:
+            continue
+        formatted = format_key(part)
+        for name, glyph in _DISPLAY_KEY_ALIASES.items():
+            if formatted == name or formatted.endswith("+" + name):
+                formatted = formatted[: -len(name)] + glyph
+                break
+        shown.append(formatted)
+    return ",".join(shown)
 
 
 def display_key(value: str, *, scope: str = "app", platform: str | None = None) -> str:

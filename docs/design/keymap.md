@@ -879,6 +879,15 @@ are on the `/settings` → Hotkeys page:
 | `keymap.transcript_half_up` | `alt+u` | half a viewport up |
 | `keymap.transcript_half_down` | `alt+d` | half a viewport down |
 
+The table names the STORED ids (`alt+k`), which is what `lop config edit` and
+`/settings` → Hotkeys take. The UI copy reads `option+k` for the same chord:
+the `/help` block already spells the modifier that way in its
+`option+left/right` and `option+up/down` rows, and one surface with two
+spellings is a defect (design round 1, D6). `format_key_display` owns that
+display path for every app-scope key, which is also where Textual's
+non-keycap names are mapped (`right_square_bracket` → `]`, `backslash` → `\`,
+D5).
+
 `ctrl+home`/`ctrl+end` keep their jobs and gain `alt+g`/`alt+shift+g` on the
 same two fixed bindings (top/end are not remappable rows; two more persisted
 ids would cost eight translated settings strings for keys the arrows already
@@ -898,8 +907,12 @@ claim so there is one rule rather than two.
 
 **Clause 4.** Option chords require the terminal to send Meta (`Ghostty`:
 `macos-option-as-alt = true`; iTerm2: Left Option = Esc+; Terminal.app: "Use
-Option as Meta key"), which is why the `ctrl` fallback exists and why `/help`,
-the splash and `docs/guide/tui.md` say so.
+Option as Meta key"), which is why the `ctrl` fallback exists. The fallback is
+named where a reader looks without leaving the conversation: the same `/help`
+`ctrl+home/end` row carries `scroll option+k/j or ctrl+]/\\`, and the `?`
+legend row carries the same pair — replacing an earlier claim that the splash
+named it (UX round 1, U2). `docs/guide/tui.md` carries the setup steps and the
+fallback together.
 
 ### E.5 A leader key is an extension point, not scope
 

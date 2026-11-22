@@ -29,5 +29,5 @@
   "tui.welcome.tip.shell": "! trên ô nhập trống chạy lệnh shell",
   "tui.welcome.tip.subagents": "Yêu cầu chạy song song, tác nhân tách ra các tác nhân con",
   "tui.welcome.tip.team": "/team <name> <message> gửi việc cho manager",
-  "tui.welcome.tip.transcript_scroll": "⌥J/K cuộn cuộc trò chuyện khi bạn đang nhập"
+  "tui.welcome.tip.transcript_scroll": "option+k/j cuộn cuộc trò chuyện khi bạn đang nhập"
 }

@@ -275,16 +275,41 @@ TranscriptView {
  * would steal the click target on the last line of conversation text, and
  * the probe behind this feature measured exactly that. The view sets the
  * horizontal offset per resize (right edge, one cell in) because `dock`
- * alone pins the left edge. */
+ * alone pins the left edge.
+ *
+ * Ink and plate are deliberate, and neither is the accent. The accent means
+ * "this is what the turn is on" and its five-site list is exhaustive (this
+ * file's header); a chip that appears mid-stream beside the status band's
+ * running spinner would be a sixth green saying a different thing (design
+ * round 1, D1). It was also unreadable on the brand light ramp: `accent` on
+ * `raised` measured 3.96:1, under the repo's own 4.0 state-hue floor (D2).
+ * `fg` on `overlay` measures 11.30:1 dark / 10.92:1 light.
+ *
+ * `overlay`, not `raised`: over a full-width last row, `raised` is one
+ * elevation step from the ground and the text it hides is 10x louder than
+ * the plate, so the label read as truncated text rather than an overlay.
+ * `overlay` is the rung that separates from `bg` over ink, and one cell of
+ * padding either side keeps the label from abutting covered content (D3). */
 TranscriptView > JumpToLatestChip {
     layer: chip;
     dock: bottom;
     width: auto;
     height: 1;
-    padding: 0;
+    padding: 0 1;
     margin: 0;
-    background: $lo-raised;
-    color: $lo-accent;
+    background: $lo-overlay;
+    color: $lo-fg;
+    /* A click target answers the pointer before the click, like ToolCard.
+     * Textual walks this rule on mouse events and emits OSC 22; terminals
+     * that do not speak it ignore it silently. */
+    pointer: pointer;
+}
+
+TranscriptView > JumpToLatestChip:hover {
+    /* The plate already sits on the top elevation rung, so the hover answer
+     * is an ink lift rather than a second background step (design round 1,
+     * NIT2 — the chip was the only clickable surface with no hover state). */
+    text-style: bold;
 }
 
 /* Blocks: zero outer margin, zero padding — no declarations here by design

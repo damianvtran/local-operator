@@ -29,5 +29,5 @@
   "tui.welcome.tip.shell": "! on an empty composer runs a shell command",
   "tui.welcome.tip.subagents": "Ask for parallel work and the agent fans out subagents",
   "tui.welcome.tip.team": "/team <name> <message> sends work to the manager",
-  "tui.welcome.tip.transcript_scroll": "⌥J/K scrolls the chat while you type"
+  "tui.welcome.tip.transcript_scroll": "option+k/j scrolls the chat while you type"
 }

@@ -6929,11 +6929,15 @@ def needs_gap_above(
 #: projection"). The words around it are the translated part.
 JUMP_CHIP_GLYPH = "↓"
 
-#: Content widths (cells) at which the chip sheds its sentence, widest first.
-#: Below the last rung the glyph alone is the label and the tooltip carries
-#: the words; the click target and the action do not change.
-JUMP_CHIP_SHORT_WIDTH = 24
-JUMP_CHIP_ICON_WIDTH = 12
+#: Horizontal plate padding either side of the label (`padding: 0 1` in the
+#: sheet) — one cell so the label never abuts the text the plate covers. The
+#: offset arithmetic and the label rungs BOTH derive from this number, so the
+#: painted plate and the maths the view uses cannot drift.
+JUMP_CHIP_PAD_CELLS = 1
+
+#: Cells kept clear on the right, inside the content region, so the plate
+#: never touches the permanently reserved scrollbar column (D21).
+JUMP_CHIP_RIGHT_MARGIN = 1
 
 
 class JumpToLatestChip(Static):
@@ -6966,12 +6970,23 @@ class JumpToLatestChip(Static):
         self.display = False
 
     def label_for_width(self, width: int) -> str:
-        """The widest label that fits ``width`` cells, glyph included."""
-        if width < JUMP_CHIP_ICON_WIDTH:
-            return JUMP_CHIP_GLYPH
-        if width < JUMP_CHIP_SHORT_WIDTH:
-            return f"{JUMP_CHIP_GLYPH} {_t(tui_transcript.jump_to_latest_short())}"
-        return f"{JUMP_CHIP_GLYPH} {_t(tui_transcript.jump_to_latest())}"
+        """The widest label whose PLATE fits ``width`` cells, glyph included.
+
+        The rungs are derived from the labels' own cell widths, not from fixed
+        content-width constants: the full label is 16 cells in `en` but 22 in
+        `es`/`fr`, and the old 24/12 constants showed the full label only from
+        24 cells even where it fitted at 17 (design round 1, D4). ``width`` is
+        the transcript's content region; the plate spends two padding cells
+        and the right margin on top of the label.
+        """
+        available = width - (2 * JUMP_CHIP_PAD_CELLS) - JUMP_CHIP_RIGHT_MARGIN
+        full = f"{JUMP_CHIP_GLYPH} {_t(tui_transcript.jump_to_latest())}"
+        if cell_len(full) <= available:
+            return full
+        short = f"{JUMP_CHIP_GLYPH} {_t(tui_transcript.jump_to_latest_short())}"
+        if cell_len(short) <= available:
+            return short
+        return JUMP_CHIP_GLYPH
 
     def apply_label(self, width: int) -> str:
         """Set the fitting label and return it (the width the view offsets by).
@@ -9130,12 +9145,12 @@ class TranscriptView(ScrollableContainer):
         which label fits, and where it docks — cannot be updated by one route
         and missed by another.
 
-        The offset is arithmetic on the label we just painted (`cell_len`) rather
-        than the chip's laid-out width: this runs inside `_size_updated`, and
-        reading a child's geometry there would answer about the PREVIOUS frame —
-        the class of stale measurement this transcript's own comments warn
-        about. `width: auto` on a borderless one-row Static is exactly its
-        label's cell width, so the arithmetic is the same answer.
+        The offset is arithmetic on the label we just painted (`cell_len`)
+        rather than the chip's laid-out width: this runs inside `_size_updated`,
+        and reading a child's geometry there would answer about the PREVIOUS
+        frame — the class of stale measurement this transcript's own comments
+        warn about. `width: auto` on a borderless one-row Static is exactly its
+        label plus the declared padding, so the arithmetic is the same answer.
         """
         chip = self._jump_chip
         if chip is None or not chip.is_mounted:
@@ -9147,7 +9162,8 @@ class TranscriptView(ScrollableContainer):
             return
         width = self.scrollable_content_region.width
         label = chip.apply_label(width)
-        offset = max(0, width - cell_len(label) - 1)
+        plate = cell_len(label) + 2 * JUMP_CHIP_PAD_CELLS
+        offset = max(0, width - plate - JUMP_CHIP_RIGHT_MARGIN)
         if offset != self._jump_chip_offset:
             self._jump_chip_offset = offset
             chip.styles.offset = (offset, 0)
