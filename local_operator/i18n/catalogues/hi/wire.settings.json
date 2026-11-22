@@ -771,7 +771,7 @@
   "wire.settings.tool_approval_mode.choice.ask.description": "लिखने/चलाने वाले टूल से पहले पूछें",
   "wire.settings.tool_approval_mode.choice.ask.label": "पूछें",
   "wire.settings.tool_approval_mode.choice.auto.description": "बिना पूछे चलाएँ",
-  "wire.settings.tool_approval_mode.choice.auto.label": "auto",
+  "wire.settings.tool_approval_mode.choice.auto.label": "स्वचालित",
   "wire.settings.tool_approval_mode.help": "ढीला करने के लिए इसी सत्र से लिखना पड़ेगा — /approvals auto।",
   "wire.settings.tool_approval_mode.label": "टूल स्वीकृति मोड",
   "wire.settings.tools.description": "बिल्ट-इन टूल कैसे चलते हैं।",

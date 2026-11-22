@@ -771,7 +771,7 @@
   "wire.settings.tool_approval_mode.choice.ask.description": "preguntar antes de las herramientas de escritura/ejecución",
   "wire.settings.tool_approval_mode.choice.ask.label": "preguntar",
   "wire.settings.tool_approval_mode.choice.auto.description": "ejecutarlas sin preguntar",
-  "wire.settings.tool_approval_mode.choice.auto.label": "auto",
+  "wire.settings.tool_approval_mode.choice.auto.label": "automático",
   "wire.settings.tool_approval_mode.help": "Aflojarlo requiere un cambio en esta sesión — /approvals auto.",
   "wire.settings.tool_approval_mode.label": "Modo de aprobación de herramientas",
   "wire.settings.tools.description": "Cómo se ejecutan las herramientas integradas.",

@@ -1,0 +1,75 @@
+{
+  "locale": "hi",
+  "role": "translator",
+  "agent": "approval-labels-author-hi",
+  "session_id": "c456dba3488d",
+  "actual_author_model": "openai/gpt-6.1-sol",
+  "host_fallback": {
+    "from": "anthropic/claude-opus-5-5",
+    "to": "openai/gpt-6.1-sol",
+    "reason": "provider failure: quota",
+    "source": "host model-switch message before translation authoring"
+  },
+  "head": "69b7e09c9b56924a7fefe561e283a73045b0a845",
+  "scope": [
+    "wire.settings.tool_approval_mode.choice.ask.label",
+    "wire.settings.tool_approval_mode.choice.auto.label"
+  ],
+  "target_path": "local_operator/i18n/catalogues/hi/wire.settings.json",
+  "input_capture": "i18n/audits/evidence/approval-choice-input-cache.json",
+  "source_pin": "i18n/audits/evidence/approval-choice-source-pin.json",
+  "source_sha256": "298fc1100cb10bfa34909aa245307a735dad318f456e5bbfb5337fbcdb1e8962",
+  "context_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+  "target_before_sha256": "6c4712d0a5a6edd1b2fee561f5ca66dcaf5916fe8ef356a27ee20100de31da0d",
+  "target_after_sha256": "64bf453ca81721ed35d89ba95d7e5e5aac343765d5e6010fbd37ccbc50704f48",
+  "selected_before_sha256": "80494db52c30abe94b6ce0b5be2825072e9bbce5381a26d4d76046f9defbec5e",
+  "selected_after_sha256": "9d7ea71b3d1ab904d78a16436b800b78e294b1786a617acb15d059c1f215823e",
+  "selected_digest_encoding": "JSON UTF-8, ensure_ascii=false, sort_keys=true, separators=(',', ':')",
+  "labels": {
+    "wire.settings.tool_approval_mode.choice.ask.label": {
+      "value": "पूछें",
+      "status": "RETAINED unchanged",
+      "original_author": "unknown; existed in pinned Hindi catalogue before this run",
+      "new_authorship_claim": false,
+      "backtranslation": "Ask (polite)",
+      "rationale": "Existing concise polite imperative matches the Hindi style guide and names the prompting mode without promising that every tool call prompts.",
+      "literal_cell_len": 2,
+      "synthetic_literal_pseudo": "⟦पूछें··⟧",
+      "synthetic_cell_len": 6
+    },
+    "wire.settings.tool_approval_mode.choice.auto.label": {
+      "value": "स्वचालित",
+      "status": "CHANGED authored in this run",
+      "original_author": "unknown; prior auto value existed in pinned Hindi catalogue",
+      "author_model": "openai/gpt-6.1-sol",
+      "backtranslation": "Automatic",
+      "rationale": "Standard compact Hindi adjective for an automatic mode. No glossary entry mandates a different automatic rendering. Replaces the Latin wire-token-shaped label rather than adding approval, permission, always, or all-tools semantics. Not a newly invented word.",
+      "literal_cell_len": 5,
+      "synthetic_literal_pseudo": "⟦स्वचालित··⟧",
+      "synthetic_cell_len": 9
+    }
+  },
+  "authoring_controls": {
+    "input_selected_digests_and_original_full_sha_verified": true,
+    "english_and_context_full_sha_verified": true,
+    "captured_contexts_equal_current_sidecar_entries": true,
+    "catalogue_key_count_before": 895,
+    "catalogue_key_count_after": 895,
+    "scoped_key_count": 2,
+    "changed_key_count": 1,
+    "retained_key_count": 1,
+    "other_keys_unchanged": 893,
+    "byte_diff_exactly_one_value_replacement": true,
+    "key_order_and_formatting_preserved": true,
+    "icu": "Both labels parsed by local_operator.i18n.runtime.parse_message into text-only nodes; zero arguments and zero selectors; plural branches N/A.",
+    "negative_control": "Malformed synthetic ICU {broken rejected with ValueError.",
+    "unicode": "Both labels NFC; no authored bidi controls, markup, escapes or added punctuation.",
+    "placeholders": "None in either English source or either target label; unchanged empty placeholder sets.",
+    "synthetic_width": "Literal-only bracket-and-dot expansion measured using rich.cells.cell_len; not actual rendered fit or visual evidence.",
+    "overflow_risk": "No relative-width risk flagged by literal-cell measurement; Hindi ask 2 and automatic 5 versus English Ask 3 and Automatic 9. Actual UI fit remains unverified.",
+    "execution": "Worktree .venv was absent; used existing primary-checkout .venv/bin/python with worktree cwd, stripped CMUX_* environment variables, and no dependency installation.",
+    "kernel_recovery": "Eval kernel was evicted after the edit; reconstructed original bytes by reversing only the authored replacement and verified them against the original full-file SHA before continuing.",
+    "redaction": "Unrelated credentials terminology was redacted by the style/glossary reader. It was not decoded, reconstructed or used. All target copy came solely from the explicitly approved input capture."
+  },
+  "authority_limits": "LLM authorship and mechanical authoring controls only; no self-audit, native-speaker approval, rendered-fit claim or safety-audit approval. Two independent safety audits remain pending on the common candidate head. No wire values, risk checks, guardrails or person-only gates changed."
+}

@@ -771,7 +771,7 @@
   "wire.settings.tool_approval_mode.choice.ask.description": "demander avant les outils d’écriture/exécution",
   "wire.settings.tool_approval_mode.choice.ask.label": "demander",
   "wire.settings.tool_approval_mode.choice.auto.description": "les exécuter sans demander",
-  "wire.settings.tool_approval_mode.choice.auto.label": "auto",
+  "wire.settings.tool_approval_mode.choice.auto.label": "automatique",
   "wire.settings.tool_approval_mode.help": "Assouplir exige une écriture dans cette session — /approvals auto.",
   "wire.settings.tool_approval_mode.label": "Mode d’approbation des outils",
   "wire.settings.tools.description": "Comment les outils intégrés s’exécutent.",

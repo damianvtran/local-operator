@@ -771,7 +771,7 @@
   "wire.settings.tool_approval_mode.choice.ask.description": "hỏi trước với công cụ ghi/thực thi",
   "wire.settings.tool_approval_mode.choice.ask.label": "hỏi trước",
   "wire.settings.tool_approval_mode.choice.auto.description": "chạy chúng không hỏi",
-  "wire.settings.tool_approval_mode.choice.auto.label": "auto",
+  "wire.settings.tool_approval_mode.choice.auto.label": "Tự động",
   "wire.settings.tool_approval_mode.help": "Nới lỏng cần một lần ghi trong chính phiên này — /approvals auto.",
   "wire.settings.tool_approval_mode.label": "Chế độ phê duyệt công cụ",
   "wire.settings.tools.description": "Cách các công cụ tích hợp sẵn thực thi.",

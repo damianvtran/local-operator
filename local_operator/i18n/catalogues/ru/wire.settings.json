@@ -771,7 +771,7 @@
   "wire.settings.tool_approval_mode.choice.ask.description": "спрашивать перед инструментами записи/выполнения",
   "wire.settings.tool_approval_mode.choice.ask.label": "спрашивать",
   "wire.settings.tool_approval_mode.choice.auto.description": "выполнять их, не спрашивая",
-  "wire.settings.tool_approval_mode.choice.auto.label": "auto",
+  "wire.settings.tool_approval_mode.choice.auto.label": "автоматически",
   "wire.settings.tool_approval_mode.help": "Для ослабления нужна запись в этой сессии — /approvals auto.",
   "wire.settings.tool_approval_mode.label": "Режим одобрения инструментов",
   "wire.settings.tools.description": "Как выполняются встроенные инструменты.",
