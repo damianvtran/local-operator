@@ -164,7 +164,19 @@ def test_hostile_exception_metaclass_preserves_retry_hold(
     # A colliding hash makes dictionary lookup reach equality too. Identity-only
     # classification must invoke neither hook, including on an unhashable type.
     class HostileMeta(type):
-        __hash__ = (
+        pass
+
+    # The hooks go on at runtime, not in the class body: `__hash__` and `__eq__`
+    # are declared members of `type`, so a class-body `__hash__` that is either a
+    # hook or None is a static assignment-type error even though the hostile
+    # runtime semantics below are exactly what the test needs. `type.__setattr__`
+    # takes the value untyped and still installs the real slots. Order matters:
+    # equality first, so no later assignment can clear the hash being installed.
+    type.__setattr__(HostileMeta, "__eq__", forbidden("equality"))
+    type.__setattr__(
+        HostileMeta,
+        "__hash__",
+        (
             None
             if metaclass_kind == "unhashable"
             else (
@@ -172,8 +184,8 @@ def test_hostile_exception_metaclass_preserves_retry_hold(
                 if metaclass_kind == "raising_hash"
                 else lambda cls: accesses.append("hash") or hash(RuntimeError)
             )
-        )
-        __eq__ = forbidden("equality")
+        ),
+    )
 
     class HostileFailure(RuntimeError, metaclass=HostileMeta):
         __str__ = forbidden("str")
