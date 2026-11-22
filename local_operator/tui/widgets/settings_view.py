@@ -56,11 +56,11 @@ from textual.widgets import Static
 
 from local_operator import keymap as keymap_mod
 from local_operator import settings_io
+from local_operator.i18n import catalogues
 from local_operator.i18n.keys import tui_settings_view as _sv
 from local_operator.i18n.keys import tui_settings_view_chrome as _svc
 from local_operator.i18n.keys import tui_small as _x
 from local_operator.i18n.keys import tui_sound as _sound_keys
-from local_operator.i18n import catalogues
 from local_operator.i18n.messages import Msg, _namespace_for
 from local_operator.i18n.text import active_locale, register_refresh, tr, tr_record
 from local_operator.settings_io import Kind, Scope, Section, Setting

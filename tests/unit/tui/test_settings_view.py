@@ -136,15 +136,21 @@ async def test_bool_toggle_writes_and_survives_reopen(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("key,initial,committed", (
-    ("tool_approval_mode", "ask", "auto"),
-    ("display.nerd_icons", None, True),
-    ("display.nerd_icons", True, False),
-    ("display.nerd_icons", False, None),
-    ("speech.voice.tone", "removed-choice", "warm"),
-))
+@pytest.mark.parametrize(
+    "key,initial,committed",
+    (
+        ("tool_approval_mode", "ask", "auto"),
+        ("display.nerd_icons", None, True),
+        ("display.nerd_icons", True, False),
+        ("display.nerd_icons", False, None),
+        ("speech.voice.tone", "removed-choice", "warm"),
+    ),
+)
 async def test_localized_enum_browsing_preserves_wire_values(
-    tmp_path: Path, key: str, initial: Any, committed: Any,
+    tmp_path: Path,
+    key: str,
+    initial: Any,
+    committed: Any,
 ) -> None:
     """Painting/expansion/cancel are read-only; accept still writes typed wire data."""
     from local_operator.i18n import text

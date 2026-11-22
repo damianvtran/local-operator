@@ -844,7 +844,8 @@ def test_enum_summary_uses_registered_label_in_every_locale(locale: str) -> None
         for key, value in _ENUM_LABEL_CASES:
             setting = settings_io.BY_KEY[key]
             choice = next(
-                c for c in setting.resolved_choices
+                c
+                for c in setting.resolved_choices
                 if type(c.value) is type(value) and c.value == value
             )
             message = choice.label.message
@@ -909,7 +910,8 @@ def test_enum_label_repaint_resolves_only_match_without_catalogue_io(
 
 
 def test_enum_label_urdu_and_english_fallback_keep_source_provenance(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A translated Urdu label projects once; missing Urdu copy stays English."""
     from local_operator.i18n.keys import wire_settings as keys
@@ -971,8 +973,7 @@ async def test_enum_summary_and_default_follow_live_locale() -> None:
                 assert view._detail_clause(row) == expected
                 view.action_activate()
                 choice_row = next(
-                    r for r in view._rows
-                    if r.kind == "choice" and r.choice.value == "neutral"
+                    r for r in view._rows if r.kind == "choice" and r.choice.value == "neutral"
                 )
                 assert label in view._row_text(choice_row, view._rows.index(choice_row), 96).plain
                 view._expanded = None
