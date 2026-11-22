@@ -1354,12 +1354,13 @@ def test_goal_recovery_bootstraps_a_missing_or_retired_supervisor(
             schedules=[],
             preserve={"goal_only": True, "stopped_at": 1},
         )
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    # Resolve the registration under the same backend the recovery calls use.
+    monkeypatch.setattr(supervisors, "supervisor", lambda: supervisors.LAUNCHCTL)
     path = plist_path()
     if unit != "absent":
         path.parent.mkdir(parents=True)
         path.write_bytes(plistlib.dumps(render_plist(root)))
-    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
-    monkeypatch.setattr(supervisors, "supervisor", lambda: supervisors.LAUNCHCTL)
     monkeypatch.setattr(install, "_launchd_is_addressable", lambda: True)
     monkeypatch.setattr(
         launchd, "is_own_plist", lambda candidate, label: candidate == path and label == LABEL
