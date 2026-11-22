@@ -2839,6 +2839,11 @@ CONNECTIVITY_MAX_RETRIES = 15
 MAX_USAGE_RETRY_AFTER_MS = 30_000
 MAX_SAME_CREDENTIAL_USAGE_RETRIES = 2
 
+# Google's retry strategy starts at approximately one second before jitter.
+# The general 500 ms default is tuned for transport faults; on a shared Vertex
+# capacity burst it can spend both 429 retries before demand has time to ease.
+VERTEX_429_BASE_DELAY_MS = 1_000
+
 # The same-credential re-ask cap for a PINNED route (``FailoverRouteState.
 # launch_pin``). A child launched on a resolved model may afford one bounded
 # wait an interactive turn may not: the child runs as ONE long background call
@@ -5396,7 +5401,13 @@ async def _stream_with_failover_events(
                     if pinned and pin_selector is not None:
                         raise _pinned_fallback_disabled_error(pin_selector, exc) from exc
                     raise exc
-                if _same_credential_retry_allowed(
+                vertex_429 = provider == "google-vertex" and exc.status == 429
+                # If Vertex names a delay longer than even the pinned budget,
+                # move on instead of waiting a minute only to retry too early.
+                vertex_wait_fits = (
+                    not vertex_429 or (exc.retry_after_ms or 0) <= PINNED_USAGE_RETRY_AFTER_CAP_MS
+                )
+                if vertex_wait_fits and _same_credential_retry_allowed(
                     exc,
                     transport_retries,
                     retry,
@@ -5415,19 +5426,15 @@ async def _stream_with_failover_events(
                     # re-ask is what keeps a single refusal from silently
                     # descending onto another vendor's model.
                     transport_retries += 1
+                    base = retry.base_delay_ms
+                    if vertex_429:
+                        base = max(base, VERTEX_429_BASE_DELAY_MS)
+                    advertised = exc.retry_after_ms or 0
                     if pinned:
-                        # Bounded even when the advertised reset is longer: a
-                        # background child may afford a wait an interactive
-                        # turn may not, but never an unbounded one.
-                        delay = max(
-                            min(exc.retry_after_ms or 0, PINNED_USAGE_RETRY_AFTER_CAP_MS),
-                            backoff_delay_ms(retry.base_delay_ms, transport_retries, rng=rng),
-                        )
-                    else:
-                        delay = max(
-                            exc.retry_after_ms or 0,
-                            backoff_delay_ms(retry.base_delay_ms, transport_retries, rng=rng),
-                        )
+                        # A pinned child may afford a longer wait, never an
+                        # unbounded one. For Vertex the hint already fits.
+                        advertised = min(advertised, PINNED_USAGE_RETRY_AFTER_CAP_MS)
+                    delay = max(advertised, backoff_delay_ms(base, transport_retries, rng=rng))
                     await _abortable_sleep(delay, signal)
                     retry_same_key = True
                     continue

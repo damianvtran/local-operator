@@ -500,6 +500,76 @@ def _request(provider: str = "openai", model_id: str = "gpt-4o") -> ChatRequest:
     return ChatRequest(model=ModelSpec(provider=provider, model_id=model_id))
 
 
+@pytest.mark.parametrize("hint", [None, "4s", "120s"])
+async def test_vertex_http_429_waits_or_falls_back(
+    monkeypatch: pytest.MonkeyPatch, hint: str | None
+) -> None:
+    """Exercise the real Vertex HTTP error parser and streaming retry driver."""
+    from local_operator.providers.clients import client_for_spec
+
+    attempts: list[str] = []
+    sleeps: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append("vertex")
+        if len(attempts) <= 2:
+            error: dict[str, Any] = {
+                "message": "Resource exhausted, please try again later.",
+                "status": "RESOURCE_EXHAUSTED",
+            }
+            if hint is not None:
+                error["details"] = [
+                    {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": hint}
+                ]
+            return httpx.Response(429, json={"error": error})
+        return httpx.Response(
+            200,
+            text='data: {"candidates":[{"content":{"parts":[{"text":"ok"}]},'
+            '"finishReason":"STOP"}]}\n\n',
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async def record_sleep(delay_ms: int, signal: Any) -> None:
+        sleeps.append(delay_ms)
+
+    def fallback(request: ChatRequest, api_key: str | None, oauth_access: Any) -> AsyncIterator[Any]:
+        attempts.append("fallback")
+        return _clean_stream()
+
+    monkeypatch.setattr(failover_module, "_abortable_sleep", record_sleep)
+    request = _request("google-vertex", "gemini-3.8-flash")
+    state = FailoverRouteState()
+    state.launch_pin = "google-vertex/gemini-3.8-flash"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+
+        async def client_for(spec: ModelSpec) -> Any:
+            if spec.provider == "google-vertex":
+                return client_for_spec(spec, http_client=http)
+            return _FnClient(fallback)
+
+        await _collect(
+            stream_with_failover(
+                request,
+                FakeAuth({"google-vertex": ["vertex-key"], "openai": ["fallback-key"]}),
+                {"retry": {"fallbackChains": {"default": ["openai/gpt-5.4"]}}},
+                client_for,
+                route_state=state,
+            )
+        )
+
+    if hint is None:
+        assert attempts == ["vertex"] * 3
+        assert len(sleeps) == 2
+        assert 750 <= sleeps[0] <= 1000
+        assert 1500 <= sleeps[1] <= 2000
+    elif hint == "4s":
+        assert attempts == ["vertex"] * 3
+        assert sleeps == [4000, 4000]
+    else:
+        assert attempts == ["vertex", "fallback"]
+        assert sleeps == []
+
+
 async def test_local_output_envelope_never_retries_rotates_or_hops() -> None:
     from local_operator.providers.clients import StreamOutputEnvelopeExceeded
 
