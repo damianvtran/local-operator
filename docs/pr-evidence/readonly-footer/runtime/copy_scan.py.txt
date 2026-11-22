@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""copy_scan.py — deterministic copy checks on user-facing strings in a repo.
+
+Part of the design-qa skill (see ../SKILL.md). Extracts candidate
+user-facing strings from source files and runs a fixed set of checks:
+
+  placeholder-text   lorem ipsum, TODO/TBD/FIXME/"XXX", sample.com, John Doe,
+                     "your text here", "hello world", asdf, foo/bar literals
+  generic-error-copy "oops", "something went wrong", "an error occurred",
+                     "unknown error" — say what failed and what to do next
+  click-here         "click here" / "read more" link text (say where it goes)
+  banned-terms       terms from --banned (e.g. internal or off-brand vocabulary)
+
+Everything is advisory candidate generation: the reviewer confirms each hit
+against the rendered context. Strings inside obvious non-copy contexts
+(imports, urls, paths, class names, css values, test files by default) are
+filtered out; treat the rest as candidates.
+
+Usage:
+  python3 copy_scan.py <path...> [options]
+
+Options:
+  --banned "term1,term2"   extra terms to flag (case-insensitive)
+  --exts                   file extensions (default: .ts .tsx .js .jsx .html .vue .svelte .mdx .json)
+  --include-tests          keep *.test.*/*.spec.* files (dropped by default)
+  --min-len N              minimum candidate length (default 3)
+  --top N                  max findings printed (default 25)
+  --json / --out FILE      machine-readable output
+  --check                  exit 2 when any finding is present
+
+Exit codes: 0 ok (or only listings), 2 findings under --check, 1 could not run.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+DEFAULT_EXTS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".html", ".vue", ".svelte", ".mdx", ".json")
+SKIP_DIRS = {
+    "node_modules", ".git", "dist", "build", "out", "coverage", ".next",
+    ".turbo", ".cache", "storybook-static", "playwright-report", "test-results",
+    ".venv", "venv", "__pycache__",
+}
+MAX_FILE_BYTES = 512 * 1024
+
+# --- candidate string extraction -------------------------------------------
+QUOTED = re.compile(r"""(?P<q>['"])(?P<s>(?:(?!(?P=q)).){3,160}?)(?P=q)""")
+JSX_TEXT = re.compile(r">\s*(?P<s>[A-Za-z][^<>{}\n]{2,90})\s*<")
+TEMPLATE = re.compile(r"`([^`$]{3,160})`")
+
+URL_LIKE = re.compile(r"(https?://|www\.|@[\w.-]+\.\w+|\.\w{2,4}(/|\b)|/[\w-]+/|[\w-]+\.(tsx?|jsx?|css|json)\b)", re.I)
+# Even when a string looks URL-like, these still deserve the placeholder checks
+# (a sample address is exactly the thing we want flagged).
+SAMPLE_CONTACT = re.compile(r"example\.(com|org)|(john|jane|joe)[._-]?(doe|smith|bloggs)|test@test|@test\b", re.I)
+CODE_LIKE = re.compile(r"[{}]|=>|\.\w+\(|^[a-z][a-zA-Z0-9]*$|[_$]|#[0-9a-fA-F]{3,8}\b|::|;")
+CSS_LIKE = re.compile(r"^\s*[\d.]+(px|rem|em|%|ms|deg)?\s*$|rgba?\(|var\(--|cubic-bezier|translate|absolute|flex|grid|none\b|^\d+x\d+$")
+ALLOWED_SHORT = {"ok", "yes", "no", "on", "off", "save", "done", "skip", "back", "next", "add", "new"}
+
+PLACEHOLDERS = [
+    (re.compile(r"lorem ipsum", re.I), "lorem ipsum placeholder"),
+    (re.compile(r"\b(TODO|TBD|FIXME|XXX)\b"), "development placeholder"),
+    (re.compile(r"\b(John|Jane|Joe) (Doe|Smith|Bloggs)\b", re.I), "sample-person placeholder"),
+    (re.compile(r"\bexample\.(com|org)\b|\bfoo@bar\b|\btest@test\b", re.I), "sample contact"),
+    (re.compile(r"\b(your name|your email|your text here|placeholder text|sample text)\b", re.I), "placeholder copy"),
+    (re.compile(r"^\s*hello world\s*$", re.I), "'hello world' sample"),
+    (re.compile(r"\basdf\b|\bqwerty\b|\bfoobar\b", re.I), "keyboard-mash sample"),
+]
+GENERIC_ERRORS = [
+    (re.compile(r"\boops\b", re.I), "'oops' — name the failure instead"),
+    (re.compile(r"\bsomething went wrong\b", re.I), "generic failure — say what failed and what to do"),
+    (re.compile(r"\ban (unexpected|unknown) error occurred\b", re.I), "generic failure — say what failed and what to do"),
+    (re.compile(r"\bunknown error\b", re.I), "generic failure — say what failed and what to do"),
+]
+CLICK_HERE = [
+    (re.compile(r"\bclick here\b", re.I), "'click here' — name the destination"),
+    (re.compile(r"^\s*read more\s*$", re.I), "'read more' — name the destination"),
+]
+EMOJI = re.compile(
+    "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F000-\U0001F2FF\u2700-\u27bf\ufe0f]"
+)
+
+
+def iter_files(paths, exts, include_tests):
+    for root in paths:
+        root = Path(root)
+        if root.is_file():
+            yield root
+            continue
+        for p in sorted(root.rglob("*")):
+            if not p.is_file():
+                continue
+            if any(part in SKIP_DIRS for part in p.parts):
+                continue
+            if p.suffix.lower() not in exts:
+                continue
+            if not include_tests and (".test." in p.name or ".spec." in p.name):
+                continue
+            try:
+                if p.stat().st_size > MAX_FILE_BYTES:
+                    continue
+            except OSError:
+                continue
+            yield p
+
+
+def extract_candidates(text: str):
+    out = []
+
+    def add(s, kind):
+        s = s.strip(" \t\n\r")
+        if len(s) < 3:
+            return
+        if (URL_LIKE.search(s) or CSS_LIKE.search(s)) and not SAMPLE_CONTACT.search(s):
+            return
+        if CODE_LIKE.search(s) and len(s.split()) < 2 and s.lower() not in ALLOWED_SHORT:
+            # single tokens that look like identifiers/directives are not copy
+            if not re.match(r"^[A-Z][a-zA-Z' ]+$", s):
+                return
+        if s.lower() in ALLOWED_SHORT:
+            return
+        out.append((s, kind))
+
+    for m in QUOTED.finditer(text):
+        add(m.group("s"), "quoted")
+    for m in TEMPLATE.finditer(text):
+        add(m.group(1), "template")
+    for m in JSX_TEXT.finditer(text):
+        add(m.group("s"), "jsx-text")
+    return out
+
+
+def scan(paths, exts, include_tests, banned):
+    findings = []
+    files_scanned = 0
+    strings_seen = 0
+    for f in iter_files(paths, exts, include_tests):
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        files_scanned += 1
+        for lineno, raw in enumerate(text.splitlines(), 1):
+            for s, kind in extract_candidates(raw):
+                strings_seen += 1
+                for rx, why in PLACEHOLDERS:
+                    if rx.search(s):
+                        findings.append({"check": "placeholder-text", "severity": "advisory",
+                                         "message": f"{why}: {s!r}", "string": s, "kind": kind,
+                                         "file": str(f), "line": lineno})
+                        break
+                for rx, why in GENERIC_ERRORS:
+                    if rx.search(s):
+                        findings.append({"check": "generic-error-copy", "severity": "advisory",
+                                         "message": f"{why}: {s!r}", "string": s, "kind": kind,
+                                         "file": str(f), "line": lineno})
+                        break
+                for rx, why in CLICK_HERE:
+                    if rx.search(s):
+                        findings.append({"check": "click-here", "severity": "advisory",
+                                         "message": f"{why}: {s!r}", "string": s, "kind": kind,
+                                         "file": str(f), "line": lineno})
+                        break
+                if EMOJI.search(s):
+                    findings.append({"check": "emoji-in-copy", "severity": "advisory",
+                                     "message": f"emoji in a UI string: {s!r}", "string": s, "kind": kind,
+                                     "file": str(f), "line": lineno})
+                for term in banned:
+                    if re.search(rf"\b{re.escape(term)}\b", s, re.I):
+                        findings.append({"check": "banned-term", "severity": "advisory",
+                                         "message": f"banned term {term!r}: {s!r}", "string": s, "kind": kind,
+                                         "file": str(f), "line": lineno})
+    return {"summary": {"filesScanned": files_scanned, "stringsSeen": strings_seen,
+                        "findings": len(findings)},
+            "findings": findings}
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="deterministic copy checks on user-facing strings")
+    ap.add_argument("paths", nargs="+")
+    ap.add_argument("--banned", default="", help="comma-separated extra terms to flag")
+    ap.add_argument("--exts", default="")
+    ap.add_argument("--include-tests", action="store_true")
+    ap.add_argument("--min-len", type=int, default=3)
+    ap.add_argument("--top", type=int, default=25)
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--out")
+    ap.add_argument("--check", action="store_true")
+    args = ap.parse_args()
+
+    for p in args.paths:
+        if not Path(p).exists():
+            print(f"[copy_scan] path not found: {p}", file=sys.stderr)
+            return 1
+
+    exts = tuple(e.strip() for e in args.exts.split(",") if e.strip()) or DEFAULT_EXTS
+    banned = [t.strip() for t in args.banned.split(",") if t.strip()]
+    payload = scan(args.paths, exts, args.include_tests, banned)
+
+    if args.json:
+        text = json.dumps(payload, indent=2)
+        print(text)
+        if args.out:
+            Path(args.out).write_text(text)
+    else:
+        s = payload["summary"]
+        print(f"scanned {s['filesScanned']} files, {s['stringsSeen']} candidate strings; "
+              f"{s['findings']} findings")
+        for f in payload["findings"][:args.top]:
+            loc = f"{f['file']}:{f['line']}"
+            print(f"  [{f['check']}] {f['message']}\n       {loc}")
+        if len(payload["findings"]) > args.top:
+            print(f"  … {len(payload['findings']) - args.top} more (see --json)")
+        if args.out:
+            Path(args.out).write_text(json.dumps(payload, indent=2))
+
+    if args.check and payload["findings"]:
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

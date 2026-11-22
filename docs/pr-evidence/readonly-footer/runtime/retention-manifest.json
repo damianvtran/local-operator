@@ -1,0 +1,1157 @@
+{
+  "schema": 1,
+  "kind": "source-byte-retention-proof-not-new-execution",
+  "runtime_executed_head": "3fca695e29bafbf0ea8539dd7a147f2f87183c6d",
+  "archive_parent_head": "3fca695e29bafbf0ea8539dd7a147f2f87183c6d",
+  "archive_manifest_sha256": "cb8149fc0936d61e1e52a7e5512aaaa1f00192b41ba43b01630df7e5d496e785",
+  "source_bindings": [
+    {
+      "path": "i18n/audit-history/es/tui.editor_readonly.json",
+      "sha256": "5f9f94ad6499b3991bb3e7700829c633e203e1e15bd1536b057f7c0bdb980c24",
+      "matches_source_head": true
+    },
+    {
+      "path": "i18n/audit-history/fr/tui.editor_readonly.json",
+      "sha256": "fda6f880497e5ac0b64078e543a1d4d7ebd4e6f03d0e61350145e55f28027f92",
+      "matches_source_head": true
+    },
+    {
+      "path": "i18n/audit-history/hi/tui.editor_readonly.json",
+      "sha256": "078bb4175c87d6ed8dda2fd99ce620ea4a7b0d0238ba1e4b8c8754f6541133df",
+      "matches_source_head": true
+    },
+    {
+      "path": "i18n/audit-history/ru/tui.editor_readonly.json",
+      "sha256": "a83799e9d6d2fd903d83b1e6f32f42f23d9e61e4b545cf809f77386ed95beccf",
+      "matches_source_head": true
+    },
+    {
+      "path": "i18n/audit-history/ur/tui.editor_readonly.json",
+      "sha256": "5c23470d685aee31383ee718fa28f395425d663111e24fb7d61e2e99f5f70e4e",
+      "matches_source_head": true
+    },
+    {
+      "path": "i18n/audit-history/vi/tui.editor_readonly.json",
+      "sha256": "23efc430c1782a4d8b0ad78b8b74c9d89d447310e59b5bf4534d4b0e96ebade5",
+      "matches_source_head": true
+    },
+    {
+      "path": "i18n/audit-history/zh-CN/tui.editor_readonly.json",
+      "sha256": "788df29223bc3c1792095cb8468032069b26a84074c21211c47658adc484f9e5",
+      "matches_source_head": true
+    },
+    {
+      "path": "i18n/languages.json",
+      "sha256": "7fd056b916fc3d56ddf36991a09b29864ea0b0f825d938aead1ed165926f8d63",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/catalogues.py",
+      "sha256": "1e5cebb1b7b774d017fbab777c3bb63e52c2113a84f82c4c0ec4245d4ec8dca9",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/catalogues/en/tui.editor_readonly.context.json",
+      "sha256": "46c48a659223ad5e4861a1407c2c7a685183b9c7caecf6e19f53adb8131389ee",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/catalogues/en/tui.editor_readonly.json",
+      "sha256": "a2a8bfb8a250b38e3a950bb2b02d885ec76cc726d77521086801099b6e99b5f2",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/catalogues/es/tui.editor_readonly.json",
+      "sha256": "d92fbdd397bbf7dd424c51c79b302c3b1b35b155a97a30cd5fd0973dbe1d950b",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/catalogues/fr/tui.editor_readonly.json",
+      "sha256": "98e716bcdc26c724f9e556e3ed366349cf0a596a8dc81bb350fc95a9f39d0ad5",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/catalogues/hi/tui.editor_readonly.json",
+      "sha256": "6a682bddc90feaa5627dd033b11a30c6fa4e6bb53c623e0c09fa500d30bbae7f",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/catalogues/ru/tui.editor_readonly.json",
+      "sha256": "07740014857374da1b9bec31999f65955e6a6069faf97fa753e109e28f88d1e0",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/catalogues/ur/tui.editor_readonly.json",
+      "sha256": "c423782b7450e73a070fa4f774a8c2324f89629909698d2a27175ced2e717817",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/catalogues/vi/tui.editor_readonly.json",
+      "sha256": "86c9aa76cd934591e291b4140ef3cc1b391662fe8f94d8db6646b7bc89366198",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/catalogues/zh-CN/tui.editor_readonly.json",
+      "sha256": "de698b3c4f9a184351bd627147bfe086da057890e287e01a78d87539471fa65f",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/data/formats.json",
+      "sha256": "728ad518f47eb1011ddaeeaae81065ef9e6a36012f1e2a82fd5fd70bc500c9e2",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/data/plural_rules.json",
+      "sha256": "a58fc97ed92a6fdc1c31cd6c40c856fa9c6539f54e1ce76461ec6cff9f235ffe",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/data/shipped.json",
+      "sha256": "e8316253e6fb242bc838122d26f7bb7d419ccb654edf199c4f22172349e1567d",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/__init__.py",
+      "sha256": "5453c67abf73d56add62147395d8aae1e06a0536f09f983f27e6336d6446593e",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/browser_site_approval.py",
+      "sha256": "e973a55d5086036cc0d9692a2f8a47e718ce1971577f76f02717acb97dd1ff91",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_agents_help.py",
+      "sha256": "afc02c38405e14dcae3e75d70952e7fe605b17c6184f13623bdfe5f4f283a6ec",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_agents_picture.py",
+      "sha256": "f3c63f7aef422e0c230d41b78d43b0e24cbe09f34ccec35d56d70889ca77deb3",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_aida_help.py",
+      "sha256": "8263bb088efa480cc779d8f7a29eb79e9d3fb6d2d7b8e759226ced0f0a012fbb",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_browser.py",
+      "sha256": "1f7aa5acd4d2db74fed536a577d470af8afe17b9858242810e11f76049cf559d",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_browser_help.py",
+      "sha256": "152c8e064de25fe8843d935906526e31567a4a74ba0568e1e9ec04bd6850111d",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_browser_node.py",
+      "sha256": "9921f63a4b47effb6fcfc478a6e2fd3e064fa64d7067d9e3e582dae92389edfc",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_config.py",
+      "sha256": "3c13652e023eaab8e2eaf048a6dc1d120a8f21621812e73c2ab8838eb9c4cd1b",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_config_help.py",
+      "sha256": "45f9e2afbf7455d9cb0d410620e421fa63f552c9cd4d8a69e8cf0fbeb53d2587",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_credential_help.py",
+      "sha256": "5e1647a73e3fc5ad639a3531aa6fcb44f9cbd53c4aaf567124e26285dd01e5fd",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_daemon_build.py",
+      "sha256": "7198b8e008285e995d4507de8b33e4caa75b82e167d7efc982c5943841d2c0b9",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_exec_help.py",
+      "sha256": "c6c1d6768290ded743945e6c2e54e789644953deceab2f42b96fb6a016e50885",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_exec_remote_help.py",
+      "sha256": "bdf81d95f9c11c6cdcb42b223855d80c082d6165829df28c0cb4c8b3a63fdccc",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_exec_runtime.py",
+      "sha256": "a77e8801d658ce80987aa235556d160b60bdcd8f4dbd6ffb9be4a405ed851352",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_exec_worker_help.py",
+      "sha256": "2db4d1386a6e29604e07a1d9503f83a67045dd2d5023a0aae515248f23659937",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_failure_details.py",
+      "sha256": "ec303003d5a7224fb00167deab5412686ac7843396b1fb4e537d4ab5e8f24815",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_failures.py",
+      "sha256": "b426e1a221719c74ddbbb96ba764e57e2d06a3c9e8421f6ebeb30e4589b11a1a",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_global_help.py",
+      "sha256": "f788b976800534756e367f763acce44bb29bfb45ce8a5ece3d614f0dc7563ffe",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_group_help.py",
+      "sha256": "101d817b4008eb9bcadab7b7fbe48765ec344248b7a9cc67a6953a18e8b07fa4",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_hub_help.py",
+      "sha256": "454f4022d8737f7294bb3e204c86bdd3b37fe848aa3f87c82ba3591fb262accb",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_hub_org.py",
+      "sha256": "63ab8ed8bb1974acdb3bd19a1cae630dd8fae957b58694787b26a263018bbc58",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_hub_org_help.py",
+      "sha256": "867b1a255a5ee5e2d9b76f12c5d35d0eb50fc1698f86f674cd36a1e119b20450",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_hub_shared_help.py",
+      "sha256": "bcf975ad46d09fbd5b517897f6a4ad6d953cbd5a6e83214bb63c2a4f41a81e19",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_install_help.py",
+      "sha256": "800a42fe33e6a5a01a6ae7f944922dfab7011774ea8a1644459887cc87d65747",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_login_help.py",
+      "sha256": "45a902f52a08438f7e6bb854d470a3897f81821e93eff4fbd521888897ea9e06",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_login_status_help.py",
+      "sha256": "555eb7007bdd0e953db107f753426dd0f14be9ec61cb122e8646d7b13f2475d2",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_logout_help.py",
+      "sha256": "d8e157e49752bd10bd86304ef8b12a27bdc42a14413563c90fbf67f97a26a4ad",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_mcp_help.py",
+      "sha256": "74b8136b16c0488b658ea550c3b00a416554b5f97255eb9c1a5c95669ed06004",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_memory_help.py",
+      "sha256": "0487f5fc4e5720d9362dcd284b05b7c0d56d791acf8a42a24add494538c6ff3a",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_mobile_help.py",
+      "sha256": "3da3cc3ab443cf2a012ba1a92b0f688fded17e08cc39e2d9733565a0a5d4bd3a",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_model_help.py",
+      "sha256": "992641c99969fe46d332ddd448c5636a302a9782e935f2a3ce9c2c8cde78c3e5",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_monitor_help.py",
+      "sha256": "cf21544e5ea23c3803eb13d54c8a8b6c2de626ad897166f9367a7b7425c94e6f",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_network_uplink.py",
+      "sha256": "6679d8c64c4abcd314fcfae56144836e1b9b2ce3902a268e7856288d1f816cbe",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_permissions.py",
+      "sha256": "b66c81a9ca4978c7dc2438a1df994470e4e8e37ad2f82b863043f32c16f1997b",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_qwencloud_help.py",
+      "sha256": "74122adc9e4a19fb8a6dd79ed7f3debfe01edb244c8b0f9d5793c3d7507e06c7",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_refresh_help.py",
+      "sha256": "37768128b3a4fbb3d99b38678e62749324e529ce6e8956ff29f83a510e030129",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_resume_click_help.py",
+      "sha256": "1a6a9094ec1b889971d5980dbe88e5f9e6731974e7d454af69b97ac529be2bea",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_send_help.py",
+      "sha256": "f166df9b3dec0fbf06fd8bdb95ac4177beadb7cbda16e5b2edb52dac5d41270f",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_serve_help.py",
+      "sha256": "eec5ae3b34ad37a644760af25b26f3671dbd343bf0e6bdd65203a186706e5c90",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_serve_readiness.py",
+      "sha256": "f1da8a2d505a18468e9c5b7476b7ce254f54b06afe939e5de7ca4c00ad93c556",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_services_heavy.py",
+      "sha256": "3edf07d529fd3646968b77f81bf8f54d9bf52a3b4c4513d843fce76f50c6b4c9",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_services_help.py",
+      "sha256": "b3b1b2f4ffee8c570fbd8e68426099882fc78f69cb8a15c4b512fb2564d5e9d0",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_services_status.py",
+      "sha256": "79312be4e6ebdded2e9a2b6ee4c76a3979a6fca6c7b274545d12617918f7384c",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_sessions_help.py",
+      "sha256": "792f766d04d8ade6b30fce252df8689ed22a7908488cb56860f927bee597deda",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_sessions_move_workset.py",
+      "sha256": "6fa4ef13bc0c7903ead574b1685d7755064f94f636364a151e58d2a0d14cb359",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_skills_push.py",
+      "sha256": "c6b62b68dfbc8b308aadf6f2800a7633d9cc26a22454a8126a4ac96ab09b437f",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_stop_help.py",
+      "sha256": "604f3502b3d9dc81c2a98cc27125d425a9921502df118dc37a8bd1747f124f89",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_team_bridge.py",
+      "sha256": "b0761be4bc132fdd116763281f76565e051dd2b057361f46fdfc5e3b630cf3fe",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_team_bridge_alert.py",
+      "sha256": "de833a9468d04f470ea94a992fc2da272a7769e210421dea869d2a493713db50",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_team_bridge_hold.py",
+      "sha256": "23a1b0ba4d518366387ba75ccb8b042fdbf4957dc917d8a0f56849bfd833ece2",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_teams_help.py",
+      "sha256": "5d56156f1436bf2170fd3ac2eb0c41c88d5ae725edbcc57f7f6cb7daca0aab7e",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_update_help.py",
+      "sha256": "13d6ce7c92f764a0e98c3d42f6e700ac756ee2d5214be058fbaeedbf6bddbff5",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_vault.py",
+      "sha256": "46849f4a8e8b851cb94b9fb9b5d2be728f93fff62e7785d8e7a5ac8d340d93bc",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_vault_help.py",
+      "sha256": "474b71b4dd0d885b925ba54a66ecc8c104d9dfe92904dd83ded83a394bf810da",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/cli_wake_help.py",
+      "sha256": "0ea1dc7abd61149a02f93c9ae98ed74466efd1e870f39925cca2867654937720",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/mobile_doctor.py",
+      "sha256": "a90344f7a63f6d020d2df3539c232a8b2f67133deae3450f984be3795491953c",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/mobile_setup.py",
+      "sha256": "8e2c2e2d3325e6afa4d42e8044783d537193e027efbb2503978c8733bc3f2877",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/network_pairing.py",
+      "sha256": "9a60d09f87670be4ef50d54772d26107f0364446daaa232c12fe280a20b000c7",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/operator_pairing.py",
+      "sha256": "c5b7aebd0ec03442ec736c48e21e82aba1c70030285177ea0e7bd6b3c0ca802b",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/providers_vertex_prompts.py",
+      "sha256": "f13e56541727372e6407e26a6dfd20c231be882914f97c7f03a00042d4dc948a",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/relay_account_policy.py",
+      "sha256": "5c74b1d55578ec0259f5c1ddec0cca4889373a7a75bf61c70cf7898a7a15cb03",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/relay_agent_avatar.py",
+      "sha256": "db44b5522d07a3cfa10587fa867bdd2a16fe75f145031f3f55a0cf30e70ddcbc",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/relay_approvals.py",
+      "sha256": "1204863f205a3eb2284c522e7f52ffba8561c60e6625522792797f86d37020c3",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/relay_ask.py",
+      "sha256": "638972cb360330629e86b7b4b14b23d14e1f22de86eaab7dd2490d91d45eae55",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/relay_asks.py",
+      "sha256": "e36ee126f5919b9e3332b263e24d9d9acad504647b8aafca9530ba23dbe18ae7",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/relay_chrome.py",
+      "sha256": "6d15972dcd8dbfce2f3cce093d5958f5d9e75d946ff4ab5c18f616a9a0c70a71",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/relay_composer.py",
+      "sha256": "b3cf73f0f737163064a136f1a8f7334b5aa780fa83fbb35cc1e0be94e6cad6a3",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/relay_diagram.py",
+      "sha256": "232c0de8656a58516d9820ebaa6fe43941b191923c30156a2b41dba25dc591c8",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/relay_health.py",
+      "sha256": "a7ca750ac8f7aa397433ea3bbebbabd7896b9f35b9dc0b97c6ea88187864d65c",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/relay_highlights.py",
+      "sha256": "20a3f1645b7e55eefcb58316c58330ae3efe87336f0e7315e1caa7143179d345",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/relay_library.py",
+      "sha256": "96b6eed29308caa0b986f31dff9edf415dd99fd6759a9e3dee8ecc1cc4407fc8",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/relay_login.py",
+      "sha256": "8c81ea3cc17ca3b8f64513ee77be09aacdf8093bdd583385bf7b4e17be19ac5d",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/relay_notifications.py",
+      "sha256": "f13f0473cbfbf05ff11bca043eb63cf5b1fa9c659a0f0ab919f8c08f626d26cf",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/relay_pairing.py",
+      "sha256": "d6a68d23afd0d9bda69df53cc12ed1e585822dd9216e26941072949bf86e735b",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/relay_session.py",
+      "sha256": "573fc2f2f2c408137e2f6c88ad5f02704066ed42f42acff3ae54699d60846626",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/relay_session_tags.py",
+      "sha256": "2e59b1f216c630a45bf3007d7f734a3d8f5db2ee1fc7b03f0ec4198da1a8292c",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/relay_shell.py",
+      "sha256": "ebafe6223e765de581d03a3b79872eff72a12307b3e89e2ad4dd740560bccdfe",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/relay_skills.py",
+      "sha256": "8d2fc68a23b73089b0790be7d0f585040e155e075fc6c582d73aa2c39f61813e",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/relay_transcript.py",
+      "sha256": "9d13745bdcc7e5b3676af438debacc9763196f69dc22d832a3f82c7c98fd17fb",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/relay_usage_reset.py",
+      "sha256": "2f01eafaf99d73a2fd75df58e2add482a549916e2f225733ef6b3e0df3256b51",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_analytics.py",
+      "sha256": "4c23f0a8bd7bdcaec9c417c793a364e0decedc04917f6038088108eda1bd741c",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_app.py",
+      "sha256": "69f97ad38bd479412990a53535a9f4ac4ab088476edd93708360812611f104d7",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_asks.py",
+      "sha256": "d0d9269b091bf4bb36ce0b863d5579afd696c1b8bf48d47971057891d3c79303",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_authoring.py",
+      "sha256": "7e5380f1327011abbbe15ac6c7a48acb0b43b1e6b080684ad21c1e2261d3c874",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_boot_prompt.py",
+      "sha256": "863918c84afa2e37364eeb5d5f0e2e3fcd38273a19f8bb446b7b03e5d25c2f00",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_bridge_card.py",
+      "sha256": "11ee1f1e11bd2f434c4799d2e92e2a08311fec22f1ec9233c29ac6a1155733cd",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_chrome_banners.py",
+      "sha256": "abbe5e4cd47df26ebc385a8008eadce592f0517d09d24f7c1b8c7e409fd4164e",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_chrome_bindings.py",
+      "sha256": "b0aeae37bcad09f4282bd8aa97bcdb53e48cb45fcd057c46e6192b1580096bd2",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_chrome_remote_park.py",
+      "sha256": "0cd44243f4ac1a054b2876fcbe09271dc497b5acbb546b781a224154a625735a",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_community.py",
+      "sha256": "7c021bbeeef55843ac09c481bbadb82cce330b20a42a6f979bd71a5bbf32b578",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_composer.py",
+      "sha256": "5430808c4aadbc9ba8715574971b75a72ed3ca72afacede13c10029f62f00004",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_editor_readonly.py",
+      "sha256": "68f283e9bf6deeb52db3a2ae7624ccab992bf99f78433230e99839f79458604a",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_highlights.py",
+      "sha256": "9b409be5d17e498649fcb57b4aed60d31c4a4f8f2160adcc44f2e2406fffe2ea",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_hub_links.py",
+      "sha256": "9a66b512b3aa943a80f7748eb6b42d41e5835e9378c2afb5d9eac4f2e54100c7",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_import.py",
+      "sha256": "f71b03f05d66666e44016c0ab8fae46314c27290a19a5a416a5916c8eb24f0e2",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_library.py",
+      "sha256": "456e49f30614437f7e9d22798653b368e8a2b9e2400808e841525a9c554eb980",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_notices.py",
+      "sha256": "2d9088ad9d14b86800be48520a83cf63ce66f0a6102963b5dd5da364a92dc322",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_notification_kinds.py",
+      "sha256": "a4495c0d2d0d36a1fbd26fa0da63c6b3210a22f8122a60989187737f93e02939",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_notifications.py",
+      "sha256": "f5c579017304bd093ddb743312faeee8ba0a23ebd40223c61a2e6beac25972e8",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_palette.py",
+      "sha256": "0eefcf7d95570988313321dc128631a526e0705719ef0f069feead3ff36a1f4c",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_profile_actions.py",
+      "sha256": "c3936be92959e1c92176b433618f87d58a3bd0851cb356de70b4a796ef90076d",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_projects.py",
+      "sha256": "fa1839a3c74c9d1935489ac30be4cb754faf5bd0b602ea394966c55068bcc885",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_projects_edit.py",
+      "sha256": "f2109cc7a6dc701ed86da14d801e5b406cf9d6357af6e00c771bb288e609654b",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_review.py",
+      "sha256": "cc4ce0f9ccd569a67cd91af57d91acb135c7fdc2665999368eab92c7dc8d0534",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_schedule.py",
+      "sha256": "8ec18b0b5834b63b6375338a5efe76aa3ffd81229ea3e7aab4f4dc8f83fb8845",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_session_move.py",
+      "sha256": "455f782a5d182de89b39a081f501da867cdaf4636395e0e07ac63e97032dc880",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_session_move_workset.py",
+      "sha256": "c5c02e0587a8d9c799acbf91fbc44cd625efbaf708aa237b47cc61572b826e1d",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_session_sidebar.py",
+      "sha256": "47e65b95e0cedf073c20e7d0ab13b76f94db9bf465f116b6485b486a386d3b14",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_settings_view.py",
+      "sha256": "3089d635e4c4fd2833521e43cd5d5357031354b5ca7e022c8c7b4e7b2cdc724d",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_settings_view_chrome.py",
+      "sha256": "6cba5a2e1ba040ca2c5540ac87852af7221b06df2d1ed193d388bb45ae405c5b",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_setup_cues.py",
+      "sha256": "164407d670c06f7cda54891cdb3c90978df4f8ff6a9294cb1172c9fea2d83d9e",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_small.py",
+      "sha256": "d95d2fedb282d1671c22f75ec8e129e40bd1c7c3f2d8ef0f1a9513f6c6a5fafe",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_sound.py",
+      "sha256": "631c1cd218c3e94e72ceb06571e80e1b089e5eaa9c01b225a10e94d8bb37eb9a",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_status.py",
+      "sha256": "32964de62d855b9cf602f6ee730d50fd0be22c6056343094fd89bdf7b915f005",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_status_command.py",
+      "sha256": "6e7665c7610699f6f4cbeac52d1a4c0fd7382656960f4f4e94320d18912f03ca",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_tags.py",
+      "sha256": "2c4dfa8d884b4a0a11f925c414e1ef6b55f4f5c91c959e30a782f9ad3f7d3982",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_team_authoring.py",
+      "sha256": "68c736f6b7bb0384dfe9766cd8df9cf525f8749c8da4d3eca600e0a8b8635b0d",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_tool_card.py",
+      "sha256": "b55b4a5f6c993686ec053f5b4cf7c0fc1f2276d1f050eb6ad3298ce14db3bf55",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_tool_card_extra.py",
+      "sha256": "0c502fd6ecdef2c711e2869a7ddf9dcbe9dc058ecd5176e3718e83aed4e73da1",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_tool_card_status.py",
+      "sha256": "4a1fb853659ec2fd4b3dec1aec5a42a8bfa41c4e841ce2a460e8d295ad4bb322",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_transcript.py",
+      "sha256": "889d7f71d709c8f88f4cc272eb123d6b522566b7f01185dd2cd8a0869cd39d8f",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_update.py",
+      "sha256": "7ac0437bbcaff96e7afcab9eb36f4c25b95ce9da4c1e4c93c088f39d1ae671f1",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_usage.py",
+      "sha256": "338f273dbcf3c9980ead9b701eef9c62aa3a6a8717baefc59f2f050cac894f91",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_usage_refusal.py",
+      "sha256": "d326f4abdb6899fb64a2c9709562e87df775939472787eb23930fdc1529b6e44",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_viewer.py",
+      "sha256": "3988998c4859ee1f92dfb8845515c709d172bf53cbc7723d4493bbb9016fe2a1",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tui_welcome.py",
+      "sha256": "6a4bce0469dec186bd2d67a6575053f7a41130bd85ced423daf85dd0da2b7ed2",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tunnel_status.py",
+      "sha256": "07cad14600010706a199ccf34d1c8281afb939a4b9fab8b5e4280d2fe63c603e",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tunnel_transient.py",
+      "sha256": "91b82a82a78d410f86c265326ae7ca5a1d5c5bfd4c415a20686f390a6aa3b94a",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/tunnel_upgrade.py",
+      "sha256": "dff712f8ea2b49bf10217230e7ea40be8d1af3db3cc0f81a7be41d16c150affe",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_aida_cadence.py",
+      "sha256": "1217acc8e963ac37f7ab9531229c0bc0673970ef6383ed422f2b545e8a5fc792",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_bridge_taint.py",
+      "sha256": "d3ac584dabbf1deb83eab25a4b1742accc37bdd7f0da684a9c1b653558c01742",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_community.py",
+      "sha256": "c6512a31f0b0e9e95ba6b6482b211f7f8c4cafe71767d20fd4102e1c9742865e",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_console.py",
+      "sha256": "a8b901da45767c2d6302a5fe667e87cbdbe3d18e3177866f0640cefca6aa405a",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_errors.py",
+      "sha256": "1686f52c853cc893f2e767bf6f82ee9aae86ab75278deb836ef8b11565e94c3b",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_errors_agent_avatar.py",
+      "sha256": "f4cb10dd20edd9ed479d4467aa136a42d5a88560ee33a3f9861a2cb4edbf65fe",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_errors_agents.py",
+      "sha256": "5abee8c22a735fff4aa334acb3f9aea78ad610c4bcd8215c7327b71bc0a461d8",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_errors_auth.py",
+      "sha256": "93b77c784ea3822790790fe10f8abef1c7d67ea776728bf2b6fc48e14a232e34",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_errors_bedrock.py",
+      "sha256": "6a51c44969ef3252ee77b5213a748b0cb195d1190c398437e9f155d1296be879",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_errors_desktop.py",
+      "sha256": "3b769a37959548ee2c0f39c9f381c40c291c3ebe54a189e718e9a186a3fd7df3",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_errors_files.py",
+      "sha256": "64920e5c90f2240b6211d930a97d5dad6ddbe557a76c8cd4e5fbd609d5df9e3e",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_errors_hosting.py",
+      "sha256": "f8f7a2c4643039de05a75d10f848e0e8fedcd2894b0bf8e9dc5e4e856c97b4fd",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_errors_media.py",
+      "sha256": "0dad6650cf656f93e4a4f4806d63606ea0b4327a9758714bcee6fb9fcd25f71b",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_errors_notifications.py",
+      "sha256": "24c874a67a5670a0c75257d9e5c79eb8c492b4c78c7bbe7a89d055b7c63c4831",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_errors_sdk_spec.py",
+      "sha256": "18cd6dbc60d9e228732a5d1f4dc58d4a6fd012d8b74e1a3df6f37b9b8671a2d9",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_errors_sdk_startup.py",
+      "sha256": "72d81b91488b6116c4a080008d37ad2f4635f89cd63942e7848b611e8087abc8",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_errors_session_host.py",
+      "sha256": "b4e12cf4a04c3af509928eec141270b3fc847b593d50a9c87664c374fdd936aa",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_errors_settings.py",
+      "sha256": "bab4b09203c684e120eb979d00cec6e772499fba80049609faa968e9a23603da",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_exec.py",
+      "sha256": "4136f2c6f9eeeb408c6569e293500f11480ec025afba71e2e54f49e379627117",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_github.py",
+      "sha256": "e39416c59c8bd996a522faab4a44fb3434152d613a2205bb38223b0cd23f233d",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_guardrails.py",
+      "sha256": "91a4808a6d1ccb058b5c3f7eb4674654aee94f7ede4c683eccb009b74834b01b",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_harness_import_detail.py",
+      "sha256": "c80efd4126ca3a890654411f95aba49ba5a41077bab1b42d4544ac51664d5b44",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_host_speed.py",
+      "sha256": "d012ed3575a6681cc8c3370fee48b78b4a1a70844299ef989809cf39bbabdb91",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_hub_pull.py",
+      "sha256": "a5ab9e4c8824404caf22294fcd554d557f0e59ab2be3bae5690f6a80cd7950b3",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_incidents.py",
+      "sha256": "1686f52c853cc893f2e767bf6f82ee9aae86ab75278deb836ef8b11565e94c3b",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_language_receipts.py",
+      "sha256": "e804062fd824918f4a76c8cc28a7d46ae85aa3d84e07cf45c68e4d566ee0835e",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_login_bedrock.py",
+      "sha256": "59fbaf69044aca5230e5cb23dcc28775410f0c89d6c971964c2fb1abc62cbfd0",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_memory.py",
+      "sha256": "8057d0b7a866baf6b0305510d85c2b9a25f034c12e9935f2c94d9e0368dd3599",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_music.py",
+      "sha256": "f10963fb7f59f8cf167bd187ea1140d0804f4861017868ac69b8a2fd70d628b5",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_notices.py",
+      "sha256": "1686f52c853cc893f2e767bf6f82ee9aae86ab75278deb836ef8b11565e94c3b",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_notification_sound.py",
+      "sha256": "0f28bc9df485d153c71f5ac081be90518f7f56a677d3d8426f6e0b82dcb6ba33",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_operator_setup.py",
+      "sha256": "afc5725d9d2a134ee05a43734407d4fc0b108af7d50875242ac1c68c3b76bc38",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_outcome_notices.py",
+      "sha256": "72ebde5616e1040593013dd4761632cbb812d74199bc71c081668fe8453cc4bc",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_phone_access.py",
+      "sha256": "2a6b0f92743665333ab501c78f7baf5c086fa2aa4efa0462ec24a79ea733242b",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_providers_connect.py",
+      "sha256": "8e88398c77f11f1fe0c05cdc660e34813ed725a048b089f676cad4c8cc3180b5",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_providers_reauth.py",
+      "sha256": "a0ecd4fa1741ce1bd77e2092ac0263db285af7aa9d4efc64e4f313c115bdfaef",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_push_alert.py",
+      "sha256": "29d51c7bc5b9b93a5aef1c54df6c42b841bd8f66a08c6b07763397ea112fd1b4",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_radient_saver.py",
+      "sha256": "43930757f9d59676d1bccbd6a4252c120ef07269c76de268e1ee0ee26487359f",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_remote_compute.py",
+      "sha256": "733c59d965f4d4aaa5144d873385f781886b7584a3359a42eed4db4ee1b5202c",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_session.py",
+      "sha256": "e81e8c9394ae071c06f9855ee6cdbeacb3da29582ff577beb692f22c59003a51",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_session_status.py",
+      "sha256": "6d062fa069b55b58c8dfa1cd810ce757d979608bfffc413344a8fb10cc6d89e8",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_sessions.py",
+      "sha256": "53e79fe72f9e4d1144e6a51d8acd8116a8ac82ff35cb3e91430b60be70b7b777",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_settings.py",
+      "sha256": "e1ef2bbed2acbdac536ce746e460760828535fc6116d7fb96139f933e7bf94cf",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_settings_account_policy.py",
+      "sha256": "6adcf16946f6abe20621f38d28e01cfd4d4ead35bd05297f9c7066ead712af56",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_settings_hub_defaults.py",
+      "sha256": "68055975239fb4471efac0a43db5c4cab4afe195509601dd86962d66c3ac047f",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_settings_hub_org.py",
+      "sha256": "e4c69b4a875b02393634f8c157bd703f4ee4c622964db01469c6452b3ba3082e",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_settings_keymap.py",
+      "sha256": "3ea8db887470c5132328d175adf16c66204026a94626d5707cd02d434238405b",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_skill_adoption.py",
+      "sha256": "56285e9cb70b652514d6983d7b5a01fc2e6f0444e125dfb2aa7f551c9d8920fd",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_slash.py",
+      "sha256": "f8fd7bfec27437e42d71c6f473745ac06f115d5b50eee5a26be65bb4aa3b20c8",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_slash_library.py",
+      "sha256": "285d154634bb8d80d42fb2436680dd7aff85a19c87952b702c36ffdac58be9f9",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_slash_notifications_page.py",
+      "sha256": "36d23b586c868ae0dd41ed87db7344966226375ddcdb8312f84bc00814fff7d5",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_team_integrations.py",
+      "sha256": "641dbd4cf4da40bd809ef364aa53c4ef321411670327cdeb247cb38e0637dd2b",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_teams_effective.py",
+      "sha256": "31f458c92330eb5ceacf1e56a239de4d686c3beb011568b1ebb415efb1b6704c",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_tool_rows_bridge.py",
+      "sha256": "2ada379c1ad774bc3ce4bf93721682238e5174cb7efe37e097ce8aa02792308c",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_tool_rows_bridge_skipped.py",
+      "sha256": "2e7b89aff2aeaf7e5bb95cbcc8421b6b843688e51d7fdb60d99242247063957a",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_tunnel_setup.py",
+      "sha256": "ef0797b40010c95ebef30f95ed793ba4bc18c57076d9938d9a8baf1379b86002",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_voice.py",
+      "sha256": "379a9de2f7187acf3d20ae866d43922ad304887f2e16f5f3478757221788f140",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_voice_availability.py",
+      "sha256": "ff027793504802015d08b59fd67e913ba9464f4f292e5e1a128a35004d7696d4",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/keys/wire_wakes_supervisor.py",
+      "sha256": "f8beddb534e159ed7dd09137ef1b4d2ffff07690786f4b5fcf3ebd026abf6e66",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/i18n/text.py",
+      "sha256": "c2d6868e17bd7af6ebafb08fec0e4f626ab67d0c0f5424783cced5caa99f77f5",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/mobile/web/src/i18n/bundled.es.gen.ts",
+      "sha256": "9eeb07400b10d87f0472cc3a735044f598e74714744466be5c0424faac08e3b3",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/mobile/web/src/i18n/bundled.fr.gen.ts",
+      "sha256": "3280e1826d37717e1a21a24e470d217cb9cd07d59c0990f167258cb50f409de9",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/mobile/web/src/i18n/bundled.gen.ts",
+      "sha256": "dbe8f5658c30b13ec2011336d8f160f53749cf5287911161d322171622e76e67",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/mobile/web/src/i18n/bundled.hi.gen.ts",
+      "sha256": "830ebab3910960345f6241e0ca3ec830cf7a727215a37f16c6d6aa001e40981c",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/mobile/web/src/i18n/bundled.ru.gen.ts",
+      "sha256": "fbd341606b942e0251a8db368d6dba749173a9cf664a66c3fe259706a87f45e1",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/mobile/web/src/i18n/bundled.ur.gen.ts",
+      "sha256": "33c7e0bb305260c6c2b48a032def8efddbedf99bcd77d4fdf54f738df5b5f3fb",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/mobile/web/src/i18n/bundled.vi.gen.ts",
+      "sha256": "be1fb1caa924f7941c32ee03ea43ea535340a2e18bcde21d919a7053ca4bda96",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/mobile/web/src/i18n/bundled.zh-CN.gen.ts",
+      "sha256": "a0973161501125d0358e5639183336bf19100ea605d953455051059f2af329af",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/mobile/web/src/i18n/keys.gen.ts",
+      "sha256": "51a27080eb61c4f8385a4997c0732bd9e12686b344de662cba5fb46dc2c8abf7",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/tui/app.py",
+      "sha256": "b127aac8a49ae18f2b691ca72bf0ad2c335bad8d9b49b328af957ee522353112",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/tui/local_operator.tcss",
+      "sha256": "a388e695061e014ecd8e2aa1334bf4f4020fd4edcbf9eeeecfdfd8e51f5d4783",
+      "matches_source_head": true
+    },
+    {
+      "path": "local_operator/tui/widgets/editor.py",
+      "sha256": "ba03a049e2ccfa004d4c63d1eb50d993a826e88149eab3e6acb87d10c99b5411",
+      "matches_source_head": true
+    },
+    {
+      "path": "pyproject.toml",
+      "sha256": "009fec741a68dad42d8771457bc8781134797cd289d173b3e4cd8f95eae4b1e3",
+      "matches_source_head": true
+    },
+    {
+      "path": "scripts/visual_capture.py",
+      "sha256": "47b7811aea17c73cd55fae41289c31dfc798641c0caa26e4114ab162311512ca",
+      "matches_source_head": true
+    },
+    {
+      "path": "tests/unit/i18n/test_editor_readonly_footer.py",
+      "sha256": "4aed469a1db9eddb3b4843a72000e377c77aeaf1e1ad668992e16de88a215a1e",
+      "matches_source_head": true
+    },
+    {
+      "path": "tests/unit/tui/test_app_pilot.py",
+      "sha256": "10efb22af214c2b3ad7f7342cb0b9b5d364d9c4a34e1f13bc71bee9b24e384e3",
+      "matches_source_head": true
+    }
+  ],
+  "generated_output_count": 201,
+  "targeted_tests_original_head": "1ad0b8c8547243f8257ee8838fbb35ed795b13f3",
+  "targeted_tests_original_evidence": "docs/i18n-readonly-footer-source.md: targeted 3-case result; preserved attribution, not rerun",
+  "targeted_test_consumers_unchanged_paths": [
+    "local_operator/tui/app.py",
+    "local_operator/tui/widgets/editor.py",
+    "local_operator/i18n/keys/tui_editor_readonly.py",
+    "tests/unit/i18n/test_editor_readonly_footer.py",
+    "tests/unit/tui/test_app_pilot.py",
+    "local_operator/i18n/catalogues/en/tui.editor_readonly.json",
+    "local_operator/i18n/catalogues/en/tui.editor_readonly.context.json"
+  ],
+  "scope": "Retain private runtime and earlier exact English/footer regression evidence across evidence-only archive delta. Formal pushed-head independent review/QA/design/UX remain manager-owned. No native gate cleared."
+}

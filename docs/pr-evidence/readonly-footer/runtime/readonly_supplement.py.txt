@@ -1,0 +1,60 @@
+import sys, os, json, asyncio, hashlib, socket, subprocess
+from pathlib import Path
+ROOT=Path('/Users/damian/local-operator/.worktrees/i18n-readonly-footer')
+OUT=Path(__file__).parent/'readonly-runtime'; OUT.mkdir(exist_ok=True)
+sys.path.insert(0,str(ROOT))
+# Cache font measurement with the real HOME, before isolating the application.
+from scripts.visual_capture import CaptureProfile, font_provenance, save_capture
+PROFILE=CaptureProfile(); FONT=font_provenance(PROFILE)
+HOME=OUT/'home'; HOME.mkdir(exist_ok=True)
+keep={k:v for k,v in os.environ.items() if k in ('PATH','LANG','LC_ALL','TMPDIR','SYSTEMROOT')}
+os.environ.clear();os.environ.update(keep)
+os.environ.update(HOME=str(HOME),LOCAL_OPERATOR_CONFIG_DIR=str(HOME/'config'),TERM='xterm-256color',LOP_LANG='en',LOCAL_OPERATOR_NO_SHIMMER='1',LOCAL_OPERATOR_NO_NOTIFICATIONS='1',LOCAL_OPERATOR_NO_DESKTOP_LAUNCH='1',LOCAL_OPERATOR_NO_TERMINAL_TITLE='1')
+(HOME/'config').mkdir(exist_ok=True);os.chdir(HOME)
+from unittest.mock import patch
+import local_operator
+from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.editor import Editor, read_only_placeholder
+from local_operator.i18n import text
+from tests.unit.tui.test_app_pilot import FakeSession, _factory
+from rich.cells import cell_len
+from scripts.visual_capture import terminal_svg
+
+LOCALES=['en','zh-CN','fr','es','ru','vi','hi','ur']
+def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
+def lines(editor):
+    return [''.join(seg.text for seg in editor.render_line(y)) for y in range(editor.size.height)]
+def geom(app, editor):
+    return dict(screen=list(app.screen.size), screen_virtual=list(app.screen.virtual_size), screen_scrollbar=[app.screen.show_horizontal_scrollbar,app.screen.show_vertical_scrollbar], editor_size=list(editor.size), editor_content=list(editor.content_size), editor_virtual=list(editor.virtual_size), editor_scrollbar=[editor.show_horizontal_scrollbar,editor.show_vertical_scrollbar], editor_region=list(editor.region), focused=type(app.focused).__name__ if app.focused else None)
+def capture(app,stem):
+    # Preserve the public app screenshot as requested, plus calibrated capture.
+    app.save_screenshot(filename=stem+'-rich.svg',path=str(OUT))
+    save_capture(app,OUT/(stem+'.svg'),profile=PROFILE)
+def deny(*args,**kwargs):raise AssertionError('Private runtime rig forbids network/process creation')
+
+async def supplement():
+    app=OperatorApp(lambda:_factory(FakeSession()))
+    results=[]
+    async with app.run_test(size=(40,24)) as pilot:
+        await pilot.pause()
+        editor=app.query_one(Editor)
+        for locale in ['fr','zh-CN','en','es','ru','vi','hi','ur']:
+            editor.focus();await pilot.pause()
+            app._open_settings_view();await pilot.pause()
+            notices=[]
+            app._cmd_language(locale, notices.append)
+            await pilot.pause()
+            expected=json.loads((ROOT/'local_operator/i18n/catalogues'/locale/'tui.editor_readonly.json').read_text())['tui.editor_readonly.hint'].replace('{key}','esc')
+            assert editor.placeholder==expected and text.active_locale()==locale
+            import yaml
+            saved=yaml.safe_load((HOME/'config/config.yml').read_text())
+            assert saved['values']['language']==locale, saved
+            assert editor.read_only and not editor.can_focus
+            await pilot.press('escape');await pilot.pause()
+            assert app._settings_view is None and app.focused is editor and not editor.read_only
+            results.append(dict(locale=locale,persisted=True,hint=expected,escape='closed page, restored editable composer focus',notice=notices))
+            print(json.dumps(results[-1],ensure_ascii=False),flush=True)
+    (OUT/'config-escape-supplement.json').write_text(json.dumps(results,ensure_ascii=False,indent=2))
+    print('PASS all8 persisted language + actual Escape; context exited',flush=True)
+with patch.object(socket.socket,'connect',deny),patch.object(subprocess,'Popen',deny):
+    asyncio.run(supplement())
