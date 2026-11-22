@@ -61,6 +61,7 @@ from local_operator.model.effort import (
     supported_efforts,
 )
 from local_operator.model.ids import normalised_id as _normalised_id
+from local_operator.model.ids import openai_developer_instructions_model
 from local_operator.model.registry import (
     ModelInfo,
     _hosting_qualified_bare_id,
@@ -984,7 +985,10 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         # discovered model with no bundled row (not a fabricated Full alias).
         supports_responses_api = True
         supports_cache = False
-    if canonical == "openai" and _OPENAI_RESPONSES_API.search(model_name.lower()):
+    if canonical == "openai" and (
+        _OPENAI_RESPONSES_API.search(model_name.lower())
+        or openai_developer_instructions_model(model_name)
+    ):
         supports_responses_api = True
         supports_cache = True
     lowered = model_name.lower()

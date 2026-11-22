@@ -1588,6 +1588,76 @@ async def test_openai_api_key_gpt5_uses_public_responses_end_to_end() -> None:
     assert events[-1].stop_reason == "toolUse"
 
 
+@pytest.mark.parametrize(
+    ("provider", "model_id", "base_url", "api_mode", "placement"),
+    [
+        ("openai", "gpt-6.2-astra", "https://api.openai.com/v1", "responses", "input"),
+        ("openai", "gpt-6.10-sol", "https://api.openai.com/v1", "responses", "input"),
+        ("openai", "gpt-6.2-sol", "https://gateway.invalid/v1", "responses", "instructions"),
+        ("openrouter", "gpt-6.2-sol", "https://api.openai.com/v1", "responses", "instructions"),
+        ("openai", "gpt-6.2-unknown", "https://api.openai.com/v1", "responses", "instructions"),
+        ("openai", "gpt-6.2-sol", "https://api.openai.com/v1", "chat_completions", "chat"),
+        ("openai-device", "gpt-6.2-sol", "https://api.openai.com/v1", "codex", "input"),
+        ("openai", "gpt-6.2-sol", "https://gateway.invalid/v1", "codex", "instructions"),
+    ],
+)
+async def test_responses_developer_instructions_are_scoped_to_official_models_and_endpoint(
+    provider: str, model_id: str, base_url: str, api_mode: str, placement: str
+) -> None:
+    from local_operator.model.configure import build_model_spec
+    from local_operator.providers.clients import CODEX_RESPONSES_URL
+
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content)
+        stream = (
+            _sse([{"choices": [{"delta": {}, "finish_reason": "stop"}]}])
+            if placement == "chat"
+            else _public_responses_sse()
+        )
+        return httpx.Response(200, content=stream, headers={"content-type": "text/event-stream"})
+
+    # Official models resolve through the same discovery fallback as a session.
+    # Force Responses only for the negative controls so we exercise the body gate.
+    spec = build_model_spec(provider, model_id)
+    if placement == "instructions" and not spec.supports_responses_api:
+        spec = spec.model_copy(update={"supports_responses_api": True})
+    request = ChatRequest(
+        model=spec, system_blocks=["Reusable guidance."], messages=[Message.user("hi")]
+    )
+    access = (
+        OAuthAccess(access_token="fixture", credential_id=1, org_id="org", kind="oauth")
+        if api_mode == "codex"
+        else None
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = OpenAICompatClient(
+            base_url, http_client=http, openai_api="responses" if access else api_mode
+        )
+        await _collect(client.stream(request, "fixture", access))
+
+    body = captured["body"]
+    if placement == "chat":
+        assert captured["url"] == f"{base_url}/chat/completions"
+        assert body["messages"][0] == {"role": "system", "content": "Reusable guidance."}
+        assert "instructions" not in body and "input" not in body
+    else:
+        assert captured["url"] == (CODEX_RESPONSES_URL if access else f"{base_url}/responses")
+        if placement == "input":
+            assert "instructions" not in body
+            assert body["input"][0] == {
+                "type": "message",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": "Reusable guidance."}],
+            }
+            assert body["input"][1]["role"] == "user"
+        else:
+            assert body["instructions"] == "Reusable guidance."
+            assert body["input"][0]["role"] == "user"
+
+
 def _enum_members(node: Any) -> list[Any]:
     """Collect enum members from exactly the provider-bound JSON payload.
 
