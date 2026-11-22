@@ -320,8 +320,18 @@ class _GuidanceClient:
 async def test_inbox_handling_carries_the_response_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def fake_execute(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[str, Any]:
+    seen_witnesses: list[Any] = []
+
+    async def fake_execute(
+        runtime: BridgeRuntime, args: dict[str, Any], *, owner_turn: Any = None
+    ) -> dict[str, Any]:
+        # The wrapper forwards host authority unchanged; this advisory-only
+        # inbox path must neither invoke it nor manufacture an owner verdict.
+        seen_witnesses.append(owner_turn)
         return {"ok": True, "state": "working", "message_id": "bmsg_1"}
+
+    def witness(required_text: str) -> Any:
+        pytest.fail("ack must not consult owner-turn authority")
 
     monkeypatch.setattr(tool_mod, "execute_bridge", fake_execute)
     runtime = BridgeRuntime(
@@ -331,7 +341,7 @@ async def test_inbox_handling_carries_the_response_scope(
         owner=OWNER,
         session_id="sess_cos",
     )
-    context = ToolContext(bridge_runtime=runtime)
+    context = ToolContext(bridge_runtime=runtime, owner_turn_witness=witness)
     tool = build_bridge_tool(context)
     assert tool is not None
     result = await tool.execute(
@@ -342,6 +352,7 @@ async def test_inbox_handling_carries_the_response_scope(
         context,
     )
     text = "\n".join(getattr(block, "text", "") for block in result.content)
+    assert seen_witnesses == [witness]
     assert "[bridge guidance — advisory]" in text
     assert "Share only the status and implementation detail of in-flight work" in text
     assert "Never share personal or private information" in text

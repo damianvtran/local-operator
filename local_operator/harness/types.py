@@ -2715,6 +2715,12 @@ class ToolContext(BaseModel):
     decide_profile_proposal: Callable[[str, str], Awaitable[str]] | None = Field(
         default=None, exclude=True, repr=False
     )
+    #: Host-held operator-turn witness (``harness/owner_turn.py``): called with
+    #: the exact command the operator must have typed, it answers
+    #: whether THIS run's own operator turn asked for it, and which entry did.
+    #: For tool ops that act AS the human owner. ``None`` (SDK hosts, children
+    #: built without a session) is a refusal, never a permission.
+    owner_turn_witness: Callable[[str], Any] | None = Field(default=None, exclude=True, repr=False)
     # Session-named variables behind the list_variables / read_variable tools.
     # Values are never baked into the prompt; the model lists names and reads
     # single values on demand. ``None`` degrades those tools to the process

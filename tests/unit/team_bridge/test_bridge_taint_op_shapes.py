@@ -41,6 +41,7 @@ from tests.unit.team_bridge.test_owner_audit_isolation import (
     ROOT,
     TENANT,
     _hub_answer,
+    _rename_witness,
 )
 
 TAKE_UP_BODY = "a screened teammate body"
@@ -74,6 +75,8 @@ def _hub(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200, json={"msg": "ok", "result": {"message": {"body": {"text": TAKE_UP_BODY}}}}
         )
+    if request.url.path == f"/v1/messaging/conversations/{CID}/rename":
+        return _hub_answer(request)
     if request.method == "POST" and "/conversations" not in request.url.path:
         # The pair lane (``send``/``reply``) confirms with a 201 and the new message's id.
         return httpx.Response(201, json={"msg": "ok", "result": {"message": {"id": "bmsg_9"}}})
@@ -101,9 +104,12 @@ def _runtime(tmp_path: Path, handler: Any = _hub) -> BridgeRuntime:
 async def _classify(runtime: BridgeRuntime, args: dict[str, Any]) -> tuple[Message, bool, bool]:
     """Run one call through the tool; return the live message and its two verdicts."""
 
-    tool = build_bridge_tool(ToolContext(bridge_runtime=runtime))
+    # Use the host witness seam: the rename driver must succeed on the exact
+    # latest operator command, not classify an early refusal as a harmless op.
+    context = ToolContext(bridge_runtime=runtime, owner_turn_witness=_rename_witness)
+    tool = build_bridge_tool(context)
     assert tool is not None
-    result = await tool.execute("call_1", args, None, None, ToolContext(bridge_runtime=runtime))
+    result = await tool.execute("call_1", args, None, None, context)
     message = Message.tool_result(result)
     payload = message.model_dump(mode="json", exclude_none=True)
     payload["kind"] = "message"

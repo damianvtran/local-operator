@@ -4212,6 +4212,11 @@ class Session:
         # ``profile_proposal op=show`` the model runs after the owner spoke can
         # never rebind the owner's earlier words to a different proposal.
         self._run_owner_text_bindings: list[str | None] = []
+        #: Parallel to ``_run_owner_texts``: each owner row's transcript entry id
+        #: (``Message.id``). Read only by :meth:`owner_turn_witness`, so an op
+        #: that acts AS the owner can cite, in its audit line, the exact operator
+        #: turn that authorized it. Reset at the pipeline head with the texts.
+        self._run_owner_entry_ids: list[str] = []
         self._run_owner_consent = False
         self._run_untrusted_input = False
         #: This run DISPLAYED an untrusted-origin proposal (``profile_proposal
@@ -17343,6 +17348,38 @@ class Session:
                 return False
         return True
 
+    def owner_turn_witness(self, required_text: str) -> Any:
+        """Host-only: did the operator's OWN typed turn in THIS run name ``required_text``?
+
+        For tool ops that act AS the human owner (the bridge ``channel_rename``).
+        Returns a ``harness.owner_turn.OwnerTurnWitness``; the decision and its
+        rationale live in that module. Every fact is one this session already
+        records for the account-profile seam (``_note_run_input``), plus the
+        dangerous-delete guard's ``session_lineage`` answer to "did a person
+        open this session?" -- so a peer message, a Team Bridge delivery, a
+        remote prompt, a wake, a monitor, a subagent, a tool result or an
+        agent-opened workstream's brief can never stand in for the operator.
+        Fails closed: an unreadable lineage is "not operator-opened".
+        """
+        from local_operator.harness import owner_turn
+
+        try:
+            from local_operator.guardrails.provenance import session_lineage
+
+            _, operator_opened = session_lineage(self._session_id)
+        except Exception:  # noqa: BLE001 -- unknown lineage is not operator-opened
+            logger.debug("owner_turn_witness: lineage unreadable", exc_info=True)
+            operator_opened = False
+        return owner_turn.decide(
+            owner_host=self._owner_prompt_consent,
+            is_subagent=bool(self._parent_session_id),
+            operator_opened=operator_opened,
+            owner_rows=list(zip(self._run_owner_entry_ids, self._run_owner_texts, strict=False)),
+            untrusted_input=self._run_untrusted_input,
+            last_trigger_typed=self._run_last_trigger == TRIGGER_TYPED,
+            required_text=required_text,
+        )
+
     def _profile_owner_consent(self) -> bool:
         """Only a top-level owner's clean run may authorize account writes."""
         return bool(
@@ -19564,6 +19601,7 @@ class Session:
                 if not _is_remote_prompt(message):
                     self._run_owner_texts.append(str(getattr(message, "text", "") or ""))
                     self._run_owner_text_bindings.append(self._last_displayed_profile_proposal)
+                    self._run_owner_entry_ids.append(str(getattr(message, "id", "") or ""))
 
     def _turn_is_user_directed(self) -> bool:
         """Whether a person's own message drives this run (body-exclusion gate).
@@ -22497,6 +22535,7 @@ class Session:
         self._run_typed_user = False
         self._run_owner_texts = []
         self._run_owner_text_bindings = []
+        self._run_owner_entry_ids = []
         self._run_owner_consent = False
         self._run_untrusted_input = False
         #: This run DISPLAYED an untrusted-origin proposal (``profile_proposal
@@ -25258,6 +25297,9 @@ class Session:
             # is a refusal, never a permission (see the constructor field).
             authorize_durable_write=self._authorize_durable_write,
             decide_profile_proposal=self.decide_profile_proposal,
+            # Host-held witness for ops that act AS the owner (bridge
+            # channel_rename); a model argument can never supply it.
+            owner_turn_witness=self.owner_turn_witness,
             register_profile_action=self._profile_actions.register,
             ask_user=self._ask_user,
             # THE QUEUED-ASK DOOR (design §2.1). ``None`` on the blocking path

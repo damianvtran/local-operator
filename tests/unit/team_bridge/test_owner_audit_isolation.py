@@ -34,6 +34,7 @@ import pytest
 
 import local_operator
 from local_operator.aida import state as aida_state
+from local_operator.harness import owner_turn
 from local_operator.harness.types import ToolContext
 from local_operator.team_bridge import authority as authority_mod
 from local_operator.team_bridge import client as tb_client
@@ -180,6 +181,7 @@ OP_ARGS: dict[str, dict[str, Any]] = {
     "reply": {"thread_id": "bthr_1", "to": {"account_id": "acc_b"}, "text": "hi"},
     "channels": {"limit": 5},
     "channel_create": {"kind": "channel", "name": "audit-probe", "visibility": "tenant"},
+    "channel_rename": {"channel_id": CID, "name": "audit-probe-renamed"},
     "channel_post": {"channel_id": CID, "body": "hello"},
     "channel_history": {"channel_id": CID, "limit": 5},
     "react": {"channel_id": CID, "message_id": ROOT, "emoji": "👍"},
@@ -189,6 +191,23 @@ OP_ARGS: dict[str, dict[str, Any]] = {
     "shared_conversations": {"limit": 5},
     "shared_history": {"channel_id": CID, "limit": 5},
 }
+
+
+def _rename_witness(required_text: str) -> owner_turn.OwnerTurnWitness:
+    """Bind the driver to the latest operator row, never bless arbitrary args."""
+
+    return owner_turn.decide(
+        owner_host=True,
+        is_subagent=False,
+        operator_opened=True,
+        owner_rows=[
+            ("owner_previous", f"rename {CID} to superseded-name"),
+            ("owner_latest", f"rename {CID} to {OP_ARGS['channel_rename']['name']}"),
+        ],
+        untrusted_input=False,
+        last_trigger_typed=True,
+        required_text=required_text,
+    )
 
 
 class TrippedClient(TeamBridgeClient):
@@ -223,6 +242,15 @@ def _hub_answer(request: httpx.Request) -> httpx.Response:
                 }
             ],
         }
+    elif path == f"/v1/messaging/conversations/{CID}/rename":
+        # A rename must exercise the owner's real client contract, not fall
+        # through to a generic message response that cannot prove a mutation.
+        assert request.method == "POST"
+        assert json.loads(request.content) == {
+            "tenant_id": TENANT,
+            "name": OP_ARGS["channel_rename"]["name"],
+        }
+        result = {"id": CID, "kind": "channel", "name": OP_ARGS["channel_rename"]["name"]}
     elif path.endswith("/replies"):
         result = {"root": {"id": ROOT, "seq": 1}, "replies": [], "has_more": False}
     elif path.endswith("/messages") and request.method == "GET":
@@ -292,13 +320,27 @@ async def test_no_bridge_tool_op_reaches_the_owner_audit(tmp_path: Path) -> None
     tool = build_bridge_tool(ToolContext(bridge_runtime=runtime))
     assert tool is not None
 
-    new_ops = {"directory", "dm", "shared_conversations", "shared_history"}
+    # Prove that lacking operator authority cannot produce an owner write.
+    before = len(requests)
+    refused = await execute_bridge(runtime, {"op": "channel_rename", **OP_ARGS["channel_rename"]})
+    assert refused["code"] == "owner_confirmation_required"
+    assert len(requests) == before
+    # An earlier matching instruction cannot authorize a different/latest name.
+    refused = await execute_bridge(
+        runtime,
+        {"op": "channel_rename", "channel_id": CID, "name": "superseded-name"},
+        owner_turn=_rename_witness,
+    )
+    assert refused["code"] == "owner_confirmation_required"
+    assert len(requests) == before
+
+    new_ops = {"directory", "dm", "shared_conversations", "shared_history", "channel_rename"}
     for op, args in OP_ARGS.items():
         # New ops must complete, not merely avoid the audit by failing before
         # dispatch. Keep the legacy pair-lane exception policy unchanged.
         if op in new_ops:
             before = len(requests)
-            result = await execute_bridge(runtime, {"op": op, **args})
+            result = await execute_bridge(runtime, {"op": op, **args}, owner_turn=_rename_witness)
             assert result["ok"] is True, (op, result)
             assert len(requests) > before, op
             continue
@@ -308,6 +350,9 @@ async def test_no_bridge_tool_op_reaches_the_owner_audit(tmp_path: Path) -> None
             pass
 
     paths = [request.url.path for request in requests]
+    renames = [r for r in requests if r.url.path.endswith("/rename")]
+    assert len(renames) == 1
+    assert "actor_endpoint_id" not in json.loads(renames[0].content)
     assert client.tripped == [], f"a tool op reached {client.tripped}"
     assert not any("/agents/owned" in path for path in paths), paths
     # Positive control: the ops DID talk to the hub through this client.

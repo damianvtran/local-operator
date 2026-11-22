@@ -496,7 +496,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # 1996 -> 1990 (same PR, CI context-budget fix): the wire description drops
     # "teammates use bridge" (restated by the ONE-channel sentence) and the
     # ``to`` hint's "or substring" (implied by WHOLE), paying for the emoji hint.
-    "bridge": 1990,
+    # 1990 -> 1997 (channel_rename, 2026-11-21): the owner-typed-only op joins
+    # the enum, wire description and opt-in ops. Dropping dm's duplicate
+    # "never forward this thread" sentence pays for it (Purpose still says
+    # that every turn). Measured by this test: 8,186 chars, below 8,192.
+    "bridge": 1997,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
