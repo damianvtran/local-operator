@@ -158,8 +158,8 @@ async def test_a_pass_stops_at_the_budget_and_evicts_nothing_it_landed(
     assert len(worker.landed) == 2
 
 
-async def _on_screen_while_precaching(viewer: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    client, (server_a, server_b, *_rest) = viewer
+async def _on_screen_while_precaching(viewer_fixture: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, (server_a, server_b, *_rest) = viewer_fixture
     written = _pad_media(server_a, {f"slow{i}.mp4": 300_000 for i in range(5)})
     worker = precache.Precacher(Path(server_b.root))
     row = _catalogue_row(server_a)
@@ -220,9 +220,7 @@ async def _on_screen_while_precaching(viewer: Any, monkeypatch: pytest.MonkeyPat
         # Register only AFTER the slow transfer entered and both candidate
         # snapshots were fixed: cache hits/single-flight cannot satisfy HTTP.
         on_screen = os.urandom(150_000)
-        ref = AttachmentStore(Path(server_a.root) / "attachments").put_bytes(
-            on_screen, "image/png"
-        )
+        ref = AttachmentStore(Path(server_a.root) / "attachments").put_bytes(on_screen, "image/png")
         assert ref is not None
         append_journal(
             Path(server_a.root) / "sessions" / SESSION,
