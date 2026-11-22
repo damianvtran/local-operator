@@ -1,0 +1,59 @@
+{
+  "locale": "vi",
+  "namespace": "tui.model_persistence",
+  "source_sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff",
+  "status": "passed",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "edc50a6f3d77",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": false,
+    "actual_model_source": "Host model-switch message: anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; provider failure: quota. Translation and validation authored after switch.",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "auditor": {
+    "agent": "i18n-auditor B",
+    "session": "674d6e6c175e",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "translator_session": "edc50a6f3d77",
+    "actual_model_source": "Host model-switch message during this audit: anthropic/claude-opus-5-5 to openai/gpt-6.1-sol; provider failure: quota. Assessment and execution after fallback.",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "date": "2026-11-22",
+    "result": "passed",
+    "unresolved_blocker_major": 0,
+    "findings": 0
+  },
+  "note": "Independent B; 4 keys, zero findings; plain Rich only, not styled/native proof. Record: i18n/audits/evidence/vi/tui.model_persistence/vib674/record.json",
+  "record_reference": {
+    "path": "i18n/audits/evidence/vi/tui.model_persistence/vib674/record.json",
+    "sha256": "2c12f19343862ccafab93afbda6f339b3a131bdccb7edfe762689b98e1a1cfaa"
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/vi/tui.model_persistence/vib674/report.md",
+      "sha256": "47beecc7cdbf2a87d1843b81e80552a7df698f4dd0fc2ccd0fa18dfe6c34a10d",
+      "kind": "audit_notes_not_execution_log"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/tui.model_persistence/vib674/audit.log",
+      "sha256": "47ca15b86797726ce1e3448d83246a93d4d8a273f8ff5617cffd7038592bfb1c",
+      "kind": "actual_execution_log"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/tui.model_persistence/vib674/script.py.txt",
+      "sha256": "614b0d1d0f1171b4eea2fb1a7674b5ac2dfd3b32101b08a7965e715d79727f63",
+      "kind": "reproduction_source"
+    }
+  ]
+}

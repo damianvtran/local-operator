@@ -1,0 +1,116 @@
+BEFORE en/tui.model_persistence.json 4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff
+BEFORE en/tui.model_persistence.context.json b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc
+BEFORE vi/tui.model_persistence.json d6b5f00ab0a25ea2596879299e5cda07b5b5bb66bf8ea8bc9081f503719cf505
+INTERPRETER /Users/damian/local-operator/.venv/bin/python
+MODULE local_operator.i18n.catalogues /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/catalogues.py
+MODULE local_operator.i18n.runtime /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/runtime.py
+MODULE local_operator.i18n.messages /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/messages.py
+MODULE scripts.i18n.check /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/scripts/i18n/check.py
+ISOLATION /Users/damian/.local-operator/sessions/fcb8a76716b3/scratchpad/viA1-home /Users/damian/.local-operator/sessions/fcb8a76716b3/scratchpad/viA1-home/config CMUX absent
+OFFICIAL scoped catalogue/context/ICU []
+NEGATIVE missing key ["vi/tui.model_persistence: missing key 'tui.model_persistence.persist'"]
+NEGATIVE renamed argument ["vi/tui.model_persistence: tui.model_persistence.with_model: arguments (('wrong', 'simple'), ('routes', 'simple')) != en's (('label', 'simple'), ('routes', 'simple')): argument 1 is 'wrong', en's is 'label' (renamed or reordered)"]
+KEY tui.model_persistence.persist arguments () plural/select=0 NFC=yes cells 49 no explicit cap
+KEY tui.model_persistence.settings arguments () plural/select=0 NFC=yes cells 48 no explicit cap
+KEY tui.model_persistence.saved arguments () plural/select=0 NFC=yes cells 63 no explicit cap
+KEY tui.model_persistence.with_model arguments (('label', 'simple'), ('routes', 'simple')) plural/select=0 NFC=yes cells 27 no explicit cap
+PROTECTED /model default ASCII bytes unchanged
+PROTECTED /settings ASCII bytes unchanged
+PROTECTED /model saved ASCII bytes unchanged
+NEGATIVE missing label MessageFormatError message argument 'label' was not supplied (have: routes)
+NEGATIVE missing routes MessageFormatError message argument 'routes' was not supplied (have: label)
+MISSING KEY API documented unknown-code passthrough tui.model_persistence.missing_key
+CLAUSE_ONLY en ordinary /model default saves this for new sessions · switch to the boot default with /model saved · /settings edits the boot default too
+PLAIN_RICH en ordinary x 80 cells [75, 64] rows ['model: x — /model default saves this for new sessions · switch to the boot ', 'default with /model saved · /settings edits the boot default too']
+PLAIN_RICH en ordinary x 100 cells [100, 38] rows ['model: x — /model default saves this for new sessions · switch to the boot default with /model saved', '· /settings edits the boot default too']
+PLAIN_RICH en ordinary x 120 cells [119, 20] rows ['model: x — /model default saves this for new sessions · switch to the boot default with /model saved · /settings edits ', 'the boot default too']
+PLAIN_RICH en ordinary openai/gpt-6.1-sol 80 cells [80, 76] rows ['model: openai/gpt-6.1-sol — /model default saves this for new sessions · switch ', 'to the boot default with /model saved · /settings edits the boot default too']
+PLAIN_RICH en ordinary openai/gpt-6.1-sol 100 cells [100, 56] rows ['model: openai/gpt-6.1-sol — /model default saves this for new sessions · switch to the boot default ', 'with /model saved · /settings edits the boot default too']
+PLAIN_RICH en ordinary openai/gpt-6.1-sol 120 cells [120, 36] rows ['model: openai/gpt-6.1-sol — /model default saves this for new sessions · switch to the boot default with /model saved · ', '/settings edits the boot default too']
+PLAIN_RICH en ordinary provider/very-long-opaque-model-20261122:thinking-high 80 cells [79, 77, 36] rows ['model: provider/very-long-opaque-model-20261122:thinking-high — /model default ', 'saves this for new sessions · switch to the boot default with /model saved · ', '/settings edits the boot default too']
+PLAIN_RICH en ordinary provider/very-long-opaque-model-20261122:thinking-high 100 cells [98, 94] rows ['model: provider/very-long-opaque-model-20261122:thinking-high — /model default saves this for new ', 'sessions · switch to the boot default with /model saved · /settings edits the boot default too']
+PLAIN_RICH en ordinary provider/very-long-opaque-model-20261122:thinking-high 120 cells [119, 73] rows ['model: provider/very-long-opaque-model-20261122:thinking-high — /model default saves this for new sessions · switch to ', 'the boot default with /model saved · /settings edits the boot default too']
+CLAUSE_ONLY en missing-model /model default saves this for new sessions · /settings edits the boot default too
+PLAIN_RICH en missing-model x 80 cells [80, 11] rows ['model: x — /model default saves this for new sessions · /settings edits the boot', 'default too']
+PLAIN_RICH en missing-model x 100 cells [92] rows ['model: x — /model default saves this for new sessions · /settings edits the boot default too']
+PLAIN_RICH en missing-model x 120 cells [92] rows ['model: x — /model default saves this for new sessions · /settings edits the boot default too']
+PLAIN_RICH en missing-model openai/gpt-6.1-sol 80 cells [73, 36] rows ['model: openai/gpt-6.1-sol — /model default saves this for new sessions · ', '/settings edits the boot default too']
+PLAIN_RICH en missing-model openai/gpt-6.1-sol 100 cells [98, 11] rows ['model: openai/gpt-6.1-sol — /model default saves this for new sessions · /settings edits the boot ', 'default too']
+PLAIN_RICH en missing-model openai/gpt-6.1-sol 120 cells [109] rows ['model: openai/gpt-6.1-sol — /model default saves this for new sessions · /settings edits the boot default too']
+PLAIN_RICH en missing-model provider/very-long-opaque-model-20261122:thinking-high 80 cells [79, 66] rows ['model: provider/very-long-opaque-model-20261122:thinking-high — /model default ', 'saves this for new sessions · /settings edits the boot default too']
+PLAIN_RICH en missing-model provider/very-long-opaque-model-20261122:thinking-high 100 cells [98, 47] rows ['model: provider/very-long-opaque-model-20261122:thinking-high — /model default saves this for new ', 'sessions · /settings edits the boot default too']
+PLAIN_RICH en missing-model provider/very-long-opaque-model-20261122:thinking-high 120 cells [119, 26] rows ['model: provider/very-long-opaque-model-20261122:thinking-high — /model default saves this for new sessions · /settings ', 'edits the boot default too']
+CLAUSE_ONLY en absent-hosting /settings edits the boot default too
+PLAIN_RICH en absent-hosting x 80 cells [47] rows ['model: x — /settings edits the boot default too']
+PLAIN_RICH en absent-hosting x 100 cells [47] rows ['model: x — /settings edits the boot default too']
+PLAIN_RICH en absent-hosting x 120 cells [47] rows ['model: x — /settings edits the boot default too']
+PLAIN_RICH en absent-hosting openai/gpt-6.1-sol 80 cells [64] rows ['model: openai/gpt-6.1-sol — /settings edits the boot default too']
+PLAIN_RICH en absent-hosting openai/gpt-6.1-sol 100 cells [64] rows ['model: openai/gpt-6.1-sol — /settings edits the boot default too']
+PLAIN_RICH en absent-hosting openai/gpt-6.1-sol 120 cells [64] rows ['model: openai/gpt-6.1-sol — /settings edits the boot default too']
+PLAIN_RICH en absent-hosting provider/very-long-opaque-model-20261122:thinking-high 80 cells [80, 20] rows ['model: provider/very-long-opaque-model-20261122:thinking-high — /settings edits ', 'the boot default too']
+PLAIN_RICH en absent-hosting provider/very-long-opaque-model-20261122:thinking-high 100 cells [100] rows ['model: provider/very-long-opaque-model-20261122:thinking-high — /settings edits the boot default too']
+PLAIN_RICH en absent-hosting provider/very-long-opaque-model-20261122:thinking-high 120 cells [100] rows ['model: provider/very-long-opaque-model-20261122:thinking-high — /settings edits the boot default too']
+CLAUSE_ONLY vi ordinary /model default lưu lựa chọn này cho các phiên mới · chuyển phiên này sang mô hình mặc định đã lưu bằng /model saved · /settings cũng sửa mô hình mặc định khi mở phiên
+PLAIN_RICH vi ordinary x 80 cells [78, 80, 21] rows ['mô hình: x — /model default lưu lựa chọn này cho các phiên mới · chuyển phiên ', 'này sang mô hình mặc định đã lưu bằng /model saved · /settings cũng sửa mô hình ', 'mặc định khi mở phiên']
+PLAIN_RICH vi ordinary x 100 cells [99, 80] rows ['mô hình: x — /model default lưu lựa chọn này cho các phiên mới · chuyển phiên này sang mô hình mặc ', 'định đã lưu bằng /model saved · /settings cũng sửa mô hình mặc định khi mở phiên']
+PLAIN_RICH vi ordinary x 120 cells [116, 63] rows ['mô hình: x — /model default lưu lựa chọn này cho các phiên mới · chuyển phiên này sang mô hình mặc định đã lưu bằng ', '/model saved · /settings cũng sửa mô hình mặc định khi mở phiên']
+PLAIN_RICH vi ordinary openai/gpt-6.1-sol 80 cells [80, 78, 38] rows ['mô hình: openai/gpt-6.1-sol — /model default lưu lựa chọn này cho các phiên mới ', '· chuyển phiên này sang mô hình mặc định đã lưu bằng /model saved · /settings ', 'cũng sửa mô hình mặc định khi mở phiên']
+PLAIN_RICH vi ordinary openai/gpt-6.1-sol 100 cells [99, 97] rows ['mô hình: openai/gpt-6.1-sol — /model default lưu lựa chọn này cho các phiên mới · chuyển phiên này ', 'sang mô hình mặc định đã lưu bằng /model saved · /settings cũng sửa mô hình mặc định khi mở phiên']
+PLAIN_RICH vi ordinary openai/gpt-6.1-sol 120 cells [120, 75] rows ['mô hình: openai/gpt-6.1-sol — /model default lưu lựa chọn này cho các phiên mới · chuyển phiên này sang mô hình mặc định', 'đã lưu bằng /model saved · /settings cũng sửa mô hình mặc định khi mở phiên']
+PLAIN_RICH vi ordinary provider/very-long-opaque-model-20261122:thinking-high 80 cells [80, 79, 72] rows ['mô hình: provider/very-long-opaque-model-20261122:thinking-high — /model default', 'lưu lựa chọn này cho các phiên mới · chuyển phiên này sang mô hình mặc định đã ', 'lưu bằng /model saved · /settings cũng sửa mô hình mặc định khi mở phiên']
+PLAIN_RICH vi ordinary provider/very-long-opaque-model-20261122:thinking-high 100 cells [98, 100, 33] rows ['mô hình: provider/very-long-opaque-model-20261122:thinking-high — /model default lưu lựa chọn này ', 'cho các phiên mới · chuyển phiên này sang mô hình mặc định đã lưu bằng /model saved · /settings cũng', 'sửa mô hình mặc định khi mở phiên']
+PLAIN_RICH vi ordinary provider/very-long-opaque-model-20261122:thinking-high 120 cells [118, 114] rows ['mô hình: provider/very-long-opaque-model-20261122:thinking-high — /model default lưu lựa chọn này cho các phiên mới · ', 'chuyển phiên này sang mô hình mặc định đã lưu bằng /model saved · /settings cũng sửa mô hình mặc định khi mở phiên']
+CLAUSE_ONLY vi missing-model /model default lưu lựa chọn này cho các phiên mới · /settings cũng sửa mô hình mặc định khi mở phiên
+PLAIN_RICH vi missing-model x 80 cells [80, 33] rows ['mô hình: x — /model default lưu lựa chọn này cho các phiên mới · /settings cũng ', 'sửa mô hình mặc định khi mở phiên']
+PLAIN_RICH vi missing-model x 100 cells [100, 12] rows ['mô hình: x — /model default lưu lựa chọn này cho các phiên mới · /settings cũng sửa mô hình mặc định', 'khi mở phiên']
+PLAIN_RICH vi missing-model x 120 cells [113] rows ['mô hình: x — /model default lưu lựa chọn này cho các phiên mới · /settings cũng sửa mô hình mặc định khi mở phiên']
+PLAIN_RICH vi missing-model openai/gpt-6.1-sol 80 cells [80, 50] rows ['mô hình: openai/gpt-6.1-sol — /model default lưu lựa chọn này cho các phiên mới ', '· /settings cũng sửa mô hình mặc định khi mở phiên']
+PLAIN_RICH vi missing-model openai/gpt-6.1-sol 100 cells [100, 29] rows ['mô hình: openai/gpt-6.1-sol — /model default lưu lựa chọn này cho các phiên mới · /settings cũng sửa', 'mô hình mặc định khi mở phiên']
+PLAIN_RICH vi missing-model openai/gpt-6.1-sol 120 cells [118, 12] rows ['mô hình: openai/gpt-6.1-sol — /model default lưu lựa chọn này cho các phiên mới · /settings cũng sửa mô hình mặc định ', 'khi mở phiên']
+PLAIN_RICH vi missing-model provider/very-long-opaque-model-20261122:thinking-high 80 cells [80, 80, 5] rows ['mô hình: provider/very-long-opaque-model-20261122:thinking-high — /model default', 'lưu lựa chọn này cho các phiên mới · /settings cũng sửa mô hình mặc định khi mở ', 'phiên']
+PLAIN_RICH vi missing-model provider/very-long-opaque-model-20261122:thinking-high 100 cells [98, 68] rows ['mô hình: provider/very-long-opaque-model-20261122:thinking-high — /model default lưu lựa chọn này ', 'cho các phiên mới · /settings cũng sửa mô hình mặc định khi mở phiên']
+PLAIN_RICH vi missing-model provider/very-long-opaque-model-20261122:thinking-high 120 cells [118, 48] rows ['mô hình: provider/very-long-opaque-model-20261122:thinking-high — /model default lưu lựa chọn này cho các phiên mới · ', '/settings cũng sửa mô hình mặc định khi mở phiên']
+CLAUSE_ONLY vi absent-hosting /settings cũng sửa mô hình mặc định khi mở phiên
+PLAIN_RICH vi absent-hosting x 80 cells [61] rows ['mô hình: x — /settings cũng sửa mô hình mặc định khi mở phiên']
+PLAIN_RICH vi absent-hosting x 100 cells [61] rows ['mô hình: x — /settings cũng sửa mô hình mặc định khi mở phiên']
+PLAIN_RICH vi absent-hosting x 120 cells [61] rows ['mô hình: x — /settings cũng sửa mô hình mặc định khi mở phiên']
+PLAIN_RICH vi absent-hosting openai/gpt-6.1-sol 80 cells [78] rows ['mô hình: openai/gpt-6.1-sol — /settings cũng sửa mô hình mặc định khi mở phiên']
+PLAIN_RICH vi absent-hosting openai/gpt-6.1-sol 100 cells [78] rows ['mô hình: openai/gpt-6.1-sol — /settings cũng sửa mô hình mặc định khi mở phiên']
+PLAIN_RICH vi absent-hosting openai/gpt-6.1-sol 120 cells [78] rows ['mô hình: openai/gpt-6.1-sol — /settings cũng sửa mô hình mặc định khi mở phiên']
+PLAIN_RICH vi absent-hosting provider/very-long-opaque-model-20261122:thinking-high 80 cells [80, 33] rows ['mô hình: provider/very-long-opaque-model-20261122:thinking-high — /settings cũng', 'sửa mô hình mặc định khi mở phiên']
+PLAIN_RICH vi absent-hosting provider/very-long-opaque-model-20261122:thinking-high 100 cells [97, 17] rows ['mô hình: provider/very-long-opaque-model-20261122:thinking-high — /settings cũng sửa mô hình mặc ', 'định khi mở phiên']
+PLAIN_RICH vi absent-hosting provider/very-long-opaque-model-20261122:thinking-high 120 cells [114] rows ['mô hình: provider/very-long-opaque-model-20261122:thinking-high — /settings cũng sửa mô hình mặc định khi mở phiên']
+CLAUSE_ONLY pseudo-en ordinary /model default ssaavveess tthhiiss ffoorr nneeww sseessssiioonnss · sswwiittcchh ttoo tthhee bboooott ddeeffaauulltt wwiitthh /model saved · /settings eeddiittss tthhee bboooott ddeeffaauulltt ttoooo
+PLAIN_RICH pseudo-en ordinary x 80 cells [65, 77, 73] rows ['mmooddeell: x — /model default ssaavveess tthhiiss ffoorr nneeww ', 'sseessssiioonnss · sswwiittcchh ttoo tthhee bboooott ddeeffaauulltt wwiitthh ', '/model saved · /settings eeddiittss tthhee bboooott ddeeffaauulltt ttoooo']
+PLAIN_RICH pseudo-en ordinary x 100 cells [97, 97, 21] rows ['mmooddeell: x — /model default ssaavveess tthhiiss ffoorr nneeww sseessssiioonnss · sswwiittcchh ', 'ttoo tthhee bboooott ddeeffaauulltt wwiitthh /model saved · /settings eeddiittss tthhee bboooott ', 'ddeeffaauulltt ttoooo']
+PLAIN_RICH pseudo-en ordinary x 120 cells [118, 97] rows ['mmooddeell: x — /model default ssaavveess tthhiiss ffoorr nneeww sseessssiioonnss · sswwiittcchh ttoo tthhee bboooott ', 'ddeeffaauulltt wwiitthh /model saved · /settings eeddiittss tthhee bboooott ddeeffaauulltt ttoooo']
+PLAIN_RICH pseudo-en ordinary openai/gpt-6.1-sol 80 cells [75, 75, 76, 6] rows ['mmooddeell: openai/gpt-6.1-sol — /model default ssaavveess tthhiiss ffoorr ', 'nneeww sseessssiioonnss · sswwiittcchh ttoo tthhee bboooott ddeeffaauulltt ', 'wwiitthh /model saved · /settings eeddiittss tthhee bboooott ddeeffaauulltt ', 'ttoooo']
+PLAIN_RICH pseudo-en ordinary openai/gpt-6.1-sol 100 cells [100, 100, 30] rows ['mmooddeell: openai/gpt-6.1-sol — /model default ssaavveess tthhiiss ffoorr nneeww sseessssiioonnss ·', 'sswwiittcchh ttoo tthhee bboooott ddeeffaauulltt wwiitthh /model saved · /settings eeddiittss tthhee', 'bboooott ddeeffaauulltt ttoooo']
+PLAIN_RICH pseudo-en ordinary openai/gpt-6.1-sol 120 cells [119, 113] rows ['mmooddeell: openai/gpt-6.1-sol — /model default ssaavveess tthhiiss ffoorr nneeww sseessssiioonnss · sswwiittcchh ttoo ', 'tthhee bboooott ddeeffaauulltt wwiitthh /model saved · /settings eeddiittss tthhee bboooott ddeeffaauulltt ttoooo']
+PLAIN_RICH pseudo-en ordinary provider/very-long-opaque-model-20261122:thinking-high 80 cells [76, 79, 76, 37] rows ['mmooddeell: provider/very-long-opaque-model-20261122:thinking-high — /model ', 'default ssaavveess tthhiiss ffoorr nneeww sseessssiioonnss · sswwiittcchh ttoo ', 'tthhee bboooott ddeeffaauulltt wwiitthh /model saved · /settings eeddiittss ', 'tthhee bboooott ddeeffaauulltt ttoooo']
+PLAIN_RICH pseudo-en ordinary provider/very-long-opaque-model-20261122:thinking-high 100 cells [95, 100, 73] rows ['mmooddeell: provider/very-long-opaque-model-20261122:thinking-high — /model default ssaavveess ', 'tthhiiss ffoorr nneeww sseessssiioonnss · sswwiittcchh ttoo tthhee bboooott ddeeffaauulltt wwiitthh ', '/model saved · /settings eeddiittss tthhee bboooott ddeeffaauulltt ttoooo']
+PLAIN_RICH pseudo-en ordinary provider/very-long-opaque-model-20261122:thinking-high 120 cells [118, 120, 30] rows ['mmooddeell: provider/very-long-opaque-model-20261122:thinking-high — /model default ssaavveess tthhiiss ffoorr nneeww ', 'sseessssiioonnss · sswwiittcchh ttoo tthhee bboooott ddeeffaauulltt wwiitthh /model saved · /settings eeddiittss tthhee ', 'bboooott ddeeffaauulltt ttoooo']
+CLAUSE_ONLY pseudo-en missing-model /model default ssaavveess tthhiiss ffoorr nneeww sseessssiioonnss · /settings eeddiittss tthhee bboooott ddeeffaauulltt ttoooo
+PLAIN_RICH pseudo-en missing-model x 80 cells [65, 77] rows ['mmooddeell: x — /model default ssaavveess tthhiiss ffoorr nneeww ', 'sseessssiioonnss · /settings eeddiittss tthhee bboooott ddeeffaauulltt ttoooo']
+PLAIN_RICH pseudo-en missing-model x 100 cells [94, 48] rows ['mmooddeell: x — /model default ssaavveess tthhiiss ffoorr nneeww sseessssiioonnss · /settings ', 'eeddiittss tthhee bboooott ddeeffaauulltt ttoooo']
+PLAIN_RICH pseudo-en missing-model x 120 cells [120, 21] rows ['mmooddeell: x — /model default ssaavveess tthhiiss ffoorr nneeww sseessssiioonnss · /settings eeddiittss tthhee bboooott', 'ddeeffaauulltt ttoooo']
+PLAIN_RICH pseudo-en missing-model openai/gpt-6.1-sol 80 cells [75, 78, 6] rows ['mmooddeell: openai/gpt-6.1-sol — /model default ssaavveess tthhiiss ffoorr ', 'nneeww sseessssiioonnss · /settings eeddiittss tthhee bboooott ddeeffaauulltt ', 'ttoooo']
+PLAIN_RICH pseudo-en missing-model openai/gpt-6.1-sol 100 cells [100, 58] rows ['mmooddeell: openai/gpt-6.1-sol — /model default ssaavveess tthhiiss ffoorr nneeww sseessssiioonnss ·', '/settings eeddiittss tthhee bboooott ddeeffaauulltt ttoooo']
+PLAIN_RICH pseudo-en missing-model openai/gpt-6.1-sol 120 cells [111, 48] rows ['mmooddeell: openai/gpt-6.1-sol — /model default ssaavveess tthhiiss ffoorr nneeww sseessssiioonnss · /settings ', 'eeddiittss tthhee bboooott ddeeffaauulltt ttoooo']
+PLAIN_RICH pseudo-en missing-model provider/very-long-opaque-model-20261122:thinking-high 80 cells [76, 71, 48] rows ['mmooddeell: provider/very-long-opaque-model-20261122:thinking-high — /model ', 'default ssaavveess tthhiiss ffoorr nneeww sseessssiioonnss · /settings ', 'eeddiittss tthhee bboooott ddeeffaauulltt ttoooo']
+PLAIN_RICH pseudo-en missing-model provider/very-long-opaque-model-20261122:thinking-high 100 cells [95, 100] rows ['mmooddeell: provider/very-long-opaque-model-20261122:thinking-high — /model default ssaavveess ', 'tthhiiss ffoorr nneeww sseessssiioonnss · /settings eeddiittss tthhee bboooott ddeeffaauulltt ttoooo']
+PLAIN_RICH pseudo-en missing-model provider/very-long-opaque-model-20261122:thinking-high 120 cells [118, 77] rows ['mmooddeell: provider/very-long-opaque-model-20261122:thinking-high — /model default ssaavveess tthhiiss ffoorr nneeww ', 'sseessssiioonnss · /settings eeddiittss tthhee bboooott ddeeffaauulltt ttoooo']
+CLAUSE_ONLY pseudo-en absent-hosting /settings eeddiittss tthhee bboooott ddeeffaauulltt ttoooo
+PLAIN_RICH pseudo-en absent-hosting x 80 cells [74] rows ['mmooddeell: x — /settings eeddiittss tthhee bboooott ddeeffaauulltt ttoooo']
+PLAIN_RICH pseudo-en absent-hosting x 100 cells [74] rows ['mmooddeell: x — /settings eeddiittss tthhee bboooott ddeeffaauulltt ttoooo']
+PLAIN_RICH pseudo-en absent-hosting x 120 cells [74] rows ['mmooddeell: x — /settings eeddiittss tthhee bboooott ddeeffaauulltt ttoooo']
+PLAIN_RICH pseudo-en absent-hosting openai/gpt-6.1-sol 80 cells [70, 21] rows ['mmooddeell: openai/gpt-6.1-sol — /settings eeddiittss tthhee bboooott ', 'ddeeffaauulltt ttoooo']
+PLAIN_RICH pseudo-en absent-hosting openai/gpt-6.1-sol 100 cells [91] rows ['mmooddeell: openai/gpt-6.1-sol — /settings eeddiittss tthhee bboooott ddeeffaauulltt ttoooo']
+PLAIN_RICH pseudo-en absent-hosting openai/gpt-6.1-sol 120 cells [91] rows ['mmooddeell: openai/gpt-6.1-sol — /settings eeddiittss tthhee bboooott ddeeffaauulltt ttoooo']
+PLAIN_RICH pseudo-en absent-hosting provider/very-long-opaque-model-20261122:thinking-high 80 cells [79, 48] rows ['mmooddeell: provider/very-long-opaque-model-20261122:thinking-high — /settings ', 'eeddiittss tthhee bboooott ddeeffaauulltt ttoooo']
+PLAIN_RICH pseudo-en absent-hosting provider/very-long-opaque-model-20261122:thinking-high 100 cells [97, 30] rows ['mmooddeell: provider/very-long-opaque-model-20261122:thinking-high — /settings eeddiittss tthhee ', 'bboooott ddeeffaauulltt ttoooo']
+PLAIN_RICH pseudo-en absent-hosting provider/very-long-opaque-model-20261122:thinking-high 120 cells [120, 6] rows ['mmooddeell: provider/very-long-opaque-model-20261122:thinking-high — /settings eeddiittss tthhee bboooott ddeeffaauulltt', 'ttoooo']
+AFTER en/tui.model_persistence.json 4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff
+AFTER en/tui.model_persistence.context.json b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc
+AFTER vi/tui.model_persistence.json d6b5f00ab0a25ea2596879299e5cda07b5b5bb66bf8ea8bc9081f503719cf505
+PASS all scoped checks; zero plural/select; 81 plain-Rich wrap cases. NOT styled NoticeBlock, native font, transcript-family geometry, RTL certification, consumer integration or release approval.
