@@ -1,4 +1,5 @@
 import { sendCommand } from "./api";
+import { heldContinuation, holdContinuation, releaseContinuation } from "./continuation-memory";
 import type { InputMode, PromptImage, SkillExpansionReceipt } from "./types";
 
 /*
@@ -39,6 +40,14 @@ import type { InputMode, PromptImage, SkillExpansionReceipt } from "./types";
  *     privacy scope: clear ALL scoped storage (drafts + every envelope), so a
  *     later user on the device never inherits private content. This is distinct
  *     from "navigating between my own sessions", which keeps per-session state.
+ *
+ * WHERE IT IS KEPT. localStorage, so a reload keeps it. localStorage is a shared,
+ * small budget (iOS Safari: ~5 M characters for the whole origin), and an envelope
+ * carrying screenshots is ~3 M, so a second one can be refused with
+ * `QuotaExceededError`. A refused write is NEVER a reason to refuse the send: the
+ * envelope is held in memory instead (`continuation-memory.ts`), the request goes
+ * out under its UUID, and an in-page retry replays it. Only survival across a
+ * reload is lost in that case.
  *
  * The keep/clear split for a caught HTTP error is centralised in
  * `isAmbiguousDeliveryStatus` so transport, correlation, and tests share one
@@ -180,18 +189,25 @@ function enforceEnvelopeBound(keepKey: string): void {
 }
 
 function saveEnvelope(key: string, envelope: ContinuationEnvelope, savedAt: number): void {
-	const raw = JSON.stringify({ version: 1, saved_at: savedAt, envelope } satisfies StoredContinuation);
-	if (raw.length > MAX_STORED_COMMAND_CHARS) {
-		throw new Error("This instruction is too large to retain safely for retry.");
-	}
+	const record: StoredContinuation = { version: 1, saved_at: savedAt, envelope };
+	const raw = JSON.stringify(record);
 	/* Bound BEFORE the write so a fresh envelope for a new route evicts an older
 	   route's, never the one we are about to persist (U1: per-session scope). */
 	enforceEnvelopeBound(key);
-	try {
-		localStorage.setItem(key, raw);
-	} catch {
-		throw new Error("This instruction could not be retained safely for retry.");
+	if (raw.length <= MAX_STORED_COMMAND_CHARS) {
+		try {
+			localStorage.setItem(key, raw);
+			releaseContinuation(key);
+			return;
+		} catch {
+			/* Quota: another conversation's envelope (or any other key) already holds
+			   the origin's budget. Fall through to the memory copy rather than
+			   aborting a send that has not been attempted yet. */
+		}
 	}
+	/* Too big for localStorage, or refused by it: the send still goes out. The
+	   envelope is retained for an in-page retry, not for a reload. */
+	holdContinuation(key, record, MAX_PENDING_ENVELOPES);
 }
 
 export function getPendingContinuation(sessionId: string): ContinuationEnvelope | null {
@@ -203,14 +219,17 @@ export function hasPendingContinuation(sessionId: string): boolean {
 }
 
 export function clearPendingContinuation(sessionId: string): void {
-	localStorage.removeItem(commandStorageKey(sessionId));
+	const key = commandStorageKey(sessionId);
+	localStorage.removeItem(key);
+	releaseContinuation(key);
 }
 
 function storedEnvelope(key: string): ContinuationEnvelope | null {
 	const raw = localStorage.getItem(key);
-	if (!raw || raw.length > MAX_STORED_COMMAND_CHARS) {
+	if (!raw) return heldEnvelope(key);
+	if (raw.length > MAX_STORED_COMMAND_CHARS) {
 		localStorage.removeItem(key);
-		return null;
+		return heldEnvelope(key);
 	}
 	try {
 		const value = JSON.parse(raw) as Partial<StoredContinuation> & Partial<ContinuationEnvelope>;
@@ -237,6 +256,24 @@ function storedEnvelope(key: string): ContinuationEnvelope | null {
 		/* Corrupt or quota-truncated state has no trustworthy UUID/body pairing. */
 	}
 	localStorage.removeItem(key);
+	return null;
+}
+
+/** The in-memory copy of an envelope localStorage could not hold, under the same
+ * TTL and shape rules as a persisted one. */
+function heldEnvelope(key: string): ContinuationEnvelope | null {
+	const record = heldContinuation(key);
+	if (!record) return null;
+	const envelope = record.envelope as Partial<ContinuationEnvelope> | undefined;
+	if (
+		record.saved_at <= Date.now() &&
+		Date.now() - record.saved_at <= COMMAND_TTL_MS &&
+		envelope &&
+		validEnvelope(envelope)
+	) {
+		return envelope;
+	}
+	releaseContinuation(key);
 	return null;
 }
 
