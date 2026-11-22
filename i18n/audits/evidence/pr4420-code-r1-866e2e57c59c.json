@@ -1,0 +1,57 @@
+{
+  "pr": "https://github.com/damianvtran/local-operator/pull/4420",
+  "round": 1,
+  "role": "independent code reviewer",
+  "session": "866e2e57c59c",
+  "model": "openai/gpt-6.1-sol",
+  "fallback": "anthropic/claude-opus-5-5 failed with provider quota before engineering review; actual implementation review and probes used openai/gpt-6.1-sol",
+  "worktree": "~/local-operator/.worktrees/i18n-info-readout",
+  "scope": "7e5da6775c41d867365347f380e2d01fbbeeab29..e9e6c3711149cba6899083eab019342d98d5fa55",
+  "classification": "bounded fix review; 45-minute maximum",
+  "identity_commands": ["git rev-parse HEAD", "gh pr view 4420 --repo damianvtran/local-operator --json headRefOid,url"],
+  "identity_actual": "Both local HEAD and pushed PR head were e9e6c3711149cba6899083eab019342d98d5fa55",
+  "source_command": "git diff 7e5da6775c41..e9e6c3711149 -- local_operator/info/copy.py local_operator/info/render.py local_operator/tui/app.py local_operator/tui/widgets/info_panel.py tests/unit/i18n/test_info_readout.py tests/unit/tui/test_info_i18n_refresh.py",
+  "execution_prefix": "cd ~/local-operator/.worktrees/i18n-info-readout; ISO=$(mktemp -d \"$LOCAL_OPERATOR_SCRATCHPAD/final-review-home.XXXXXX\"); env -i HOME=\"$ISO\" LOCAL_OPERATOR_CONFIG_DIR=\"$ISO/config\" PATH=\"$PATH\" TERM=xterm-256color PYTHONPATH=\"$PWD\" ~/local-operator/.venv/bin/python - <<'PY'",
+  "import_identity_actual": "~/local-operator/.worktrees/i18n-info-readout/local_operator/__init__.py",
+  "matrix": [
+    {
+      "surface": "French redacted clipboard / missing durations",
+      "command": "set_active_locale('fr'); print([line for line in build_export(InfoSnapshot()).splitlines() if 'unknown' in line])",
+      "actual": ["local-operator unknown · unknown install", "  âge compilation   unknown", "  durée d’activité  unknown"],
+      "status": "FAIL",
+      "finding": "R1 MAJOR: localized export messages receive the globally formatted English unknown duration. First stable triage-prefix line is explicitly EXCLUDED from finding. Localize None at the Info presentation boundary; preserve global format_duration/CLI behavior."
+    },
+    {
+      "surface": "Urdu real not-answering sentence command projection",
+      "command": "set_active_locale('ur'); clause=not_answering_clause(SessionsInfo(total=1,wedged=1,lines=(SessionLine(pid=4243,state='wedged',heartbeat_age_s=65),))); b=_Body(1000); b.note(clause); whole=\"\\u2066'lop stop --pid 4243 --force'\\u2069\"; direct=InfoRow(); direct.append(info_text(k.not_answering_clause_remedy_one(pid='4243'))); print(whole in b.to_text().plain,whole in paint_info_row(direct).plain,list(clause.parts[0].literals))",
+      "actual": {"real_path_force_command_isolated": false, "direct_helper_force_command_isolated": true, "real_path_literals": ["1m", "'lop stop --pid N'", "'/stop N'", "'lop stop --pid N --force'"]},
+      "status": "FAIL",
+      "finding": "R2 MAJOR: str(remedy) discards nested source/whole-command metadata. Real full sentence lacks actual-PID command islands even without wrapping; direct helper test passes and misses the production composition. Preserve metadata through interpolation/composition and cell wrapping. No native shaping claim."
+    },
+    {
+      "surface": "Translated Source row technical identity fit; English same-input control",
+      "command": "s=InfoSnapshot(install=InstallInfo(version='0.90.0',kind='uv-tool',is_git_snapshot=True,source_ref='a1b2c3d4e5f67890')); for locale in ('en','fr','es','vi','ur'): set_active_locale(locale); b=_Body(51); _install_section(b,s,False); label=str(info_text(k.label_source())); print(locale,b.label_cells,next(r.plain for r in b.lines if label in r.plain),'a1b2c3d4e5f6' in b.to_text().plain)",
+      "actual": {
+        "en": {"label_cells": 20, "source_row": "  Source              git snapshot @ a1b2c3d4e5f6", "complete_sha": true},
+        "fr": {"label_cells": 26, "source_row": "  Source                    instantané Git @ a1b2c3", "complete_sha": false},
+        "es": {"label_cells": 25, "source_row": "  Origen                   instantánea de git @ a1b", "complete_sha": false},
+        "vi": {"label_cells": 23, "source_row": "  Nguồn                  ảnh chụp Git @ a1b2c3d4e5f", "complete_sha": false},
+        "ur": {"label_cells": 23, "source_row": "  ماخذ                   git اسنیپ شاٹ @ a1b2c3d4e5", "complete_sha": false}
+      },
+      "status": "FAIL",
+      "finding": "R3 MAJOR: localized label-column growth and longer source prose cause kv's unconditional crop to publish a partial identifying SHA at a width where English preserves it. Add a whole-SHA value ladder/fitting rule; do not crop a technical identifier or globally shorten translations. English's pre-existing crop at width 47 is explicitly NOT this finding."
+    },
+    {
+      "surface": "Pure body/export smoke, redaction, immutable facts, clipboard controls",
+      "command": "home=str(Path.home()); s=InfoSnapshot(install=InstallInfo(version='0.90.0',kind='uv-tool',prefix=home+'/synthetic/install'),process=ProcessInfo(cwd=home+'/synthetic/work',config_dir=home+'/synthetic/config'),env=EnvInfo(credential_keys=('SYNTHETIC_KEY',))); before=asdict(s); checks=[]; for locale in ('en','fr','es','zh-CN','vi','hi','ru','ur'): set_active_locale(locale); exported=build_export(s); for width in (101,65,47): rendered=build_info_report(s,LiveState(),width); checks.append(rendered.cell_len >= 0); checks.extend((home not in exported,not any(c in exported for c in '\\u2066\\u2067\\u2069'),before==asdict(s)))",
+      "actual": {"assertions": 48, "failures": 0, "locales": 8, "pure_body_widths": [101,65,47]},
+      "status": "PASS",
+      "limits": "Body existence/no exception is smoke only, NOT pixel/geometry/English-identity proof. Redaction uses synthetic isolated-HOME paths and credential NAME only. No real registry, secrets, services or live sessions."
+    }
+  ],
+  "source_review": ["semantic and typed message boundaries", "count/plural ownership", "refresh registration and mounted screen stack repaint lifecycle", "clipboard home-relativization and machine-state exceptions", "measured label/value fitting", "source-aware post-fit RTL projection"],
+  "known_not_duplicated": ["Five copy majors from manager-owned seven-language audit bundle", "expected unfinished i18n audit ledger/generation integration", "PR4414 update-warning sites", "stable triage prefix and machine identifiers"],
+  "not_run": ["pytest: QA owns exclusive lease", "App/run_test/native/browser: QA owns exclusive lease; this role has no browser tool", "full suites and i18n/gen/ledger gate: not authorized this wave", "native Urdu shaping: not proven by pure helpers/SVG/raster", "mounted language commands/watch real flow and scroll: source reviewed, independent QA owns execution", "EN 120/80 rendered identity: QA/design evidence lane"],
+  "process_cleanup": "No servers, App, browser or background process groups started. All foreground pure-helper processes exited 0.",
+  "verdict": "changes required: three independently reproduced new MAJOR findings; no BLOCKER; no padded minor/nit findings"
+}

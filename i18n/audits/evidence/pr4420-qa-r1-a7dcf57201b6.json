@@ -1,0 +1,23 @@
+{
+  "kind": "independent QA round 1; initial wave; not ship clearance",
+  "pr": 4420,
+  "scope": "7e5da6775c41..e9e6c3711149cba6899083eab019342d98d5fa55",
+  "head": "e9e6c3711149cba6899083eab019342d98d5fa55",
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-info-readout",
+  "qa": "qa-tester session a7dcf57201b6",
+  "served_model": "openai/gpt-6.1-sol",
+  "fallback": "temporary fallback after anthropic/claude-opus-5-5 provider quota failure",
+  "verdict": "FAIL",
+  "new_findings": [{"id":"Q1", "severity":"MAJOR", "path":"local_operator/tui/widgets/info_panel.py:1990-2014", "actual":"First mounted language-refresh frame has French title/body and old English hint; settled frame French. Observed command+disk poll at middle/end and actual external writer with automatic config watcher.", "cause":"_repaint synchronously updates body/title but only schedules _sync_hint after refresh"}],
+  "known_findings_retained_from_other_streams": ["reviewer R1 raw English unknown duration in clipboard", "reviewer R2 Urdu nested remedy technical-token provenance", "reviewer R3 SHA truncation", "five linguistic majors in manager-owned initial locale audit bundle"],
+  "scratch_root": "/Users/damian/.local-operator/sessions/a7dcf57201b6/scratchpad",
+  "report": "qa-report-r1.md",
+  "summary": "qa-summary.json",
+  "captures": {"frames-v2":182,"flow-v2":43,"rich-v2":88,"external-v2":3},
+  "invalid_old_position_artifacts": "frames/ retained for rig failure provenance; do not use TOP labels",
+  "tests": {"files":["tests/unit/i18n/test_info_readout.py","tests/unit/tui/test_info_i18n_refresh.py","tests/unit/tui/test_info_panel.py","tests/unit/info/test_redaction.py"],"result":"174 passed, 2 warnings, 10.66s, exit 0","runs":1},
+  "geometry": "No overlong report rows or unclosed isolates in corrected captures; explicit scroll positions validated",
+  "native_urdu_shaping": "NOTRUN; librsvg compositor raster is not native terminal shaping proof",
+  "cleanup": "All recorded App PIDs/PGIDs and wrapper PIDs absent; App process-group membership check empty; external writer PID92822 absent. run_bounded command-status cleanup=unknown is not used as cleanup certification.",
+  "product_edits": false
+}

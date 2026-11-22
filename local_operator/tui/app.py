@@ -48868,6 +48868,16 @@ class OperatorApp(App[None]):
         settings_view = self._settings_view
         if settings_view is not None:
             settings_view._repaint()
+        # /info owns painted Statics, not render-time lookups. Repaint the
+        # existing presentation through this shared command/config-watch hook:
+        # re-opening it would lose its snapshot/scroll and re-run costly probes.
+        # Walking the mounted stack also covers an InfoScreen under a modal;
+        # no process-global listener retains a dismissed presentation.
+        from local_operator.tui.widgets.info_panel import InfoScreen
+
+        for screen in self.screen_stack:
+            if isinstance(screen, InfoScreen):
+                screen._repaint()
 
     def _apply_theme(self, name: str, *, preview: bool = False) -> None:
         """Switch every rendering surface to ``name``, live.

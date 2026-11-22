@@ -1,0 +1,48 @@
+{
+  "locale": "hi",
+  "namespace": "tui.info",
+  "stage": "additional translator authoring only; full R2 independent localization review pending parent common commit",
+  "agent": "translator / info-remediate-hi / ad9306355f35",
+  "fifth_key_model": "anthropic/claude-opus-5-5",
+  "fifth_key_model_provenance": "Current host Model declaration; no fallback notice received in this resumed authoring turn",
+  "prior_four_key_model": "openai/gpt-6.1-sol",
+  "prior_four_key_model_provenance": "anthropic/claude-opus-5-5 quota provider failure; host notice before authoring",
+  "original_before_r1_target_sha256": "76406c8f5c7f42bb71d6fdf872090a7407701531688151c0e96152be25aa0702",
+  "four_key_candidate_sha256": "4917914cae4994eab9cdb0ba490794653d4be94872b3ac3ef6d8af99a4513fa2",
+  "target_final_sha256": "1a841571a322478b0294935ea760abe48d7984accd3fd5839d47af7d129697d2",
+  "source_sha256": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+  "context_sha256": "aee21715fca769227b3bda5b500a5e81e51763cf86817f741baff8b1a5ef0ae7",
+  "original_receipt": "/Users/damian/local-operator/.worktrees/i18n-info-readout/i18n/audits/evidence/pr4420-translator-hi-remediation.json",
+  "original_receipt_sha256": "397639602109fe41b33511b7004a1793e7cd6ed27bdfab221fe51ab326b3e950",
+  "changed_keys_from_original": [
+    "tui.info.fleet_caveats.lower_bound",
+    "tui.info.tree_lines.deeper",
+    "tui.info.export.build_age",
+    "tui.info.export.uptime",
+    "tui.info.state.stale"
+  ],
+  "key_count": 277,
+  "additional_key": "tui.info.state.stale",
+  "old": "पुरानी जानकारी",
+  "new": "प्रोसेस अब मौजूद नहीं",
+  "meaning": "The OS process no longer exists; does not claim intentional stop, hang, or an expired heartbeat.",
+  "source_context_note": "Human rendering of the corresponding stable machine code; do not translate the stored code. Registry classification stale means the operating-system PID no longer exists, NOT an expired heartbeat. A live PID with an expired heartbeat is instead wedged/not answering, even if the stored heartbeat on the dead-PID record was fresh.",
+  "controls": {
+    "exactly_one_changed_value_from_four_key_candidate": "PASS",
+    "other_276_values_unchanged": "PASS",
+    "key_order_and_277_keys": "PASS",
+    "ICU_arguments_source_and_target_empty": "PASS",
+    "ICU_parser_and_formatter": "PASS: प्रोसेस अब मौजूद नहीं",
+    "source_and_context_still_pinned": "PASS",
+    "authored_bidi_controls": "none",
+    "git_diff_check": "PASS"
+  },
+  "fit_risk": "Longer missing-process label; rendered narrow-width fit unverified. Meaning retained without abbreviation.",
+  "not_run": [
+    "self-audit/native linguistic clearance",
+    "full tests",
+    "generation",
+    "native/App/browser/rendered layout",
+    "commit/stage/push"
+  ]
+}
