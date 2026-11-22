@@ -5588,14 +5588,18 @@ async def _prepare(
     # a gate miss leaves the field None and the createIf behaves as before.
     from local_operator.team_bridge.host import bridge_runtime_for_session
 
+    # One host-resolved name snapshot, shared by construction and dispatch.
+    bridge_session_agent_display = agent.name if agent is not None else None
     bridge_runtime = bridge_runtime_for_session(
         config_manager=config_manager,
         session_id=transcript.directory.name,
+        session_agent_display=bridge_session_agent_display,
     )
     # One value, both roles: the table assembled below inspects this context for
     # PRESENCE, and the Session executes against the same runtime. Two
     # resolutions here would be two answers waiting to disagree.
     tool_context.bridge_runtime = bridge_runtime
+    tool_context.bridge_session_agent_display = bridge_session_agent_display
     tools = create_tools(tool_context)
     # The mesh credential binding recorder: created with the transcript in hand
     # (it appends the durable rows), gated on THIS root holding a credential

@@ -8452,3 +8452,42 @@ def test_is_config_run_dir_reads_either_witness(tmp_path: Path) -> None:
     plain.mkdir(parents=True)
     assert is_config_run_dir(plain) is False
     assert is_config_run_dir(tmp_path / "sessions" / "missing") is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", [None, "Resolved host agent"])
+async def test_bridge_factory_uses_resolved_agent_name_for_host_context(
+    tmp_config_dir, monkeypatch, name
+):
+    """Birth composition uses the resolved record, not a transcript/model label."""
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.team_bridge import host
+    from local_operator.tools import registry as tools_registry
+
+    manager = ConfigManager(tmp_config_dir)
+    registry = AgentRegistry(tmp_config_dir)
+    if name is not None:
+        registry.create_agent(_agent_fields(name))
+    captured = {}
+
+    def runtime_for_session(**kwargs):
+        captured["host"] = kwargs["session_agent_display"]
+        return None  # feature-disabled birth: never creates a live/network runtime
+
+    def create_tools(context):
+        captured["dispatch"] = context.bridge_session_agent_display
+        return []
+
+    monkeypatch.setattr(host, "bridge_runtime_for_session", runtime_for_session)
+    monkeypatch.setattr(tools_registry, "create_tools", create_tools)
+    plan = await session_factory._prepare(
+        _args(hosting="test", model="test", agent_name=name), manager, registry, has_ui=False
+    )
+    try:
+        assert captured == {"host": name, "dispatch": name}
+    finally:
+        if plan.auth_store is not None:
+            plan.auth_store.close()
+        if plan.session_lease is not None:
+            plan.session_lease.release()

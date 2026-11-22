@@ -172,7 +172,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
@@ -200,7 +200,7 @@ from local_operator.harness.types import (
 )
 
 from . import agent_attachments, agent_files, reply_guard, secret_guard
-from .client import ATTACHMENT_MAX_COUNT, TeamBridgeClient
+from .client import ATTACHMENT_MAX_COUNT, BridgeRefusal, TeamBridgeClient
 from .emoji_names import ACCEPTED_FORMS_HINT, normalize_reaction_emoji
 from .inline_data import bound_inline_data_payload, bound_inline_data_uris
 from .outbox import Outbox, send_from_outbox
@@ -442,6 +442,8 @@ class BridgeRuntime:
     #: session-scoped, so a context that ever shares a runtime still gets the
     #: note once itself. Process-lifetime: a restart shows it once more.
     advised_guidance: dict[str, str] = field(default_factory=dict)
+    # Host-resolved birth snapshot, never a model argument or endpoint identity.
+    session_agent_display: str | None = None
 
     def note_presented(self, ref: Any) -> None:
         """Remember where a presented message lives, for default thread placement."""
@@ -1599,8 +1601,98 @@ def _refuses_human_dm_member(failure: BaseException) -> bool:
     )
 
 
+async def _session_display_send_kwargs(
+    runtime: BridgeRuntime,
+    display: str | None,
+    pre_http_guard: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    """Freeze optional display once per logical send, never per file replay.
+
+    Status/POST are not atomic: a mixed pre-parser fleet can refuse the POST.
+    Such a 400 remains visible; never strip the object and silently resend.
+    """
+    # "Each NEW logical send" means one that may attach this optional object.
+    # A send with no captured display cannot attach it: keep legacy omission
+    # free of a new status-call failure/latency path. Named sends probe anew; no
+    # capability (positive or negative) is latched between logical sends.
+    if not isinstance(display, str) or not display.strip():
+        return {}
+    from .host import _admission_from_payload, outbound_tool_fence
+
+    client = runtime.client
+    base = client.base_url
+    owner = agent_files._owner(runtime)
+    source = client._auth_store()
+    credential = getattr(client, "_pinned_credential_id", None)
+    access = await client.current_access()
+
+    def guard() -> None:
+        row = client._pinned_row()
+        if (
+            row is None
+            or row.id != access.credential_id
+            or not isinstance(row.data, Mapping)
+            or row.data.get("account_id") != access.account_id
+            or outbound_tool_fence(runtime) is not None
+            or runtime.client is not client
+            or client.base_url != base
+            or base != runtime.owner.canonical_base_url
+            or agent_files._owner(runtime) != owner
+            or client._auth_store() is not source
+            or getattr(client, "_pinned_credential_id", None) != credential
+            or access.account_id != runtime.owner.account_id
+            or access.credential_id != runtime.owner.credential_id
+        ):
+            raise BridgeRefusal("owner_changed", "send authority changed", http_status=409)
+        if pre_http_guard is not None:
+            pre_http_guard()
+
+    guard()
+    try:
+        payload = await client.status(
+            access=access, expected_account_id=runtime.owner.account_id, pre_http_guard=guard
+        )
+    except BridgeRefusal as failure:
+        # Optional-support uncertainty degrades; authority/destination refusals
+        # must not grant permission to send under the legacy envelope.
+        if (
+            failure.http_status not in (408, 429)
+            and not (failure.http_status is not None and failure.http_status >= 500)
+            and failure.code != "bridge_unreachable"
+        ):
+            raise
+        payload = None
+    except (TimeoutError, OSError):
+        payload = None
+    guard()
+    if isinstance(payload, Mapping):
+        if payload.get("available") is False:
+            raise BridgeRefusal("bridge_disabled", "bridge is unavailable", http_status=403)
+        if isinstance(payload.get("tenants"), list):
+            state, note = _admission_from_payload(payload, runtime.owner)
+            if state != "admitted":
+                raise BridgeRefusal(
+                    note or "bridge_disabled", "bridge send is not admitted", http_status=403
+                )
+    kwargs: dict[str, Any] = {
+        "access": access,
+        "expected_account_id": runtime.owner.account_id,
+        "pre_http_guard": guard,
+    }
+    features = payload.get("features") if isinstance(payload, dict) else None
+    value = (
+        features.get("team_bridge_agent_session_display") if isinstance(features, dict) else None
+    )
+    if type(value) is int and value == 1:
+        kwargs["agent_session"] = {"display_label": display}
+    return kwargs
+
+
 async def _direct_message(
-    runtime: "BridgeRuntime", params: "BridgeToolParams", endpoint_id: str
+    runtime: "BridgeRuntime",
+    params: "BridgeToolParams",
+    endpoint_id: str,
+    session_agent_display: str | None = None,
 ) -> dict[str, Any]:
     if params.thread_id or params.channel_id or params.members:
         return _error(
@@ -1790,6 +1882,7 @@ async def _direct_message(
             in_reply_to=params.in_reply_to_message_id,
         )
         try:
+            display_kwargs = await _session_display_send_kwargs(runtime, session_agent_display)
             sender = file_batch.send if file_batch else runtime.client.conversation_send
             result = await sender(
                 conversation_id,
@@ -1799,7 +1892,7 @@ async def _direct_message(
                 actor_endpoint_id=endpoint_id,
                 origin_session_id=runtime.session_id,
                 thread_root_id=thread_root_id or None,
-                expected_account_id=runtime.owner.account_id,
+                **({"expected_account_id": runtime.owner.account_id} | display_kwargs),
                 **agent_attachments.send_kwargs(staged_images),
             )
         except Exception as failure:
@@ -2837,7 +2930,9 @@ async def _post_progress_ack(
     return {"hub_ack": "pending", "code": outcome.error_code}
 
 
-async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[str, Any]:
+async def execute_bridge(
+    runtime: BridgeRuntime, args: dict[str, Any], *, session_agent_display: str | None = None
+) -> dict[str, Any]:
     """Run one tool op. Returns a JSON-ish dict; the AgentTool wrapper turns it
     into a ``ToolResult`` (and the honest error shape into ``is_error``)."""
 
@@ -3315,7 +3410,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         return await _directory(runtime, params)
 
     if params.op == "dm":
-        return await _direct_message(runtime, params, endpoint_id)
+        return await _direct_message(runtime, params, endpoint_id, session_agent_display)
 
     if params.op == "shared_conversations":
         return await _shared_conversations(runtime, params, endpoint_id)
@@ -3583,6 +3678,9 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         landed = False
         try:
             try:
+                display_kwargs = await _session_display_send_kwargs(
+                    runtime, session_agent_display, pre_http_guard
+                )
                 sender = file_batch.send if file_batch else runtime.client.conversation_send
                 result = await sender(
                     channel_id,
@@ -3593,7 +3691,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                     origin_session_id=runtime.session_id,
                     thread_root_id=thread_root_id or None,
                     mentions=mentions or None,
-                    pre_http_guard=pre_http_guard,
+                    **({"pre_http_guard": pre_http_guard} | display_kwargs),
                     **agent_attachments.send_kwargs(staged_images),
                 )
             except DispatchRefused as failure:
@@ -4638,7 +4736,10 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
             # enabled, and they talk to ``/community/v1``, never the private hub.
             outcome = await execute_community_op(args, context, config_dir=runtime.config_dir)
         else:
-            outcome = await execute_bridge(runtime, args)
+            # Freeze host attribution before the first await; a later profile
+            # switch cannot rename an already running send.
+            display = context.bridge_session_agent_display
+            outcome = await execute_bridge(runtime, args, session_agent_display=display)
         # Bytes never ride ``details`` (persisted with the transcript row).
         images = outcome.pop(_IMAGES_KEY, None) or []
         # The model gets the page with inline data URIs withheld; ``details`` keeps
