@@ -149,6 +149,7 @@ from local_operator.i18n.keys import tui_app as _x
 from local_operator.i18n.keys import tui_asks as _ask_keys
 from local_operator.i18n.keys import tui_boot_prompt as _boot_prompt_keys
 from local_operator.i18n.keys import tui_library
+from local_operator.i18n.keys import tui_model_persistence as _model_persistence_keys
 from local_operator.i18n.keys import tui_notification_kinds as _kind_keys
 from local_operator.i18n.keys import tui_projects as _pc
 from local_operator.i18n.keys import tui_projects_edit as _pe
@@ -162,7 +163,7 @@ from local_operator.i18n.keys import tui_update as _upd
 from local_operator.i18n.keys import tui_welcome
 from local_operator.i18n.keys import wire_language_receipts as _lang_keys
 from local_operator.i18n.messages import Msg
-from local_operator.i18n.text import register_refresh, tr
+from local_operator.i18n.text import active_locale, register_refresh, tr
 from local_operator.logger import current_log_file
 
 # The `/mcp` verb helpers live with the verbs they serve, so the terminal and
@@ -261,7 +262,7 @@ from local_operator.tui.ask_open_policy import (
     read_queue,
 )
 from local_operator.tui.autocomplete import ArgumentChoice, SlashCommand
-from local_operator.tui.bridge_card_body import card_body_loader
+from local_operator.tui.bridge_card_body import card_body_loader, card_conversation
 from local_operator.tui.command_palette import (
     OperatorCommandPalette,
     OperatorCommandProvider,
@@ -360,6 +361,7 @@ from local_operator.tui.notify import (
     remote_park_banner,
     remote_park_card,
 )
+from local_operator.tui.provider_state import ProviderStateRow, provider_state_label
 from local_operator.tui.quota_notice import await_prewarm, start_prewarm
 from local_operator.tui.session_catalog import CatalogEntry, SidebarSettings
 from local_operator.tui.session_drafts import SessionDraftStore
@@ -724,6 +726,7 @@ _te_projects = tr("tui.projects")
 if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from pathlib import Path
 
+    from local_operator.agent_profiles import AgentFacts
     from local_operator.herdr import HerdrReporter
     from local_operator.info.collect import LiveState
     from local_operator.multiplexer import SessionBroadcast
@@ -22718,8 +22721,9 @@ class OperatorApp(App[None]):
         routed ``/agent`` must send the same rows: a session with no TUI had
         only the ``noop`` the terminal's own resolver drew, so the phone's sheet
         offered ``/agent`` and the tap delivered nothing (review round 1,
-        R1-2/U2). This method stays as the app's seam — the settings pane and the
-        picker read it — and is a delegate rather than a copy.
+        R1-2/U2). This stays as the app's legacy string seam for listings and
+        the picker. Settings instead retains unrendered facts from that same
+        enumeration so a language repaint never needs to reread the registry.
         """
         session = self._session
         registry = getattr(session, "agent_registry", None) if session is not None else None
@@ -41421,7 +41425,7 @@ class OperatorApp(App[None]):
         view.load(
             teams=self._settings_team_rows(),
             agents=self._settings_agent_rows(),
-            providers=self._settings_provider_rows(),
+            provider_states=self._settings_provider_rows(),
             provider_catalogue=self._settings_provider_catalogue(),
             model_catalogue=self._settings_model_catalogue(),
         )
@@ -41474,36 +41478,41 @@ class OperatorApp(App[None]):
             logger.debug("settings: team rows unavailable", exc_info=True)
         return rows
 
-    def _settings_agent_rows(self) -> list[tuple[str, str, str]]:
+    def _settings_agent_rows(self) -> list[tuple[str, AgentFacts, str]]:
         """Agents as ``(display, facts, summary)`` for the settings pane.
 
-        The SAME shape ``_settings_team_rows`` returns, so the pane renders
-        both listings through one row renderer rather than carrying a second
-        layout for a second registry. The display form is UNBOUNDED here
+        Keep stable agent facts in this in-process snapshot: settings resolves
+        labels at paint time on language switches, without registry I/O. Teams
+        retain their legacy string adapter and the shared row layout.
+        The display form is UNBOUNDED here
         (mirroring the team pane): the pane truncates cells itself and the
         composed form is what a reader compares against the picker. Never
         raises: a broken registry renders as an empty list, and a settings
         page that crashed on a bad row would be unreachable exactly when it is
         needed.
         """
-        rows: list[tuple[str, str, str]] = []
+        from local_operator.agent_profiles import agent_listing_facts
+
+        rows: list[tuple[str, AgentFacts, str]] = []
         try:
-            for name, label, facts, summary in self._agent_profile_rows():
+            session = self._session
+            registry = getattr(session, "agent_registry", None) if session is not None else None
+            for name, label, facts, summary in agent_listing_facts(registry):
                 rows.append((self._agent_display_form(name, label), facts, summary))
         except Exception:  # noqa: BLE001 — a bad registry must not break the page
             logger.debug("settings: agent rows unavailable", exc_info=True)
         return rows
 
-    def _settings_provider_rows(self) -> list[tuple[str, str]]:
-        """Logged-in providers as ``(id, state)`` for the settings pane.
+    def _settings_provider_rows(self) -> list[ProviderStateRow]:
+        """Logged-in providers as immutable coded rows for the settings pane.
 
         The states come from the controller's ONE view (``view_rows``, through
-        :data:`_VIEW_STATE_COPY`) rather than a locally-invented vocabulary, so
+        the presentation resolver) rather than a locally-invented vocabulary, so
         this pane, ``/provider``, the ``/login`` picker and the desktop's census
         keep describing one situation with one set of words — the drift this
         surface already records having had.
         """
-        rows: list[tuple[str, str]] = []
+        rows: list[ProviderStateRow] = []
         providers = self._providers
         if providers is None:
             return rows
@@ -41517,7 +41526,7 @@ class OperatorApp(App[None]):
                     # the narrower "who am I logged in as", which is the half
                     # that bears on which default model will work.
                     continue
-                rows.append((definition.id, _VIEW_STATE_COPY[row.state]))
+                rows.append(ProviderStateRow(definition.id, row.state))
         except Exception:  # noqa: BLE001 — never crash the page on a store read
             logger.debug("settings: provider rows unavailable", exc_info=True)
         return rows
@@ -44541,7 +44550,9 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — a note is never worth a broken prompt
             logger.debug("the parked approval card could not be annotated", exc_info=True)
 
-    def _system_notice(self, body: str, kind: NoticeKind = "info") -> None:
+    def _system_notice(
+        self, body: str, kind: NoticeKind = "info", *, wrap_atoms: tuple[str, ...] = ()
+    ) -> None:
         """A notice about the HARNESS that leaves the empty state intact.
 
         Separate from :meth:`_notice` because the two answer different questions.
@@ -44557,10 +44568,15 @@ class OperatorApp(App[None]):
         (``NoticeFn``); a caller that must keep the block calls
         :meth:`_system_notice_block` instead.
         """
-        self._system_notice_block(body, kind)
+        self._system_notice_block(body, kind, wrap_atoms=wrap_atoms)
 
     def _system_notice_block(
-        self, body: str, kind: NoticeKind = "info", *, fold_width: int = 0
+        self,
+        body: str,
+        kind: NoticeKind = "info",
+        *,
+        fold_width: int = 0,
+        wrap_atoms: tuple[str, ...] = (),
     ) -> NoticeBlock:
         """The same notice, handing back the block it created.
 
@@ -44581,7 +44597,7 @@ class OperatorApp(App[None]):
         1, Q1 measured it on the real fixture: nine rows at ``[2,1,2,2,1,1,1,2,2]``
         with ``gap-above`` on all of them, then all 1 row with one gap.
         """
-        block = NoticeBlock(body, kind, fold_width=fold_width)
+        block = NoticeBlock(body, kind, fold_width=fold_width, wrap_atoms=wrap_atoms)
         # While the boot CARD is up the notice is part of a centred composition;
         # below the card threshold the input is a full-width bar and the spine is
         # the axis everything shares. `_append_block` recomputes the boot layout
@@ -47904,7 +47920,7 @@ class OperatorApp(App[None]):
             return ""
         return PERSIST_HINT
 
-    def _persist_hint_notice(self) -> str:
+    def _persist_hint_notice(self, *, label: str | None = None) -> str:
         """The line a bare ``/model`` prints above the list.
 
         It says the one thing the picker cannot: that a pick is session-scoped
@@ -48035,11 +48051,16 @@ class OperatorApp(App[None]):
         the primary next step it always was. Pinned by
         `test_the_model_notice_in_dead_end_setup_variants_names_only_settings`.
         """
-        session = self._session
-        label = session.model_label if session is not None else ""
-        # Named once: it is the one clause every variant below shares, and the
-        # wrap analysis above measured this exact string.
-        settings_clause = "/settings edits the boot default too"
+        if label is None:
+            session = self._session
+            label = session.model_label if session is not None else ""
+        # Resolve only this new opening, never historical transcript content.
+        # One locale snapshot keeps the clauses and their carrier consistent;
+        # the next opening follows a live language change without translating
+        # import-time PERSIST_HINT, which legacy CLI/footer parsers still own.
+        locale = active_locale()
+        settings_clause = _model_persistence_keys.settings().envelope(locale=locale)["text"]
+        persist_clause = _model_persistence_keys.persist().envelope(locale=locale)["text"]
         # `/model saved` sits at its clause's END, which is what removes the
         # split: as the clause's FIRST word it sat one word from the `·` seam
         # and broke across the fold at 4 of the 27 rendered label x width
@@ -48057,18 +48078,23 @@ class OperatorApp(App[None]):
         # naming an occasion to use it (UX review round 2, U6), and it measures
         # better on both width families, not worse: pristine C3 3 -> 2 and
         # non-empty C2 5 -> 3, with C1 and pristine C2 still 0.
-        saved_clause = "switch to the boot default with /model saved"
+        saved_clause = _model_persistence_keys.saved().envelope(locale=locale)["text"]
         if self._setup_state and not self._model_missing_for:
             # No hosting / unknown hosting: every `/model` route refuses here,
             # so the notice must not name one. `/settings` is the live escape.
             routes = settings_clause
         elif self._setup_state:
-            routes = f"{PERSIST_HINT} · {settings_clause}"
+            routes = f"{persist_clause} · {settings_clause}"
         else:
-            routes = f"{PERSIST_HINT} · {saved_clause} · {settings_clause}"
+            routes = f"{persist_clause} · {saved_clause} · {settings_clause}"
         if not label:
             return routes
-        return f"model: {label} — {routes}"
+        # The model label is an opaque machine identifier, not markup or copy.
+        # Keep it unchanged inside the existing plain-text notice envelope;
+        # dedup still compares rendered text and skips the pinned working tail.
+        return _model_persistence_keys.with_model(label=label, routes=routes).envelope(
+            locale=locale
+        )["text"]
 
     # -- reasoning effort ---------------------------------------------------
     def _effort_levels(self) -> tuple[str, ...]:
@@ -49865,7 +49891,7 @@ class OperatorApp(App[None]):
         message worth reading.
 
         The states are the controller's ONE view (``view_rows``, through
-        :data:`_VIEW_STATE_COPY`), not a fourth vocabulary invented here, so
+        :func:`provider_state_label`), not a fourth vocabulary invented here, so
         `/model`, `/provider`, the settings pane and the `/login` picker keep
         describing one situation with one set of words.
         """
@@ -49885,10 +49911,10 @@ class OperatorApp(App[None]):
         # A provider the registry does not know is ``needs login``: no env var
         # resolves for it and no login flow exists, which is exactly what the
         # old per-provider derivation answered for an unknown id.
-        state = _VIEW_STATE_COPY[row.state] if row is not None else _VIEW_STATE_COPY["needs_login"]
-        if state == "needs login":
+        state_code = row.state if row is not None else "needs_login"
+        if state_code == "needs_login":
             return "", f"{provider} needs login — /login {provider}"
-        return f" · {provider} {state}", None
+        return f" · {provider} {provider_state_label(state_code)}", None
 
     # -- model picker -------------------------------------------------------
     def on_model_query_opened(self, message: ModelQueryOpened) -> None:
@@ -49934,7 +49960,11 @@ class OperatorApp(App[None]):
         must both print.
         """
         message.stop()
-        hint = self._persist_hint_notice()
+        # Snapshot opaque identity once for both text and layout metadata. An ID
+        # may itself contain command-looking text; never parse it out of copy.
+        session = self._session
+        label = session.model_label if session is not None else ""
+        hint = self._persist_hint_notice(label=label)
         transcript = self._transcript_view()
         blocks = transcript.blocks()
         pinned = transcript.pinned_tail()
@@ -49942,7 +49972,9 @@ class OperatorApp(App[None]):
         # mid-turn append actually lands.
         last = next((b for b in reversed(blocks) if b is not pinned), None)
         if not (isinstance(last, NoticeBlock) and last.text() == hint):
-            self._system_notice(hint)
+            self._system_notice(
+                hint, wrap_atoms=(label, "/model default", "/model saved", "/settings")
+            )
         self._populate_model_picker()
 
     def _open_model_picker(self) -> None:
@@ -51861,7 +51893,7 @@ class OperatorApp(App[None]):
             items: list[tuple[str, str]] = []
             for definition in self._providers.login_providers():
                 # ONE state vocabulary, resolved in ONE place (the controller's
-                # ``view_rows``, rendered through ``_VIEW_STATE_COPY``). This
+                # ``view_rows``, rendered through ``provider_state_label``). This
                 # line, the ``/login`` picker, the settings pane and the
                 # desktop's census answer the same question on four surfaces,
                 # and two of them had already drifted: the picker said "needs
@@ -55326,13 +55358,13 @@ class OperatorApp(App[None]):
         """
         if row is None:
             return ""
-        return getattr(row, "state_detail", None) or _VIEW_STATE_COPY[row.state]
+        return getattr(row, "state_detail", None) or provider_state_label(row.state)
 
     def _login_choices(self) -> list[ArgumentChoice]:
         """Every loginable provider, with where the user stands on each.
 
         The states come from the controller's ONE view (``view_rows``) through
-        :data:`_VIEW_STATE_COPY`, so this list, ``/provider``, the settings pane
+        :func:`provider_state_label`, so this list, ``/provider``, the settings pane
         and the desktop's census render one fact from one derivation — the
         picker and ``/provider`` had drifted before ("needs login" against "—").
 
@@ -64352,6 +64384,7 @@ class OperatorApp(App[None]):
                     body_loader=card_body_loader(
                         getattr(self, "_session", None), message.message_id or ""
                     ),
+                    conversation=card_conversation(message.details),
                 )
             )
         else:
@@ -67339,28 +67372,6 @@ def _tree_listing(
 #: credential, the plural for a row removing several of ONE kind
 #: (``remove 2 oauth logins`` — the count a bare kind would hide).
 _CREDENTIAL_KINDS = {"oauth": ("oauth", "oauth logins"), "api_key": ("api key", "api keys")}
-
-
-#: The WORDS for the controller's machine states (``ProviderViewRow.state``,
-#: spelled :data:`local_operator.providers.controller.VIEW_STATES`).
-#:
-#: The machine state is ONE fact and is owned by the backend, which is what
-#: lets the desktop render it as its own copy and the census publish it as an
-#: enum; this table is the TUI's copy of it, kept here rather than derived from
-#: the enum so a wording change does not silently rewrite a wire contract.
-#:
-#: The five strings are exactly the ones the TUI printed before the enum existed
-#: (``_credential_state``), pinned by ``tests/unit/tui`` so a surface can never
-#: invent a sixth vocabulary. An unknown state is a ``KeyError`` on purpose: a
-#: row that renders as blank would read as "nothing to say" when it means "this
-#: app does not understand the backend".
-_VIEW_STATE_COPY: dict[str, str] = {
-    "logged_in": "logged in",
-    "env_key": "env key",
-    "needs_login": "needs login",
-    "local_ready": "configured server",
-    "local_unconfigured": "configure server",
-}
 
 
 #: Cells an identity may spend inside a `/logout` row's detail column.

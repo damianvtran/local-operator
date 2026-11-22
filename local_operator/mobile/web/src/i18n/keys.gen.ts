@@ -548,6 +548,7 @@ export type MessageParams = {
   "relay.transcript.bridge.provenance": undefined;
   "relay.transcript.bridge.refused": undefined;
   "relay.transcript.bridge.signed_out": undefined;
+  "relay.transcript.bridge.thread_reply": undefined;
   "relay.transcript.bridge.unavailable": undefined;
   "relay.transcript.composer.queued": { "count": number };
   "relay.transcript.fold.failed_label": undefined;
@@ -556,6 +557,8 @@ export type MessageParams = {
   "relay.transcript.fold.python": { "count": number };
   "relay.transcript.fold.shell": { "count": number };
   "relay.transcript.fold.unit": { "kind": string; "count": number; "name": string };
+  "relay.transcript.jump.latest": undefined;
+  "relay.transcript.jump.latest_short": undefined;
   "relay.transcript.label.ask": undefined;
   "relay.transcript.label.job": undefined;
   "relay.transcript.label.messages": undefined;
@@ -587,6 +590,7 @@ export type MessageParams = {
   "relay.usage_reset.outcome_nothing_to_reset": undefined;
   "relay.usage_reset.outcome_reset": { "count": number };
   "relay.usage_reset.refused": undefined;
+  "wire.agent_badges.packaged": undefined;
   "wire.aida_cadence.interval_hours.help": undefined;
   "wire.aida_cadence.interval_hours.label": undefined;
   "wire.bridge_taint.ack_refused": undefined;

@@ -1,0 +1,96 @@
+{
+  "locale": "hi",
+  "namespace": "tui.model_persistence",
+  "audit_date": "2026-11-22",
+  "record_kind": "translation_authorship_not_independent_audit",
+  "status": "translated",
+  "key_count": 4,
+  "source_revision": "87d87ec8b02ef3c279fda673302ce775f4a0329e",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "fdf96049990f",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": false,
+    "actual_model_source": "Host model-switch telemetry: provider failure: quota; fallback from anthropic/claude-opus-5-5 to openai/gpt-6.1-sol before Hindi authorship",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "auditor": {
+    "agent": "i18n-translator",
+    "session": "fdf96049990f",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": false,
+    "actual_model_source": "Host model-switch telemetry: provider failure: quota; fallback from anthropic/claude-opus-5-5 to openai/gpt-6.1-sol before Hindi authorship",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "role": "author_only_not_auditor"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.json",
+      "sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.context.json",
+      "sha256": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc"
+    },
+    "hi": {
+      "path": "local_operator/i18n/catalogues/hi/tui.model_persistence.json",
+      "sha256": "b64d9953f8abb7bc1e2e5f2bfab5d286d7b095d50e833211bf90df71d69eca68"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/notes.md",
+      "sha256": "06e7324edd9edc13d76f35313d8df75528e388fc87958e96082d1e76c486b34c"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/validator.py.txt",
+      "sha256": "0dc66292dabeba398d0c62464480d77bee1e82fdce73b03bcff7250ec675c485"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/audit.log",
+      "sha256": "4ac41baf6debac4ed0523132656d89d6444d83516525f10483698fda65d22c60"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/initial-attempt.log",
+      "sha256": "fe2e1bb54cfd5d652f1d3d044895893430c5644577eb0d73ff0e4bdd5551aabb"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/receipt.json",
+      "sha256": "f4a261eeca3ae7078bdd8419425a85652511308ed79a0bd4420c0acba9d23287"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "translated",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "independent_audit_performed": false,
+    "note": "Author mechanical validation only; independent A/B and root native Hindi gate outstanding, not passed."
+  },
+  "audit_notes_not_execution_log": [
+    "notes.md"
+  ],
+  "actual_execution_logs": [
+    "audit.log",
+    "initial-attempt.log"
+  ],
+  "glossary_proposals": {
+    "default": "डिफ़ॉल्ट",
+    "boot default": "नए सत्रों का डिफ़ॉल्ट"
+  },
+  "clearance": {
+    "native_font_shaping": false,
+    "full_UI": false,
+    "release": false,
+    "independent_audit": false
+  }
+}

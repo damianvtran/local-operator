@@ -82,7 +82,24 @@ export type BridgeCardBody = {
 	items: BridgeCardBodyItem[];
 	/** Messages beyond the listed ones: the server's count plus our own cap. */
 	more: number;
+	/** Facts of the card ROW (`card` in the answer, additive within v1): when
+	    this machine recorded the delivery (epoch ms) and whether it is a thread
+	    reply. The relay transcript row carries neither. Absent on an older core. */
+	card?: BridgeCardFacts;
 };
+
+export type BridgeCardFacts = { receivedAt?: number; threadReply: boolean };
+
+/** The answer's optional `card` object; anything malformed is dropped, not guessed. */
+function cardFactsOf(raw: unknown): BridgeCardFacts | undefined {
+	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const card = raw as Record<string, unknown>;
+	const at = typeof card.received_at === "string" ? Date.parse(card.received_at) : Number.NaN;
+	return {
+		threadReply: card.thread_reply === true,
+		...(Number.isFinite(at) ? { receivedAt: at } : {}),
+	};
+}
 
 /** The most items a coalesced card lists. Core caps the answer at 20 (design
     §4: up to 200 ids coalesce into one card, the rest are counted in `more`);
@@ -149,7 +166,8 @@ export function bridgeCardBodyOf(payload: unknown): BridgeCardBody | null {
 		? frame.more
 		: 0;
 	const listed = items.slice(0, BRIDGE_CARD_BODY_MAX_ITEMS);
-	return { items: listed, more: declaredMore + dropped + (items.length - listed.length) };
+	const card = cardFactsOf(frame.card);
+	return { items: listed, more: declaredMore + dropped + (items.length - listed.length), ...(card ? { card } : {}) };
 }
 
 /** The one line a NON-admitted item shows, keyed. `hub_unsupported` and an

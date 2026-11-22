@@ -1,0 +1,36 @@
+{
+  "locale": "zh-CN",
+  "namespace": "tui.provider_state",
+  "source_sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912",
+  "target_sha256": "ba73193e56b6b01a584418c0b8a392ee01af2c810789229f576895fbc978a5f1",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "298f6fe9722a",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host [model switch] message in this session; provider quota failure",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "auditor": {
+    "agent": "i18n-auditor (independent A)",
+    "session": "8aa95e755693",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "298f6fe9722a",
+    "independent_from_translator": true,
+    "independent_from_english_source_author_session": "93b7b02899af",
+    "actual_model_source": "Host [model switch] in this audit session: provider failure: quota; not inferred from requested model",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "date": "2026-11-22",
+    "result": "passed",
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "note": "Independent A; five keys, 0 blocker/major. Record: i18n/audits/evidence/zh-CN/tui.provider_state/a8aa95/record.json. Copy-only; B and consumer validation separate."
+}

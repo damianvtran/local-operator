@@ -1,0 +1,96 @@
+{
+  "locale": "fr",
+  "namespace": "tui.model_persistence",
+  "audit_id": "b-1bf2",
+  "audit_kind": "independent_second_B",
+  "audit_date": "2026-11-22",
+  "key_count": 4,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "1bf2a3e4c433",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "1ca940cf73ba",
+    "independent_from_A_auditor_session": "0ecda03",
+    "independent_from_source_author_session": "a97c7f76d5ee",
+    "actual_model_source": "Host [model switch] message before copy assessment: provider failure: quota; switched from anthropic/claude-opus-5-5 to openai/gpt-6.1-sol",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "source_audit_revision": "87d87ec8b02ef3c279fda673302ce775f4a0329e",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.json",
+      "sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.context.json",
+      "sha256": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc"
+    },
+    "fr": {
+      "path": "local_operator/i18n/catalogues/fr/tui.model_persistence.json",
+      "sha256": "2d31f57fd8a19eb9c82b71b135fc0cd76c0056d80a0ab846a744da2467e7c002"
+    },
+    "locale_style": {
+      "path": "i18n/style-guides/fr.md",
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/fr/tui.model_persistence/b-1bf2/audit.log",
+      "sha256": "91efd711c1d941c091454f00394d36ae31a52a8f9adf044c21f7673b0e4e44e7"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.model_persistence/b-1bf2/current-ledger.json",
+      "sha256": "3ca6c1008407286ea87bff53c312b9ac5dd9a5eac1879c5029fed1fe1d0dc603"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.model_persistence/b-1bf2/execution.json",
+      "sha256": "2bcd0e9201538d91b12851ec2350e10c3b73f4ffe25c1e5672228a2895d57d40"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.model_persistence/b-1bf2/report.md",
+      "sha256": "536953436547b930badd2485f3050b12ccb63c0a606a5e99a675276785dcb951"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.model_persistence/b-1bf2/script.py.txt",
+      "sha256": "8e0952f313d606fac1c5829e46a58b3085f5315b644d80eba0cd9dfde6559392"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "all_keys_covered": [
+    "tui.model_persistence.persist",
+    "tui.model_persistence.settings",
+    "tui.model_persistence.saved",
+    "tui.model_persistence.with_model"
+  ],
+  "current_bytes_match_audited_hashes": true,
+  "audit_notes_not_execution_log": [
+    "report.md"
+  ],
+  "actual_execution_logs": [
+    "audit.log"
+  ],
+  "assessment_limitations": [
+    "plain Rich only, not styled NoticeBlock or native transcript",
+    "No global/base checker or eligibility claim",
+    "Ledger append reserved to manager; translator actual model not supplied"
+  ],
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false,
+  "existing_evidence_untouched": true,
+  "tracking_state": "New bundle created for manager to track; not committed/staged by auditor"
+}

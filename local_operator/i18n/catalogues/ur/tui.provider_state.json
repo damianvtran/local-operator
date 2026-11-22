@@ -1,0 +1,7 @@
+{
+  "tui.provider_state.logged_in": "سائن ان ہے",
+  "tui.provider_state.env_key": "ماحولیاتی متغیر سے کلید",
+  "tui.provider_state.needs_login": "سائن ان درکار ہے",
+  "tui.provider_state.local_ready": "سرور کی ترتیب مکمل",
+  "tui.provider_state.local_unconfigured": "سرور ترتیب دیں"
+}

@@ -56,6 +56,7 @@ from textual.widgets import Static
 
 from local_operator import keymap as keymap_mod
 from local_operator import settings_io
+from local_operator.agent_profiles import AgentFact, AgentFacts, agent_fact_record
 from local_operator.i18n import catalogues
 from local_operator.i18n.keys import tui_settings_view as _sv
 from local_operator.i18n.keys import tui_settings_view_chrome as _svc
@@ -74,6 +75,7 @@ from local_operator.tui.i18n_status import (
     localized_display,
     technical_display,
 )
+from local_operator.tui.provider_state import ProviderStateRow, provider_state_label
 from local_operator.tui.widgets.command_picker import ghost_for
 from local_operator.tui.widgets.model_picker import ModelRow, rank_rows
 from local_operator.tui.widgets.subagent_view import HintButton
@@ -464,8 +466,95 @@ class _Suggestion(NamedTuple):
 _PaneLine = list[tuple[str, "Style"]]
 
 
-def _paint_facts(facts: str, room: int, *, muted: "Style", faint: "Style") -> _PaneLine:
-    """A profile row's facts, with the class marker painted one rung brighter.
+def _paint_facts(
+    facts: AgentFacts | str, room: int, *, muted: "Style", faint: "Style"
+) -> _PaneLine:
+    """Fit raw fact segments once, then project provenance at the paint boundary.
+
+    A legacy agent string is deliberately opaque. Only the explicitly selected
+    team adapter below retains the pre-existing team's display-token grammar.
+    Neither a model ID nor an unknown fact can acquire badge ink by coincidence.
+    """
+    if isinstance(facts, str):
+        return [(f"    {truncate_cells(facts, room)}", faint)]
+    line: _PaneLine = []
+    remaining = room
+    for index, fact in enumerate(facts):
+        record = agent_fact_record(fact)
+        separator = " · " if index else ""
+        raw = separator + record.text
+        fitted = truncate_cells(raw, remaining)
+        indent = "    " if index == 0 else ""
+        style = (
+            muted
+            if (fact.code, fact.value) in {("action_class", "proactive"), ("scope", "session")}
+            else faint
+        )
+        if separator and fitted.startswith(separator):
+            line.append((separator, faint))
+            fitted = fitted[len(separator) :]
+        if record.source_locale is None:
+            painted = technical_display(fitted).plain
+        else:
+            # Effort tiers are operator data, not the restricted ASCII command
+            # grammar of technical_literal_spans. Project complete occurrences
+            # as standalone technical text so Unicode/custom punctuation cannot
+            # crash paint. A clipped occurrence stays inside the prose isolate.
+            if fact.code == "effort" and record.source_locale == "ur" and fact.value:
+                painted = technical_display(fact.value).plain.join(
+                    _paint(part, source_locale="ur") for part in fitted.split(fact.value)
+                )
+            else:
+                painted = _paint(fitted, source_locale=record.source_locale)
+        line.append((indent + painted, style))
+        remaining -= cell_len(raw)
+        if remaining <= 0 or fitted.endswith("…"):
+            break
+    return line or [("    ", faint)]
+
+
+def _paint_facts_lines(
+    facts: AgentFacts | str, room: int, *, muted: "Style", faint: "Style"
+) -> list[_PaneLine]:
+    """Keep safety/scope facts whole; spend width on meaning before optional IDs.
+
+    Scope spills just as before. If a translated kind/provenance prefix would
+    clip the proactive marker, the marker gets its own line rather than being
+    silently weakened to a truncated word. The final _fit_pane guard counts
+    actual painted lines before reserving the read-only caption; the historical
+    conservative initial roster estimate remains unchanged.
+    """
+    if isinstance(facts, str):
+        return [_paint_facts(facts, room, muted=muted, faint=faint)]
+    head = list(facts)
+    spill: list[AgentFact] = []
+
+    def width(items: Sequence[AgentFact]) -> int:
+        return cell_len(" · ".join(agent_fact_record(f).text for f in items))
+
+    scope = AgentFact("scope", "session")
+    if scope in head and width(head) > room:
+        # Project out only the first occurrence, matching list.remove while
+        # keeping this local display transformation free of destructive calls.
+        scope_index = head.index(scope)
+        head = head[:scope_index] + head[scope_index + 1 :]
+        spill.append(scope)
+    marker = AgentFact("action_class", "proactive")
+    if marker in head and width(head[: head.index(marker) + 1]) > room:
+        marker_index = head.index(marker)
+        head = head[:marker_index] + head[marker_index + 1 :]
+        spill.insert(0, marker)
+    return [_paint_facts(tuple(head), room, muted=muted, faint=faint)] + [
+        _paint_facts((fact,), max(room, width([fact])), muted=muted, faint=faint) for fact in spill
+    ]
+
+
+def _paint_team_facts(facts: str, room: int, *, muted: "Style", faint: "Style") -> _PaneLine:
+    """Legacy TEAM-only display grammar, retained without changing its geometry.
+
+    Agents never take this parser: team detail strings still carry the scope
+    token and aliases, and migrating that producer is deliberately separate.
+    The historical class marker is painted one rung brighter.
 
     The class is the one fact on this line that tells a user whether the agent
     may message them unprompted, so it survives truncation (the app orders it
@@ -501,7 +590,9 @@ def _paint_facts(facts: str, room: int, *, muted: "Style", faint: "Style") -> _P
     return line
 
 
-def _paint_facts_lines(facts: str, room: int, *, muted: "Style", faint: "Style") -> list[_PaneLine]:
+def _paint_team_facts_lines(
+    facts: str, room: int, *, muted: "Style", faint: "Style"
+) -> list[_PaneLine]:
     """The facts line, plus a SECOND line for the scope token when it cannot fit.
 
     Design round 1 (D1) requires the class marker to survive; round 2 (D1/U2)
@@ -521,18 +612,16 @@ def _paint_facts_lines(facts: str, room: int, *, muted: "Style", faint: "Style")
     from local_operator.i18n.text import tr
 
     scope_token = tr("tui.authoring")(author_keys.scope_conversation())
-    # THE TOKEN IS LIFTED FROM WHEREVER IT SITS (round 2, D1): a configured role
-    # renders `role · proactive · this conversation · <model> · effort high`, so
-    # the scope fact is NOT last and a suffix-only test left exactly the rows
-    # with model/effort pins clipped. Parts are ` · `-delimited by construction in
-    # ``agent_listing_rows``; removing the token's own part keeps the rest of the
-    # line byte-identical to what the caller assembled.
+    # Team detail strings can put aliases after scope, so retain the legacy
+    # lift from ANYWHERE rather than only a suffix. Removing the token's part
+    # leaves the rest byte-identical. This compatibility parser is TEAM-only;
+    # structured agents never enter its display-text grammar.
     parts = facts.split(" · ")
     if scope_token not in parts or cell_len(facts) <= room:
-        return [_paint_facts(facts, room, muted=muted, faint=faint)]
+        return [_paint_team_facts(facts, room, muted=muted, faint=faint)]
     head = " · ".join(part for part in parts if part != scope_token)
     return [
-        _paint_facts(head, room, muted=muted, faint=faint),
+        _paint_team_facts(head, room, muted=muted, faint=faint),
         [(f"    {truncate_cells(scope_token, room)}", muted)],
     ]
 
@@ -1338,9 +1427,9 @@ class SettingsView(Vertical):
         self._pane = _PANE_TEAMS
         #: Read-only pane content, injected by the app (it owns the registries).
         self._teams: list[tuple[str, str, str]] = []
-        self._agents: list[tuple[str, str, str]] = []
+        self._agents: list[tuple[str, AgentFacts | str, str]] = []
         #: Provider login state, injected the same way and for the same reason.
-        self._providers: list[tuple[str, str]] = []
+        self._providers: list[tuple[str, str] | ProviderStateRow] = []
         #: The provider and model catalogues that feed the `hosting`/`model_name`
         #: suggestion dropdowns, injected by the app for the same reason the
         #: pane content is: the page never reaches into a registry or the
@@ -1526,8 +1615,9 @@ class SettingsView(Vertical):
         self,
         *,
         teams: Sequence[tuple[str, str, str]] = (),
-        agents: Sequence[tuple[str, str, str]] = (),
+        agents: Sequence[tuple[str, AgentFacts | str, str]] = (),
         providers: Sequence[tuple[str, str]] = (),
+        provider_states: Sequence[ProviderStateRow] | None = None,
         provider_catalogue: Sequence[tuple[str, str]] = (),
         model_catalogue: Sequence[ModelRow] = (),
     ) -> None:
@@ -1535,7 +1625,8 @@ class SettingsView(Vertical):
 
         Teams, agents and provider state are RESOLVED BY THE APP (they read the
         session's registries and the credential store) and handed here already
-        flattened to rows. The page never reaches into a registry itself, which
+        resolved as row snapshots, with agent facts deliberately unrendered.
+        The page never reaches into a registry itself, which
         is what keeps a repaint free of I/O — the same split ``OrgChartView``
         makes when the app resolves the org tree and the widget only paints it.
 
@@ -1547,9 +1638,14 @@ class SettingsView(Vertical):
         empty: a host that supplies neither simply gets the old bare free-text
         editor on those two rows, which still saves any value.
         """
+        # Legacy tuples are opaque display strings, even when their bytes look
+        # like state codes. Explicit coded input (including an empty sequence)
+        # owns the snapshot; mixing it with nonempty legacy input is ambiguous.
+        if provider_states is not None and providers:
+            raise ValueError("providers and provider_states cannot be combined")
         self._teams = list(teams)
         self._agents = list(agents)
-        self._providers = list(providers)
+        self._providers = list(provider_states) if provider_states is not None else list(providers)
         self._provider_catalogue = list(provider_catalogue)
         self._model_catalogue = list(model_catalogue)
         self._repaint()
@@ -5860,7 +5956,14 @@ class SettingsView(Vertical):
         header: _PaneLine = [(_t_sv(_sv.pane_providers_header()), head)]
         provider_lines: list[_PaneLine] = []
         if self._providers:
-            for name, state in self._providers:
+            for provider in self._providers:
+                # The row type is the tag, never the contents of either string.
+                # Resolve each paint so language changes need no credential I/O.
+                if isinstance(provider, ProviderStateRow):
+                    name = provider.provider_id
+                    state = provider_state_label(provider.state_code)
+                else:
+                    name, state = provider
                 # Truncated per SEGMENT so the id survives and the state gives
                 # way: "anthropic" is what the row is about, and a clipped id
                 # is unreadable where a clipped state is merely terse.
@@ -5946,7 +6049,10 @@ class SettingsView(Vertical):
             shown, hidden = self._budget_pane_rows(rows, used=used + 1)
             for name, facts, summary in shown:
                 entry: list[_PaneLine] = [[(f"  {truncate_cells(name, room - 2)}", muted)]]
-                entry.extend(_paint_facts_lines(facts, room - 4, muted=muted, faint=faint))
+                if self._pane == _PANE_TEAMS and isinstance(facts, str):
+                    entry.extend(_paint_team_facts_lines(facts, room - 4, muted=muted, faint=faint))
+                else:
+                    entry.extend(_paint_facts_lines(facts, room - 4, muted=muted, faint=faint))
                 if summary:
                     entry.append([(f"    {truncate_cells(summary, room - 4)}", faint)])
                 entries.append(entry)
@@ -6198,8 +6304,8 @@ class SettingsView(Vertical):
         return text
 
     def _budget_pane_rows(
-        self, rows: Sequence[tuple[str, str, str]], *, used: int
-    ) -> tuple[list[tuple[str, str, str]], int]:
+        self, rows: Sequence[tuple[str, AgentFacts | str, str]], *, used: int
+    ) -> tuple[list[tuple[str, AgentFacts | str, str]], int]:
         """Split the roster into what fits above the caption, and the rest.
 
         Each entry costs up to three rows (name, facts, an optional summary),
@@ -6215,7 +6321,7 @@ class SettingsView(Vertical):
         if room <= 0:
             return ([], len(rows))
 
-        def cost(entry: tuple[str, str, str]) -> int:
+        def cost(entry: tuple[str, AgentFacts | str, str]) -> int:
             return 3 if entry[2] else 2
 
         def take(limit: int) -> int:

@@ -1,0 +1,76 @@
+MODULE /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/catalogues.py
+MODULE /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/runtime.py
+MODULE /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/scripts/i18n/check.py
+MODULE /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/text.py
+ISOLATION /Users/damian/.local-operator/sessions/2986f83bd020/scratchpad/ru-A-home /Users/damian/.local-operator/sessions/2986f83bd020/scratchpad/ru-A-home/config CMUX count 0
+BEFORE {"context": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc", "en": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff", "ru": "9d08bddeee59461ae1a9f27de2839c39dc7b0cad17b6171e26fd7cde82946940"}
+OFFICIAL check.check_catalogues namespace=en/ru tui.model_persistence: []
+PASS key_count=4 ordered; args identical simple label/routes once; zero plural/select; NFC; no markup/backticks/bidi; commands exact
+NEGATIVE official missing_key ["ru/tui.model_persistence: missing key 'tui.model_persistence.persist'"]
+NEGATIVE official missing_arg ["ru/tui.model_persistence: tui.model_persistence.with_model: arguments (('label', 'simple'),) != en's (('label', 'simple'), ('routes', 'simple')): en has 2 argument(s), translation has 1"]
+NEGATIVE render en label MessageFormatError message argument 'label' was not supplied (have: routes)
+NEGATIVE render en routes MessageFormatError message argument 'routes' was not supplied (have: label)
+NEGATIVE render ru label MessageFormatError message argument 'label' was not supplied (have: routes)
+NEGATIVE render ru routes MessageFormatError message argument 'routes' was not supplied (have: label)
+NEGATIVE unknown-key resolver en RenderedMessage(text='tui.model_persistence.missing_control', source_locale=None)
+NEGATIVE unknown-key resolver ru RenderedMessage(text='tui.model_persistence.missing_control', source_locale=None)
+PSEUDO tui.model_persistence.persist '/model default saves this for new sessions~~~~~~~~~~~~~~~~~~~~~~~~~~~~'
+PSEUDO tui.model_persistence.settings '/settings edits the boot default too~~~~~~~~~~~~~~~~~~~~~~~~~~~'
+PSEUDO tui.model_persistence.saved 'switch to the boot default with ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~/model saved'
+PSEUDO tui.model_persistence.with_model 'model: ~~~~~~~opaque/[id]-v1 — ~~~LOCALIZED ROUTES'
+RENDER en ordinary 'model: p/m — /model default saves this for new sessions · switch to the boot default with /model saved · /settings edits the boot default too'
+RICH en ordinary 3 80 rows 2 cells [77, 64] command_fold [] last 'default with /model saved · /settings edits the boot default too'
+RICH en ordinary 3 100 rows 2 cells [97, 44] command_fold ['/model saved'] last 'saved · /settings edits the boot default too'
+RICH en ordinary 3 120 rows 2 cells [120, 20] command_fold [] last 'the boot default too'
+RENDER en ordinary 'model: provider/opaque-model-2026-11-22-long-identity-v1 — /model default saves this for new sessions · switch to the boot default with /model saved · /settings edits the boot default too'
+RICH en ordinary 49 80 rows 3 cells [80, 80, 26] command_fold [] last 'edits the boot default too'
+RICH en ordinary 49 100 rows 2 cells [93, 94] command_fold [] last 'sessions · switch to the boot default with /model saved · /settings edits the boot default too'
+RICH en ordinary 49 120 rows 2 cells [118, 69] command_fold [] last 'boot default with /model saved · /settings edits the boot default too'
+NO-LABEL route-only en ordinary '/model default saves this for new sessions · switch to the boot default with /model saved · /settings edits the boot default too'
+RENDER en missing-model 'model: p/m — /model default saves this for new sessions · /settings edits the boot default too'
+RICH en missing-model 3 80 rows 2 cells [78, 16] command_fold [] last 'boot default too'
+RICH en missing-model 3 100 rows 1 cells [94] command_fold [] last 'model: p/m — /model default saves this for new sessions · /settings edits the boot default too'
+RICH en missing-model 3 120 rows 1 cells [94] command_fold [] last 'model: p/m — /model default saves this for new sessions · /settings edits the boot default too'
+RENDER en missing-model 'model: provider/opaque-model-2026-11-22-long-identity-v1 — /model default saves this for new sessions · /settings edits the boot default too'
+RICH en missing-model 49 80 rows 2 cells [80, 60] command_fold [] last 'this for new sessions · /settings edits the boot default too'
+RICH en missing-model 49 100 rows 2 cells [93, 47] command_fold [] last 'sessions · /settings edits the boot default too'
+RICH en missing-model 49 120 rows 2 cells [120, 20] command_fold [] last 'the boot default too'
+NO-LABEL route-only en missing-model '/model default saves this for new sessions · /settings edits the boot default too'
+RENDER en hosting-deadend 'model: p/m — /settings edits the boot default too'
+RICH en hosting-deadend 3 80 rows 1 cells [49] command_fold [] last 'model: p/m — /settings edits the boot default too'
+RICH en hosting-deadend 3 100 rows 1 cells [49] command_fold [] last 'model: p/m — /settings edits the boot default too'
+RICH en hosting-deadend 3 120 rows 1 cells [49] command_fold [] last 'model: p/m — /settings edits the boot default too'
+RENDER en hosting-deadend 'model: provider/opaque-model-2026-11-22-long-identity-v1 — /settings edits the boot default too'
+RICH en hosting-deadend 49 80 rows 2 cells [79, 16] command_fold [] last 'boot default too'
+RICH en hosting-deadend 49 100 rows 1 cells [95] command_fold [] last 'model: provider/opaque-model-2026-11-22-long-identity-v1 — /settings edits the boot default too'
+RICH en hosting-deadend 49 120 rows 1 cells [95] command_fold [] last 'model: provider/opaque-model-2026-11-22-long-identity-v1 — /settings edits the boot default too'
+NO-LABEL route-only en hosting-deadend '/settings edits the boot default too'
+RENDER ru ordinary 'модель: p/m — /model default сохраняет эту модель по умолчанию для новых сессий · перейти в этой сессии на сохранённую модель по умолчанию — /model saved · /settings тоже меняет модель по умолчанию'
+RICH ru ordinary 3 80 rows 3 cells [80, 76, 41] command_fold [] last '/settings тоже меняет модель по умолчанию'
+RICH ru ordinary 3 100 rows 2 cells [97, 100] command_fold [] last 'сессии на сохранённую модель по умолчанию — /model saved · /settings тоже меняет модель по умолчанию'
+RICH ru ordinary 3 120 rows 2 cells [119, 78] command_fold [] last 'модель по умолчанию — /model saved · /settings тоже меняет модель по умолчанию'
+RENDER ru ordinary 'модель: provider/opaque-model-2026-11-22-long-identity-v1 — /model default сохраняет эту модель по умолчанию для новых сессий · перейти в этой сессии на сохранённую модель по умолчанию — /model saved · /settings тоже меняет модель по умолчанию'
+RICH ru ordinary 49 80 rows 4 cells [75, 78, 80, 9] command_fold [] last 'умолчанию'
+RICH ru ordinary 49 100 rows 3 cells [99, 100, 43] command_fold [] last '· /settings тоже меняет модель по умолчанию'
+RICH ru ordinary 49 120 rows 3 cells [119, 115, 9] command_fold [] last 'умолчанию'
+NO-LABEL route-only ru ordinary '/model default сохраняет эту модель по умолчанию для новых сессий · перейти в этой сессии на сохранённую модель по умолчанию — /model saved · /settings тоже меняет модель по умолчанию'
+RENDER ru missing-model 'модель: p/m — /model default сохраняет эту модель по умолчанию для новых сессий · /settings тоже меняет модель по умолчанию'
+RICH ru missing-model 3 80 rows 2 cells [80, 43] command_fold [] last '· /settings тоже меняет модель по умолчанию'
+RICH ru missing-model 3 100 rows 2 cells [97, 26] command_fold [] last 'меняет модель по умолчанию'
+RICH ru missing-model 3 120 rows 2 cells [114, 9] command_fold [] last 'умолчанию'
+RENDER ru missing-model 'модель: provider/opaque-model-2026-11-22-long-identity-v1 — /model default сохраняет эту модель по умолчанию для новых сессий · /settings тоже меняет модель по умолчанию'
+RICH ru missing-model 49 80 rows 3 cells [75, 75, 19] command_fold [] last 'модель по умолчанию'
+RICH ru missing-model 49 100 rows 2 cells [99, 70] command_fold [] last 'умолчанию для новых сессий · /settings тоже меняет модель по умолчанию'
+RICH ru missing-model 49 120 rows 2 cells [119, 50] command_fold [] last 'сессий · /settings тоже меняет модель по умолчанию'
+NO-LABEL route-only ru missing-model '/model default сохраняет эту модель по умолчанию для новых сессий · /settings тоже меняет модель по умолчанию'
+RENDER ru hosting-deadend 'модель: p/m — /settings тоже меняет модель по умолчанию'
+RICH ru hosting-deadend 3 80 rows 1 cells [55] command_fold [] last 'модель: p/m — /settings тоже меняет модель по умолчанию'
+RICH ru hosting-deadend 3 100 rows 1 cells [55] command_fold [] last 'модель: p/m — /settings тоже меняет модель по умолчанию'
+RICH ru hosting-deadend 3 120 rows 1 cells [55] command_fold [] last 'модель: p/m — /settings тоже меняет модель по умолчанию'
+RENDER ru hosting-deadend 'модель: provider/opaque-model-2026-11-22-long-identity-v1 — /settings тоже меняет модель по умолчанию'
+RICH ru hosting-deadend 49 80 rows 2 cells [75, 26] command_fold [] last 'меняет модель по умолчанию'
+RICH ru hosting-deadend 49 100 rows 2 cells [92, 9] command_fold [] last 'умолчанию'
+RICH ru hosting-deadend 49 120 rows 1 cells [101] command_fold [] last 'модель: provider/opaque-model-2026-11-22-long-identity-v1 — /settings тоже меняет модель по умолчанию'
+NO-LABEL route-only ru hosting-deadend '/settings тоже меняет модель по умолчанию'
+AFTER {"context": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc", "en": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff", "ru": "9d08bddeee59461ae1a9f27de2839c39dc7b0cad17b6171e26fd7cde82946940"}
+PASS scoped mechanical/render/negative/pseudo checks. No global, styled NoticeBlock, transcript-family, native UI or RTL qualification claimed.

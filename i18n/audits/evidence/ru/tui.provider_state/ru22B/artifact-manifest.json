@@ -1,0 +1,43 @@
+{
+  "record_reference": "i18n/audits/evidence/ru/tui.provider_state/ru22B/record.json",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "eb9e65295113",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "29d4fc18d1a7",
+    "actual_model_source": "Host [model switch] notice in this session: openai/gpt-6.1-sol, previously anthropic/claude-opus-5-5, provider failure: quota. No provider telemetry independently available.",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "qualification": "Native-fluent LLM lexical judgment, not human native-speaker review. Same reported fallback model as translator; independent session, not model-family independence."
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ru22B/audit.log",
+      "sha256": "56f807a1b2d3ad56724090d0b27e0b46aaecbd160ec5fdc09960935562bba01e"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ru22B/directCLIledger-receipt.json",
+      "sha256": "da16c421bb0871f7820acd3c75d58fc138dcce93e8e2eca1084629b1d5e13466"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ru22B/ledger-dry-run.log",
+      "sha256": "4c4f55a03a642e996eb9e87bffc25cc0ecd9c55c3e4693b87822f6e7bb6d2649"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ru22B/record.json",
+      "sha256": "b90520e1a79433c14542dfe7b228e891232b63d0e1854662f28ee3551e0e1d79"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ru22B/report.md",
+      "sha256": "73da14b81e87c8ce9fe378dc66b0e82d63bcf41adc4de804565b8a6198d72309"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ru22B/script.py.txt",
+      "sha256": "57a09b2701c1e7db982122f6da42cd5029df74f0faed8b8eda6024aa70ac1487"
+    }
+  ],
+  "excludes_self_hash": true
+}

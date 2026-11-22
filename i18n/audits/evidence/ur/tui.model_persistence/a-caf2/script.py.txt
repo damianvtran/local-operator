@@ -1,0 +1,90 @@
+"""Independent A scoped checks. Plain Rich diagnostics, not styled/native RTL proof."""
+from pathlib import Path
+import hashlib, json, re, sys, os, unicodedata, importlib.util
+from collections import Counter
+from unittest.mock import patch
+from rich.console import Console
+from rich.text import Text
+from local_operator.i18n import catalogues, runtime
+ROOT=Path('/Users/damian/local-operator/.worktrees/i18n-model-persist-notice')
+NS='tui.model_persistence'
+print('PYTHON',sys.executable,'HOME',os.environ['HOME'],'CONFIG',os.environ['LOCAL_OPERATOR_CONFIG_DIR'])
+assert not any(k.startswith('CMUX_') for k in os.environ)
+for m in (catalogues,runtime):
+    assert Path(m.__file__).resolve().is_relative_to(ROOT)
+    print('MODULE',m.__name__,m.__file__)
+spec=importlib.util.spec_from_file_location('scoped_check',ROOT/'scripts/i18n/check.py')
+check=importlib.util.module_from_spec(spec);sys.modules[spec.name]=check;spec.loader.exec_module(check)
+paths={loc:ROOT/f'local_operator/i18n/catalogues/{loc}/{NS}.json' for loc in ('en','ur')}
+paths['context']=ROOT/f'local_operator/i18n/catalogues/en/{NS}.context.json'
+hashes={k:hashlib.sha256(p.read_bytes()).hexdigest() for k,p in paths.items()}
+assert hashes=={'en':'4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff','context':'b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc','ur':'0e00e1ee1715d3ec8ad8d07440984da33fcb05336a35ceefbd32a87180a3e5f9'}
+# Scope only enumeration, not validation logic or real catalogue/context readers.
+with patch.object(catalogues,'locales',return_value=('en','ur')),patch.object(catalogues,'namespaces',return_value=(NS,)):
+    problems=check.check_catalogues();print('OFFICIAL_SCOPED_CHECK',problems);assert not problems
+    original=catalogues.load_catalogue
+    for mode in ('missing_key','missing_argument'):
+        def modified(locale,namespace):
+            result=dict(original(locale,namespace))
+            if locale=='ur':
+                if mode=='missing_key':result.pop(NS+'.persist')
+                else:result[NS+'.with_model']=result[NS+'.with_model'].replace('{label}','')
+            return result
+        with patch.object(catalogues,'load_catalogue',side_effect=modified):
+            negative=check.check_catalogues();print('NEGATIVE',mode,negative)
+            assert any(('missing key' if mode=='missing_key' else 'arguments') in s for s in negative)
+messages={loc:catalogues.load_catalogue(loc,NS) for loc in ('en','ur')}
+context=catalogues.context('en',NS)
+keys=[NS+'.'+s for s in ('persist','settings','saved','with_model')]
+assert list(messages['en'])==list(messages['ur'])==list(context)==keys
+commands=('/model default','/model saved','/settings')
+controls=set(range(0x202a,0x202f))|set(range(0x2066,0x206a))|{0x200e,0x200f,0x061c}
+for key in keys:
+    source=messages['en'][key];target=messages['ur'][key]
+    assert runtime.message_arguments(source)==runtime.message_arguments(target)
+    assert Counter(re.findall(r'\{\w+\}',source))==Counter(re.findall(r'\{\w+\}',target))
+    for text in (source,target):
+        assert not runtime.plural_selectors(text) and not runtime.plural_arguments(text)
+        assert all(kind=='simple' for _,kind in runtime.message_arguments(text))
+    assert all(source.count(c)==target.count(c) for c in commands)
+    assert re.findall(r'`[^`]*`|</?[^>]+>',source)==re.findall(r'`[^`]*`|</?[^>]+>',target)
+    assert unicodedata.normalize('NFC',target)==target
+    assert not any(ord(c) in controls for c in target)
+    assert all(k not in context[key] for k in ('maxCells','maxChars'))
+    print('KEY_PASS',key,'arguments',runtime.message_arguments(target),'plural/select=0','NFC=yes','stored_bidi_controls=0')
+# No official pseudo command exists (HOWTO): expand only literal prose with protected tokens masked.
+pattern=re.compile(r'/model default|/model saved|/settings|\{label\}|\{routes\}')
+def pseudo(text):
+    parts=[];start=0
+    for m in pattern.finditer(text):
+        parts.extend((text[start:m.start()]*2,m.group()));start=m.end()
+    parts.append(text[start:]*2)
+    return ''.join(parts)
+for key,text in messages['ur'].items():
+    p=pseudo(text)
+    assert pattern.findall(p)==pattern.findall(text)
+    assert runtime.message_arguments(p)==runtime.message_arguments(text)
+print('PSEUDO_PASS human prose doubled; commands/placeholders retained once; diagnostic fixture only')
+labels=('openai/gpt-6','anthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-0123456789')
+for loc in ('en','ur'):
+    for pseudo_mode in (False,True):
+        texts={k:pseudo(v) if pseudo_mode else v for k,v in messages[loc].items()}
+        for route_set in (('persist','saved','settings'),('persist','settings'),('settings',)):
+            routes=' · '.join(runtime.render_message(texts[NS+'.'+s],{},loc) for s in route_set)
+            for label in labels:
+                output=runtime.render_message(texts[NS+'.with_model'],{'label':label,'routes':routes},loc)
+                assert output.count(label)==output.count(routes)==1
+                for cmd in commands:assert output.count(cmd)==routes.count(cmd)
+                for width in (80,100,120):
+                    lines=Text(output).wrap(Console(width=width,force_terminal=False,color_system=None),width)
+                    sizes=[s.cell_len for s in lines]
+                    assert max(sizes)<=width
+                    print('PLAIN_RICH',loc,'pseudo',pseudo_mode,'routes',route_set,'label_chars',len(label),'width',width,'cells',sizes,'last',repr(lines[-1].plain))
+for loc in ('en','ur'):
+    try:runtime.render_message(messages[loc][NS+'.with_model'],{'routes':'test'},loc)
+    except runtime.MessageFormatError as e:print('RENDER_NEGATIVE',loc,type(e).__name__,str(e))
+    else:raise AssertionError('missing argument unexpectedly accepted')
+assert hashes=={k:hashlib.sha256(p.read_bytes()).hexdigest() for k,p in paths.items()}
+print('FROZEN_HASHES',json.dumps(hashes,sort_keys=True))
+print('PASS four ordered keys; official scoped checker; negative controls; zero plural/select; protected commands; NFC; no stored bidi; pseudo; English-controlled 80/100/120 plain Rich widths')
+print('NOT_PROVEN styled NoticeBlock/pristine/nonempty geometry, presentation isolators, terminal bidi/font/shaping, live consumer localization, B audit, eligibility/release')

@@ -1,0 +1,28 @@
+interpreter: /Users/damian/local-operator/.venv/bin/python
+checker: /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/scripts/i18n/check.py
+catalogues: /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/i18n/catalogues.py
+HOME: /Users/damian/.local-operator/sessions/815a20325d52/scratchpad/b815a-home config: /Users/damian/.local-operator/sessions/815a20325d52/scratchpad/b815a-home/config
+before hashes: {"context": "67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be", "en": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912", "fr": "87cf1654daed989e12d9f431395f4f731c07de5d3204aeb3f0cb0705e92719f8"}
+official check.check_catalogues scoped en/fr NS: []
+missing-key negative: ["fr/tui.provider_state: missing key 'tui.provider_state.logged_in'"]
+added-argument negative: ["fr/tui.provider_state: tui.provider_state.logged_in: arguments (('added', 'simple'),) != en's (): en has 0 argument(s), translation has 1"]
+context exact coverage, ordered keys: PASS
+render en tui.provider_state.logged_in 'logged in' cells 9 chars 9
+render fr tui.provider_state.logged_in 'connecté' cells 8 chars 8
+pseudo expansion tui.provider_state.logged_in '⟦coonneecté⟧' cells 12
+render en tui.provider_state.env_key 'env key' cells 7 chars 7
+render fr tui.provider_state.env_key 'clé d’environnement' cells 19 chars 19
+pseudo expansion tui.provider_state.env_key '⟦clé d’eenviiroonneemeent⟧' cells 26
+render en tui.provider_state.needs_login 'needs login' cells 11 chars 11
+render fr tui.provider_state.needs_login 'connexion requise' cells 17 chars 17
+pseudo expansion tui.provider_state.needs_login '⟦coonneexiioon reequuiisee⟧' cells 27
+render en tui.provider_state.local_ready 'configured server' cells 17 chars 17
+render fr tui.provider_state.local_ready 'serveur configuré' cells 17 chars 17
+pseudo expansion tui.provider_state.local_ready '⟦seerveeuur coonfiiguuré⟧' cells 25
+render en tui.provider_state.local_unconfigured 'configure server' cells 16 chars 16
+render fr tui.provider_state.local_unconfigured 'configurer le serveur' cells 21 chars 21
+pseudo expansion tui.provider_state.local_unconfigured '⟦coonfiiguureer lee seerveeuur⟧' cells 31
+ICU args=0 plural/select=0, NFC, protected-token inventory=0: PASS all five
+Example only: 31-cell pane / openrouter leaves 17 cells; not a global cap
+after hashes: {"context": "67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be", "en": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912", "fr": "87cf1654daed989e12d9f431395f4f731c07de5d3204aeb3f0cb0705e92719f8"}
+PASS scoped catalogue/context/ICU/render controls; plain Rich only, not settings/native/whole UI

@@ -1,0 +1,88 @@
+"""Independent B scoped audit rig; no ledger or catalogue writes. Plain Rich only."""
+import os, sys, json, hashlib, re, unicodedata, io
+from pathlib import Path
+from unittest.mock import patch
+ROOT=Path('/Users/damian/local-operator/.worktrees/i18n-model-persist-notice')
+sys.path.insert(0,str(ROOT))
+from scripts.i18n import check
+from local_operator.i18n import catalogues, runtime, messages
+from rich.text import Text
+from rich.console import Console
+from rich.cells import cell_len
+NS='tui.model_persistence'
+def digest(p): return hashlib.sha256(p.read_bytes()).hexdigest()
+paths={'en':ROOT/f'local_operator/i18n/catalogues/en/{NS}.json','context':ROOT/f'local_operator/i18n/catalogues/en/{NS}.context.json','fr':ROOT/f'local_operator/i18n/catalogues/fr/{NS}.json','style':ROOT/'i18n/style-guides/fr.md','glossary':ROOT/'i18n/glossary.md'}
+expected={'en':'4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff','context':'b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc','fr':'2d31f57fd8a19eb9c82b71b135fc0cd76c0056d80a0ab846a744da2467e7c002'}
+print('PROVENANCE',sys.version, 'HOME',os.environ['HOME'],'CMUX',[k for k in os.environ if k.startswith('CMUX_')])
+for mod in [check,catalogues,runtime,messages]:
+ print('MODULE',mod.__name__,mod.__file__); assert Path(mod.__file__).is_relative_to(ROOT)
+before={k:digest(p) for k,p in paths.items()}
+for k,h in expected.items(): assert before[k]==h,(k,before[k])
+print('HASHES_BEFORE',json.dumps(before,sort_keys=True))
+# The CLI has no locale/namespace flags. Narrow enumeration only; execute the
+# unchanged official validator, actual loaders and real source sidecar schema.
+with patch.object(catalogues,'locales',return_value=('en','fr')),patch.object(catalogues,'namespaces',return_value=(NS,)):
+ problems=check.check_catalogues()
+print('OFFICIAL check.check_catalogues scoped en/fr namespace',problems); assert not problems
+maps={loc:catalogues.load_catalogue(loc,NS) for loc in ('en','fr')}
+assert list(maps['en'])==list(maps['fr']) and len(maps['fr'])==4
+ctx=catalogues.context('en',NS)
+assert list(ctx)==list(maps['en'])
+for key in maps['en']:
+ src,tgt=maps['en'][key],maps['fr'][key]
+ assert runtime.message_arguments(src)==runtime.message_arguments(tgt)
+ assert runtime.plural_selectors(src)==runtime.plural_selectors(tgt)==()
+ assert not re.search(r',\s*(plural|select)\s*,',src+tgt)
+ assert unicodedata.normalize('NFC',tgt)==tgt
+ assert re.findall(r'`[^`]*`|\[[^\]]*\]|<[^>]*>',src)==re.findall(r'`[^`]*`|\[[^\]]*\]|<[^>]*>',tgt)==[]
+ assert Text.from_markup(tgt).plain==tgt
+ print('KEY',key,'arguments',runtime.message_arguments(tgt),'plural/select arms=0','NFC/markup=PASS','maxCells',ctx[key].get('maxCells'),'cells',cell_len(tgt))
+commands={'persist':'/model default','saved':'/model saved','settings':'/settings'}
+for suffix,command in commands.items():
+ for loc in ('en','fr'):
+  assert maps[loc][NS+'.'+suffix].count(command)==1
+ print('COMMAND_BYTES',suffix,repr(command),'PASS')
+assert runtime.message_arguments(maps['fr'][NS+'.with_model'])==(('label','simple'),('routes','simple'))
+for name in ('label','routes'): assert maps['fr'][NS+'.with_model'].count('{'+name+'}')==1
+print('ORDERED_KEYS, JSON, CONTEXT, ICU_TYPES, COMMAND_EQUALITY PASS')
+# Mechanical negative controls only; temporary in-memory overrides, never files.
+real_loader=catalogues.load_catalogue
+for defect in ('missing_key','bad_placeholder'):
+ def bad_loader(locale,namespace):
+  data=dict(real_loader(locale,namespace))
+  if locale=='fr':
+   if defect=='missing_key': data.pop(NS+'.saved')
+   else: data[NS+'.with_model']=data[NS+'.with_model'].replace('{label}','{wrong}')
+  return data
+ with patch.object(catalogues,'locales',return_value=('en','fr')),patch.object(catalogues,'namespaces',return_value=(NS,)),patch.object(catalogues,'load_catalogue',side_effect=bad_loader):
+  bad=check.check_catalogues()
+ assert bad
+ print('NEGATIVE_CONTROL',defect,'detected',bad)
+def pseudo(s):
+ # Protect ICU arguments and exact commands; expand human runs only.
+ pattern=r'\{[^{}]+\}|/model (?:default|saved)|/settings'
+ return ''.join(part if re.fullmatch(pattern,part) else ''.join(c+'~' if c.lower() in 'aeiouéèàô' else c for c in part) for part in re.split('('+pattern+')',s))
+# Same-code English controls. Budgets are exploratory plain-Rich widths, NOT
+# actual styled NoticeBlock/transcript families, which integration owns.
+for loc in ('en','fr'):
+ for mode in ('normal','missing_model','hosting_dead_end'):
+  suffixes={'normal':['persist','saved','settings'],'missing_model':['persist','settings'],'hosting_dead_end':['settings']}[mode]
+  for expanded in (False,True):
+   forms={k:pseudo(v) if expanded else v for k,v in maps[loc].items()}
+   for short,label in [('short','openai/gpt-6'),('long','anthropic/claude-opus-5-5-20261122-extended-context-opaque-model-identity')]:
+    clauses=[runtime.render_message(forms[NS+'.'+s],{},loc) for s in suffixes]
+    routes=' · '.join(clauses)
+    rendered=messages.render(NS+'.with_model',{'label':label,'routes':routes},locale=loc) if not expanded else runtime.render_message(forms[NS+'.with_model'],{'label':label,'routes':routes},loc)
+    assert rendered.count(label)==rendered.count(routes)==1
+    for s in suffixes: assert rendered.count(commands[s])==1
+    for width in (80,100,120):
+     lines=Text(rendered).wrap(Console(width=width,file=io.StringIO(),force_terminal=False),width)
+     plain=[line.plain for line in lines]
+     assert all(cell_len(line)<=width for line in plain)
+     split=[commands[s] for s in suffixes if not any(commands[s] in line for line in plain)]
+     lone=plain[-1].strip() in commands.values()
+     print('WRAP',loc,mode,'pseudo' if expanded else 'real',short,width,'rows',len(plain),'split_commands',split,'lone_final_command',lone,'lines',json.dumps(plain,ensure_ascii=False))
+after={k:digest(p) for k,p in paths.items()}
+assert before==after
+print('HASHES_AFTER',json.dumps(after,sort_keys=True))
+print('PASS scoped mechanics/render diagnostics; no styled NoticeBlock/native/full-app proof')

@@ -1,0 +1,41 @@
+ISOLATION PASS: scratch HOME/config; CMUX absent
+MODULE local_operator.i18n.catalogues /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/catalogues.py
+MODULE local_operator.i18n.runtime /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/runtime.py
+KEY PASS tui.model_persistence.persist args= () plural/select arms=0
+KEY PASS tui.model_persistence.settings args= () plural/select arms=0
+KEY PASS tui.model_persistence.saved args= () plural/select arms=0
+KEY PASS tui.model_persistence.with_model args= (('label', 'simple'), ('routes', 'simple')) plural/select arms=0
+OFFICIAL SCOPED CONTEXT/CATALOGUE/ICU CHECK PASS; problems=[]
+ROUTES ordinary '/model default से इस मॉडल को नए सत्रों के डिफ़ॉल्ट के रूप में सहेजें · /model saved से इस सत्र में सहेजे गए डिफ़ॉल्ट पर जाएँ · /settings से भी नए सत्रों का डिफ़ॉल्ट बदलें'
+RENDER ordinary 'मॉडल: openai/gpt-6 — /model default से इस मॉडल को नए सत्रों के डिफ़ॉल्ट के रूप में सहेजें · /model saved से इस सत्र में सहेजे गए डिफ़ॉल्ट पर जाएँ · /settings से भी नए सत्रों का डिफ़ॉल्ट बदलें'
+RICH_WRAP_ONLY ordinary label_chars= 12 width= 80 line_cells= [79, 68]
+RICH_WRAP_ONLY ordinary label_chars= 12 width= 100 line_cells= [100, 47]
+RICH_WRAP_ONLY ordinary label_chars= 12 width= 120 line_cells= [116, 31]
+RENDER ordinary 'मॉडल: anthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-0123456789 — /model default से इस मॉडल को नए सत्रों के डिफ़ॉल्ट के रूप में सहेजें · /model saved से इस सत्र में सहेजे गए डिफ़ॉल्ट पर जाएँ · /settings से भी नए सत्रों का डिफ़ॉल्ट बदलें'
+RICH_WRAP_ONLY ordinary label_chars= 81 width= 80 line_cells= [5, 80, 80, 51]
+RICH_WRAP_ONLY ordinary label_chars= 81 width= 100 line_cells= [96, 99, 21]
+RICH_WRAP_ONLY ordinary label_chars= 81 width= 120 line_cells= [117, 99]
+ROUTES missing_model_setup '/model default से इस मॉडल को नए सत्रों के डिफ़ॉल्ट के रूप में सहेजें · /settings से भी नए सत्रों का डिफ़ॉल्ट बदलें'
+RENDER missing_model_setup 'मॉडल: openai/gpt-6 — /model default से इस मॉडल को नए सत्रों के डिफ़ॉल्ट के रूप में सहेजें · /settings से भी नए सत्रों का डिफ़ॉल्ट बदलें'
+RICH_WRAP_ONLY missing_model_setup label_chars= 12 width= 80 line_cells= [72, 31]
+RICH_WRAP_ONLY missing_model_setup label_chars= 12 width= 100 line_cells= [100, 3]
+RICH_WRAP_ONLY missing_model_setup label_chars= 12 width= 120 line_cells= [104]
+RENDER missing_model_setup 'मॉडल: anthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-0123456789 — /model default से इस मॉडल को नए सत्रों के डिफ़ॉल्ट के रूप में सहेजें · /settings से भी नए सत्रों का डिफ़ॉल्ट बदलें'
+RICH_WRAP_ONLY missing_model_setup label_chars= 81 width= 80 line_cells= [5, 80, 79, 8]
+RICH_WRAP_ONLY missing_model_setup label_chars= 81 width= 100 line_cells= [96, 77]
+RICH_WRAP_ONLY missing_model_setup label_chars= 81 width= 120 line_cells= [117, 55]
+ROUTES absent_unknown_hosting '/settings से भी नए सत्रों का डिफ़ॉल्ट बदलें'
+RENDER absent_unknown_hosting 'मॉडल: openai/gpt-6 — /settings से भी नए सत्रों का डिफ़ॉल्ट बदलें'
+RICH_WRAP_ONLY absent_unknown_hosting label_chars= 12 width= 80 line_cells= [51]
+RICH_WRAP_ONLY absent_unknown_hosting label_chars= 12 width= 100 line_cells= [51]
+RICH_WRAP_ONLY absent_unknown_hosting label_chars= 12 width= 120 line_cells= [51]
+RENDER absent_unknown_hosting 'मॉडल: anthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-0123456789 — /settings से भी नए सत्रों का डिफ़ॉल्ट बदलें'
+RICH_WRAP_ONLY absent_unknown_hosting label_chars= 81 width= 80 line_cells= [5, 80, 35]
+RICH_WRAP_ONLY absent_unknown_hosting label_chars= 81 width= 100 line_cells= [100, 19]
+RICH_WRAP_ONLY absent_unknown_hosting label_chars= 81 width= 120 line_cells= [120]
+NEGATIVE PASS missing label MessageFormatError message argument 'label' was not supplied (have: routes)
+NEGATIVE PASS missing routes MessageFormatError message argument 'routes' was not supplied (have: label)
+OPAQUE ARGUMENT PASS: no recursive interpolation/translation
+FROZEN INPUTS/TARGET BEFORE-AFTER PASS {"context": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc", "en": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff", "hi": "b64d9953f8abb7bc1e2e5f2bfab5d286d7b095d50e833211bf90df71d69eca68"}
+PASS: 4 keys, ordered parity, official scoped APIs, commands exact, arguments once, negative controls, zero plural/select arms, no manual bidi controls
+NOT PROVEN: native Devanagari shaping/fonts, styled NoticeBlock pristine/non-empty geometry, integration, independent audit A/B, admission, generator, eligibility, release

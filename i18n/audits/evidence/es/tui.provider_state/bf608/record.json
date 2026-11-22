@@ -1,0 +1,83 @@
+{
+  "locale": "es",
+  "namespace": "tui.provider_state",
+  "audit_id": "bf608",
+  "audit_date": "2026-11-22",
+  "key_count": 5,
+  "source_audit_revision": "2b924d84f0e663302fd93a7b36411ee6035576fe",
+  "auditor": {
+    "agent": "i18n-auditor (Spanish B)",
+    "session": "f6084ca8999b",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "translator_session": "d37edc1334b7",
+    "actual_model_source": "Explicit host model-switch notice: provider failure quota; no independent per-response served-model telemetry available",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "initial_context_model": "anthropic/claude-opus-5-5"
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "d37edc1334b7",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Session model-switch notice before authoring; no independent per-response served-model telemetry available",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.json",
+      "sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.context.json",
+      "sha256": "67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be"
+    },
+    "es": {
+      "path": "local_operator/i18n/catalogues/es/tui.provider_state.json",
+      "sha256": "4567c719cd1492b7edc62ae85ef4769f40a2adc774a1eb49dca072883a36b490"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.provider_state/bf608/audit.log",
+      "sha256": "ae6a7684f1c87d1011d36bad2ea6f85ae7ed79e05cdd703314a2e41d892123d8"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.provider_state/bf608/ledger-dry-run.log",
+      "sha256": "03f675a4ee90bc5f10ecb296c9c3553f1ea8cf75103536295c53373700c1f5cd"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.provider_state/bf608/ledger-receipt.json",
+      "sha256": "521c5e1dfce9747a11f4780ad7c84ed50c463d22a72ac30a700848e4b354b7f9"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.provider_state/bf608/report.md",
+      "sha256": "8080a5bb15bfe006db0e978e8650b49bab2b3144c477e928a2474e4ef40a2bcc"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.provider_state/bf608/script.py.txt",
+      "sha256": "05882f70d4e35ff2031818113929d99584651357f99747ee6db688eb220622dc"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "five_key_assessment": "report.md, full five-row assessment",
+  "evidence_classification": {
+    "report.md": "audit_notes_not_execution_log",
+    "audit.log": "actual_execution_log",
+    "ledger-dry-run.log": "actual_execution_log",
+    "ledger-receipt.json": "exact_actual_CLI_input_row; dry-run only, not appended"
+  },
+  "ledger_applied": false,
+  "styled_integration_native_or_global_clearance": false
+}

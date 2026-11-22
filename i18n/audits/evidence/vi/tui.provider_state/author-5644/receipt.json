@@ -1,0 +1,23 @@
+{
+  "record_reference": "i18n/audits/evidence/vi/tui.provider_state/author-5644/record.json",
+  "provenance_reference": "i18n/audits/evidence/vi/tui.provider_state/author-5644/record.json#/author",
+  "record": {
+    "path": "i18n/audits/evidence/vi/tui.provider_state/author-5644/record.json",
+    "sha256": "f686a27a84e6f1c4d3f1e30a1135499537cc821b73cbe95e97c751c2c0fe78e7"
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/vi/tui.provider_state/author-5644/notes.md",
+      "sha256": "90642819997d82346d4ca1df74fd5f55f6161e959861ec4ab4c03353b52d2bb0"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/tui.provider_state/author-5644/validator.py.txt",
+      "sha256": "c3ce44f2245663d8072e98d26f58b75999fe017bc938610420ef5d473476ff67"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/tui.provider_state/author-5644/audit.log",
+      "sha256": "0f0aea15a3155560cf2f632c289f491e0fae9d355ae54a4dd8657629ecb070bd"
+    }
+  ],
+  "status": "translated"
+}

@@ -1,0 +1,83 @@
+{
+  "locale": "ur",
+  "namespace": "tui.model_persistence",
+  "audit_date": "2026-11-22",
+  "key_count": 4,
+  "audit_kind": "independent_B",
+  "source_audit_revision": "b1c5ca8be245dcc3f9cae4463d9a5553b3e0c01f",
+  "auditor": {
+    "agent": "i18n-auditor B",
+    "session": "41b08626ce5f",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "3c1e111e2598",
+    "independent_from_auditor_A_session": "caf2c0ebbb90",
+    "actual_model_source": "Explicit host model-switch notice in this session",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "3c1e111e2598",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Explicit host model-switch notice: provider quota failure",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "method": "Direct LLM reasoning; no translation service"
+  },
+  "translator_provenance_source": "i18n/audits/evidence/ur/tui.model_persistence/t-3c1e/record.json",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.json",
+      "sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff"
+    },
+    "ur": {
+      "path": "local_operator/i18n/catalogues/ur/tui.model_persistence.json",
+      "sha256": "0e00e1ee1715d3ec8ad8d07440984da33fcb05336a35ceefbd32a87180a3e5f9"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.context.json",
+      "sha256": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ur/tui.model_persistence/b-41b0/audit.log",
+      "sha256": "907d153d6de1f26f18db707a69f1ec634622b430d15c7c1a66cf4fc8230c9729"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.model_persistence/b-41b0/receipt.json",
+      "sha256": "de683f88f20d2113223c199084ed4e936059f8e83e38b1589bb0521d79c6a4ed"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.model_persistence/b-41b0/report.md",
+      "sha256": "a0dbb36fde266d6fa4d78ad9c60af408cfe875382a38caad97f723cd1bf72a9b"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.model_persistence/b-41b0/script.py.txt",
+      "sha256": "71234e8579ae2e0f1a0b64444aaef8f1205bbac87e315fc050253b33a871d0cc"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "notes_kind": "audit_notes_not_execution_log",
+  "execution_log": "audit.log",
+  "validation_exit_code": 0,
+  "current_bytes_match_audited_hashes": true,
+  "central_ledger_applied": false,
+  "native_styled_rtl_gate": "open",
+  "actual_commands_recorded_in": "audit.log",
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false
+}
