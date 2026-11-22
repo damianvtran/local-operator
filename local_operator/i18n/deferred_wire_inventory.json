@@ -303,7 +303,7 @@
         }
       ],
       "references": {
-        "settings_io.py": 12
+        "settings_io.py": 20
       }
     },
     "wire.language_receipts": {

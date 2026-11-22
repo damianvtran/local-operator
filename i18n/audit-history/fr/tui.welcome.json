@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "tui.welcome",
-  "history_sha256": "5d88d6687aca67d9325682146d6b9c1c558bdaf410fca6c21ada04a4f025029d",
+  "history_sha256": "f2c6235e1f4452f9142b8183180436f5418f46aefac3764ca5b98c9aa46a01e4",
   "entries": [
     {
       "locale": "fr",
@@ -45,6 +45,45 @@
       },
       "status": "passed",
       "note": "Independent delta re-audit at worktree HEAD 8704efd8e (round 2; round-1 audit was a different run at 94ecb8983). Whole namespace read at the new bytes against en source; source/context/target sha256 re-derived from disk and match the translator draft. Checked: meaning, native idiom, glossary + style-guide terms vs the locale's shipped catalogue usage, display-cell widths (rich cell_len, CJK double-width) vs sidecar maxCells (chip 20/10, hotkey label 24, help 72, legend 44, tip 57) and vs the namespace's widest existing row (no layout widening), literal keys (⌥J/K, alt+g/G), placeholder/ICU parity, key-set parity, NFC/controls/stray spaces, fr U+202F before ';', ur no manual bidi controls. R1 MAJOR fixed: tip 58->51 cells ('…pendant la saisie'), below pool max 57, no TIP_MIN_WIDTH rise. No findings.  Note: en/tui.chrome.bindings.json was re-formatted (minified->pretty-printed, JSON-equal to the audited content) between rounds, so its source_sha256 moved dfe44861…->3189693e…; no wording change."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.welcome",
+      "source_sha256": "bbb30d9cfa2c9bd601b45572e176e9ae2bfbcf8c63a1e71d936159b0d05cab56",
+      "context_sha256": "ff031b40cfe7242f597a912a4da8db6818bbc6327cbc98910adbeae9d4ee60e5",
+      "target_sha256": "85495915f26a46f6d5d213a1c0ea61ebbdfc2c61beefc0b635dab71c46930b9a",
+      "changed_keys": [
+        "tui.welcome.tip.transcript_scroll"
+      ],
+      "translator": {
+        "agent": "coder agent (local-operator lopdev team, PR #4440 remediation round 1)",
+        "model": "radient/auto",
+        "model_kind": "configured session model; concrete upstream provider not exposed to the auditor",
+        "underlying_model": "unknown (not exposed)",
+        "date": "2026-11-22"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "5a2e32439c19",
+        "session_kind": "lop session id (round 3 delta audit under team lopdev)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model reported in this session's system header",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-22",
+        "fallback": "none observed; no provider switch during this audit",
+        "result": "passed",
+        "findings": 0,
+        "findings_by_severity": {
+          "BLOCKER": 0,
+          "MAJOR": 0,
+          "MINOR": 0,
+          "NIT": 0
+        },
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Independent audit (round 3, delta) at worktree HEAD 18dd9e949 vs 8704efd8e. Whole namespace read against en source+sidecar; source/context/target sha256 re-derived from disk (shasum) and equal the coder draft. Checked: meaning/idiom, glossary+style-guide terms (transcript/conversation/composer family consistent with the namespace's other rows), display cells via rich cell_len (CJK double-width) vs sidecar maxCells, ICU/placeholder + key-set parity, NFC, no control chars, literal keys option+k/j and ctrl+]/\\\\ byte-preserved with no U+2325 glyph left, scripts/i18n/check.py --catalogues-only 0 problems. Changed key tip.transcript_scroll = 57 cells (cap 57; painted glyph+space+text = 59 <= 59 TIP_MIN_WIDTH, no pool-max rise: widest tip stays 57). Conversation noun matches this namespace's tip.key_new_session/key_resume in every locale. Pre-existing and unchanged: tip.key_new_session/key_resume exceed their sidecar cap 32 when counted with the literal '{key}' (en itself is 33). fr 57 ties the pool max (shell, classification_off)."
     }
   ]
 }

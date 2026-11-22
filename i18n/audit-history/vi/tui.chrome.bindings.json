@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "tui.chrome.bindings",
-  "history_sha256": "d0bd78a570056d7d556f317cbaf6ee7c25a3b8a60dcf4cac9312f031e3892c6a",
+  "history_sha256": "a77e276ea5f02e45161d7477cebbba12a83b5f1f2e664fedf983d313cba13d4a",
   "entries": [
     {
       "locale": "vi",
@@ -115,6 +115,45 @@
       },
       "status": "passed",
       "note": "Independent delta re-audit at worktree HEAD 8704efd8e (round 2; round-1 audit was a different run at 94ecb8983). Whole namespace read at the new bytes against en source; source/context/target sha256 re-derived from disk and match the translator draft. Checked: meaning, native idiom, glossary + style-guide terms vs the locale's shipped catalogue usage, display-cell widths (rich cell_len, CJK double-width) vs sidecar maxCells (chip 20/10, hotkey label 24, help 72, legend 44, tip 57) and vs the namespace's widest existing row (no layout widening), literal keys (⌥J/K, alt+g/G), placeholder/ICU parity, key-set parity, NFC/controls/stray spaces, fr U+202F before ';', ur no manual bidi controls. Namespace bytes unchanged since round 1 (no correction was requested or applied); round-1 verdict stands. No findings.  Note: en/tui.chrome.bindings.json was re-formatted (minified->pretty-printed, JSON-equal to the audited content) between rounds, so its source_sha256 moved dfe44861…->3189693e…; no wording change."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.chrome.bindings",
+      "source_sha256": "7e610311fb093e1c35d8fa100815a0fdd615a9e24167a4b5c7b954b485a572e4",
+      "context_sha256": "20b645474050b00d21c8d781ef714fcc4c4f42386be9168c67df19d1f0681a6f",
+      "target_sha256": "e4746253b288f6709e4e68add5d59c35f1b08fa1e34c89e2f0534c3224c7d618",
+      "changed_keys": [
+        "tui.chrome.bindings.legend_app_ctrl_home_end"
+      ],
+      "translator": {
+        "agent": "coder agent (local-operator lopdev team, PR #4440 remediation round 1)",
+        "model": "radient/auto",
+        "model_kind": "configured session model; concrete upstream provider not exposed to the auditor",
+        "underlying_model": "unknown (not exposed)",
+        "date": "2026-11-22"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "5a2e32439c19",
+        "session_kind": "lop session id (round 3 delta audit under team lopdev)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model reported in this session's system header",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-22",
+        "fallback": "none observed; no provider switch during this audit",
+        "result": "passed",
+        "findings": 1,
+        "findings_by_severity": {
+          "BLOCKER": 0,
+          "MAJOR": 0,
+          "MINOR": 0,
+          "NIT": 1
+        },
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Independent audit (round 3, delta) at worktree HEAD 18dd9e949 vs 8704efd8e. Whole namespace read against en source+sidecar; source/context/target sha256 re-derived from disk (shasum) and equal the coder draft. Checked: meaning/idiom, glossary+style-guide terms (transcript/conversation/composer family consistent with the namespace's other rows), display cells via rich cell_len (CJK double-width) vs sidecar maxCells, ICU/placeholder + key-set parity, NFC, no control chars, literal keys option+k/j and ctrl+]/\\\\ byte-preserved with no U+2325 glyph left, scripts/i18n/check.py --catalogues-only 0 problems. Changed key legend_app_ctrl_home_end = 39 cells (sidecar maxCells 50, raised from 44 in this commit; en is 43). Card does not widen: keys_legend.natural_width unchanged because the widest row per locale is another row (up_down 55/49/39/50/52/50/41 for fr/es/zh/ru/vi/ur/hi) above the new row; fr natural_width 74 (the ~74 ceiling) is set by up_down. The /help row is hard-coded English (app.py _key_row), not catalogue-fed, so no locale composes there. NIT V1: the jump verb of the old copy (nhảy tới) was dropped; 'nhảy đầu/cuối; cuộn option+k/j hoặc ctrl+]/\\\\' = 44 cells would keep it. Bare 'đầu/cuối' is acceptable next to the ctrl+home/end key column."
     }
   ]
 }
