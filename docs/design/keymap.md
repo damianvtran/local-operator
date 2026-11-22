@@ -337,7 +337,10 @@ Enumerated by walking every `Widget`/`Screen`/`App` subclass in
 `super+b` (darwin) `ctrl+f` `escape` `shift+tab` `ctrl+t` `ctrl+g`
 `p` `c` `r` `left_square_bracket` `right_square_bracket`
 `ctrl+down` `ctrl+up` `ctrl+pageup` `ctrl+pagedown` `ctrl+r`
-`ctrl+home` `ctrl+end`
+`ctrl+home`/`alt+g` `ctrl+end`/`alt+shift+g`
+`alt+k`/`ctrl+right_square_bracket` `alt+j`/`ctrl+backslash` `alt+u` `alt+d`
+(the last four are REMAPPABLE rows, see E.4b; `alt+g`/`alt+shift+g` ride the
+fixed top/end bindings and are not configurable)
 
 **Composer (`Editor.BINDINGS`, `editor.py:1377-1425` + inherited `TextArea`):**
 `alt+left` `alt+right` `alt+shift+left` `alt+shift+right` `alt+b` `alt+f`
@@ -862,6 +865,41 @@ is not in it. At app level, non-priority, they would silently lose to `TextArea`
 and the chord would look broken; at priority they would take the composer's keys
 away. Verified: `ctrl+a` still reaches `cursor_line_start` when the Editor has
 focus.
+
+### E.4b Shipped: transcript scrolling from the composer
+
+The reader can move the conversation under a focused composer without losing
+the caret or the draft. These are `Binding`s with `keymap.*` ids, so all four
+are on the `/settings` → Hotkeys page:
+
+| Action id | Default | Step |
+|---|---|---|
+| `keymap.transcript_up` | `alt+k,ctrl+right_square_bracket` | 2 rows up |
+| `keymap.transcript_down` | `alt+j,ctrl+backslash` | 2 rows down |
+| `keymap.transcript_half_up` | `alt+u` | half a viewport up |
+| `keymap.transcript_half_down` | `alt+d` | half a viewport down |
+
+`ctrl+home`/`ctrl+end` keep their jobs and gain `alt+g`/`alt+shift+g` on the
+same two fixed bindings (top/end are not remappable rows; two more persisted
+ids would cost eight translated settings strings for keys the arrows already
+cover). A subagent page open targets the CHILD transcript, which is the page
+the reader is looking at.
+
+**Clause 2 of §E.4 is met by an explicit claim, not by the binding table.**
+`alt+<letter>` is not an `Editor`/`TextArea` binding, so a non-priority app
+binding survives the binding chain — but `TextArea` INSERTS the character
+before any binding dispatches, because it is printable. `Editor._on_key`
+therefore looks the key up in `Screen.active_bindings`; when the owning node is
+the app and the action is one of the transcript actions, it runs the action and
+consumes the key. The claim never hardcodes a chord, so a remap moves it with
+the binding, and `set_keymap({})` restores it. `ctrl+]`/`ctrl+\` are not
+printable and would reach their bindings on their own; they go through the same
+claim so there is one rule rather than two.
+
+**Clause 4.** Option chords require the terminal to send Meta (`Ghostty`:
+`macos-option-as-alt = true`; iTerm2: Left Option = Esc+; Terminal.app: "Use
+Option as Meta key"), which is why the `ctrl` fallback exists and why `/help`,
+the splash and `docs/guide/tui.md` say so.
 
 ### E.5 A leader key is an extension point, not scope
 

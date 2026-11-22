@@ -131,7 +131,9 @@ class KeyAction:
     #: under 32 cells excluding ``{key}`` — ``welcome.TIP_MIN_WIDTH`` budgets
     #: a worst-case key against it and an over-long template would push the
     #: threshold up and drop the tip row on narrow terminals. "" means "no
-    #: tip" and ``welcome.KEYED_TIPS`` skips the row.
+    #: tip" and ``welcome.KEYED_TIPS`` skips the row; the transcript-scroll
+    #: pair uses a plain static tip instead (two worst-case chords would
+    #: triple the template budget).
     tip: str
     #: Which surface OWNS the key: ``"app"`` for a Textual binding declared in
     #: ``OperatorApp.BINDINGS``, ``"desktop"`` for a global shortcut owned by
@@ -183,6 +185,56 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         default="ctrl+s",
         help="Opens the picker of recent conversations, the same as /resume.",
         tip=_t(tui_welcome.tip_key_resume()),
+    ),
+    # Transcript scrolling from the COMPOSER, so a reader can re-read history
+    # while a turn streams without losing the caret or the draft. Two pairs:
+    # a ROW step and a HALF PAGE. `alt+<letter>` is printable, so TextArea
+    # would insert the letter before any app binding ran — `widgets/editor.py`
+    # claims these from the ACTIVE binding map rather than hardcoding a chord,
+    # which is what keeps a remap working with no second list to drift.
+    # `ctrl+]`/`ctrl+\` are the fallbacks for terminals whose Option key
+    # composes (macOS "Use Option as Meta" off) instead of sending `esc j`.
+    # They carry non-printable characters, so they reach the app binding on
+    # their own — but they go through the same claim, for the same reason.
+    KeyAction(
+        id="keymap.transcript_up",
+        action="keymap_transcript_up",
+        # i18n: ignore catalogued row; this literal is registry-only
+        label="Scroll transcript up",
+        default="alt+k,ctrl+right_square_bracket",
+        # i18n: ignore catalogued row; this literal is registry-only
+        help="Scrolls the conversation up two rows; the caret stays in the composer.",
+        tip="",
+    ),
+    KeyAction(
+        id="keymap.transcript_down",
+        action="keymap_transcript_down",
+        # i18n: ignore catalogued row; this literal is registry-only
+        label="Scroll transcript down",
+        default="alt+j,ctrl+backslash",
+        # i18n: ignore catalogued row; this literal is registry-only
+        help="Scrolls the conversation down two rows; the caret stays in the composer.",
+        tip="",
+    ),
+    KeyAction(
+        id="keymap.transcript_half_up",
+        action="keymap_transcript_half_up",
+        # i18n: ignore catalogued row; this literal is registry-only
+        label="Half-page transcript up",
+        default="alt+u",
+        # i18n: ignore catalogued row; this literal is registry-only
+        help="Scrolls the conversation up half a screen; the caret stays in the composer.",
+        tip="",
+    ),
+    KeyAction(
+        id="keymap.transcript_half_down",
+        action="keymap_transcript_half_down",
+        # i18n: ignore catalogued row; this literal is registry-only
+        label="Half-page transcript down",
+        default="alt+d",
+        # i18n: ignore catalogued row; this literal is registry-only
+        help="Scrolls the conversation down half a screen; the caret stays in the composer.",
+        tip="",
     ),
     # The first DESKTOP-scoped action. Not a Textual binding: no `action_*`
     # method, no `Binding`, and `tip=""` so the splash cannot advertise a key
@@ -492,11 +544,30 @@ def alternates(text: str) -> frozenset[str]:
     return frozenset(part for part in normalize_key(text).split(",") if part)
 
 
+#: Modifier names Textual puts on a key before the base key name.
+_KEY_MODIFIERS = frozenset({"alt", "ctrl", "shift", "super"})
+
+
 def _is_valid_single_key(key: str, vocabulary: frozenset[str]) -> bool:
     """Whether ``key`` names something a terminal can actually send."""
     if not key:
         return False
     if vocabulary and key in vocabulary:
+        return True
+    # MODIFIER + PRINTABLE CHARACTER. Textual's ``Keys`` vocabulary enumerates
+    # named keys and ctrl aliases but no alt/super + character chord — measured
+    # on 8.2.8: ``alt+j`` normalizes to ``alt+j`` and the kitty protocol
+    # delivers it, yet it is not a ``Keys`` member, so the vocabulary branch
+    # alone refused the transcript-scroll defaults and every user remap onto a
+    # chord the runtime honours. Accept exactly the shape Textual itself
+    # normalizes: known modifiers in front of one printable character.
+    *modifiers, base = key.split("+")
+    if (
+        modifiers
+        and all(modifier in _KEY_MODIFIERS for modifier in modifiers)
+        and len(base) == 1
+        and base.isprintable()
+    ):
         return True
     # A single printable character is a legal key and is NOT a `Keys` member,
     # so the vocabulary check alone would reject `a` and `?`. Textual maps

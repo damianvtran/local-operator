@@ -101,6 +101,17 @@ update leaves the current terminal and runtime running.
   `ctrl+f` promotes the aside into the conversation.
 - `shift+tab`: cycle reasoning effort.
 - `ctrl+l`: clear the transcript (history is untouched).
+- **Scroll the conversation while you type**: `option+k` / `option+j` (⌥K/⌥J)
+  move the transcript two rows up/down, `option+u` / `option+d` move half a
+  page, and `option+g` / `option+shift+g` jump to the top/live end. Your draft
+  and caret stay in the composer. Option chords need the terminal to send Meta:
+  Ghostty `macos-option-as-alt = true`, iTerm2 Left Option = Esc+, Terminal.app
+  Settings → Profiles → Keys → "Use Option as Meta key". `ctrl+]` / `ctrl+\`
+  are the no-setup fallbacks for the row steps. All four row/half-page keys are
+  remappable on `/settings` → Hotkeys. When new output arrives while you are
+  scrolled up, a small **↓ Jump to latest** chip appears at the bottom right of
+  the conversation; press it (or `ctrl+end`) to return and follow again.
+  Sending a prompt always snaps to the bottom; typing never moves the view.
 - `ctrl+t` / `ctrl+g`: expand the todo list · cycle the subagent panel.
 - **Hand over a secret**: `/credential` followed by a space opens a masked
   capture: type the value and **Enter** turns it into a chip, and a paste your

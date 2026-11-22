@@ -768,3 +768,25 @@ def test_resolved_keymap_keeps_none_and_not_rejected() -> None:
     resolved, rejected = keymap.resolved_keymap({"keymap.quick_send": "none"})
     assert resolved == {}
     assert rejected == ["keymap.quick_send"]
+
+
+def test_the_transcript_scroll_rows_are_registered_and_reach_their_actions() -> None:
+    """The rows exist, in the app scope, and name methods the app really has.
+
+    Deliberately structural, like every other test in this file: the pilot
+    behaviour lives in `tests/unit/tui/test_transcript_scroll_keys.py`, and
+    what can silently break here is the IDENTITY — a row whose action method
+    does not exist fails only when somebody presses the key.
+    """
+    from local_operator.tui.app import OperatorApp
+
+    expected = {
+        "keymap.transcript_up": ("keymap_transcript_up", "alt+k,ctrl+right_square_bracket"),
+        "keymap.transcript_down": ("keymap_transcript_down", "alt+j,ctrl+backslash"),
+        "keymap.transcript_half_up": ("keymap_transcript_half_up", "alt+u"),
+        "keymap.transcript_half_down": ("keymap_transcript_half_down", "alt+d"),
+    }
+    for action_id, (method, default) in expected.items():
+        action = keymap.BY_ID[action_id]
+        assert (action.scope, action.action, action.default) == ("app", method, default)
+        assert callable(getattr(OperatorApp, f"action_{method}"))

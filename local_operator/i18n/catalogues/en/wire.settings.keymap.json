@@ -8,5 +8,13 @@
   "wire.settings.keymap.push_to_talk.label": "Push to talk",
   "wire.settings.keymap.push_to_talk.help": "Hold to dictate (desktop); release to stop.",
   "wire.settings.keymap.start_recording.label": "Start recording",
-  "wire.settings.keymap.start_recording.help": "Starts speech-to-text recording in the desktop window."
+  "wire.settings.keymap.start_recording.help": "Starts speech-to-text recording in the desktop window.",
+  "wire.settings.keymap.transcript_up.label": "Scroll transcript up",
+  "wire.settings.keymap.transcript_up.help": "Scrolls the conversation up two rows; the caret stays in the composer.",
+  "wire.settings.keymap.transcript_down.label": "Scroll transcript down",
+  "wire.settings.keymap.transcript_down.help": "Scrolls the conversation down two rows; the caret stays in the composer.",
+  "wire.settings.keymap.transcript_half_up.label": "Half-page transcript up",
+  "wire.settings.keymap.transcript_half_up.help": "Scrolls the conversation up half a screen; the caret stays in the composer.",
+  "wire.settings.keymap.transcript_half_down.label": "Half-page transcript down",
+  "wire.settings.keymap.transcript_half_down.help": "Scrolls the conversation down half a screen; the caret stays in the composer."
 }

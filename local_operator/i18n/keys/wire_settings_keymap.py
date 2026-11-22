@@ -47,3 +47,35 @@ def start_recording_help() -> Msg:
 
 def start_recording_label() -> Msg:
     return Msg("wire.settings.keymap.start_recording.label", {})
+
+
+def transcript_down_help() -> Msg:
+    return Msg("wire.settings.keymap.transcript_down.help", {})
+
+
+def transcript_down_label() -> Msg:
+    return Msg("wire.settings.keymap.transcript_down.label", {})
+
+
+def transcript_half_down_help() -> Msg:
+    return Msg("wire.settings.keymap.transcript_half_down.help", {})
+
+
+def transcript_half_down_label() -> Msg:
+    return Msg("wire.settings.keymap.transcript_half_down.label", {})
+
+
+def transcript_half_up_help() -> Msg:
+    return Msg("wire.settings.keymap.transcript_half_up.help", {})
+
+
+def transcript_half_up_label() -> Msg:
+    return Msg("wire.settings.keymap.transcript_half_up.label", {})
+
+
+def transcript_up_help() -> Msg:
+    return Msg("wire.settings.keymap.transcript_up.help", {})
+
+
+def transcript_up_label() -> Msg:
+    return Msg("wire.settings.keymap.transcript_up.label", {})

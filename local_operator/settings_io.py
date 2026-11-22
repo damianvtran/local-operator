@@ -229,6 +229,13 @@ _KEYMAP_COPY = {
     "keymap.quick_send": (_wk.quick_send_label, _wk.quick_send_help),
     "keymap.push_to_talk": (_wk.push_to_talk_label, _wk.push_to_talk_help),
     "keymap.start_recording": (_wk.start_recording_label, _wk.start_recording_help),
+    "keymap.transcript_up": (_wk.transcript_up_label, _wk.transcript_up_help),
+    "keymap.transcript_down": (_wk.transcript_down_label, _wk.transcript_down_help),
+    "keymap.transcript_half_up": (_wk.transcript_half_up_label, _wk.transcript_half_up_help),
+    "keymap.transcript_half_down": (
+        _wk.transcript_half_down_label,
+        _wk.transcript_half_down_help,
+    ),
 }
 
 

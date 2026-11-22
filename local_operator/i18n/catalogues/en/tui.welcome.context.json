@@ -106,5 +106,11 @@
     "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
     "role": "splash tip",
     "tone": "plain, one clause"
+  },
+  "tui.welcome.tip.transcript_scroll": {
+    "role": "splash tip",
+    "tone": "plain, one clause",
+    "maxCells": 57,
+    "note": "EN-only context sidecar. Static on purpose: it names TWO chords (Option-J / Option-K, the row-step pair), and resolving both from the remappable keymap through the keyed-tip machinery would triple the template width budget behind TIP_MIN_WIDTH and drop every tip below ~90 cells. `⌥` is the Option/Alt glyph and stays in every locale; the keys are technical tokens. A remap makes this sentence stale — /help and the ? legend carry the live name. No ICU arguments."
   }
 }
