@@ -122,15 +122,22 @@ def _log_conversation_failure(failure: Exception, phase: str, reference: str) ->
         "reservation",
         "card_handoff",
     }
-    failure_class = {
-        BridgeRefusal: "bridge_refusal",
-        RuntimeError: "runtime_error",
-        ValueError: "value_error",
-        TypeError: "type_error",
-        OSError: "os_error",
-        TimeoutError: "timeout",
-        ConnectionError: "connection_error",
-    }.get(type(failure), "unknown")
+    # Unknown exception metaclasses may override hash/equality (or be
+    # unhashable). Only identity comparisons keep this observer from invoking
+    # their hooks and accidentally changing the durable retry hold.
+    failure_class = "unknown"
+    for known_type, label in (
+        (BridgeRefusal, "bridge_refusal"),
+        (RuntimeError, "runtime_error"),
+        (ValueError, "value_error"),
+        (TypeError, "type_error"),
+        (OSError, "os_error"),
+        (TimeoutError, "timeout"),
+        (ConnectionError, "connection_error"),
+    ):
+        if type(failure) is known_type:
+            failure_class = label
+            break
     status = failure.http_status if type(failure) is BridgeRefusal else None
     safe_status = (
         status

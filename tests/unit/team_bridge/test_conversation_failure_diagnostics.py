@@ -148,6 +148,78 @@ def test_unknown_exception_never_reads_dynamic_fields(caplog):
     assert caplog.records[-1].exc_info is None
 
 
+@pytest.mark.parametrize("metaclass_kind", ["unhashable", "raising_hash", "raising_equality"])
+def test_hostile_exception_metaclass_preserves_retry_hold(
+    tmp_path, monkeypatch, caplog, metaclass_kind
+):
+    accesses = []
+
+    def forbidden(name):
+        def access(*args, **kwargs):
+            accesses.append(name)
+            raise AssertionError("diagnostics must not invoke exception hooks")
+
+        return access
+
+    # A colliding hash makes dictionary lookup reach equality too. Identity-only
+    # classification must invoke neither hook, including on an unhashable type.
+    class HostileMeta(type):
+        __hash__ = (
+            None
+            if metaclass_kind == "unhashable"
+            else (
+                forbidden("hash")
+                if metaclass_kind == "raising_hash"
+                else lambda cls: accesses.append("hash") or hash(RuntimeError)
+            )
+        )
+        __eq__ = forbidden("equality")
+
+    class HostileFailure(RuntimeError, metaclass=HostileMeta):
+        __str__ = forbidden("str")
+        __repr__ = forbidden("repr")
+        http_status = property(forbidden("http_status"))
+        code = property(forbidden("code"))
+
+    owner = _owner("a", 1)
+    root = tmp_path / "a"
+    root.mkdir()
+    store = _enroll(root, owner, "sess_a")
+    server = FakeServer(notify={"bep_a": "mute"}, active={"bep_a": True}, mentioned={"bep_a"})
+    transcripts, _ = _wire_rig(monkeypatch, server, {"a": (owner, root)})
+    ref = _ref(server)
+    store.persist_hold(owner, ref.encode(), "conversation_failed", retry_at=0)
+
+    def fail(*args, **kwargs):
+        raise HostileFailure(CANARY)
+
+    monkeypatch.setattr(conversation, "plan_route", fail)
+    caplog.set_level(logging.WARNING, logger=conversation.__name__)
+    outcome = asyncio.run(
+        loop.retry_due_holds(
+            owner,
+            config_dir=root,
+            access=SimpleNamespace(credential_id=owner.credential_id),
+            auth_store=None,
+        )
+    )
+    assert outcome["outcomes"][0]["action"] == "hold"
+    holds = _hold_rows(root)
+    assert len(holds) == 1 and holds[0]["hold_code"] == "conversation_failed"
+    assert holds[0]["retry_at"] > 0
+    assert _reservation_rows(root) == [] and transcripts["sess_a"] == []
+    assert accesses == []
+    record = caplog.records[-1]
+    assert record.args == (
+        "routing",
+        "unknown",
+        "unknown",
+        hashlib.sha256(ref.encode().encode("utf-8")).hexdigest(),
+    )
+    assert record.exc_info is None and record.stack_info is None
+    assert CANARY not in caplog.text and ref.encode() not in caplog.text
+
+
 @pytest.mark.parametrize("kind", ["refusal", "store", "cancel"])
 def test_failure_protocol_is_not_reclassified(tmp_path, monkeypatch, caplog, kind):
     owner = _owner("a", 1)
