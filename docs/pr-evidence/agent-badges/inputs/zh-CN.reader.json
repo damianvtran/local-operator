@@ -1,0 +1,26 @@
+{
+  "tool_call_id": "call_f5428d9cdda8443c807c23a227da0a25:5020708bd53b44cab662bc4e60040e3d",
+  "tool_name": "read_public_copy",
+  "content": [
+    {
+      "type": "text",
+      "text": "{\n \"wire.agent_badges.packaged\": \"内置\"\n}"
+    }
+  ],
+  "details": {
+    "path": "local_operator/i18n/catalogues/zh-CN/wire.agent_badges.json",
+    "key": null,
+    "public_copy": true,
+    "policy": "docs/security/redaction-policy.md",
+    "audit_log": "/Users/damian/.local-operator/audit/public-copy-reads.jsonl",
+    "sha256": "526e998bcd4a576add23bcbb128dd62e141c718dbdf6475a31bc868c5ded3218",
+    "repository_root": "/Users/damian/local-operator/.worktrees/i18n-agent-facts",
+    "repository": "damianvtran/local-operator",
+    "repository_verified": true,
+    "commit": "7d03eb5874ddbf8d3d16aeed8a12d7d204d68603",
+    "checkout_head": "7d03eb5874ddbf8d3d16aeed8a12d7d204d68603"
+  },
+  "duration_s": 4.6961573750013486,
+  "is_error": false,
+  "useless": false
+}

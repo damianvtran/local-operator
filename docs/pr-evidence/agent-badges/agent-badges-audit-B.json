@@ -1,0 +1,658 @@
+{
+  "schema": 1,
+  "receipt_kind": "independent-native-copy-audit-B-private-not-ledger-admission",
+  "namespace": "wire.agent_badges",
+  "scope": "wire.agent_badges.packaged",
+  "round": 1,
+  "lane": "bounded read-only copy audit, <=15 minutes",
+  "date_utc": "2026-11-22T08:13:01.531964+00:00",
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-agent-facts",
+  "source_commit": "7d03eb5874ddbf8d3d16aeed8a12d7d204d68603",
+  "english_original_commit": "741a45d8465c5f4608e374a1bffeb9d2190065cf",
+  "auditor_session_id": "aa681ae7e68e",
+  "auditor_actual_model": "openai/gpt-6.1-sol",
+  "model_fallback": {
+    "initial": "anthropic/claude-opus-5-5",
+    "actual": "openai/gpt-6.1-sol",
+    "reason": "provider failure: quota",
+    "source": "explicit host model-switch notice in this conversation",
+    "additional_provider_telemetry": "UNKNOWN; no inference made"
+  },
+  "independence": {
+    "translator_session": "8a63c771f926",
+    "english_author_session": "05ab22c0ed05",
+    "auditor_session": "aa681ae7e68e",
+    "distinct_actors": true,
+    "same_model_as_translator_disclosed": true,
+    "author_identity_evidence": "/Users/damian/local-operator/.worktrees/i18n-agent-facts/docs/pr-evidence/agent-badges/wire-agent-badges-author-8a63c771f926.json",
+    "english_author_identity_source": "captured input manifest and task brief; actor identity not independently proven by Git author metadata",
+    "audit_A_current_judgment_read": false,
+    "self_translation_or_repo_edit": false
+  },
+  "input_manifest": "/Users/damian/local-operator/.worktrees/i18n-agent-facts/docs/pr-evidence/agent-badges/inputs/manifest.md",
+  "source_binding_path": "/Users/damian/local-operator/.worktrees/i18n-agent-facts/docs/pr-evidence/agent-badges/source-binding.json",
+  "source_binding_raw_sha256": "69c208fcafeac2d22b3851fb6f8d98eca7445aa5d190a07651cc0fc1ac2b8812",
+  "author_receipt_path": "/Users/damian/local-operator/.worktrees/i18n-agent-facts/docs/pr-evidence/agent-badges/wire-agent-badges-author-8a63c771f926.json",
+  "author_receipt_raw_sha256": "ca539cc1cacb46457d20a7e7fc5f264aaf9431e06720b87557d6abfe6c57307b",
+  "provenance_checks": [
+    {
+      "input": "en",
+      "checks": {
+        "envelope_manifest_hash": true,
+        "selected_hash": true,
+        "raw_binding_hash": true,
+        "payload_equals_frozen_blob": true,
+        "repository": true,
+        "head": true,
+        "root": true,
+        "reader_ok": true,
+        "one_exact_key": true,
+        "original_source_bytes_equal": true
+      }
+    },
+    {
+      "input": "en-context",
+      "checks": {
+        "envelope_manifest_hash": true,
+        "selected_hash": true,
+        "raw_binding_hash": true,
+        "payload_equals_frozen_blob": true,
+        "repository": true,
+        "head": true,
+        "root": true,
+        "reader_ok": true,
+        "one_exact_key": true,
+        "original_source_bytes_equal": true
+      }
+    },
+    {
+      "input": "zh-CN",
+      "checks": {
+        "envelope_manifest_hash": true,
+        "selected_hash": true,
+        "raw_binding_hash": true,
+        "payload_equals_frozen_blob": true,
+        "repository": true,
+        "head": true,
+        "root": true,
+        "reader_ok": true,
+        "one_exact_key": true
+      }
+    },
+    {
+      "input": "fr",
+      "checks": {
+        "envelope_manifest_hash": true,
+        "selected_hash": true,
+        "raw_binding_hash": true,
+        "payload_equals_frozen_blob": true,
+        "repository": true,
+        "head": true,
+        "root": true,
+        "reader_ok": true,
+        "one_exact_key": true
+      }
+    },
+    {
+      "input": "es",
+      "checks": {
+        "envelope_manifest_hash": true,
+        "selected_hash": true,
+        "raw_binding_hash": true,
+        "payload_equals_frozen_blob": true,
+        "repository": true,
+        "head": true,
+        "root": true,
+        "reader_ok": true,
+        "one_exact_key": true
+      }
+    },
+    {
+      "input": "ru",
+      "checks": {
+        "envelope_manifest_hash": true,
+        "selected_hash": true,
+        "raw_binding_hash": true,
+        "payload_equals_frozen_blob": true,
+        "repository": true,
+        "head": true,
+        "root": true,
+        "reader_ok": true,
+        "one_exact_key": true
+      }
+    },
+    {
+      "input": "vi",
+      "checks": {
+        "envelope_manifest_hash": true,
+        "selected_hash": true,
+        "raw_binding_hash": true,
+        "payload_equals_frozen_blob": true,
+        "repository": true,
+        "head": true,
+        "root": true,
+        "reader_ok": true,
+        "one_exact_key": true
+      }
+    },
+    {
+      "input": "hi",
+      "checks": {
+        "envelope_manifest_hash": true,
+        "selected_hash": true,
+        "raw_binding_hash": true,
+        "payload_equals_frozen_blob": true,
+        "repository": true,
+        "head": true,
+        "root": true,
+        "reader_ok": true,
+        "one_exact_key": true
+      }
+    },
+    {
+      "input": "ur",
+      "checks": {
+        "envelope_manifest_hash": true,
+        "selected_hash": true,
+        "raw_binding_hash": true,
+        "payload_equals_frozen_blob": true,
+        "repository": true,
+        "head": true,
+        "root": true,
+        "reader_ok": true,
+        "one_exact_key": true
+      }
+    }
+  ],
+  "input_hash_domains": {
+    "en": {
+      "envelope_sha256": "61488aee5b09453d9840e764f78138421def295f1de8160751e6cef316d31a3e",
+      "selected_sha256": "591461b74f7bcc90b89534c8f5b1d1fa2f798114ce745d2adabb1faee0099feb",
+      "raw_blob_sha256": "5caa688fa6d6a78f315e32f7bb1db3b8cae08c77f727dd36af22e45a0206a23b",
+      "path": "local_operator/i18n/catalogues/en/wire.agent_badges.json"
+    },
+    "en-context": {
+      "envelope_sha256": "9e97f066e9ec1a0508708c2a3a025aa0673303be61d633508f77126152e82699",
+      "selected_sha256": "a8e8c64fa876c7e73beb4f237ad47f48adfb36a3efddfd7bf7e677325c784964",
+      "raw_blob_sha256": "8ab96370595b180339f4a6392daaef10a6f8324f202f3738dfc97574df5591e7",
+      "path": "local_operator/i18n/catalogues/en/wire.agent_badges.context.json"
+    },
+    "zh-CN": {
+      "envelope_sha256": "631888506501bac2e90ad5ebe75bf519208555ffaa620b3f9d3ec8b46955ad91",
+      "selected_sha256": "526e998bcd4a576add23bcbb128dd62e141c718dbdf6475a31bc868c5ded3218",
+      "raw_blob_sha256": "7d4ee2c090bf96f8d280e84e057d208b65372000bccb851bba0b88c65666d3f1",
+      "path": "local_operator/i18n/catalogues/zh-CN/wire.agent_badges.json"
+    },
+    "fr": {
+      "envelope_sha256": "0f37e41155f6d6d0ac8ed3afd23495f6e207d6a3eec0328f609d9b636e2ec973",
+      "selected_sha256": "d47cf430705c53975458691a201ab7ceb3aa0608302560fea79332581b539ce6",
+      "raw_blob_sha256": "e4312efcb294f012872a50cb9adc1a64ca51b36abd730d10a97e172bd4cf46ab",
+      "path": "local_operator/i18n/catalogues/fr/wire.agent_badges.json"
+    },
+    "es": {
+      "envelope_sha256": "f4615ab524c9dcd8f160d12096a2ac8dff3cbf536e54a490c4c1550c98d7a091",
+      "selected_sha256": "3547b18f486cbc880426716eb0ac8116137551ea3c1ec27c8e0af8a81847844b",
+      "raw_blob_sha256": "393ca75c04e0e28adb8acd766c00850f07578fe54c2b7fe3307557b7eda333dc",
+      "path": "local_operator/i18n/catalogues/es/wire.agent_badges.json"
+    },
+    "ru": {
+      "envelope_sha256": "26741b96762a1b631362c5facaa9f126b04c47486f33ce67c33fa0d9a68a3f68",
+      "selected_sha256": "e6a13a00e7087c68989d86ba01b886779e8a5af1c0bfb2233dc02a5b8d755121",
+      "raw_blob_sha256": "329a61c18aeee9cd811586349999e88f16b1e769ec5c54ff5c3e854412d1cff2",
+      "path": "local_operator/i18n/catalogues/ru/wire.agent_badges.json"
+    },
+    "vi": {
+      "envelope_sha256": "a5acbaadb1db8b70f4cc5882a621b0636f33b130ad5e55daab22a77e0d7d42b4",
+      "selected_sha256": "78f9986d9eb06c0cb54185efa748b043778a957c637c7893c21a329ac664479e",
+      "raw_blob_sha256": "ac9a9baac27826ad4966f87b1d26dbd8c9db94b26d7e9ffd3cb8cec56d49a8ca",
+      "path": "local_operator/i18n/catalogues/vi/wire.agent_badges.json"
+    },
+    "hi": {
+      "envelope_sha256": "893a29fbf294aaae09178dc08f4573aac2836174a894c5b41b0f7c7b832005c2",
+      "selected_sha256": "3b96a019227bbd950b70289164be52548acfc8a94d72344743adda9f3205cef0",
+      "raw_blob_sha256": "f5e37710fac3b43a63ce5e85da03cd20151302440a29566e40ca83f432cacbc9",
+      "path": "local_operator/i18n/catalogues/hi/wire.agent_badges.json"
+    },
+    "ur": {
+      "envelope_sha256": "6cd6a583a7044923330d4a260a70a4668d1d60a1f1d04d1eb231ace62826e75f",
+      "selected_sha256": "4b127724278e620da4f8e6b42d0e107448f5d1fc46861bf5492c6853af0ec62e",
+      "raw_blob_sha256": "90185ca989752bde7e56c3269609eae6aceca184fca4b8f67845a9b42258365b",
+      "path": "local_operator/i18n/catalogues/ur/wire.agent_badges.json"
+    }
+  },
+  "context": {
+    "role": "agent provenance badge",
+    "tone": "short, plain, lowercase",
+    "maxCells": 27,
+    "note": "Available built-in starter not yet present in the registry. Not installation status, trust, security, or permission. Shares ONE 27-cell facts budget with kind and proactive; not 27 cells per label. Preserve the proactive safety marker whole, spilling it or scope to another facts line when needed."
+  },
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.agent_badges",
+      "key": "wire.agent_badges.packaged",
+      "keys_read": 1,
+      "fresh_keys": 1,
+      "retained_keys": 0,
+      "source_commit": "7d03eb5874ddbf8d3d16aeed8a12d7d204d68603",
+      "english_original_commit": "741a45d8465c5f4608e374a1bffeb9d2190065cf",
+      "source_sha256": "5caa688fa6d6a78f315e32f7bb1db3b8cae08c77f727dd36af22e45a0206a23b",
+      "source_raw_sha256": "5caa688fa6d6a78f315e32f7bb1db3b8cae08c77f727dd36af22e45a0206a23b",
+      "source_canonical_sha256": "db915e9d40dd3e036e2c7401e6af74c7bf3cdfc97e40e1305ec6bb039b1308f9",
+      "context_raw_sha256": "8ab96370595b180339f4a6392daaef10a6f8324f202f3738dfc97574df5591e7",
+      "target_raw_sha256": "7d4ee2c090bf96f8d280e84e057d208b65372000bccb851bba0b88c65666d3f1",
+      "target_canonical_sha256": "2069a56e6f08dcd5e42c593bb65450af2def498277d3c400709e4b834adfc6ff",
+      "translator": {
+        "agent": "8a63c771f926 (translator, lopdev)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-22T07:56:19.512284+00:00",
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol, provider failure: quota; source: author receipt"
+      },
+      "auditor": {
+        "agent": "aa681ae7e68e (translation-auditor B, lopdev)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-22",
+        "result": "passed",
+        "findings": 0,
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol, provider failure: quota; source: host notice in this transcript before copy review"
+      },
+      "status": "passed",
+      "value": "内置",
+      "backtranslation": "built-in",
+      "semantic_review": "内置 is the conventional compact software adjective for something included with the application; it does not assert registry installation, safety, trust or permissions. No punctuation or address form is needed.",
+      "glossary_register_review": "Matches 内置 in the independently read existing starter sentence; no glossary collision.",
+      "mechanical": {
+        "exact_key_parity": true,
+        "NFC": true,
+        "controls": [],
+        "markup_placeholder_tokens": [],
+        "ICU_plural_select_skeleton": "N/A: plain label; absent from source and target",
+        "characters": 2,
+        "cells_rich": 4,
+        "bidi_classes": [
+          "L"
+        ],
+        "no_leading_trailing_whitespace": true
+      },
+      "findings": [],
+      "unresolved_blocker_major_count": 0,
+      "verdict": "PASS — one-key native-copy semantic audit only; rendered fit and shaping not certified",
+      "note": "Fresh independent B decision; no self-authorship or A judgment read. This is private evidence, not ledger admission or locale/interface eligibility. Entire combined facts line must preserve all meaning and whole proactive marker."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.agent_badges",
+      "key": "wire.agent_badges.packaged",
+      "keys_read": 1,
+      "fresh_keys": 1,
+      "retained_keys": 0,
+      "source_commit": "7d03eb5874ddbf8d3d16aeed8a12d7d204d68603",
+      "english_original_commit": "741a45d8465c5f4608e374a1bffeb9d2190065cf",
+      "source_sha256": "5caa688fa6d6a78f315e32f7bb1db3b8cae08c77f727dd36af22e45a0206a23b",
+      "source_raw_sha256": "5caa688fa6d6a78f315e32f7bb1db3b8cae08c77f727dd36af22e45a0206a23b",
+      "source_canonical_sha256": "db915e9d40dd3e036e2c7401e6af74c7bf3cdfc97e40e1305ec6bb039b1308f9",
+      "context_raw_sha256": "8ab96370595b180339f4a6392daaef10a6f8324f202f3738dfc97574df5591e7",
+      "target_raw_sha256": "e4312efcb294f012872a50cb9adc1a64ca51b36abd730d10a97e172bd4cf46ab",
+      "target_canonical_sha256": "5c67fa894b7c003f6188022cd453f578864b971f07785116fa7b3005c5246a97",
+      "translator": {
+        "agent": "8a63c771f926 (translator, lopdev)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-22T07:56:19.512284+00:00",
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol, provider failure: quota; source: author receipt"
+      },
+      "auditor": {
+        "agent": "aa681ae7e68e (translation-auditor B, lopdev)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-22",
+        "result": "passed",
+        "findings": 0,
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol, provider failure: quota; source: host notice in this transcript before copy review"
+      },
+      "status": "passed",
+      "value": "fourni",
+      "backtranslation": "supplied / provided",
+      "semantic_review": "fourni is an idiomatic lowercase provenance participle for an agent or supplied starter; it is not installé or approuvé. Masculine singular agrees with agent/modèle, rather than a packaging action.",
+      "glossary_register_review": "Matches fourni in modèle fourni; terse participial statuses are explicitly allowed by the French guide.",
+      "mechanical": {
+        "exact_key_parity": true,
+        "NFC": true,
+        "controls": [],
+        "markup_placeholder_tokens": [],
+        "ICU_plural_select_skeleton": "N/A: plain label; absent from source and target",
+        "characters": 6,
+        "cells_rich": 6,
+        "bidi_classes": [
+          "L"
+        ],
+        "no_leading_trailing_whitespace": true
+      },
+      "findings": [],
+      "unresolved_blocker_major_count": 0,
+      "verdict": "PASS — one-key native-copy semantic audit only; rendered fit and shaping not certified",
+      "note": "Fresh independent B decision; no self-authorship or A judgment read. This is private evidence, not ledger admission or locale/interface eligibility. Entire combined facts line must preserve all meaning and whole proactive marker."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.agent_badges",
+      "key": "wire.agent_badges.packaged",
+      "keys_read": 1,
+      "fresh_keys": 1,
+      "retained_keys": 0,
+      "source_commit": "7d03eb5874ddbf8d3d16aeed8a12d7d204d68603",
+      "english_original_commit": "741a45d8465c5f4608e374a1bffeb9d2190065cf",
+      "source_sha256": "5caa688fa6d6a78f315e32f7bb1db3b8cae08c77f727dd36af22e45a0206a23b",
+      "source_raw_sha256": "5caa688fa6d6a78f315e32f7bb1db3b8cae08c77f727dd36af22e45a0206a23b",
+      "source_canonical_sha256": "db915e9d40dd3e036e2c7401e6af74c7bf3cdfc97e40e1305ec6bb039b1308f9",
+      "context_raw_sha256": "8ab96370595b180339f4a6392daaef10a6f8324f202f3738dfc97574df5591e7",
+      "target_raw_sha256": "393ca75c04e0e28adb8acd766c00850f07578fe54c2b7fe3307557b7eda333dc",
+      "target_canonical_sha256": "2097ac78a6870078931a57146040e81cb39931e347f4f8ea9bc373cbdb418e92",
+      "translator": {
+        "agent": "8a63c771f926 (translator, lopdev)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-22T07:56:19.512284+00:00",
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol, provider failure: quota; source: author receipt"
+      },
+      "auditor": {
+        "agent": "aa681ae7e68e (translation-auditor B, lopdev)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-22",
+        "result": "passed",
+        "findings": 0,
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol, provider failure: quota; source: host notice in this transcript before copy review"
+      },
+      "status": "passed",
+      "value": "incluido",
+      "backtranslation": "included",
+      "semantic_review": "incluido is a normal badge for an included agent/starter, not instalado, fiable or permitido. Masculine agent/agente is the implicit referent; the existing plantilla incluida correctly changes gender because plantilla is feminine. That inflection is not terminology drift.",
+      "glossary_register_review": "Matches incluida in plantilla incluida after natural gender inflection; glossary explicitly permits inflected citation forms.",
+      "mechanical": {
+        "exact_key_parity": true,
+        "NFC": true,
+        "controls": [],
+        "markup_placeholder_tokens": [],
+        "ICU_plural_select_skeleton": "N/A: plain label; absent from source and target",
+        "characters": 8,
+        "cells_rich": 8,
+        "bidi_classes": [
+          "L"
+        ],
+        "no_leading_trailing_whitespace": true
+      },
+      "findings": [],
+      "unresolved_blocker_major_count": 0,
+      "verdict": "PASS — one-key native-copy semantic audit only; rendered fit and shaping not certified",
+      "note": "Fresh independent B decision; no self-authorship or A judgment read. This is private evidence, not ledger admission or locale/interface eligibility. Entire combined facts line must preserve all meaning and whole proactive marker."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.agent_badges",
+      "key": "wire.agent_badges.packaged",
+      "keys_read": 1,
+      "fresh_keys": 1,
+      "retained_keys": 0,
+      "source_commit": "7d03eb5874ddbf8d3d16aeed8a12d7d204d68603",
+      "english_original_commit": "741a45d8465c5f4608e374a1bffeb9d2190065cf",
+      "source_sha256": "5caa688fa6d6a78f315e32f7bb1db3b8cae08c77f727dd36af22e45a0206a23b",
+      "source_raw_sha256": "5caa688fa6d6a78f315e32f7bb1db3b8cae08c77f727dd36af22e45a0206a23b",
+      "source_canonical_sha256": "db915e9d40dd3e036e2c7401e6af74c7bf3cdfc97e40e1305ec6bb039b1308f9",
+      "context_raw_sha256": "8ab96370595b180339f4a6392daaef10a6f8324f202f3738dfc97574df5591e7",
+      "target_raw_sha256": "329a61c18aeee9cd811586349999e88f16b1e769ec5c54ff5c3e854412d1cff2",
+      "target_canonical_sha256": "0c21bed9208d0a21a0197e88eba3e37fdeca85ab8c084cec9dff895032a8416f",
+      "translator": {
+        "agent": "8a63c771f926 (translator, lopdev)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-22T07:56:19.512284+00:00",
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol, provider failure: quota; source: author receipt"
+      },
+      "auditor": {
+        "agent": "aa681ae7e68e (translation-auditor B, lopdev)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-22",
+        "result": "passed",
+        "findings": 0,
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol, provider failure: quota; source: host notice in this transcript before copy review"
+      },
+      "status": "passed",
+      "value": "встроенный",
+      "backtranslation": "built-in",
+      "semantic_review": "встроенный is a standard software provenance adjective and agrees with implicit агент/шаблон in masculine singular. It does not say установленный, доверенный or разрешённый. It names an available built-in resource, not registry membership.",
+      "glossary_register_review": "Same term as встроенный шаблон; lowercase adjective suits a compact badge.",
+      "mechanical": {
+        "exact_key_parity": true,
+        "NFC": true,
+        "controls": [],
+        "markup_placeholder_tokens": [],
+        "ICU_plural_select_skeleton": "N/A: plain label; absent from source and target",
+        "characters": 10,
+        "cells_rich": 10,
+        "bidi_classes": [
+          "L"
+        ],
+        "no_leading_trailing_whitespace": true
+      },
+      "findings": [],
+      "unresolved_blocker_major_count": 0,
+      "verdict": "PASS — one-key native-copy semantic audit only; rendered fit and shaping not certified",
+      "note": "Fresh independent B decision; no self-authorship or A judgment read. This is private evidence, not ledger admission or locale/interface eligibility. Entire combined facts line must preserve all meaning and whole proactive marker."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.agent_badges",
+      "key": "wire.agent_badges.packaged",
+      "keys_read": 1,
+      "fresh_keys": 1,
+      "retained_keys": 0,
+      "source_commit": "7d03eb5874ddbf8d3d16aeed8a12d7d204d68603",
+      "english_original_commit": "741a45d8465c5f4608e374a1bffeb9d2190065cf",
+      "source_sha256": "5caa688fa6d6a78f315e32f7bb1db3b8cae08c77f727dd36af22e45a0206a23b",
+      "source_raw_sha256": "5caa688fa6d6a78f315e32f7bb1db3b8cae08c77f727dd36af22e45a0206a23b",
+      "source_canonical_sha256": "db915e9d40dd3e036e2c7401e6af74c7bf3cdfc97e40e1305ec6bb039b1308f9",
+      "context_raw_sha256": "8ab96370595b180339f4a6392daaef10a6f8324f202f3738dfc97574df5591e7",
+      "target_raw_sha256": "ac9a9baac27826ad4966f87b1d26dbd8c9db94b26d7e9ffd3cb8cec56d49a8ca",
+      "target_canonical_sha256": "7e07bd86de91af1853f68df86e1fbf32bff84f624e83abb69a5bec9b239c1334",
+      "translator": {
+        "agent": "8a63c771f926 (translator, lopdev)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-22T07:56:19.512284+00:00",
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol, provider failure: quota; source: author receipt"
+      },
+      "auditor": {
+        "agent": "aa681ae7e68e (translation-auditor B, lopdev)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-22",
+        "result": "passed",
+        "findings": 0,
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol, provider failure: quota; source: host notice in this transcript before copy review"
+      },
+      "status": "passed",
+      "value": "đi kèm",
+      "backtranslation": "bundled with / accompanying",
+      "semantic_review": "đi kèm is the idiomatic relational phrase for a supplied accompanying resource. The product or installation is recoverable from UI context; there is no claim that the starter is already cài (installed).",
+      "glossary_register_review": "Exactly matches đi kèm in mẫu đi kèm; precomposed diacritics and neutral short-fragment register are correct.",
+      "mechanical": {
+        "exact_key_parity": true,
+        "NFC": true,
+        "controls": [],
+        "markup_placeholder_tokens": [],
+        "ICU_plural_select_skeleton": "N/A: plain label; absent from source and target",
+        "characters": 6,
+        "cells_rich": 6,
+        "bidi_classes": [
+          "L",
+          "WS"
+        ],
+        "no_leading_trailing_whitespace": true
+      },
+      "findings": [],
+      "unresolved_blocker_major_count": 0,
+      "verdict": "PASS — one-key native-copy semantic audit only; rendered fit and shaping not certified",
+      "note": "Fresh independent B decision; no self-authorship or A judgment read. This is private evidence, not ledger admission or locale/interface eligibility. Entire combined facts line must preserve all meaning and whole proactive marker."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.agent_badges",
+      "key": "wire.agent_badges.packaged",
+      "keys_read": 1,
+      "fresh_keys": 1,
+      "retained_keys": 0,
+      "source_commit": "7d03eb5874ddbf8d3d16aeed8a12d7d204d68603",
+      "english_original_commit": "741a45d8465c5f4608e374a1bffeb9d2190065cf",
+      "source_sha256": "5caa688fa6d6a78f315e32f7bb1db3b8cae08c77f727dd36af22e45a0206a23b",
+      "source_raw_sha256": "5caa688fa6d6a78f315e32f7bb1db3b8cae08c77f727dd36af22e45a0206a23b",
+      "source_canonical_sha256": "db915e9d40dd3e036e2c7401e6af74c7bf3cdfc97e40e1305ec6bb039b1308f9",
+      "context_raw_sha256": "8ab96370595b180339f4a6392daaef10a6f8324f202f3738dfc97574df5591e7",
+      "target_raw_sha256": "f5e37710fac3b43a63ce5e85da03cd20151302440a29566e40ca83f432cacbc9",
+      "target_canonical_sha256": "a24a9eb91f1ef350aab41ef0ebf826adb3982d13920b1858bec7df8d69c42e40",
+      "translator": {
+        "agent": "8a63c771f926 (translator, lopdev)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-22T07:56:19.512284+00:00",
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol, provider failure: quota; source: author receipt"
+      },
+      "auditor": {
+        "agent": "aa681ae7e68e (translation-auditor B, lopdev)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-22",
+        "result": "passed",
+        "findings": 0,
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol, provider failure: quota; source: host notice in this transcript before copy review"
+      },
+      "status": "passed",
+      "value": "साथ मिला",
+      "backtranslation": "received with / came along with [the product]",
+      "semantic_review": "साथ मिला is a natural abbreviated provenance predicate: an implicit masculine singular agent/starter came with the product. मिला agrees with एजेंट/नमूना; मिले in the existing इस साथ मिले शुरुआती नमूने phrase is the expected oblique form before को, not a competing term. The omitted product complement is recoverable in a badge. It does not mean installed (इंस्टॉल), approved, trusted or permitted.",
+      "glossary_register_review": "Matches the established साथ मिले phrase by grammatical inflection; everyday Hindi rather than a heavy coined technical adjective; no आप/तुम register issue in this non-address label.",
+      "mechanical": {
+        "exact_key_parity": true,
+        "NFC": true,
+        "controls": [],
+        "markup_placeholder_tokens": [],
+        "ICU_plural_select_skeleton": "N/A: plain label; absent from source and target",
+        "characters": 8,
+        "cells_rich": 5,
+        "bidi_classes": [
+          "L",
+          "WS"
+        ],
+        "no_leading_trailing_whitespace": true
+      },
+      "findings": [],
+      "unresolved_blocker_major_count": 0,
+      "verdict": "PASS — one-key native-copy semantic audit only; rendered fit and shaping not certified",
+      "note": "Fresh independent B decision; no self-authorship or A judgment read. This is private evidence, not ledger admission or locale/interface eligibility. Entire combined facts line must preserve all meaning and whole proactive marker."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.agent_badges",
+      "key": "wire.agent_badges.packaged",
+      "keys_read": 1,
+      "fresh_keys": 1,
+      "retained_keys": 0,
+      "source_commit": "7d03eb5874ddbf8d3d16aeed8a12d7d204d68603",
+      "english_original_commit": "741a45d8465c5f4608e374a1bffeb9d2190065cf",
+      "source_sha256": "5caa688fa6d6a78f315e32f7bb1db3b8cae08c77f727dd36af22e45a0206a23b",
+      "source_raw_sha256": "5caa688fa6d6a78f315e32f7bb1db3b8cae08c77f727dd36af22e45a0206a23b",
+      "source_canonical_sha256": "db915e9d40dd3e036e2c7401e6af74c7bf3cdfc97e40e1305ec6bb039b1308f9",
+      "context_raw_sha256": "8ab96370595b180339f4a6392daaef10a6f8324f202f3738dfc97574df5591e7",
+      "target_raw_sha256": "90185ca989752bde7e56c3269609eae6aceca184fca4b8f67845a9b42258365b",
+      "target_canonical_sha256": "77f9409b8bac6197bb939d5b5238fa3e9db7b82677f26466f93cc8f985b455d4",
+      "translator": {
+        "agent": "8a63c771f926 (translator, lopdev)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-22T07:56:19.512284+00:00",
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol, provider failure: quota; source: author receipt"
+      },
+      "auditor": {
+        "agent": "aa681ae7e68e (translation-auditor B, lopdev)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-22",
+        "result": "passed",
+        "findings": 0,
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol, provider failure: quota; source: host notice in this transcript before copy review"
+      },
+      "status": "passed",
+      "value": "ساتھ فراہم کردہ",
+      "backtranslation": "provided along with [the product]",
+      "semantic_review": "ساتھ فراہم کردہ is a grammatical compact attributive phrase: ساتھ conveys accompanying provision and فراہم کردہ means provided. کردہ is an established invariable participial form, so no missing gender agreement or copula needs repair in a badge. It refers to provenance, not installation (انسٹال), approval, trust or permission. The accompanying product is recoverable from UI context.",
+      "glossary_register_review": "Deliberate plain Urdu equivalent of packaged provenance rather than the existing loanword پیکج شدہ; not a second name for starter, because the contribution is a provenance badge and contains no starter noun. Logical-order Urdu contains no embedded Latin run or punctuation requiring local correction.",
+      "mechanical": {
+        "exact_key_parity": true,
+        "NFC": true,
+        "controls": [],
+        "markup_placeholder_tokens": [],
+        "ICU_plural_select_skeleton": "N/A: plain label; absent from source and target",
+        "characters": 15,
+        "cells_rich": 15,
+        "bidi_classes": [
+          "AL",
+          "WS"
+        ],
+        "no_leading_trailing_whitespace": true
+      },
+      "findings": [],
+      "unresolved_blocker_major_count": 0,
+      "verdict": "PASS — one-key native-copy semantic audit only; rendered fit and shaping not certified",
+      "note": "Fresh independent B decision; no self-authorship or A judgment read. This is private evidence, not ledger admission or locale/interface eligibility. Entire combined facts line must preserve all meaning and whole proactive marker."
+    }
+  ],
+  "count": {
+    "target_locales": 7,
+    "target_keys_read": 7,
+    "fresh_decisions": 7,
+    "retained": 0,
+    "english_source_keys": 1,
+    "context_keys": 1,
+    "adjacent_starter_context_keys": 7
+  },
+  "overall_verdict": "PASS native-copy semantics for 7 × 1 fresh keys; CONDITIONAL on later real-app width/design and Urdu/Hindi shaping validation, not overall native/runtime gate closure",
+  "findings": [],
+  "unresolved_blocker_major_count": 0,
+  "width_and_runtime_boundary": {
+    "shared_budget_cells": 27,
+    "measured_label_cells": {
+      "zh-CN": 4,
+      "fr": 6,
+      "es": 8,
+      "ru": 10,
+      "vi": 6,
+      "hi": 5,
+      "ur": 15
+    },
+    "English_label_cells": 8,
+    "longer_than_English": [
+      "es: 8 vs 8 cells (same cells; one extra code point)",
+      "ru: 10 vs 8 cells",
+      "ur: 15 vs 8 cells"
+    ],
+    "combination_estimates_source": "Translator author receipt, independently bound to exact target bytes; combination estimates NOT rederived or rendered by B",
+    "reported_overruns": {
+      "fr_specialist": 31,
+      "es_specialist": 35,
+      "ru_role": 31,
+      "ru_specialist": 37,
+      "vi_specialist": 30,
+      "ur_role": 33,
+      "ur_specialist": 32
+    },
+    "required_hand_off": "After implementation freeze, real-app QA/design must verify whole proactive marker or scope spills into existing second facts line and no meaning marker is clipped. Do not abbreviate these native words to hide overflow. Recheck all non-proactive combinations as runtime evidence; prior author fit estimates are not our proof.",
+    "Hindi_Urdu_shaping": "UNVERIFIED: Rich cell counts are optimistic estimates, not shaped or painted glyph evidence",
+    "RTL": "Urdu stored logical order verified, AL/WS only, no format controls or embedded Latin; renderer isolation/Latin technical-token island is separate real-path QA",
+    "synthetic_controls": "Not run; no synthetic width, bidi, pseudo or plural example is promoted as real-label runtime proof",
+    "private_uncommitted_product_test_code": "Not read or exercised; prior claimed 34 tests are not this audit evidence"
+  },
+  "limitations": [
+    "LLM idiomatic audit, not a claim of human native-speaker review.",
+    "No full interface, wire.settings, existing kind/proactive namespace certification or rendered fit approval.",
+    "No product/test/generated implementation read, app/browser/native launch, generation, installation, commit, push, PR comment, CI, ledger, baseline or admission writes.",
+    "Receipt is not ready for eligibility admission: rendered/native evidence remains open."
+  ],
+  "guidance_read": [
+    "guide://i18n",
+    "AGENTS.md lines 1-60",
+    "docs/I18N.md relevant audit and bidi sections",
+    "docs/design/i18n.md sections 2, 4, 6",
+    "i18n/glossary.md",
+    "all seven target i18n/style-guides/*.md",
+    "docs/security/redaction-policy.md section 4"
+  ]
+}
