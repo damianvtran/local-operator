@@ -113,10 +113,10 @@ async def test_a_remap_moves_the_action_AND_retires_the_old_key() -> None:
         app._editor().focus()
         await pilot.pause()
 
-        app._apply_keymap({"keymap.new_session": "ctrl+g"}, announce=False)
+        app._apply_keymap({"keymap.new_session": "f3"}, announce=False)
         await pilot.pause()
 
-        await pilot.press("ctrl+g")
+        await pilot.press("f3")
         assert fired == ["new"]
 
         fired.clear()
@@ -239,7 +239,7 @@ async def test_every_exit_route_clears_capture_mode(route: str) -> None:
         if route == "escape":
             await pilot.press("escape")
         elif route == "commit":
-            await pilot.press("ctrl+g")
+            await pilot.press("f3")
             await pilot.press("enter")
         elif route == "cursor-move":
             # NOT an arrow key: while capturing, the arrows are KEYS TO BIND
@@ -284,7 +284,7 @@ async def test_capture_writes_only_on_the_second_enter(tmp_path: Path) -> None:
         _select(view, "keymap.new_session")
 
         await pilot.press("enter")
-        await pilot.press("ctrl+g")
+        await pilot.press("f3")
         await pilot.pause()
         # A FRESH manager per read: `ConfigManager` snapshots the file, so a
         # held one would answer from before the write either way and the
@@ -292,12 +292,12 @@ async def test_capture_writes_only_on_the_second_enter(tmp_path: Path) -> None:
         assert (
             "keymap.new_session" not in ConfigManager(tmp_path).get_config().values
         ), "the first enter wrote config.yml"
-        assert "ctrl+g" in view._detail_text.plain
+        assert "f3" in view._detail_text.plain
 
         await pilot.press("enter")
         await pilot.pause()
         setting = settings_io.BY_KEY["keymap.new_session"]
-        assert settings_io.read_setting(ConfigManager(tmp_path), setting) == "ctrl+g"
+        assert settings_io.read_setting(ConfigManager(tmp_path), setting) == "f3"
 
 
 @pytest.mark.asyncio
@@ -348,7 +348,7 @@ async def test_a_second_key_while_pending_replaces_the_first() -> None:
         _select(view, "keymap.new_session")
 
         await pilot.press("enter")
-        await pilot.press("ctrl+g")
+        await pilot.press("f3")
         await pilot.press("f5")
         await pilot.pause()
         assert view._capture is not None and view._capture.key == "f5"
@@ -496,10 +496,10 @@ async def test_a_conflicting_key_names_its_victim_and_is_still_allowed() -> None
         _select(view, "keymap.new_session")
 
         await pilot.press("enter")
-        await pilot.press("ctrl+t")  # the app's own "expand/collapse todos"
+        await pilot.press("ctrl+home")  # the app's own "Transcript top"
         await pilot.pause()
         detail = view._detail_text.plain
-        assert "takes ctrl+t" in detail and "todos" in detail.lower()
+        assert "takes ctrl+home" in detail and "transcript" in detail.lower()
         assert "enter confirms" in detail, "a soft conflict must still be committable"
 
 
@@ -551,14 +551,14 @@ async def test_a_settings_page_write_rebinds_THIS_process(tmp_path: Path) -> Non
         _select(view, "keymap.new_session")
 
         await pilot.press("enter")
-        await pilot.press("ctrl+g")
+        await pilot.press("f3")
         await pilot.press("enter")
         await pilot.pause()
         app._close_settings_view()
         app._editor().focus()
         await pilot.pause()
 
-        await pilot.press("ctrl+g")
+        await pilot.press("f3")
         assert fired == ["new"], "the page wrote the key and this pane did not rebind"
         fired.clear()
         await pilot.press("ctrl+n")
@@ -590,13 +590,13 @@ async def test_a_write_from_another_process_propagates_through_the_watcher(
         # The "other process": a manager of its own writing through the same
         # facade, exactly as a second pane or `lop config edit` would.
         setting = settings_io.BY_KEY["keymap.new_session"]
-        settings_io.write_setting(ConfigManager(tmp_path), setting, "ctrl+g")
+        settings_io.write_setting(ConfigManager(tmp_path), setting, "f3")
 
         change = watcher.poll_now()
         assert change is not None and "keymap.new_session" in change.changed_keys
         await pilot.pause()
 
-        await pilot.press("ctrl+g")
+        await pilot.press("f3")
         assert fired == ["new"]
         fired.clear()
         await pilot.press("ctrl+n")
@@ -614,11 +614,11 @@ async def test_the_splash_tip_names_the_key_that_is_actually_bound(
     from local_operator.tui.widgets import welcome
 
     setting = settings_io.BY_KEY["keymap.new_session"]
-    settings_io.write_setting(ConfigManager(tmp_path), setting, "ctrl+g")
+    settings_io.write_setting(ConfigManager(tmp_path), setting, "f3")
     ConfigWatcher(tmp_path).poll_now()
 
     template = keymap.BY_ID["keymap.new_session"].tip
-    assert welcome._resolve_tip(template).startswith("ctrl+g")
+    assert welcome._resolve_tip(template).startswith("f3")
 
 
 def test_tip_min_width_has_not_risen_above_its_measured_bound() -> None:
@@ -784,7 +784,7 @@ async def test_a_pending_key_is_marked_without_relying_on_colour() -> None:
 
         assert "?" not in row()
         await pilot.press("enter")
-        await pilot.press("ctrl+g")
+        await pilot.press("f3")
         await pilot.pause()
         assert "?" in row(), "a pending key carries no non-colour mark"
 
@@ -1048,3 +1048,137 @@ async def test_a_hold_row_displays_and_refuses_to_arm_capture() -> None:
         await pilot.press("down")
         await pilot.pause()
         assert "cannot capture" not in painted_row(app, view._detail)
+
+
+@pytest.mark.asyncio
+async def test_the_palette_opens_on_its_live_key_and_ctrl_p_stops_opening_it() -> None:
+    """`ctrl+p` was the one app chord nobody could remap.
+
+    Textual injects its own priority binding on it unless a binding carries
+    ``command_palette``; the app declares that action now. Driven with
+    ``App.simulate_key`` rather than ``pilot.press``: the pilot synthesises a
+    PRINTABLE character for a ctrl+letter (`ctrl+p` arrives with character
+    `"p"`), which a focused TextArea's ``check_consume_key`` legitimately
+    claims — so a `press`-driven negative half passes even when the binding is
+    still live. ``simulate_key`` sends the control key a terminal sends
+    (character ``None``).
+
+    The default app is asserted FIRST: without that control, "ctrl+p no longer
+    opens it" proves nothing about the remap.
+    """
+    from local_operator.tui.command_palette import palette_is_open
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        palette_bindings = [
+            binding
+            for _key, binding in app._bindings
+            if getattr(binding, "action", "") == "command_palette"
+        ]
+        assert len(palette_bindings) == 1, "Textual injected a second palette binding"
+        assert palette_bindings[0].key == "ctrl+p"
+
+        app.simulate_key("ctrl+p")
+        await pilot.pause()
+        assert palette_is_open(app), "the shipped key does not open the palette"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not palette_is_open(app)
+
+        app._apply_keymap({"keymap.command_palette": "ctrl+o"}, announce=False)
+        await pilot.pause()
+
+        app.simulate_key("ctrl+p")
+        await pilot.pause()
+        assert not palette_is_open(app), "ctrl+p still opens the palette after the remap"
+
+        app.simulate_key("ctrl+o")
+        await pilot.pause()
+        assert palette_is_open(app), "the remapped key does not open the palette"
+
+
+@pytest.mark.asyncio
+async def test_a_non_priority_app_row_moves_and_retires_its_old_key() -> None:
+    """f9/b/f10-class rows are ordinary bubbling bindings; one live remap
+    proves the derivation reaches them and the old chord is gone."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        fired: list[str] = []
+        app.action_toggle_sidebar = lambda: fired.append("sidebar")  # type: ignore[method-assign]
+        app._editor().focus()
+        await pilot.pause()
+
+        app._apply_keymap({"keymap.toggle_sidebar": "f3"}, announce=False)
+        await pilot.pause()
+
+        await pilot.press("f3")
+        assert fired == ["sidebar"]
+
+        fired.clear()
+        await pilot.press("ctrl+b")
+        assert fired == [], "ctrl+b still toggles the sidebar after the remap"
+
+
+@pytest.mark.asyncio
+async def test_a_priority_app_row_moves_with_its_precedence_intact() -> None:
+    """`shift+tab` is priority because Textual's Screen owns it.
+
+    The remap must keep firing PAST a focused composer (the flag travels with
+    the row, not with the literal key), and the shipped chord must stop.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        fired: list[str] = []
+        app.action_cycle_effort = lambda: fired.append("effort")  # type: ignore[method-assign]
+        editor = app._editor()
+        editor.focus()
+        editor.load_text("half a thought")
+        await pilot.pause()
+
+        app._apply_keymap({"keymap.cycle_effort": "f12"}, announce=False)
+        await pilot.pause()
+
+        await pilot.press("f12")
+        assert fired == ["effort"]
+        assert editor.text == "half a thought"
+
+        fired.clear()
+        await pilot.press("shift+tab")
+        assert fired == [], "shift+tab still cycles effort after the remap"
+
+
+@pytest.mark.asyncio
+async def test_a_second_remappable_row_holding_the_key_is_a_refusal_not_a_warning() -> None:
+    """Design §C.4 at the page: two ids on one key has no reading under which
+    it is intended, so the capture refuses and the row keeps its default.
+
+    The soft warning next door covers a chord an UNREMAPPABLE binding holds;
+    here both victims are inside the feature, so the group check must win.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        _select(view, "keymap.new_session")
+
+        await pilot.press("enter")
+        await pilot.press("ctrl+t")  # keymap.toggle_todos's shipped default
+        await pilot.pause()
+        detail = view._detail_text.plain
+        assert "already uses ctrl+t" in detail, detail
+        assert view._capture is not None, "a refusal must not close the capture"
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert view._capture is not None, "enter committed a refused key"
+        import os
+
+        manager = ConfigManager(Path(os.environ["LOCAL_OPERATOR_CONFIG_DIR"]))
+        assert (
+            settings_io.read_setting(manager, settings_io.BY_KEY["keymap.new_session"]) == "ctrl+n"
+        )

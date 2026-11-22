@@ -5843,8 +5843,13 @@ def test_sidebar_footer_bindings_do_not_shadow_app_bindings() -> None:
         )
         # A REMAPPABLE app key must never be shadowed: that is the exact D10 bug
         # (`ctrl+n` silently took the user's new-session hotkey), so it is
-        # asserted directly rather than left to the allowlist.
-        taken = keymap_defaults & set(shadows)
+        # asserted directly rather than left to the allowlist. The ONE documented
+        # exception is `ctrl+f`: it became `keymap.fork_aside`'s default when the
+        # app-level rows were exposed, and the sidebar's fleet door already
+        # carries it under a reviewed reason whose guard (`check_action` declines
+        # `fork_aside` while the aside is open) is what makes the shadow safe —
+        # so the allowlist still has to name it, and nothing else gets in.
+        taken = (keymap_defaults & set(shadows)) - set(allowed_shadows)
         assert not taken, f"{widget.__name__} shadows remappable keymap keys: {taken}"
 
     check(SessionSidebar)

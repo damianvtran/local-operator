@@ -5365,7 +5365,10 @@ class SettingsView(Vertical):
                 # finding names.
                 clause_style = _bridge_ink()
             width = self._detail_width()
-            help_text = _paint(row.setting.help, source_locale="en")
+            help_text = keymap_mod.substitute_keys(
+                _paint(row.setting.help, source_locale="en"),
+                getattr(self.app, "_keymap", None),
+            )
             if row.setting.key == "notifications.sound.id":
                 # The registry help is SHARED with the desktop and `lop config`,
                 # so it names `lop sound add` / `lop sound doctor`. Inside the

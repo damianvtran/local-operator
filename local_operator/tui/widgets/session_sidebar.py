@@ -25,6 +25,7 @@ from textual.strip import Strip
 from textual.timer import Timer
 from textual.widget import Widget
 
+from local_operator import keymap as _keymap
 from local_operator.i18n.keys import tui_notifications as _inbox_keys
 from local_operator.i18n.keys import tui_session_sidebar as _ss
 from local_operator.i18n.keys import tui_small as _x
@@ -3125,6 +3126,7 @@ class SessionSidebar(Widget, can_focus=True):
             else _t(_x.session_sidebar_lead_focus())
         )
         base = lead if self.has_focus else f"{lead}{_t(_x.session_sidebar_hide_suffix())}"
+        base = _keymap.substitute_keys(base, getattr(self.app, "_keymap", None))
         # The chip is a PARTICIPANT in the ladder above, never an append after
         # it: appending past a candidate that has already been fit-tested voids
         # that test and the final `truncate_cells` then crops mid-word (the
@@ -3302,6 +3304,7 @@ class SessionSidebar(Widget, can_focus=True):
                 # applied to this two-template rung (hide-dropped full variants
                 # before the hub-free ones).
                 head_hide = f"{position} · {lead}{_t(_x.session_sidebar_hide_suffix())}"
+                head_hide = _keymap.substitute_keys(head_hide, getattr(self.app, "_keymap", None))
                 head_plain = f"{position} · {lead}"
                 # Every tail variant, widest first, each with and without the
                 # hide hint: the inbox note's yield-first rule (above) reaches

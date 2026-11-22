@@ -66,6 +66,7 @@ intercept before dispatch.
 from __future__ import annotations
 
 import dataclasses
+import re
 import sys
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -148,6 +149,21 @@ class KeyAction:
     #: the key and restores the default, so `none` is the one way to have no
     #: shortcut at all. Surfacing it on the wire is ``settings_io``'s job.
     clearable: bool = False
+    #: Whether the derived ``Binding`` is ``priority=True``.
+    #:
+    #: Default False, and that default is the safe one in both directions:
+    #: a priority binding fires BEFORE the focused widget, which costs the
+    #: pickers their own ``ctrl+n``-class movements when it is unnecessary,
+    #: and — worse — it applies to whatever chord the user remaps ONTO, so a
+    #: remap onto a composer key would silently EAT the user's text instead of
+    #: the composer receiving it. Non-priority costs the reverse (the hotkey
+    #: silently does not fire while typing), which is visible rather than
+    #: destructive. Priority is only for actions that must beat a widget that
+    #: owns the chord contextually: the command palette (an open composer must
+    #: not swallow it), the transcript's session switches and effort cycling
+    #: (they own Screen-level or composer-level keys — see the bindings' own
+    #: comments in ``tui/app.py``).
+    priority: bool = False
 
 
 #: Every remappable action, in the order the settings page lists them.
@@ -246,6 +262,164 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         tip="",
         scope="desktop",
         clearable=True,
+    ),
+    # The app-scope rows below were literal `Binding`s in `tui/app.py` until
+    # this slice; each default is the key that binding shipped with, so
+    # exposing them changes no shipped behaviour. `priority` carries the
+    # binding's own precedence — a remap through `set_keymap` re-keys the
+    # Binding but cannot change that flag, which is why it is registry data.
+    KeyAction(
+        id="keymap.command_palette",
+        action="command_palette",
+        label="Command palette",
+        default="ctrl+p",
+        # i18n: ignore keymap row copy is not extracted yet: every KEY_ACTIONS
+        # label/help is a literal here and is recorded verbatim in the
+        # wire.settings golden (the 8 keymap rows were deliberately left to a
+        # later slice). Extracting only this row would split one table across
+        # two mechanisms, and new English copy in wire.settings stales the
+        # carried locales' audited ledger rows.
+        help="Searches every command, setting and conversation from one box.",
+        tip="",
+        # Textual injects its OWN priority binding on ctrl+p when no binding
+        # carries this action; declaring ours suppresses the injection, so the
+        # palette is remappable at all. Priority because it must open while
+        # the composer holds the keys.
+        priority=True,
+    ),
+    KeyAction(
+        # i18n: ignore keymap row literals — see the block reason on
+        # keymap.command_palette: the row copy is not extracted yet.
+        id="keymap.toggle_sidebar",
+        action="toggle_sidebar",
+        label="Sessions list",
+        default="ctrl+b",
+        help="Shows or hides the session sidebar; /sidebar does the same.",
+        tip="",
+    ),
+    KeyAction(
+        # i18n: ignore keymap row literals — see the block reason on
+        # keymap.command_palette: the row copy is not extracted yet.
+        id="keymap.focus_sidebar",
+        action="focus_sidebar",
+        label="Focus sessions",
+        default="f9",
+        help="Moves the keys into the sessions list; esc returns to the composer.",
+        tip="",
+    ),
+    KeyAction(
+        # i18n: ignore keymap row literals — see the block reason on
+        # keymap.command_palette: the row copy is not extracted yet.
+        id="keymap.aside",
+        action="aside",
+        label="Aside",
+        default="f8",
+        help="Asks a side question without spending the composer's draft.",
+        tip="",
+    ),
+    KeyAction(
+        # i18n: ignore keymap row literals — see the block reason on
+        # keymap.command_palette: the row copy is not extracted yet.
+        id="keymap.fork_aside",
+        action="fork_aside",
+        label="Fork aside",
+        default="ctrl+f",
+        help="Promotes the open aside exchange into the conversation.",
+        tip="",
+    ),
+    KeyAction(
+        # i18n: ignore keymap row literals — see the block reason on
+        # keymap.command_palette: the row copy is not extracted yet.
+        id="keymap.toggle_todos",
+        action="toggle_todos",
+        label="Todo panel",
+        default="ctrl+t",
+        help="Expands or collapses the dock's todo list.",
+        tip="",
+    ),
+    KeyAction(
+        # i18n: ignore keymap row literals — see the block reason on
+        # keymap.command_palette: the row copy is not extracted yet.
+        id="keymap.toggle_subagents",
+        action="toggle_subagents",
+        label="Subagent panel",
+        default="ctrl+g",
+        help="Cycles the dock's subagent panel: full, summary, hidden.",
+        tip="",
+    ),
+    KeyAction(
+        # i18n: ignore keymap row literals — see the block reason on
+        # keymap.command_palette: the row copy is not extracted yet.
+        id="keymap.toggle_pin",
+        action="toggle_pin",
+        label="Pin session",
+        default="f10",
+        help="Pins or unpins the row under the pointer, else the sidebar's cursor.",
+        tip="",
+    ),
+    KeyAction(
+        # i18n: ignore keymap row literals — see the block reason on
+        # keymap.command_palette: the row copy is not extracted yet.
+        id="keymap.toggle_asks",
+        action="toggle_asks",
+        label="Queued asks",
+        default="f4",
+        help="Opens or collapses the questions waiting on an answer.",
+        tip="",
+    ),
+    KeyAction(
+        # i18n: ignore keymap row literals — see the block reason on
+        # keymap.command_palette: the row copy is not extracted yet.
+        id="keymap.prev_session",
+        action="switch_session(-1)",
+        label="Previous session",
+        default="ctrl+shift+up",
+        # Priority: the composer holds focus in the common case and would
+        # otherwise swallow the chord (the binding comment in `tui/app.py`
+        # records the audit that chose it).
+        help="Switches to the previous conversation in the sidebar.",
+        tip="",
+        priority=True,
+    ),
+    KeyAction(
+        # i18n: ignore keymap row literals — see the block reason on
+        # keymap.command_palette: the row copy is not extracted yet.
+        id="keymap.next_session",
+        action="switch_session(1)",
+        label="Next session",
+        default="ctrl+shift+down",
+        help="Switches to the next conversation in the sidebar.",
+        tip="",
+        priority=True,
+    ),
+    KeyAction(
+        # i18n: ignore keymap row literals — see the block reason on
+        # keymap.command_palette: the row copy is not extracted yet.
+        id="keymap.cycle_effort",
+        action="cycle_effort",
+        label="Reasoning effort",
+        default="shift+tab",
+        # Priority because Textual's `Screen` binds shift+tab to
+        # `focus_previous`; a bubbling App binding is never reached. The
+        # `_team_form`/`_agent_form` delegation is dispatch inside the action
+        # and is untouched by the key the user picks.
+        help="Cycles the reasoning effort level; /effort sets one directly.",
+        tip="",
+        priority=True,
+    ),
+    KeyAction(
+        # i18n: ignore keymap row literals — see the block reason on
+        # keymap.command_palette: the row copy is not extracted yet.
+        id="keymap.clear_transcript",
+        action="clear_transcript",
+        label="Clear transcript",
+        default="ctrl+l",
+        # `clear_transcript` is a plain app action with no confirmation, which is
+        # the test the brief set for exposing it; the action itself closes every
+        # floating surface first, so a remap cannot wipe a transcript the user
+        # cannot see.
+        help="Clears the transcript view; the stored history stays.",
+        tip="",
     ),
 )
 
@@ -364,7 +538,12 @@ COMPOSER_KEYS: frozenset[str] = frozenset(
         "ctrl+u",
         "ctrl+y",
         "ctrl+z",
-        "ctrl+f",
+        # NOT `ctrl+f`: TextArea 8.2.8 binds none (measured from the venv
+        # through `TextArea.BINDINGS`, and `Editor.BINDINGS` adds none), which
+        # is why `fork_aside` fires on it today. It stood here as a
+        # soft-conflict guess; leaving it would warn about a key the composer
+        # does not own and would refuse `keymap.fork_aside`'s shipped default
+        # to that warning.
         "ctrl+left",
         "ctrl+right",
         "ctrl+shift+left",
@@ -908,10 +1087,21 @@ def conflict_note(action_id: str, key: str) -> str:
     the feature feel arbitrary; stealing silently is worse, because the victim
     is invisible until the user notices weeks later that something stopped
     working. Naming the cost at the moment of the decision is the middle path.
+
+    The sentence INVERTS for a priority row (``KeyAction.priority``): a
+    priority binding is matched before the focused widget, so a composer key
+    is not a hotkey that silently stops working — it is text the user can no
+    longer type. Same warn-and-allow, opposite consequence, and the wording
+    has to say which one the user is choosing.
     """
-    del action_id  # symmetric with the app-level path, which does key on it
+    action = BY_ID.get(action_id)
     for part in normalize_key(key).split(","):
         if part in COMPOSER_KEYS:
+            if action is not None and action.priority:
+                return (
+                    f"the composer uses {part} — a priority hotkey would take it"
+                    " away from typing"
+                )
             return f"the composer uses {part} — the hotkey will not fire while you are typing"
     return ""
 
@@ -1062,6 +1252,64 @@ def effective_key(action: KeyAction, values: Mapping[str, Any]) -> str:
     return resolved.get(action.id, action.default)
 
 
+def painted_key(action_id: str, keymap: Mapping[str, str] | None = None) -> str:
+    """The key a user-facing hint should NAME for ``action_id``.
+
+    ``keymap`` is the mapping the app applied through ``App.set_keymap`` (the
+    app holds it on ``_keymap``); absent — a stripped harness, a pure builder
+    — the action ships its default, which is what the static hint shows.
+
+    A paint helper rather than a resolver: it never validates and never walks
+    the registry, so a caller can render one hint without reading config. A
+    value that is not a mapping (an unset app attribute, a test double) is
+    treated as absent rather than raising inside a paint.
+    """
+    if not isinstance(keymap, Mapping):
+        keymap = None
+    live = (keymap or {}).get(action_id)
+    if live:
+        return live
+    action = BY_ID.get(action_id)
+    return action.default if action is not None else ""
+
+
+def substitute_keys(text: str, keymap: Mapping[str, str] | None) -> str:
+    """``text`` with every shipped app chord replaced by its live remap.
+
+    WHY substitution rather than ICU placeholders: the copy that names these
+    chords (the legend's headings and rows, the dock's footer chips, the
+    settings help line for the dock, notifications) is TRANSLATED and audited
+    per namespace in eight locales. Retyping those sentences as templates with
+    a ``{key}`` argument would invalidate every audited row of each namespace
+    to move one token; the shipped chord is a stable technical token, so it is
+    rewritten at paint instead.
+
+    Token-bounded, so ``ctrl+b`` never rewrites a prefix of ``ctrl+backspace``.
+    Longest default first, so a default that is a prefix of another cannot eat
+    the longer one. Only app-scope rows can appear in terminal copy; the
+    desktop rows' accelerators are no terminal chord.
+    """
+    if not isinstance(keymap, Mapping) or not keymap:
+        return text
+    pairs = [
+        (action.default, keymap[action.id])
+        for action in KEY_ACTIONS
+        if action.scope == "app"
+        and action.id in keymap
+        and keymap[action.id]
+        and keymap[action.id] != action.default
+    ]
+    if not pairs:
+        return text
+    for shipped, live in sorted(pairs, key=lambda pair: len(pair[0]), reverse=True):
+        text = re.sub(
+            rf"(?<![A-Za-z0-9_+\-]){re.escape(shipped)}(?![A-Za-z0-9_+\-])",
+            live.replace("\\", "\\\\"),
+            text,
+        )
+    return text
+
+
 def format_key_display(key: str) -> str:
     """``key`` in Textual's own footer vocabulary (``escape`` -> ``esc``).
 
@@ -1133,6 +1381,8 @@ __all__ = [
     "display_key",
     "effective_key",
     "format_key_display",
+    "painted_key",
+    "substitute_keys",
     "normalize_desktop_key",
     "normalize_key",
     "resolved_keymap",

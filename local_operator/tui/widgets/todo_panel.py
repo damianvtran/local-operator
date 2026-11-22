@@ -45,6 +45,7 @@ from textual.containers import Container, VerticalScroll
 from textual.dom import NoScreen
 from textual.widgets import Static
 
+from local_operator import keymap as _keymap
 from local_operator.ansi import strip_control_sequences
 from local_operator.i18n.keys import tui_small as _x
 from local_operator.i18n.text import tr
@@ -1375,7 +1376,10 @@ class TodoPanel(Container):
             else:
                 row.append(_t(_x.todo_panel_done_hidden(count=str(hidden_done))), style=dim)
         row.append(
-            _t(_x.todo_panel_collapse()) if self._expanded else _t(_x.todo_panel_expand()),
+            _keymap.substitute_keys(
+                _t(_x.todo_panel_collapse()) if self._expanded else _t(_x.todo_panel_expand()),
+                getattr(getattr(self, "app", None), "_keymap", None),
+            ),
             style=muted,
         )
         return row

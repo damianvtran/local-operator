@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict
 
+from local_operator import keymap as _keymap
 from local_operator import settings_io
 from local_operator.config import ConfigManager
 from local_operator.i18n.boot import follow_language
@@ -213,7 +214,7 @@ def _view(manager: ConfigManager, setting: settings_io.Setting) -> SettingView:
         section=setting.section,
         label=setting.label,
         kind=setting.kind.value,
-        help=setting.help,
+        help=_live_help(manager, setting),
         value=None if _private_endpoint(value) else value,
         default=setting.default,
         redacted=_private_endpoint(value),
@@ -263,6 +264,24 @@ def _setting(key: str) -> settings_io.Setting:
         # routes migrate in slices (docs/design/i18n.md §2.6).
         raise HTTPException(404, _we.not_registered().envelope())
     return setting
+
+
+def _live_help(manager: ConfigManager, setting: settings_io.Setting) -> str:
+    """``setting.help``, with any shipped app chord replaced by its live remap.
+
+    The dock's help line names the subagent-panel chord, and a row that kept
+    saying ``ctrl+g`` after a remap would send a desktop user after a key the
+    terminal no longer answers to. Same token-substitution rule the TUI paints
+    with (``keymap.substitute_keys``) — the copy is translated and audited, so
+    the chord is rewritten, not templated. A no-op while every row is default.
+    """
+    values = manager.get_config().values
+    live = {
+        action.id: _keymap.effective_key(action, values)
+        for action in _keymap.KEY_ACTIONS
+        if action.scope == "app"
+    }
+    return _keymap.substitute_keys(setting.help, live)
 
 
 @router.get("/v1/settings", response_model=CRUDResponse[SettingsView])
