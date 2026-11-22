@@ -12,6 +12,7 @@ developer's own settings.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -132,6 +133,79 @@ async def test_bool_toggle_writes_and_survives_reopen(tmp_path: Path) -> None:
         await pilot.pause()
         index = _select(view, "display.shimmer")
         assert " off" in view.render_lines_for_test()[index + 2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key,initial,committed", (
+    ("tool_approval_mode", "ask", "auto"),
+    ("display.nerd_icons", None, True),
+    ("display.nerd_icons", True, False),
+    ("display.nerd_icons", False, None),
+    ("speech.voice.tone", "removed-choice", "warm"),
+))
+async def test_localized_enum_browsing_preserves_wire_values(
+    tmp_path: Path, key: str, initial: Any, committed: Any,
+) -> None:
+    """Painting/expansion/cancel are read-only; accept still writes typed wire data."""
+    from local_operator.i18n import text
+    from local_operator.server.routes.settings import _view
+    from local_operator.tui.widgets import settings_view as sv_mod
+
+    previous = text.active_locale()
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    try:
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause()
+            app._open_settings_view()
+            view = app.query_one(SettingsView)
+            setting = settings_io.BY_KEY[key]
+            if initial == "removed-choice":
+                # External/stale configuration bypasses today's enum validator.
+                view._manager.set_config_value("speech", {"voice": {"tone": initial}})
+            else:
+                settings_io.write_setting(view._manager, setting, initial)
+            path = tmp_path / "config.yml"
+            original = path.read_bytes() if path.exists() else None
+            wire = _view(view._manager, setting).model_dump(mode="json")
+
+            def projection(body):
+                return (body["value"], body["default"], [c["value"] for c in body["choices"]])
+
+            baseline = json.dumps(projection(wire))
+            text.set_active_locale("fr")
+            index = _select(view, key)
+            view._row_text(view._rows[index], index, 116)
+            painted = _view(view._manager, setting).model_dump(mode="json")
+            assert json.dumps(projection(painted)) == baseline
+            view.action_activate()
+            await pilot.pause()
+            if initial == "removed-choice":
+                assert all(c.value != initial for c in sv_mod._choices_for(setting))
+                for offset, row in enumerate(view._rows):
+                    if row.kind == "choice" and row.setting.key == key:
+                        assert "●" not in view._row_text(row, offset, 116).plain
+            await pilot.press("escape")
+            assert (path.read_bytes() if path.exists() else None) == original
+            _select(view, key)
+            view.action_activate()
+            for index, row in enumerate(view._rows):
+                if (
+                    row.kind == "choice"
+                    and type(row.choice.value) is type(committed)
+                    and row.choice.value == committed
+                ):
+                    view._selected = index
+                    break
+            else:
+                raise AssertionError("missing target choice")
+            view.action_activate()
+            stored = settings_io.read_setting(view._manager, setting)
+            assert type(stored) is type(committed) and stored == committed
+            body = _view(view._manager, setting).model_dump(mode="json")
+            assert type(body["value"]) is type(committed) and body["value"] == committed
+            assert sv_mod._edit_seed(stored) == ("" if stored is None else str(stored))
+    finally:
+        text.set_active_locale(previous)
 
 
 @pytest.mark.asyncio

@@ -815,3 +815,168 @@ async def test_english_detail_band_is_unchanged_at_120_and_80(
         view._confirm_delete = "default"
         view._paint_detail()
         assert view._detail_text.plain == (f"▸ delete chain default and its 1 hop?  {contract}")
+
+
+_ENUM_LABEL_CASES = (
+    ("speech.voice.tone", "warm"),
+    ("speech.voice.expressiveness", "medium"),
+    ("providers.openai.api", "responses"),
+    ("tool_approval_mode", "ask"),
+    ("tool_approval_mode", "auto"),
+    ("retry.accountSelectionPolicy", "reset-soonest"),
+    ("display.dock", "full"),
+    ("display.nerd_icons", None),
+    ("display.nerd_icons", True),
+    ("display.nerd_icons", False),
+)
+
+
+@pytest.mark.parametrize("locale", ("en", "fr", "es", "zh-CN", "ru", "vi", "ur", "hi"))
+def test_enum_summary_uses_registered_label_in_every_locale(locale: str) -> None:
+    """Actual shipped copy, not synthetic parity: picker, summary and raw slot agree."""
+    from local_operator.i18n.messages import render_record
+    from local_operator.tui.i18n_status import localized_display
+
+    previous = text.active_locale()
+    try:
+        text.set_active_locale(locale)
+        assert text.active_locale() == locale
+        for key, value in _ENUM_LABEL_CASES:
+            setting = settings_io.BY_KEY[key]
+            choice = next(
+                c for c in setting.resolved_choices
+                if type(c.value) is type(value) and c.value == value
+            )
+            message = choice.label.message
+            record = render_record(message.code, message.params, locale=locale)
+            expected = localized_display(record.text, source_locale=record.source_locale).plain
+            assert sv_mod._render_value(value, setting=setting) == expected, (locale, key)
+            assert sv_mod._choice_label(setting, choice) == expected, (locale, key)
+            assert sv_mod._render_value(value, setting=setting, raw=True) == record.text
+            assert not any(c in record.text for c in "\u2066\u2067\u2068\u2069")
+            assert sv_mod._edit_seed(value) == ("" if value is None else str(value))
+    finally:
+        text.set_active_locale(previous)
+
+
+def test_enum_label_technical_and_non_enum_values_stay_unchanged() -> None:
+    from local_operator.tui.i18n_status import technical_display
+
+    previous = text.active_locale()
+    try:
+        for locale in ("fr", "zh-CN", "ur"):
+            text.set_active_locale(locale)
+            language = settings_io.BY_KEY["language"]
+            native = next(c for c in language.resolved_choices if c.value == "fr")
+            expected = technical_display(native.label).plain
+            assert sv_mod._render_value("fr", setting=language) == expected
+            theme = settings_io.BY_KEY["tui.theme"]
+            choice = theme.resolved_choices[0]
+            assert sv_mod._render_value(choice.value, setting=theme) == choice.label
+            boolean = _first_of(Kind.BOOL)
+            for value in (True, False, None, ["warm", "auto"], "/warm/auto", "ctrl+s"):
+                assert sv_mod._render_value(value, setting=boolean) == sv_mod._render_value(value)
+            assert sv_mod._edit_seed(["warm", "auto"]) == "warm, auto"
+    finally:
+        text.set_active_locale(previous)
+
+
+def test_enum_label_repaint_resolves_only_match_without_catalogue_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setting = settings_io.BY_KEY["speech.voice.tone"]
+    sv_mod._render_value("warm", setting=setting)  # warm the shared namespace caches
+    real = sv_mod.tr_record
+    calls = []
+
+    def resolve(namespace):
+        calls.append(namespace)
+        return real(namespace)
+
+    def unexpected_read(*args, **kwargs):
+        raise AssertionError("a warm repaint must not reread catalogue files")
+
+    monkeypatch.setattr(sv_mod, "tr_record", resolve)
+    monkeypatch.setattr(catalogues, "load_catalogue", unexpected_read)
+    for _ in range(3):
+        sv_mod._render_value("warm", setting=setting)
+    assert calls == ["wire.settings"] * 3
+    calls.clear()
+    assert sv_mod._render_value("removed-choice", setting=setting) == "removed-choice"
+    assert calls == []
+    assert sv_mod._render_value(["warm"], setting=setting) == "warm"
+    assert sv_mod._render_value("/warm/auto") == "/warm/auto"
+
+
+def test_enum_label_urdu_and_english_fallback_keep_source_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A translated Urdu label projects once; missing Urdu copy stays English."""
+    from local_operator.i18n.keys import wire_settings as keys
+    from local_operator.tui.i18n_status import localized_display
+
+    message = keys.speech_voice_tone_choice_warm_label()
+    root = tmp_path / "label-catalogues"
+    for locale, source in (("en", "warm"), ("ur", "وارم")):
+        (root / locale).mkdir(parents=True)
+        (root / locale / "wire.settings.json").write_text(
+            json.dumps({message.code: source}), encoding="utf-8"
+        )
+    monkeypatch.setattr(catalogues, "_CATALOGUES", root)
+    monkeypatch.setattr(text, "_active_locale", "ur")
+    monkeypatch.setattr(resolve, "shipped_locales", lambda: ("en", "ur"))
+    monkeypatch.delenv("LOP_I18N", raising=False)
+    setting = settings_io.BY_KEY["speech.voice.tone"]
+    choice = settings_io.Choice("warm", settings_io._LocalizedText("stale", message))
+    assert sv_mod._choice_label(setting, choice, raw=True) == "وارم"
+    expected = localized_display("وارم", source_locale="ur").plain
+    assert sv_mod._choice_label(setting, choice) == expected
+    # A separate immutable root avoids invalidating caches to manufacture a pass.
+    fallback = tmp_path / "fallback-catalogues"
+    (fallback / "en").mkdir(parents=True)
+    (fallback / "en" / "wire.settings.json").write_text(
+        json.dumps({message.code: "warm"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(catalogues, "_CATALOGUES", fallback)
+    assert sv_mod._choice_label(setting, choice) == "warm"
+    assert sv_mod._choice_label(setting, choice, raw=True) == "warm"
+
+
+@pytest.mark.asyncio
+async def test_enum_summary_and_default_follow_live_locale() -> None:
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    previous = text.active_locale()
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app._open_settings_view()
+            view = app.query_one(SettingsView)
+            setting = settings_io.BY_KEY["speech.voice.tone"]
+            settings_io.write_setting(view._manager, setting, "neutral")
+            _select(view, setting.key)
+            row = view._rows[view._selected]
+            for locale in ("fr", "zh-CN", "ur"):
+                text.set_active_locale(locale)
+                view._repaint()
+                choices = sv_mod._choices_for(setting)
+                selected = next(c for c in choices if c.value == "neutral")
+                default = next(c for c in choices if c.value == setting.default)
+                label = sv_mod._choice_label(setting, selected)
+                assert label in view._row_text(row, view._selected, 96).plain
+                expected = sv_mod._t_chrome(
+                    sv_mod._svc.clause_default(
+                        value=sv_mod._choice_label(setting, default, raw=True)
+                    )
+                )
+                assert view._detail_clause(row) == expected
+                view.action_activate()
+                choice_row = next(
+                    r for r in view._rows
+                    if r.kind == "choice" and r.choice.value == "neutral"
+                )
+                assert label in view._row_text(choice_row, view._rows.index(choice_row), 96).plain
+                view._expanded = None
+                view._repaint()
+                _select(view, setting.key)
+    finally:
+        text.set_active_locale(previous)
