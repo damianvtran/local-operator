@@ -1,0 +1,1199 @@
+{
+  "locale": "hi",
+  "side": "A",
+  "namespace": "wire.settings",
+  "round": 1,
+  "scope": "fa4fb006..a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+  "head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+  "source_sha256": "298fc1100cb10bfa34909aa245307a735dad318f456e5bbfb5337fbcdb1e8962",
+  "target_sha256": "64bf453ca81721ed35d89ba95d7e5e5aac343765d5e6010fbd37ccbc50704f48",
+  "context_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+  "status": "failed",
+  "semantic_coverage": "Complete: 895 fresh source/target pairs. Initially output-masked Bedrock help cleared through the one manager-leased official exact-key read.",
+  "fresh_keys_read": 895,
+  "keys_total": 895,
+  "retained_semantic_keys": 0,
+  "context_entries_read": 104,
+  "unreadable_keys": [],
+  "translator": {
+    "agent": "approval-labels-author-hi",
+    "model": "openai/gpt-6.1-sol",
+    "source": "permitted approval-choice-translator-hi.json receipt: only Automatic newly authored; Ask retained; other 893 authors unknown"
+  },
+  "auditor": {
+    "agent": "approval-full-hi-A-cached / translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "host fallback notice: provider failure quota; switched from anthropic/claude-opus-5-5",
+    "independent_agent": true,
+    "findings": [
+      {
+        "id": "H-A-EN-1",
+        "severity": "major",
+        "key": "wire.settings.bash_memory_mode.choice.auto.label",
+        "current": "auto",
+        "proposed": "स्वचालित",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-2",
+        "severity": "major",
+        "key": "wire.settings.bash_memory_mode.choice.manual.label",
+        "current": "manual",
+        "proposed": "ख़ुद तय करें",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-3",
+        "severity": "major",
+        "key": "wire.settings.classification_vendor.choice.auto.label",
+        "current": "auto",
+        "proposed": "स्वचालित",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-4",
+        "severity": "major",
+        "key": "wire.settings.compaction_strategy.choice.auto.label",
+        "current": "auto",
+        "proposed": "स्वचालित",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-5",
+        "severity": "major",
+        "key": "wire.settings.display_nerd_icons.choice.none.label",
+        "current": "auto",
+        "proposed": "स्वचालित",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-6",
+        "severity": "major",
+        "key": "wire.settings.local_providers.base_url.label",
+        "current": "{name} endpoint",
+        "proposed": "{name} एंडपॉइंट",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-7",
+        "severity": "major",
+        "key": "wire.settings.model_effort.choice.unset.label",
+        "current": "auto",
+        "proposed": "स्वचालित",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-8",
+        "severity": "major",
+        "key": "wire.settings.network_rollout_on_update.choice.auto.label",
+        "current": "auto",
+        "proposed": "स्वचालित",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-9",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+        "current": "false",
+        "proposed": "नहीं",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-10",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+        "current": "default",
+        "proposed": "डिफ़ॉल्ट",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-11",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+        "current": "allow",
+        "proposed": "अनुमति दें",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-12",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+        "current": "deny",
+        "proposed": "अनुमति न दें",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-13",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+        "current": "default",
+        "proposed": "डिफ़ॉल्ट",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-14",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+        "current": "true",
+        "proposed": "हाँ",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-15",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+        "current": "default",
+        "proposed": "डिफ़ॉल्ट",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-16",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+        "current": "true",
+        "proposed": "हाँ",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-17",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+        "current": "default",
+        "proposed": "डिफ़ॉल्ट",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-18",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+        "current": "default",
+        "proposed": "डिफ़ॉल्ट",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-19",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+        "current": "true",
+        "proposed": "हाँ",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-20",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+        "current": "default",
+        "proposed": "डिफ़ॉल्ट",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-21",
+        "severity": "major",
+        "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+        "current": "allowlist",
+        "proposed": "अनुमति-सूची",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-22",
+        "severity": "major",
+        "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+        "current": "inherit",
+        "proposed": "मौजूदा परिवेश",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-23",
+        "severity": "major",
+        "key": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+        "current": "auto",
+        "proposed": "स्वचालित",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-24",
+        "severity": "major",
+        "key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+        "current": "client",
+        "proposed": "क्लाइंट",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-25",
+        "severity": "major",
+        "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+        "current": "off",
+        "proposed": "बंद",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-26",
+        "severity": "major",
+        "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+        "current": "provider",
+        "proposed": "प्रोवाइडर",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-27",
+        "severity": "major",
+        "key": "wire.settings.speech_voice_gender.choice.auto.label",
+        "current": "auto",
+        "proposed": "स्वचालित",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-28",
+        "severity": "major",
+        "key": "wire.settings.speech_voice_gender.choice.female.label",
+        "current": "female",
+        "proposed": "स्त्री",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-29",
+        "severity": "major",
+        "key": "wire.settings.speech_voice_gender.choice.male.label",
+        "current": "male",
+        "proposed": "पुरुष",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-30",
+        "severity": "major",
+        "key": "wire.settings.web_fetch_render_backend.choice.auto.label",
+        "current": "auto",
+        "proposed": "स्वचालित",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-31",
+        "severity": "major",
+        "key": "wire.settings.web_search_searxng_endpoint.label",
+        "current": "SearXNG endpoint",
+        "proposed": "SearXNG एंडपॉइंट",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-32",
+        "severity": "major",
+        "key": "wire.settings.web_search_strategy.choice.ordered.label",
+        "current": "ordered",
+        "proposed": "सूची के क्रम में",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-EN-33",
+        "severity": "major",
+        "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+        "current": "round_robin",
+        "proposed": "बारी-बारी",
+        "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-SEM-1",
+        "severity": "major",
+        "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+        "current": "मौजूदा स्थिर मान।",
+        "proposed": "मौजूदा सामान्य शैली।",
+        "reason": "स्थिर मान means a fixed/mathematical value; the approved context explicitly means the existing standard speaking delivery and forbids a mathematical constant or promise of invariant speech.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-MIX-35",
+        "severity": "major",
+        "key": "wire.settings.bash_memory_limit_mb.label",
+        "current": "manual सीमा (MB)",
+        "proposed": "ख़ुद तय की गई सीमा (MB)",
+        "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-MIX-36",
+        "severity": "major",
+        "key": "wire.settings.classification_vendor.choice.typesafe.description",
+        "current": "TypeSafe का Jev endpoint",
+        "proposed": "TypeSafe का Jev एंडपॉइंट",
+        "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-MIX-37",
+        "severity": "major",
+        "key": "wire.settings.local_providers.base_url.help",
+        "current": "HTTP(S) API रूट। सर्वर बदलने पर /login से नया टोकन लेना पड़ता है; मौजूदा टोकन कभी दूसरे endpoint पर नहीं भेजे जाते।",
+        "proposed": "HTTP(S) API रूट। सर्वर बदलने पर /login से नया टोकन लेना पड़ता है; मौजूदा टोकन कभी दूसरे एंडपॉइंट पर नहीं भेजे जाते।",
+        "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-MIX-38",
+        "severity": "major",
+        "key": "wire.settings.local_providers.description",
+        "current": "सर्वर endpoint और सटीक मॉडल मेटाडेटा। जोड़ने के लिए /login इस्तेमाल करें; मॉडल बदलाव लागू करने के लिए /model saved से दोबारा चुनें।",
+        "proposed": "सर्वर एंडपॉइंट और सटीक मॉडल मेटाडेटा। जोड़ने के लिए /login इस्तेमाल करें; मॉडल बदलाव लागू करने के लिए /model saved से दोबारा चुनें।",
+        "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-MIX-39",
+        "severity": "major",
+        "key": "wire.settings.network_advertise_hosts.label",
+        "current": "घोषित endpoint",
+        "proposed": "घोषित एंडपॉइंट",
+        "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-MIX-40",
+        "severity": "major",
+        "key": "wire.settings.network_port.help",
+        "current": "वह पोर्ट जो पीयर डायल करते हैं; बिना पोर्ट के endpoint इसी का इस्तेमाल करते हैं।",
+        "proposed": "वह पोर्ट जो पीयर डायल करते हैं; बिना पोर्ट के एंडपॉइंट इसी का इस्तेमाल करते हैं।",
+        "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-MIX-41",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.description",
+        "current": "सिर्फ़ distillable-text endpoint",
+        "proposed": "सिर्फ़ मॉडल डिस्टिलेशन योग्य टेक्स्ट वाले एंडपॉइंट",
+        "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-MIX-42",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.label",
+        "current": "distillable टेक्स्ट",
+        "proposed": "मॉडल डिस्टिलेशन योग्य टेक्स्ट",
+        "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-MIX-43",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.help",
+        "current": "'true': सिर्फ़ ऐसे endpoint जिनका टेक्स्ट आउटपुट distill किया जा सके। 'default': कुछ नहीं भेजा जाता।",
+        "proposed": "'true': सिर्फ़ ऐसे एंडपॉइंट जिनका टेक्स्ट आउटपुट distill किया जा सके। 'default': कुछ नहीं भेजा जाता।",
+        "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-MIX-44",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_zdr.choice.true.description",
+        "current": "सिर्फ़ शून्य-डेटा-रिटेंशन endpoint",
+        "proposed": "सिर्फ़ शून्य-डेटा-रिटेंशन एंडपॉइंट",
+        "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-MIX-45",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_zdr.help",
+        "current": "'true': सिर्फ़ शून्य-डेटा-रिटेंशन endpoint तक सीमित। 'default': कुछ नहीं भेजा जाता।",
+        "proposed": "'true': सिर्फ़ शून्य-डेटा-रिटेंशन एंडपॉइंट तक सीमित। 'default': कुछ नहीं भेजा जाता।",
+        "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-MIX-46",
+        "severity": "major",
+        "key": "wire.settings.shell_environment_inherit.label",
+        "current": "…allowlist मोड में रखे जाते हैं",
+        "proposed": "…अनुमति-सूची मोड में रखे जाते हैं",
+        "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-MIX-47",
+        "severity": "major",
+        "key": "wire.settings.hub_auto_update_agents.choice.true.description",
+        "current": "हब अपडेट अपने-आप merge करें",
+        "proposed": "हब अपडेट अपने-आप मिलाएँ",
+        "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-MIX-48",
+        "severity": "major",
+        "key": "wire.settings.hub_auto_update_teams.choice.true.description",
+        "current": "हब अपडेट अपने-आप merge करें",
+        "proposed": "हब अपडेट अपने-आप मिलाएँ",
+        "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-MIX-49",
+        "severity": "major",
+        "key": "wire.settings.hub.description",
+        "current": "Agent Hub से pull किए गए एजेंट और टीमें अपडेट रहें: अपडेट अपने-आप merge होते हैं या नहीं, हब कितनी बार जाँचा जाता है, और टकराव कौन-सा मॉडल सुलझाता है। आपने जो संपादित या हटाया, वह merge हो जाता है, कभी ओवरराइट नहीं।",
+        "proposed": "Agent Hub से लिए गए एजेंट और टीमों को अपडेट रखें: अपडेट अपने-आप मिलते हैं या नहीं, हब कितनी बार जाँचा जाता है, और टकराव कौन-सा मॉडल सुलझाता है। आपके संपादन और हटाए गए हिस्सों को मिलाया जाता है, कभी ओवरराइट नहीं किया जाता।",
+        "reason": "Untranslated ordinary English verbs/nouns in human-facing prose are not machine values; localize them without changing the behavior.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-MIX-50",
+        "severity": "major",
+        "key": "wire.settings.hub_auto_update_agents.help",
+        "current": "हब अपडेट pull किए गए एजेंट में अपने-आप merge करें।",
+        "proposed": "हब के अपडेट, हब से लिए गए एजेंटों में अपने-आप मिलाएँ।",
+        "reason": "Untranslated ordinary English verbs/nouns in human-facing prose are not machine values; localize them without changing the behavior.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-MIX-51",
+        "severity": "major",
+        "key": "wire.settings.hub_auto_update_teams.help",
+        "current": "हब अपडेट pull की गई टीमों में अपने-आप merge करें।",
+        "proposed": "हब के अपडेट, हब से ली गई टीमों में अपने-आप मिलाएँ।",
+        "reason": "Untranslated ordinary English verbs/nouns in human-facing prose are not machine values; localize them without changing the behavior.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-MIX-52",
+        "severity": "major",
+        "key": "wire.settings.network_max_handshakes.help",
+        "current": "यह रिले एक बार में कितने अप्रमाणित कनेक्शन रखेगा। पेयरिंग कोड टाइप होने तक के सेकंडों भर एक कनेक्शन रोकती है; सीमा से ऊपर का हर कनेक्शन accept पर ही गिरा दिया जाता है, बिना कोई reply फ़्रेम।",
+        "proposed": "यह रिले एक बार में कितने अप्रमाणित कनेक्शन रखेगा। पेयरिंग कोड टाइप होने तक एक कनेक्शन रखती है; सीमा से ऊपर के कनेक्शन स्वीकार होते ही छोड़ दिए जाते हैं, बिना जवाबी फ़्रेम भेजे।",
+        "reason": "Untranslated ordinary English verbs/nouns in human-facing prose are not machine values; localize them without changing the behavior.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-MIX-53",
+        "severity": "major",
+        "key": "wire.settings.speech_transcription_cleanup.help",
+        "current": "डिक्टेशन भरने वाले शब्द और गैर-भाषाई संकेत कैसे हटाता है। auto उपलब्ध होने पर प्रोवाइडर की अंतर्निहित सफ़ाई और बाक़ी मामलों में सतर्क क्लाइंट नियम लागू करता है; provider और client में से प्रत्येक केवल एक तंत्र लागू करता है; off ट्रांसक्रिप्ट ज्यों का त्यों रखता है। हर अनुरोध का `cleanup` फ़ील्ड अभी भी प्राथमिकता पाता है।",
+        "proposed": "डिक्टेशन में भरने वाले शब्द और गैर-भाषाई संकेत कैसे हटते हैं। स्वचालित मोड उपलब्ध होने पर प्रोवाइडर की अंतर्निहित सफ़ाई और अन्यथा सतर्क क्लाइंट नियम लागू करता है; प्रोवाइडर और क्लाइंट मोड केवल अपना तंत्र लागू करते हैं; बंद मोड ट्रांसक्रिप्ट ज्यों का त्यों रखता है। हर अनुरोध का `cleanup` फ़ील्ड अब भी प्राथमिकता पाता है।",
+        "reason": "Untranslated ordinary English verbs/nouns in human-facing prose are not machine values; localize them without changing the behavior.",
+        "scope": "inherited"
+      },
+      {
+        "id": "H-A-MIX-54",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_require_parameters.help",
+        "current": "'true' सिर्फ़ उन होस्ट तक सीमित करता है जो आपके भेजे हर पैरामीटर को सपोर्ट करते हैं (टूल, structured output); 'default' में OpenRouter असमर्थित पैरामीटर चुपचाप हटा देता है।",
+        "proposed": "'true' सिर्फ़ उन होस्ट तक सीमित करता है जो आपके भेजे हर पैरामीटर को सपोर्ट करते हैं (टूल, संरचित आउटपुट); 'default' में OpenRouter असमर्थित पैरामीटर चुपचाप हटा सकता है।",
+        "reason": "Untranslated ordinary English verbs/nouns in human-facing prose are not machine values; localize them without changing the behavior.",
+        "scope": "inherited"
+      }
+    ],
+    "minor_count": 1
+  },
+  "findings": [
+    {
+      "id": "H-A-EN-1",
+      "severity": "major",
+      "key": "wire.settings.bash_memory_mode.choice.auto.label",
+      "current": "auto",
+      "proposed": "स्वचालित",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-2",
+      "severity": "major",
+      "key": "wire.settings.bash_memory_mode.choice.manual.label",
+      "current": "manual",
+      "proposed": "ख़ुद तय करें",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-3",
+      "severity": "major",
+      "key": "wire.settings.classification_vendor.choice.auto.label",
+      "current": "auto",
+      "proposed": "स्वचालित",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-4",
+      "severity": "major",
+      "key": "wire.settings.compaction_strategy.choice.auto.label",
+      "current": "auto",
+      "proposed": "स्वचालित",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-5",
+      "severity": "major",
+      "key": "wire.settings.display_nerd_icons.choice.none.label",
+      "current": "auto",
+      "proposed": "स्वचालित",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-6",
+      "severity": "major",
+      "key": "wire.settings.local_providers.base_url.label",
+      "current": "{name} endpoint",
+      "proposed": "{name} एंडपॉइंट",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-7",
+      "severity": "major",
+      "key": "wire.settings.model_effort.choice.unset.label",
+      "current": "auto",
+      "proposed": "स्वचालित",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-8",
+      "severity": "major",
+      "key": "wire.settings.network_rollout_on_update.choice.auto.label",
+      "current": "auto",
+      "proposed": "स्वचालित",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-9",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+      "current": "false",
+      "proposed": "नहीं",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-10",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+      "current": "default",
+      "proposed": "डिफ़ॉल्ट",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-11",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "current": "allow",
+      "proposed": "अनुमति दें",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-12",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "current": "deny",
+      "proposed": "अनुमति न दें",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-13",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+      "current": "default",
+      "proposed": "डिफ़ॉल्ट",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-14",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+      "current": "true",
+      "proposed": "हाँ",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-15",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+      "current": "default",
+      "proposed": "डिफ़ॉल्ट",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-16",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+      "current": "true",
+      "proposed": "हाँ",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-17",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+      "current": "default",
+      "proposed": "डिफ़ॉल्ट",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-18",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+      "current": "default",
+      "proposed": "डिफ़ॉल्ट",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-19",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+      "current": "true",
+      "proposed": "हाँ",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-20",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+      "current": "default",
+      "proposed": "डिफ़ॉल्ट",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-21",
+      "severity": "major",
+      "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "current": "allowlist",
+      "proposed": "अनुमति-सूची",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-22",
+      "severity": "major",
+      "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+      "current": "inherit",
+      "proposed": "मौजूदा परिवेश",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-23",
+      "severity": "major",
+      "key": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+      "current": "auto",
+      "proposed": "स्वचालित",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-24",
+      "severity": "major",
+      "key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+      "current": "client",
+      "proposed": "क्लाइंट",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-25",
+      "severity": "major",
+      "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+      "current": "off",
+      "proposed": "बंद",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-26",
+      "severity": "major",
+      "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+      "current": "provider",
+      "proposed": "प्रोवाइडर",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-27",
+      "severity": "major",
+      "key": "wire.settings.speech_voice_gender.choice.auto.label",
+      "current": "auto",
+      "proposed": "स्वचालित",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-28",
+      "severity": "major",
+      "key": "wire.settings.speech_voice_gender.choice.female.label",
+      "current": "female",
+      "proposed": "स्त्री",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-29",
+      "severity": "major",
+      "key": "wire.settings.speech_voice_gender.choice.male.label",
+      "current": "male",
+      "proposed": "पुरुष",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-30",
+      "severity": "major",
+      "key": "wire.settings.web_fetch_render_backend.choice.auto.label",
+      "current": "auto",
+      "proposed": "स्वचालित",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-31",
+      "severity": "major",
+      "key": "wire.settings.web_search_searxng_endpoint.label",
+      "current": "SearXNG endpoint",
+      "proposed": "SearXNG एंडपॉइंट",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-32",
+      "severity": "major",
+      "key": "wire.settings.web_search_strategy.choice.ordered.label",
+      "current": "ordered",
+      "proposed": "सूची के क्रम में",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-EN-33",
+      "severity": "major",
+      "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+      "current": "round_robin",
+      "proposed": "बारी-बारी",
+      "reason": "Untranslated human-facing display label, not the separately stored machine enum; violates the explicit entire-UI Hindi acceptance criterion.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-SEM-1",
+      "severity": "major",
+      "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+      "current": "मौजूदा स्थिर मान।",
+      "proposed": "मौजूदा सामान्य शैली।",
+      "reason": "स्थिर मान means a fixed/mathematical value; the approved context explicitly means the existing standard speaking delivery and forbids a mathematical constant or promise of invariant speech.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-MIX-35",
+      "severity": "major",
+      "key": "wire.settings.bash_memory_limit_mb.label",
+      "current": "manual सीमा (MB)",
+      "proposed": "ख़ुद तय की गई सीमा (MB)",
+      "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-MIX-36",
+      "severity": "major",
+      "key": "wire.settings.classification_vendor.choice.typesafe.description",
+      "current": "TypeSafe का Jev endpoint",
+      "proposed": "TypeSafe का Jev एंडपॉइंट",
+      "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-MIX-37",
+      "severity": "major",
+      "key": "wire.settings.local_providers.base_url.help",
+      "current": "HTTP(S) API रूट। सर्वर बदलने पर /login से नया टोकन लेना पड़ता है; मौजूदा टोकन कभी दूसरे endpoint पर नहीं भेजे जाते।",
+      "proposed": "HTTP(S) API रूट। सर्वर बदलने पर /login से नया टोकन लेना पड़ता है; मौजूदा टोकन कभी दूसरे एंडपॉइंट पर नहीं भेजे जाते।",
+      "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-MIX-38",
+      "severity": "major",
+      "key": "wire.settings.local_providers.description",
+      "current": "सर्वर endpoint और सटीक मॉडल मेटाडेटा। जोड़ने के लिए /login इस्तेमाल करें; मॉडल बदलाव लागू करने के लिए /model saved से दोबारा चुनें।",
+      "proposed": "सर्वर एंडपॉइंट और सटीक मॉडल मेटाडेटा। जोड़ने के लिए /login इस्तेमाल करें; मॉडल बदलाव लागू करने के लिए /model saved से दोबारा चुनें।",
+      "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-MIX-39",
+      "severity": "major",
+      "key": "wire.settings.network_advertise_hosts.label",
+      "current": "घोषित endpoint",
+      "proposed": "घोषित एंडपॉइंट",
+      "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-MIX-40",
+      "severity": "major",
+      "key": "wire.settings.network_port.help",
+      "current": "वह पोर्ट जो पीयर डायल करते हैं; बिना पोर्ट के endpoint इसी का इस्तेमाल करते हैं।",
+      "proposed": "वह पोर्ट जो पीयर डायल करते हैं; बिना पोर्ट के एंडपॉइंट इसी का इस्तेमाल करते हैं।",
+      "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-MIX-41",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.description",
+      "current": "सिर्फ़ distillable-text endpoint",
+      "proposed": "सिर्फ़ मॉडल डिस्टिलेशन योग्य टेक्स्ट वाले एंडपॉइंट",
+      "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-MIX-42",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.label",
+      "current": "distillable टेक्स्ट",
+      "proposed": "मॉडल डिस्टिलेशन योग्य टेक्स्ट",
+      "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-MIX-43",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.help",
+      "current": "'true': सिर्फ़ ऐसे endpoint जिनका टेक्स्ट आउटपुट distill किया जा सके। 'default': कुछ नहीं भेजा जाता।",
+      "proposed": "'true': सिर्फ़ ऐसे एंडपॉइंट जिनका टेक्स्ट आउटपुट distill किया जा सके। 'default': कुछ नहीं भेजा जाता।",
+      "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-MIX-44",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_zdr.choice.true.description",
+      "current": "सिर्फ़ शून्य-डेटा-रिटेंशन endpoint",
+      "proposed": "सिर्फ़ शून्य-डेटा-रिटेंशन एंडपॉइंट",
+      "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-MIX-45",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_zdr.help",
+      "current": "'true': सिर्फ़ शून्य-डेटा-रिटेंशन endpoint तक सीमित। 'default': कुछ नहीं भेजा जाता।",
+      "proposed": "'true': सिर्फ़ शून्य-डेटा-रिटेंशन एंडपॉइंट तक सीमित। 'default': कुछ नहीं भेजा जाता।",
+      "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-MIX-46",
+      "severity": "major",
+      "key": "wire.settings.shell_environment_inherit.label",
+      "current": "…allowlist मोड में रखे जाते हैं",
+      "proposed": "…अनुमति-सूची मोड में रखे जाते हैं",
+      "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-MIX-47",
+      "severity": "major",
+      "key": "wire.settings.hub_auto_update_agents.choice.true.description",
+      "current": "हब अपडेट अपने-आप merge करें",
+      "proposed": "हब अपडेट अपने-आप मिलाएँ",
+      "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-MIX-48",
+      "severity": "major",
+      "key": "wire.settings.hub_auto_update_teams.choice.true.description",
+      "current": "हब अपडेट अपने-आप merge करें",
+      "proposed": "हब अपडेट अपने-आप मिलाएँ",
+      "reason": "English remains in a human label/description rather than a code identifier; render the ordinary term in Hindi/Devanagari. Proposal preserves any surrounding literal identifiers.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-MIX-49",
+      "severity": "major",
+      "key": "wire.settings.hub.description",
+      "current": "Agent Hub से pull किए गए एजेंट और टीमें अपडेट रहें: अपडेट अपने-आप merge होते हैं या नहीं, हब कितनी बार जाँचा जाता है, और टकराव कौन-सा मॉडल सुलझाता है। आपने जो संपादित या हटाया, वह merge हो जाता है, कभी ओवरराइट नहीं।",
+      "proposed": "Agent Hub से लिए गए एजेंट और टीमों को अपडेट रखें: अपडेट अपने-आप मिलते हैं या नहीं, हब कितनी बार जाँचा जाता है, और टकराव कौन-सा मॉडल सुलझाता है। आपके संपादन और हटाए गए हिस्सों को मिलाया जाता है, कभी ओवरराइट नहीं किया जाता।",
+      "reason": "Untranslated ordinary English verbs/nouns in human-facing prose are not machine values; localize them without changing the behavior.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-MIX-50",
+      "severity": "major",
+      "key": "wire.settings.hub_auto_update_agents.help",
+      "current": "हब अपडेट pull किए गए एजेंट में अपने-आप merge करें।",
+      "proposed": "हब के अपडेट, हब से लिए गए एजेंटों में अपने-आप मिलाएँ।",
+      "reason": "Untranslated ordinary English verbs/nouns in human-facing prose are not machine values; localize them without changing the behavior.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-MIX-51",
+      "severity": "major",
+      "key": "wire.settings.hub_auto_update_teams.help",
+      "current": "हब अपडेट pull की गई टीमों में अपने-आप merge करें।",
+      "proposed": "हब के अपडेट, हब से ली गई टीमों में अपने-आप मिलाएँ।",
+      "reason": "Untranslated ordinary English verbs/nouns in human-facing prose are not machine values; localize them without changing the behavior.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-MIX-52",
+      "severity": "major",
+      "key": "wire.settings.network_max_handshakes.help",
+      "current": "यह रिले एक बार में कितने अप्रमाणित कनेक्शन रखेगा। पेयरिंग कोड टाइप होने तक के सेकंडों भर एक कनेक्शन रोकती है; सीमा से ऊपर का हर कनेक्शन accept पर ही गिरा दिया जाता है, बिना कोई reply फ़्रेम।",
+      "proposed": "यह रिले एक बार में कितने अप्रमाणित कनेक्शन रखेगा। पेयरिंग कोड टाइप होने तक एक कनेक्शन रखती है; सीमा से ऊपर के कनेक्शन स्वीकार होते ही छोड़ दिए जाते हैं, बिना जवाबी फ़्रेम भेजे।",
+      "reason": "Untranslated ordinary English verbs/nouns in human-facing prose are not machine values; localize them without changing the behavior.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-MIX-53",
+      "severity": "major",
+      "key": "wire.settings.speech_transcription_cleanup.help",
+      "current": "डिक्टेशन भरने वाले शब्द और गैर-भाषाई संकेत कैसे हटाता है। auto उपलब्ध होने पर प्रोवाइडर की अंतर्निहित सफ़ाई और बाक़ी मामलों में सतर्क क्लाइंट नियम लागू करता है; provider और client में से प्रत्येक केवल एक तंत्र लागू करता है; off ट्रांसक्रिप्ट ज्यों का त्यों रखता है। हर अनुरोध का `cleanup` फ़ील्ड अभी भी प्राथमिकता पाता है।",
+      "proposed": "डिक्टेशन में भरने वाले शब्द और गैर-भाषाई संकेत कैसे हटते हैं। स्वचालित मोड उपलब्ध होने पर प्रोवाइडर की अंतर्निहित सफ़ाई और अन्यथा सतर्क क्लाइंट नियम लागू करता है; प्रोवाइडर और क्लाइंट मोड केवल अपना तंत्र लागू करते हैं; बंद मोड ट्रांसक्रिप्ट ज्यों का त्यों रखता है। हर अनुरोध का `cleanup` फ़ील्ड अब भी प्राथमिकता पाता है।",
+      "reason": "Untranslated ordinary English verbs/nouns in human-facing prose are not machine values; localize them without changing the behavior.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-MIX-54",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_require_parameters.help",
+      "current": "'true' सिर्फ़ उन होस्ट तक सीमित करता है जो आपके भेजे हर पैरामीटर को सपोर्ट करते हैं (टूल, structured output); 'default' में OpenRouter असमर्थित पैरामीटर चुपचाप हटा देता है।",
+      "proposed": "'true' सिर्फ़ उन होस्ट तक सीमित करता है जो आपके भेजे हर पैरामीटर को सपोर्ट करते हैं (टूल, संरचित आउटपुट); 'default' में OpenRouter असमर्थित पैरामीटर चुपचाप हटा सकता है।",
+      "reason": "Untranslated ordinary English verbs/nouns in human-facing prose are not machine values; localize them without changing the behavior.",
+      "scope": "inherited"
+    },
+    {
+      "id": "H-A-MIN-1",
+      "severity": "minor",
+      "key": "wire.settings.librarian_cadence_max_extra_per_day.help",
+      "current": "वह प्रति दिन कितने अतिरिक्त पास माँग सकता है। 0 अतिरिक्त पास बंद करता है।",
+      "proposed": "वे प्रति दिन कितने अतिरिक्त पास माँग सकती हैं। 0 अतिरिक्त पास बंद करता है।",
+      "reason": "English consistently refers to the Librarian as she; current वह … सकता है switches her gender and register. Neighboring librarian.description, librarian_cadence_min_gap_minutes.help, librarian_cadence_paused.help, librarian_enabled.help and librarian_name.help also use masculine/non-honorific references; normalize together, deferred rather than a new minor-only wave.",
+      "scope": "inherited"
+    }
+  ],
+  "severity_counts": {
+    "major": 54,
+    "minor": 1
+  },
+  "new_two_labels_verdict": {
+    "status": "passed",
+    "keys": [
+      "wire.settings.tool_approval_mode.choice.ask.label",
+      "wire.settings.tool_approval_mode.choice.auto.label"
+    ],
+    "reason": "पूछें is a compact polite prompting-mode label; स्वचालित a compact automatic-mode adjective. Neither adds all-tools prompting, universal permission, guardrail bypass or person-only-gate override.",
+    "new_findings": 0
+  },
+  "inherited_namespace_verdict": "failed: untranslated human display labels/prose and context-confirmed medium-voice semantic error remain; separate from clean new two-label scope",
+  "controls": {
+    "keys_total": 895,
+    "checked_keys": 894,
+    "skipped_masked": [
+      "wire.settings.providers_bedrock_auth.help"
+    ],
+    "argument_mismatches": [],
+    "parse_errors": [],
+    "plural_messages": [],
+    "non_nfc": [],
+    "bidi_controls": [],
+    "missing_argument_negative": [
+      [
+        "wire.settings.local_providers.base_url.label",
+        "name",
+        "PASS"
+      ],
+      [
+        "wire.settings.local_providers.models.label",
+        "name",
+        "PASS"
+      ]
+    ],
+    "width_over_context_cap": [],
+    "relative_width_flags": [],
+    "hi_cldr_categories": [
+      "one",
+      "other"
+    ],
+    "hi_cldr_samples": {
+      "0": "one",
+      "1": "one",
+      "2": "other",
+      "0.5": "one",
+      "1.5": "other"
+    },
+    "new_labels": {
+      "wire.settings.tool_approval_mode.choice.ask.label": {
+        "text": "पूछें",
+        "arguments": [],
+        "cells": 2,
+        "source_cells": 3,
+        "literal_pseudo": "⟦पूछें··⟧",
+        "pseudo_render_equal": true,
+        "synthetic_bidi_render_equal": true
+      },
+      "wire.settings.tool_approval_mode.choice.auto.label": {
+        "text": "स्वचालित",
+        "arguments": [],
+        "cells": 5,
+        "source_cells": 9,
+        "literal_pseudo": "⟦स्वचालित··⟧",
+        "pseudo_render_equal": true,
+        "synthetic_bidi_render_equal": true
+      }
+    },
+    "malformed_negative": "PASS"
+  },
+  "controls_limits": "Pure runtime loop covers 894 pairs, excludes initial masked key. Dedicated exact-key result supplied remaining semantic/literal-token review. No ICU plurals/selects/number-date skeletons in checked pairs; two simple name arguments preserved and both missing-argument negative controls passed. New two labels literal-pseudo and synthetic bidi only; not native RTL or rendered-fit proof.",
+  "width": "No checked explicit maxCells exceedance or materially expanded labels by rich.cells.cell_len. Actual native clipping/fit unverified.",
+  "per_key_subgroups": {
+    "fresh_read_sorted_ordinals": [
+      "1..895"
+    ],
+    "new_scope_read": 2,
+    "inherited_read": 893,
+    "new_scope_clean": 2,
+    "semantic_retained": 0
+  },
+  "dedicated_reader": {
+    "key": "wire.settings.providers_bedrock_auth.help",
+    "route": "read_public_copy, exact approved root/path/key, one leased call",
+    "result": "Readable and clean: ambient value and AWS/Bedrock/IAM names preserved; describes this machine credentials correctly.",
+    "lease": "released via hub"
+  },
+  "exceptions": [
+    {
+      "key": "wire.settings.classification_vendor.choice.openrouter.label",
+      "reason": "OpenRouter provider brand"
+    },
+    {
+      "key": "wire.settings.classification_vendor.choice.radient.label",
+      "reason": "Radient provider brand"
+    },
+    {
+      "key": "wire.settings.classification_vendor.choice.typesafe.label",
+      "reason": "TypeSafe provider brand"
+    },
+    {
+      "key": "wire.settings.compaction_strategy.choice.context_full.label",
+      "reason": "named compaction algorithm context-full"
+    },
+    {
+      "key": "wire.settings.compaction_strategy.choice.snapcompact.label",
+      "reason": "named compaction algorithm snapcompact"
+    },
+    {
+      "key": "wire.settings.providers_openai_api.choice.chat_completions.label",
+      "reason": "OpenAI Chat Completions API endpoint identifier"
+    },
+    {
+      "key": "wire.settings.providers_openai_api.choice.responses.label",
+      "reason": "OpenAI Responses API name"
+    },
+    {
+      "key": "wire.settings.web_fetch_render_backend.choice.stdlib.label",
+      "reason": "named Python stdlib renderer implementation"
+    },
+    {
+      "keys": [
+        "wire.settings.aida.title",
+        "wire.settings.aida_name.placeholder"
+      ],
+      "reason": "Aida proper name"
+    },
+    {
+      "keys": [
+        "wire.settings.subagents_models_hi.label",
+        "wire.settings.subagents_models_lo.label",
+        "wire.settings.subagents_models_med.label"
+      ],
+      "reason": "hi/lo/med named model-tier identifiers"
+    },
+    {
+      "key": "wire.settings.guardrails_enabled.help",
+      "reason": "dangerous-delete rule identifier explicitly required verbatim by context"
+    },
+    {
+      "key": "wire.settings.providers_bedrock_auth.help",
+      "reason": "ambient literal configured value; Bedrock/AWS/IAM product/technical names"
+    }
+  ],
+  "provenance": {
+    "english_capture": "/Users/damian/.local-operator/sessions/6448acb16e8d/scratchpad/approval-full-en-A-approved-capture.json",
+    "hindi_capture": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-full-inputs/hi-approved-envelope.json",
+    "english_envelope_sha256": "9ff37d2efa1d9c367ce7dcc9a01f1fa9f60f74601daf20dbb9d86c85698bf096",
+    "hindi_envelope_sha256": "444e3b4284616f74b29316a4086e57acd9ba2a3cfdc7b6bef5223ea947c62399",
+    "english_canonical_sha256": "f621866fb5e74c1b617e29e17d02008cb42dce6574aa3624ff9a557e1ef2a7b6",
+    "hindi_canonical_sha256": "5b23e59e189b2a767a4c47ddd5af911cc0f1d2187c52f4d914b00687dc56bafc",
+    "repository_verified": true,
+    "original_hashes_rechecked": true,
+    "head_rechecked": true
+  },
+  "limits": [
+    "No repository edits, retranslations, ledger writes, generation, whole testsuites, app/browser/native/server/dependencies or real settings operations.",
+    "No partner opinions or current auditor receipts read. Only permitted translator receipt inspected.",
+    "Initial scoped mask cleared only by approved official read, no decoding or raw fallback.",
+    "No full-UI, merge or release clearance.",
+    "Inherited findings prevent whole-namespace pass; proposals are review guidance only."
+  ],
+  "passed_vs_uncleared": {
+    "read_keys_without_findings": 840,
+    "keys_with_findings": 55,
+    "new_two_labels": "passed",
+    "whole_namespace": "failed",
+    "unreadable": 0
+  },
+  "finding_groups": {
+    "inherited_english_display_copy": 53,
+    "inherited_semantic_error": 1,
+    "inherited_minor_register_gender": 1,
+    "new_approval_label_findings": 0
+  },
+  "controls_environment": {
+    "primary_venv_shared": true,
+    "worktree_pythonpath": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+    "all_CMUX_variables_stripped": true,
+    "HOME_and_config": "own scratch pure-hi-control-home",
+    "real_settings_touched": false
+  }
+}

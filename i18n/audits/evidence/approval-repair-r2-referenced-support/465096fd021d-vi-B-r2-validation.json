@@ -1,0 +1,1171 @@
+{
+  "binding": {
+    "head": "4880031aeed59ef17ae6ffccc15d28e1fc0db104",
+    "readerbrief_sha256": "e06649f101e397c32acd49b83cdc816209687d86c0f491fcafa12be03f9adf29",
+    "input_manifest": true,
+    "frozen_receipt": true,
+    "controls_receipt": true,
+    "english_envelope": true,
+    "target_envelope": true,
+    "english_canonical": true,
+    "target_canonical": true,
+    "context": true,
+    "author": true,
+    "official_provenance": true,
+    "English_raw_metadata": true,
+    "target_raw_metadata": true,
+    "all_keysets_equal": true,
+    "all_count": 895,
+    "r2_count": 65,
+    "contexts_count": 104,
+    "official_vs_raw_canonical": true,
+    "English_official_vs_raw_canonical": true,
+    "git_origin": "ssh://git@github.com/damianvtran/local-operator.git",
+    "English_90009_raw_sha256": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+    "English_K_raw_sha256": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+    "old_context_raw_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+    "actual_changed_target_keys_match_brief": true
+  },
+  "retention": {
+    "count": 830,
+    "mismatches": [],
+    "prior_receipts": [
+      {
+        "path": "i18n/audits/evidence/approval-full-vi-A-original.json",
+        "sha256": "e8b01da98da13e3dd13920082996c326fc9cef187dc7e611e5e2b28139df7fe9",
+        "status": "failed",
+        "top_level_fields": [
+          "locale",
+          "side",
+          "namespace",
+          "round",
+          "status",
+          "source_sha256",
+          "context_sha256",
+          "target_sha256",
+          "head",
+          "scope",
+          "created_at",
+          "translator",
+          "auditor",
+          "inputs",
+          "validation",
+          "reading",
+          "subgroups",
+          "verdicts",
+          "findings",
+          "counts",
+          "exceptions",
+          "technical_literals_policy",
+          "controls",
+          "overflow_flags",
+          "evidence_paths",
+          "limits"
+        ],
+        "explicit_keys_count": 895,
+        "explicit_keyset_complete": true,
+        "reading_metadata": {
+          "fresh_pairs_read": 895,
+          "source_values_read": 895,
+          "target_values_read": 895,
+          "retained_semantic_keys": 0,
+          "method": "Read paired approved-envelope values in ordered batches; expanded every truncated spill middle. No current partner audit/receipt read. All 104 source context entries read, with truncated sections expanded. No raw original product prose fallback."
+        },
+        "auditor": {
+          "agent": "translation-auditor / approval-full-vi-A-cached",
+          "session_id": "8c17083550fb",
+          "model": "openai/gpt-6.1-sol",
+          "actual_model_provenance": "Explicit host model-switch message: anthropic/claude-opus-5-5 → openai/gpt-6.1-sol; provider failure: quota, before semantic audit.",
+          "independent": true,
+          "findings": [
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.bash_memory_mode.choice.auto.label",
+              "source": "auto",
+              "current": "auto",
+              "proposed": "Tự động",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.bash_memory_mode.choice.manual.label",
+              "source": "manual",
+              "current": "manual",
+              "proposed": "Thủ công",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.classification_vendor.choice.auto.label",
+              "source": "auto",
+              "current": "auto",
+              "proposed": "Tự động",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.compaction_strategy.choice.auto.label",
+              "source": "auto",
+              "current": "auto",
+              "proposed": "Tự động",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.display_nerd_icons.choice.none.label",
+              "source": "auto",
+              "current": "auto",
+              "proposed": "Tự động",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.model_effort.choice.unset.label",
+              "source": "auto",
+              "current": "auto",
+              "proposed": "Tự động",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.network_rollout_on_update.choice.auto.label",
+              "source": "auto",
+              "current": "auto",
+              "proposed": "Tự động",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+              "source": "false",
+              "current": "false",
+              "proposed": "Không",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+              "source": "default",
+              "current": "default",
+              "proposed": "Mặc định",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+              "source": "allow",
+              "current": "allow",
+              "proposed": "Cho phép",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+              "source": "deny",
+              "current": "deny",
+              "proposed": "Không cho phép",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+              "source": "default",
+              "current": "default",
+              "proposed": "Mặc định",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+              "source": "true",
+              "current": "true",
+              "proposed": "Có",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+              "source": "default",
+              "current": "default",
+              "proposed": "Mặc định",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+              "source": "true",
+              "current": "true",
+              "proposed": "Có",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+              "source": "default",
+              "current": "default",
+              "proposed": "Mặc định",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+              "source": "default",
+              "current": "default",
+              "proposed": "Mặc định",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+              "source": "true",
+              "current": "true",
+              "proposed": "Có",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+              "source": "default",
+              "current": "default",
+              "proposed": "Mặc định",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+              "source": "allowlist",
+              "current": "allowlist",
+              "proposed": "Danh sách cho phép",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+              "source": "inherit",
+              "current": "inherit",
+              "proposed": "Kế thừa",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+              "source": "auto",
+              "current": "auto",
+              "proposed": "Tự động",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+              "source": "client",
+              "current": "client",
+              "proposed": "Máy khách",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+              "source": "off",
+              "current": "off",
+              "proposed": "Tắt",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+              "source": "provider",
+              "current": "provider",
+              "proposed": "Nhà cung cấp",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.speech_voice_gender.choice.auto.label",
+              "source": "auto",
+              "current": "auto",
+              "proposed": "Tự động",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.speech_voice_gender.choice.female.label",
+              "source": "female",
+              "current": "female",
+              "proposed": "Nữ",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.speech_voice_gender.choice.male.label",
+              "source": "male",
+              "current": "male",
+              "proposed": "Nam",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.web_fetch_render_backend.choice.auto.label",
+              "source": "auto",
+              "current": "auto",
+              "proposed": "Tự động",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.web_search_strategy.choice.ordered.label",
+              "source": "ordered",
+              "current": "ordered",
+              "proposed": "Theo thứ tự",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M1",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+              "source": "round_robin",
+              "current": "round_robin",
+              "proposed": "Luân phiên",
+              "reason": "Human-facing Choice.label is independently localized from Choice.value in settings_io.py; the historical style-guide token exception does not satisfy the operator’s explicit no-English human-label requirement. Leave machine values unchanged."
+            },
+            {
+              "id": "VI-A-M2",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.fork.title",
+              "source": "Fork",
+              "current": "Fork",
+              "proposed": "Tách nhánh",
+              "reason": "This is a visible section heading for branching a conversation, not the /fork command token."
+            },
+            {
+              "id": "VI-A-M3",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.session_scratchpad.title",
+              "source": "Scratchpad",
+              "current": "Scratchpad",
+              "proposed": "Nháp",
+              "reason": "This is a visible section heading for scratch storage, not the scratchpad:// scheme; Nháp is a concise native noun and respects the one-word context requirement."
+            },
+            {
+              "id": "VI-A-M4",
+              "severity": "major",
+              "scope": "inherited_namespace",
+              "key": "wire.settings.monitor_classifymaxchars.help",
+              "source": "Bound on the changed lines the materiality check receives (the monitor's name and purpose ride along, clipped separately).",
+              "current": "Giới hạn số dòng thay đổi mà bước kiểm tra mức độ quan trọng nhận được (tên và mục đích của giám sát đi kèm, được cắt riêng).",
+              "proposed": "Giới hạn số ký tự của phần thay đổi mà bước kiểm tra mức độ quan trọng nhận được (tên và mục đích của giám sát đi kèm, được cắt riêng).",
+              "reason": "Current số dòng means number of lines, but this setting clips characters: classify_max_chars is passed to gate_state; neighboring label explicitly says ký tự."
+            }
+          ],
+          "unresolved_blockers": 0,
+          "unresolved_major_groups": 4,
+          "unresolved_major_keys": 34,
+          "minor_findings_count": 3,
+          "minor_groups": 2,
+          "nit_count": 1
+        }
+      },
+      {
+        "path": "i18n/audits/evidence/approval-full-vi-B-original.json",
+        "sha256": "216f6ddc816932cf7d933311f191f2f3235d2ea732bb74d14a67ffe476aaedf2",
+        "status": "failed",
+        "top_level_fields": [
+          "locale",
+          "side",
+          "namespace",
+          "round",
+          "status",
+          "source_sha256",
+          "target_sha256",
+          "context_sha256",
+          "head",
+          "scope",
+          "worktree",
+          "translator",
+          "auditor",
+          "fresh_semantic_keys_read",
+          "retained_semantic_keys",
+          "available_context_entries_read",
+          "per_key_subgroups",
+          "namespace_verdict",
+          "new_source_label_verdict",
+          "current_semantic_findings",
+          "passed_vs_uncleared",
+          "named_exceptions",
+          "controls",
+          "supplementary_controls",
+          "inputs",
+          "source_binding_limits",
+          "limits",
+          "created_at"
+        ],
+        "explicit_keys_count": 0,
+        "explicit_keyset_complete": false,
+        "reading_metadata": {},
+        "auditor": {
+          "agent": "approval-full-vi-B-cached / translation-auditor",
+          "session_id": "6501d77e8fa2",
+          "model": "openai/gpt-6.1-sol",
+          "actual_model_evidence": "Host model-switch message: temporary fallback from anthropic/claude-opus-5-5 due provider failure: quota, before semantic catalogue audit.",
+          "independent_of_translator": true,
+          "findings": [
+            {
+              "id": "VI-B-M1",
+              "severity": "major",
+              "origin": "inherited_namespace",
+              "category": "untranslated_human_display_copy",
+              "affected_key_count": 38,
+              "entries": [
+                {
+                  "message_key": "wire.settings.bash_memory_mode.choice.auto.label",
+                  "current": "auto",
+                  "proposed": "Tự động",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.bash_memory_mode.choice.manual.label",
+                  "current": "manual",
+                  "proposed": "Thủ công",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.classification_vendor.choice.auto.label",
+                  "current": "auto",
+                  "proposed": "Tự động",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.compaction_strategy.choice.auto.label",
+                  "current": "auto",
+                  "proposed": "Tự động",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.display_nerd_icons.choice.none.label",
+                  "current": "auto",
+                  "proposed": "Tự động",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.model_effort.choice.unset.label",
+                  "current": "auto",
+                  "proposed": "Tự động",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.network_rollout_on_update.choice.auto.label",
+                  "current": "auto",
+                  "proposed": "Tự động",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+                  "current": "false",
+                  "proposed": "Tắt",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+                  "current": "default",
+                  "proposed": "Mặc định",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+                  "current": "allow",
+                  "proposed": "Cho phép",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+                  "current": "deny",
+                  "proposed": "Không cho phép",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+                  "current": "default",
+                  "proposed": "Mặc định",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+                  "current": "true",
+                  "proposed": "Bật",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+                  "current": "default",
+                  "proposed": "Mặc định",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+                  "current": "true",
+                  "proposed": "Bật",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+                  "current": "default",
+                  "proposed": "Mặc định",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+                  "current": "default",
+                  "proposed": "Mặc định",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+                  "current": "true",
+                  "proposed": "Bật",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+                  "current": "default",
+                  "proposed": "Mặc định",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+                  "current": "allowlist",
+                  "proposed": "Danh sách cho phép",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.shell_environment_mode.choice.inherit.label",
+                  "current": "inherit",
+                  "proposed": "Kế thừa",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+                  "current": "auto",
+                  "proposed": "Tự động",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+                  "current": "client",
+                  "proposed": "Máy khách",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+                  "current": "off",
+                  "proposed": "Tắt",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+                  "current": "provider",
+                  "proposed": "Nhà cung cấp",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.speech_voice_gender.choice.auto.label",
+                  "current": "auto",
+                  "proposed": "Tự động",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.speech_voice_gender.choice.female.label",
+                  "current": "female",
+                  "proposed": "Nữ",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.speech_voice_gender.choice.male.label",
+                  "current": "male",
+                  "proposed": "Nam",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.web_fetch_render_backend.choice.auto.label",
+                  "current": "auto",
+                  "proposed": "Tự động",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.web_search_strategy.choice.ordered.label",
+                  "current": "ordered",
+                  "proposed": "Theo thứ tự",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.web_search_strategy.choice.round_robin.label",
+                  "current": "round_robin",
+                  "proposed": "Luân phiên",
+                  "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+                },
+                {
+                  "message_key": "wire.settings.fork.title",
+                  "current": "Fork",
+                  "proposed": "Tách nhánh",
+                  "reason": "A human settings-section title, not the literal /fork command."
+                },
+                {
+                  "message_key": "wire.settings.session_scratchpad.title",
+                  "current": "Scratchpad",
+                  "proposed": "Vùng nháp",
+                  "reason": "A human heading for session scratch storage, not the scratchpad:// protocol token; fits the 12-cell budget."
+                },
+                {
+                  "message_key": "wire.settings.session_scratchpad_max_bytes.label",
+                  "current": "Giới hạn scratchpad (byte)",
+                  "proposed": "Giới hạn vùng nháp (byte)",
+                  "reason": "Translate the same human storage noun as the section heading; the byte unit remains."
+                },
+                {
+                  "message_key": "wire.settings.session_scratchpad_max_bytes.help",
+                  "current": "Số byte scratchpad của một phiên có thể lưu trữ: từ 16 MiB đến 8 GiB. Mặc định 256 MiB.",
+                  "proposed": "Số byte vùng nháp của một phiên có thể lưu: từ 16 MiB đến 8 GiB. Mặc định 256 MiB.",
+                  "reason": "The human storage noun is not a protocol or code identifier; preserve the binary units and bounds."
+                },
+                {
+                  "message_key": "wire.settings.team_bridge_session.label",
+                  "current": "Phiên CoS",
+                  "proposed": "Phiên chánh văn phòng",
+                  "reason": "CoS is an untranslated human role abbreviation; the locale already uses chánh văn phòng in aida.description and aida_enabled.label."
+                },
+                {
+                  "message_key": "wire.settings.fork_cmux_placement.choice.surface.label",
+                  "current": "surface mới",
+                  "proposed": "thẻ mới",
+                  "reason": "The English source description identifies an actual UI tab; the human label surface mới leaves an English UI noun."
+                },
+                {
+                  "message_key": "wire.settings.fork_cmux_placement.help",
+                  "current": "Dưới cmux, liệu nhánh mới có không gian làm việc riêng hay một surface ở đây.",
+                  "proposed": "Trong cmux, nhánh mới có không gian làm việc riêng hay một thẻ ở đây.",
+                  "reason": "Translate the human surface noun consistently with its tab choice while retaining the actual brand cmux."
+                }
+              ],
+              "reason": "The current request forbids English human labels/descriptions; historic vi style-guide config-token exemptions do not turn independently localized UI labels into machine values. Choice(value, localized label, localized description) is independently verified in settings_io.py at 2359-2375, 4714-4724, 5147-5157, 5270-5280 and 6399-6419. New approval labels are not affected."
+            },
+            {
+              "id": "VI-B-M2",
+              "severity": "major",
+              "origin": "inherited_namespace",
+              "category": "accuracy_wrong_unit",
+              "message_key": "wire.settings.monitor_classifymaxchars.help",
+              "current": "Giới hạn số dòng thay đổi mà bước kiểm tra mức độ quan trọng nhận được (tên và mục đích của giám sát đi kèm, được cắt riêng).",
+              "proposed": "Giới hạn số ký tự của phần văn bản chứa các dòng thay đổi mà bước kiểm tra mức độ quan trọng nhận được (tên và mục đích của giám sát đi kèm, được cắt riêng).",
+              "reason": "Giới hạn số dòng explicitly tells the user this character-count setting limits a number of lines, conflating it with monitor.maxDeltaLines; the sibling label says ký tự and monitors/classify.py:149-152 truncates len(delta_text) and character slices, not line counts.",
+              "source_evidence": [
+                "settings_io.py:4258-4265",
+                "local_operator/monitors/classify.py:130-152"
+              ]
+            }
+          ],
+          "minor_count": 8,
+          "blocker_count": 0,
+          "major_count": 2
+        },
+        "attested_fresh_keys": 895,
+        "retained_semantic_keys": 0,
+        "available_context_entries_read": 104,
+        "subgroup_total": 895,
+        "explicit_key_enumeration": "absent in original B receipt; per-key full coverage supplied by original deduplicated ledger attestation, not invented fresh enumeration"
+      }
+    ],
+    "direct_old_to_new_source_differences": [
+      "wire.settings.speech_voice_expressiveness.choice.medium.description"
+    ],
+    "direct_retained_target_mismatches": [],
+    "old_approved_envelope_hashes": {
+      "en": "9ff37d2efa1d9c367ce7dcc9a01f1fa9f60f74601daf20dbb9d86c85698bf096",
+      "vi": "52e670c402ed50980476898f124309bff68fd2d7fbe290e6fb72f6339fc10791"
+    },
+    "retained_prior_minor_dispositions": [
+      {
+        "message": "wire.settings.agents_auto_update_seeds.label",
+        "finding_id": "I18N-WS-296272863BEE",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.compaction_idle_min_growth_tokens.label",
+        "finding_id": "I18N-WS-EB4BF2B582E8",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.compaction_wire_bytes_budget.label",
+        "finding_id": "I18N-WS-40637B7E415B",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.display_reasoning.label",
+        "finding_id": "I18N-WS-249532749C3B",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.hooks.description",
+        "finding_id": "I18N-WS-456B6DBE92C6",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.hooks_native.label",
+        "finding_id": "I18N-WS-18A01226F174",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.librarian_cadence_paused.label",
+        "finding_id": "I18N-WS-F33E8BCFD4E0",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.mesh_move_working_set_max_bytes.label",
+        "finding_id": "I18N-WS-502F92C0DCA9",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.mesh_move_working_set_roots.label",
+        "finding_id": "I18N-WS-4DE7C5E522CA",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.monitor_classifymaxchars.label",
+        "finding_id": "I18N-WS-6DBE4623F180",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.network.description",
+        "finding_id": "I18N-WS-04C206A00754",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.network_audit_max_bytes.label",
+        "finding_id": "I18N-WS-5669EAA48D4E",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.network_credentials_grant_ttl_s.label",
+        "finding_id": "I18N-WS-0625CB48E556",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.network_credentials_offline_hold_s.label",
+        "finding_id": "I18N-WS-EF9537807420",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.network_max_handshakes.help",
+        "finding_id": "I18N-WS-552A0CCFA416",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.network_rollout_on_update.label",
+        "finding_id": "I18N-WS-4DB1F1014DBC",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.network_sync_tick_s.label",
+        "finding_id": "I18N-WS-247A04DC5FA3",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.label",
+        "finding_id": "I18N-WS-D580E7728DFC",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.retry_pinnedfallback.label",
+        "finding_id": "I18N-WS-9C9AD8F0CC96",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.retry_usageawareaccountpick.label",
+        "finding_id": "I18N-WS-27760CFBE483",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.runtime_keep_alive_max.label",
+        "finding_id": "I18N-WS-22A07A41245B",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.runtime_keep_alive_seconds.label",
+        "finding_id": "I18N-WS-4968A9E98C2C",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.runtime_unattended_gate_timeout.label",
+        "finding_id": "I18N-WS-0D4117ADED77",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.send_journal_unconfirmed.label",
+        "finding_id": "I18N-WS-B6346C5D3696",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.session_cleanup_max_inactive_days.label",
+        "finding_id": "I18N-WS-FDE808AF80F0",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.session_cleanup_temporary_idle_minutes.label",
+        "finding_id": "I18N-WS-D2CD3606B750",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.speech_voice_instructions.help",
+        "finding_id": "I18N-WS-1406CC10A091",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.subagents_model_choice.label",
+        "finding_id": "I18N-WS-119A058E1283",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.subagents_slim_child_knowledge.label",
+        "finding_id": "I18N-WS-1A28E4B3E568",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.supplements_maxfeatured.help",
+        "finding_id": "I18N-WS-060F4F9DA2FC",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.tools_defer.label",
+        "finding_id": "I18N-WS-1323A2E96834",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.tools_search_interception_rg_excludes.label",
+        "finding_id": "I18N-WS-6CF6A86C9157",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.tui_sidebar_show_subagents.label",
+        "finding_id": "I18N-WS-3702DDE4470F",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.wakes_triggers_max_per_day.label",
+        "finding_id": "I18N-WS-968C517CC557",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      },
+      {
+        "message": "wire.settings.web_fetch_blocked_retry.label",
+        "finding_id": "I18N-WS-E679E75CBC45",
+        "severity": "minor",
+        "disposition": "deferred per Root one-wave policy; unchanged/outside R2"
+      }
+    ]
+  },
+  "icu": {
+    "fresh_argument_mismatches": [],
+    "all_argument_mismatches": [],
+    "fresh_plural_selectors": {},
+    "nonliteral_namespace_keys": {
+      "wire.settings.local_providers.base_url.label": {
+        "source_arguments": [
+          [
+            "name",
+            "simple"
+          ]
+        ],
+        "target_arguments": [
+          [
+            "name",
+            "simple"
+          ]
+        ]
+      },
+      "wire.settings.local_providers.models.label": {
+        "source_arguments": [
+          [
+            "name",
+            "simple"
+          ]
+        ],
+        "target_arguments": [
+          [
+            "name",
+            "simple"
+          ]
+        ]
+      }
+    }
+  },
+  "NFC": {
+    "fresh_non_NFC": [],
+    "fresh_bidi_controls": []
+  },
+  "CLDR": {
+    "categories": [
+      "other"
+    ],
+    "values": {
+      "0": "other",
+      "1": "other",
+      "2": "other",
+      "5": "other",
+      "11": "other",
+      "21": "other",
+      "101": "other",
+      "1.5": "other"
+    },
+    "positive": "2 phiên"
+  },
+  "negative_controls": {
+    "missing_other": "UNEXPECTED_ACCEPT",
+    "broken_brace": "MessageSyntaxError: expected ',' or '}' after argument name 'name' (at offset 11 of 'Hello {name')",
+    "renamed_placeholder_detected": true,
+    "wrong_kind_detected": true,
+    "invalid_vi_one_category_detected": true,
+    "missing_other_parser_behavior": "Parser accepts syntax; required-other structural guard must inspect parsed selectors, not assume parser rejects it.",
+    "missing_other_structural_check_detected": true,
+    "missing_other_parsed_selectors": [
+      [
+        "one"
+      ]
+    ]
+  },
+  "pseudo": {
+    "positive_output": "⟦Vùng nháp TEST_123 — Ắễộ⟧",
+    "argument_preserved": true,
+    "NFC_positive": true,
+    "decomposed_negative_detected": true,
+    "unclosed_pseudo_marker_negative_detected": true,
+    "rendering": "NOT RUN; synthetic parser/Unicode controls only"
+  },
+  "width": {
+    "method": "Unicode East Asian width with combining/format marks zero; static estimate only, no rendered fit claim",
+    "hard_budgets": [
+      {
+        "key": "wire.settings.session_scratchpad.title",
+        "source": 10,
+        "target": 9,
+        "maxCells": 12,
+        "fits_static": true
+      },
+      {
+        "key": "wire.settings.session_scratchpad_max_bytes.label",
+        "source": 27,
+        "target": 25,
+        "maxCells": 29,
+        "fits_static": true
+      }
+    ],
+    "expansions": [],
+    "static_label_expansion_rows": [
+      {
+        "message": "wire.settings.bash_memory_mode.choice.auto.label",
+        "source_codepoints": 4,
+        "target_codepoints": 7,
+        "disposition": "rendered check advised, no observed overflow; no fixed cap supplied"
+      },
+      {
+        "message": "wire.settings.classification_vendor.choice.auto.label",
+        "source_codepoints": 4,
+        "target_codepoints": 7,
+        "disposition": "rendered check advised, no observed overflow; no fixed cap supplied"
+      },
+      {
+        "message": "wire.settings.compaction_strategy.choice.auto.label",
+        "source_codepoints": 4,
+        "target_codepoints": 7,
+        "disposition": "rendered check advised, no observed overflow; no fixed cap supplied"
+      },
+      {
+        "message": "wire.settings.display_nerd_icons.choice.none.label",
+        "source_codepoints": 4,
+        "target_codepoints": 7,
+        "disposition": "rendered check advised, no observed overflow; no fixed cap supplied"
+      },
+      {
+        "message": "wire.settings.model_effort.choice.unset.label",
+        "source_codepoints": 4,
+        "target_codepoints": 7,
+        "disposition": "rendered check advised, no observed overflow; no fixed cap supplied"
+      },
+      {
+        "message": "wire.settings.network_rollout_on_update.choice.auto.label",
+        "source_codepoints": 4,
+        "target_codepoints": 7,
+        "disposition": "rendered check advised, no observed overflow; no fixed cap supplied"
+      },
+      {
+        "message": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+        "source_codepoints": 5,
+        "target_codepoints": 8,
+        "disposition": "rendered check advised, no observed overflow; no fixed cap supplied"
+      },
+      {
+        "message": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+        "source_codepoints": 4,
+        "target_codepoints": 14,
+        "disposition": "rendered check advised, no observed overflow; no fixed cap supplied"
+      },
+      {
+        "message": "wire.settings.shell_environment_mode.choice.allowlist.label",
+        "source_codepoints": 9,
+        "target_codepoints": 18,
+        "disposition": "rendered check advised, no observed overflow; no fixed cap supplied"
+      },
+      {
+        "message": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+        "source_codepoints": 4,
+        "target_codepoints": 7,
+        "disposition": "rendered check advised, no observed overflow; no fixed cap supplied"
+      },
+      {
+        "message": "wire.settings.speech_transcription_cleanup.choice.client.label",
+        "source_codepoints": 6,
+        "target_codepoints": 9,
+        "disposition": "rendered check advised, no observed overflow; no fixed cap supplied"
+      },
+      {
+        "message": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+        "source_codepoints": 8,
+        "target_codepoints": 12,
+        "disposition": "rendered check advised, no observed overflow; no fixed cap supplied"
+      },
+      {
+        "message": "wire.settings.speech_voice_gender.choice.auto.label",
+        "source_codepoints": 4,
+        "target_codepoints": 7,
+        "disposition": "rendered check advised, no observed overflow; no fixed cap supplied"
+      },
+      {
+        "message": "wire.settings.team_bridge_session.label",
+        "source_codepoints": 11,
+        "target_codepoints": 21,
+        "disposition": "rendered check advised, no observed overflow; no fixed cap supplied"
+      },
+      {
+        "message": "wire.settings.tool_approval_mode.choice.ask.label",
+        "source_codepoints": 3,
+        "target_codepoints": 9,
+        "disposition": "rendered check advised, no observed overflow; no fixed cap supplied"
+      },
+      {
+        "message": "wire.settings.web_fetch_render_backend.choice.auto.label",
+        "source_codepoints": 4,
+        "target_codepoints": 7,
+        "disposition": "rendered check advised, no observed overflow; no fixed cap supplied"
+      },
+      {
+        "message": "wire.settings.web_search_strategy.choice.ordered.label",
+        "source_codepoints": 7,
+        "target_codepoints": 11,
+        "disposition": "rendered check advised, no observed overflow; no fixed cap supplied"
+      }
+    ]
+  },
+  "RTL": {
+    "applicable": false,
+    "locale": "vi",
+    "technical_islands_checked": true,
+    "native_shaping": "NOT CLAIMED"
+  },
+  "positive_controls": {
+    "placeholder_render": "Máy chủ TEST_123",
+    "plural_render": "1,5 phiên",
+    "number_skeleton": "1.234,5"
+  }
+}

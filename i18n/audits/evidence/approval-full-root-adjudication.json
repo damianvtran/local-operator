@@ -1,0 +1,27 @@
+{
+  "kind": "manager-coordination-plan-not-native-audit",
+  "source_head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+  "ledger": "approval-full-deduplicated-ledger.json",
+  "whole_namespace_status": "FAIL in all seven locales; no shipping clearance",
+  "scope_decision": "Repair the union of independently reported major locale/key findings in one authoring wave. An absent finding from the other auditor is not a rejection. This private namespace contribution has not opened a PR; completing its inherited human-copy defects is within the operator's whole-interface request.",
+  "major_locale_key_counts": {"zh-CN":32,"fr":23,"es":30,"ru":33,"vi":39,"hi":55,"ur":56},
+  "source_checkpoint": {
+    "owner_job": "153c6190e248",
+    "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+    "reason": "English Today's constant. is ambiguous. Existing context means the usual standard vocal delivery, not a mathematical value, current time or price.",
+    "action": "One LLM English-author checkpoint before locale authors; bind the new source and recapture approved inputs. No generated files hand-edited. Preserve old source/audit receipts."
+  },
+  "authoring_rules": [
+    "Use a fresh LLM translator per locale, not either of that locale's independent auditors. Record actual served model or explicitly qualified unknown provenance, never infer serving identity from a resumed header.",
+    "Human Choice.label and other headings/help must be translated separately from stable Choice.value. Keep all serialized values, commands, flags, config names, protocol tokens and executable examples byte-identical.",
+    "Accept the union of concrete meaning defects: characters versus lines, exclusions versus deletion, comma separation versus tasks, screening calls per hour versus fractions of an hour, standard vocal delivery versus constant value or price.",
+    "Preserve genuine proper product/provider/model names, identifiers, code and protocol names. A named default agent is distinct from a generic role or feature noun. Librarian, Library, Hub, ANSWER and similar words are not blanket brand exemptions.",
+    "For glossary-kept borrowed technical terms, cite the exact per-locale glossary entry AND the individual key's technical usage. Translate surrounding ordinary prose. A glossary does not justify raw true/false/default/manual/female/provider labels or untranslated whole sentences.",
+    "If a proposed major fix would rename an actual identifier or contradict a scoped technical glossary, report the key, consumer/context/glossary proof and rejection to Root; do not silently skip it or change a machine value.",
+    "Fold minor semantic/idiom issues into the same wave only when directly adjacent to accepted major copy and not a new scope. Width flags are static risks, not observed clipping; measure/render at integration and shorten if actually needed. No minor-only wave.",
+    "Do not change any unrelated locale or English/context after the English checkpoint. Do not hand-edit generated keys, eligibility, history snapshots or ratchet baselines. No self-audit, native/browser runs, dependency installs or new worktrees by translators.",
+    "Follow with independent A/B delta audits of changed keys and direct reference neighbors; explicitly bind byte/source-compatible unchanged per-key semantic records from the completed 895-pair audits. Never fabricate a zero-key pass as proof for the rest of the namespace."
+  ],
+  "non_goals": ["No whole-interface clearance from catalogue parity", "No native Urdu shaping claim from synthetic bidi", "No release or merge before real-path review and required CI", "No network product repair inside admission guard PR 4416"],
+  "next_author_wave_gate": "English checkpoint and approved new source inputs ready, then seven locale translators; one integration commit and one deduplicated remediation review wave"
+}

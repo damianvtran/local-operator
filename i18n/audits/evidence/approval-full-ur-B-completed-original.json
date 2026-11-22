@@ -1,0 +1,2097 @@
+{
+  "locale": "ur",
+  "side": "B",
+  "namespace": "wire.settings",
+  "round": 1,
+  "head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+  "scope": "fa4fb006..a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+  "source_sha256": "298fc1100cb10bfa34909aa245307a735dad318f456e5bbfb5337fbcdb1e8962",
+  "context_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+  "target_sha256": "79869c119f2cb73152c50a4a3ffb647441cd0b0db0fb1f49a76f29a15324bc5e",
+  "status": "failed",
+  "completeness": "complete_895_fresh_pairs_104_context_entries",
+  "translator": {
+    "agent": "bc9d98e0db6e (two changed labels only)",
+    "model": "unverified",
+    "claimed_model": "anthropic/claude-opus-5-5",
+    "provenance": "Read approval-choice-translator-ur.json only. Its current-header assertion is not exact-response evidence; parent reports active-route contradiction. Do not certify model. Original 893-key authorship unknown."
+  },
+  "auditor": {
+    "agent": "translation-auditor / approval-full-ur-B-cached / 28a481e6b878",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Explicit host fallback switch in this transcript: Anthropic quota failure -> openai/gpt-6.1-sol before semantic pair reading. No role/model pin changed by auditor.",
+    "findings": [
+      {
+        "id": "URB-1",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.bash_memory_mode.choice.auto.label",
+        "english": "auto",
+        "current": "auto",
+        "proposed": "خودکار",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-2",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.bash_memory_mode.choice.manual.label",
+        "english": "manual",
+        "current": "manual",
+        "proposed": "دستی",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-3",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.classification_vendor.choice.auto.label",
+        "english": "auto",
+        "current": "auto",
+        "proposed": "خودکار",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-4",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.compaction_strategy.choice.auto.label",
+        "english": "auto",
+        "current": "auto",
+        "proposed": "خودکار",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-5",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.display_nerd_icons.choice.none.label",
+        "english": "auto",
+        "current": "auto",
+        "proposed": "خودکار",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-6",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.model_effort.choice.unset.label",
+        "english": "auto",
+        "current": "auto",
+        "proposed": "خودکار",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-7",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.network_rollout_on_update.choice.auto.label",
+        "english": "auto",
+        "current": "auto",
+        "proposed": "خودکار",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-8",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+        "english": "false",
+        "current": "false",
+        "proposed": "فال بیک بند",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-9",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+        "english": "default",
+        "current": "default",
+        "proposed": "ڈیفالٹ",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-10",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+        "english": "allow",
+        "current": "allow",
+        "proposed": "اجازت دیں",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-11",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+        "english": "deny",
+        "current": "deny",
+        "proposed": "اجازت نہ دیں",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-12",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+        "english": "default",
+        "current": "default",
+        "proposed": "ڈیفالٹ",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-13",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+        "english": "true",
+        "current": "true",
+        "proposed": "فعال",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-14",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+        "english": "default",
+        "current": "default",
+        "proposed": "ڈیفالٹ",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-15",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+        "english": "true",
+        "current": "true",
+        "proposed": "فعال",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-16",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+        "english": "default",
+        "current": "default",
+        "proposed": "ڈیفالٹ",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-17",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+        "english": "default",
+        "current": "default",
+        "proposed": "ڈیفالٹ",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-18",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+        "english": "true",
+        "current": "true",
+        "proposed": "فعال",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-19",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+        "english": "default",
+        "current": "default",
+        "proposed": "ڈیفالٹ",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-20",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+        "english": "allowlist",
+        "current": "allowlist",
+        "proposed": "اجازت کی فہرست",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-21",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+        "english": "inherit",
+        "current": "inherit",
+        "proposed": "موجودہ ماحول",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-22",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+        "english": "auto",
+        "current": "auto",
+        "proposed": "خودکار",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-23",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+        "english": "client",
+        "current": "client",
+        "proposed": "کلائنٹ",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-24",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+        "english": "provider",
+        "current": "provider",
+        "proposed": "پرووائیڈر",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-25",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.speech_voice_gender.choice.auto.label",
+        "english": "auto",
+        "current": "auto",
+        "proposed": "خودکار",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-26",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.speech_voice_gender.choice.female.label",
+        "english": "female",
+        "current": "female",
+        "proposed": "نسوانی",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-27",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.speech_voice_gender.choice.male.label",
+        "english": "male",
+        "current": "male",
+        "proposed": "مردانہ",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-28",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.web_fetch_render_backend.choice.auto.label",
+        "english": "auto",
+        "current": "auto",
+        "proposed": "خودکار",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-29",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.web_search_strategy.choice.ordered.label",
+        "english": "ordered",
+        "current": "ordered",
+        "proposed": "ترتیب وار",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-30",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+        "english": "round_robin",
+        "current": "round_robin",
+        "proposed": "باری باری",
+        "reason": "This is the localized Choice.label displayed to people, not Choice.value; the raw English enum is not a brand or a technical-only field.",
+        "group": "untranslated_human_choice"
+      },
+      {
+        "id": "URB-31",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+        "english": "Today's constant.",
+        "current": "موجودہ مستقل قیمت۔",
+        "proposed": "موجودہ معمول کا انداز۔",
+        "reason": "The current text means current constant price/value; the 104-entry context explicitly identifies the existing standard vocal delivery, not a mathematical constant or price.",
+        "group": "meaning_voice"
+      },
+      {
+        "id": "URB-32",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.tools_search_interception_rg_excludes.label",
+        "english": "...prune vendor trees for ripgrep",
+        "current": "...ripgrep کے لیے وینڈر درخت حذف کریں",
+        "proposed": "...ripgrep میں وینڈر فولڈر چھوڑیں",
+        "reason": "حذف کریں says delete vendor trees; this toggle only writes a ripgrep exclusion configuration and does not delete files (settings_io.py:5098–5105; tools/builtin.py:2747–2763,5093–5099).",
+        "group": "misleading_destructive_label"
+      },
+      {
+        "id": "URB-33",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.display_rail.help",
+        "english": "A rule marks the ANSWER: the message that ends the turn. Mid-turn narration takes no rail.",
+        "current": "ایک لکیر ANSWER کو نشان زد کرتی ہے: ٹرن ختم کرنے والا پیغام۔ ٹرن کے دوران کے بیان پر ریل نہیں۔",
+        "proposed": "ایک لکیر جواب کو نشان زد کرتی ہے: ٹرن ختم کرنے والا پیغام۔ ٹرن کے دوران کے بیان پر ریل نہیں۔",
+        "reason": "An ordinary human-facing action, unit or descriptor remains Latin English; it is not an invocation, API field, named model or brand in this sentence.",
+        "group": "untranslated_human_prose"
+      },
+      {
+        "id": "URB-34",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.hub.description",
+        "english": "Keep agents and teams you pulled from the Agent Hub current: whether updates are merged in automatically, how often the hub is checked, and which model resolves a conflict. Your edits and deletions are merged, never overwritten.",
+        "current": "Agent Hub سے حاصل کردہ ایجنٹس اور ٹیمیں تازہ رکھیں: اپ ڈیٹس خودکار merge ہوں، hub کتنی بار جانچ ہو، اور تضاد کون سا ماڈل حل کرے۔ آپ کی تبدیلیاں اور حذف کردہ مواد merge ہوتا ہے، اووررائیٹ نہیں۔",
+        "proposed": "Agent Hub سے حاصل کردہ ایجنٹس اور ٹیمیں تازہ رکھیں: اپ ڈیٹس خودکار ضم ہوں، hub کتنی بار جانچ ہو، اور تضاد کون سا ماڈل حل کرے۔ آپ کی تبدیلیاں اور حذف کردہ مواد ضم ہوتا ہے، اووررائیٹ نہیں۔",
+        "reason": "An ordinary human-facing action, unit or descriptor remains Latin English; it is not an invocation, API field, named model or brand in this sentence.",
+        "group": "untranslated_human_prose"
+      },
+      {
+        "id": "URB-35",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.hub_auto_update_agents.choice.true.description",
+        "english": "merge hub updates automatically",
+        "current": "hub اپ ڈیٹس خودکار merge کریں",
+        "proposed": "hub اپ ڈیٹس خودکار ضم کریں",
+        "reason": "An ordinary human-facing action, unit or descriptor remains Latin English; it is not an invocation, API field, named model or brand in this sentence.",
+        "group": "untranslated_human_prose"
+      },
+      {
+        "id": "URB-36",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.hub_auto_update_agents.help",
+        "english": "Merge hub updates into pulled agents automatically.",
+        "current": "حاصل کردہ ایجنٹس میں hub اپ ڈیٹس خودکار merge کریں۔",
+        "proposed": "حاصل کردہ ایجنٹس میں hub اپ ڈیٹس خودکار ضم کریں۔",
+        "reason": "An ordinary human-facing action, unit or descriptor remains Latin English; it is not an invocation, API field, named model or brand in this sentence.",
+        "group": "untranslated_human_prose"
+      },
+      {
+        "id": "URB-37",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.hub_auto_update_teams.choice.true.description",
+        "english": "merge hub updates automatically",
+        "current": "hub اپ ڈیٹس خودکار merge کریں",
+        "proposed": "hub اپ ڈیٹس خودکار ضم کریں",
+        "reason": "An ordinary human-facing action, unit or descriptor remains Latin English; it is not an invocation, API field, named model or brand in this sentence.",
+        "group": "untranslated_human_prose"
+      },
+      {
+        "id": "URB-38",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.hub_auto_update_teams.help",
+        "english": "Merge hub updates into pulled teams automatically.",
+        "current": "حاصل کردہ ٹیموں میں hub اپ ڈیٹس خودکار merge کریں۔",
+        "proposed": "حاصل کردہ ٹیموں میں hub اپ ڈیٹس خودکار ضم کریں۔",
+        "reason": "An ordinary human-facing action, unit or descriptor remains Latin English; it is not an invocation, API field, named model or brand in this sentence.",
+        "group": "untranslated_human_prose"
+      },
+      {
+        "id": "URB-39",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.librarian_cadence_paused.help",
+        "english": "Pausing removes her scheduled rows; resuming re-arms the next pass. The desktop and /librarian write the same key.",
+        "current": "روکنے پر شیڈول شدہ قطاریں ہٹتی ہیں؛ resume اگلا پاس مقرر کرتا ہے۔ ڈیسک ٹاپ اور /librarian ایک ہی کلید لکھتے ہیں۔",
+        "proposed": "روکنے پر شیڈول شدہ قطاریں ہٹتی ہیں؛ دوبارہ شروع کرنے پر اگلا پاس مقرر کرتا ہے۔ ڈیسک ٹاپ اور /librarian ایک ہی کلید لکھتے ہیں۔",
+        "reason": "An ordinary human-facing action, unit or descriptor remains Latin English; it is not an invocation, API field, named model or brand in this sentence.",
+        "group": "untranslated_human_prose"
+      },
+      {
+        "id": "URB-40",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.display_notification_session_name.help",
+        "english": "A session's name, last line and error causes appear on banners, including the lock screen and paired phones' notifications, which reach them through Radient's push service.",
+        "current": "بینرز پر سیشن کا نام، آخری سطر اور خرابی کی وجوہات آتی ہیں، لاک اسکرین اور جوڑے ہوئے فونز کی اطلاعات بھی شامل، جو ان تک Radient کی push سروس کے ذریعے پہنچتی ہیں۔",
+        "proposed": "بینرز پر سیشن کا نام، آخری سطر اور خرابی کی وجوہات آتی ہیں، لاک اسکرین اور جوڑے ہوئے فونز کی اطلاعات بھی شامل، جو ان تک Radient کی پُش سروس کے ذریعے پہنچتی ہیں۔",
+        "reason": "An ordinary human-facing action, unit or descriptor remains Latin English; it is not an invocation, API field, named model or brand in this sentence.",
+        "group": "untranslated_human_prose"
+      },
+      {
+        "id": "URB-41",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.providers.title",
+        "english": "Wire protocol",
+        "current": "Wire پروٹوکول",
+        "proposed": "ترسیلی پروٹوکول",
+        "reason": "An ordinary human-facing action, unit or descriptor remains Latin English; it is not an invocation, API field, named model or brand in this sentence.",
+        "group": "untranslated_human_prose"
+      },
+      {
+        "id": "URB-42",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.compaction_wire_bytes_budget.label",
+        "english": "Request size limit (bytes)",
+        "current": "درخواست کی حد (bytes)",
+        "proposed": "درخواست کی حد (بائٹس)",
+        "reason": "An ordinary human-facing action, unit or descriptor remains Latin English; it is not an invocation, API field, named model or brand in this sentence.",
+        "group": "untranslated_human_prose"
+      },
+      {
+        "id": "URB-43",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.session_cleanup_max_total_bytes.label",
+        "english": "↳ max total bytes",
+        "current": "↳ زیادہ سے زیادہ کل bytes",
+        "proposed": "↳ زیادہ سے زیادہ کل بائٹس",
+        "reason": "An ordinary human-facing action, unit or descriptor remains Latin English; it is not an invocation, API field, named model or brand in this sentence.",
+        "group": "untranslated_human_prose"
+      },
+      {
+        "id": "URB-44",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.subagents_model_choice.choice.operator.description",
+        "english": "inherits the session model",
+        "current": "سیشن کا ماڈل inherit کرے",
+        "proposed": "سیشن کا ماڈل وراثت میں حاصل کرے",
+        "reason": "An ordinary human-facing action, unit or descriptor remains Latin English; it is not an invocation, API field, named model or brand in this sentence.",
+        "group": "untranslated_human_prose"
+      },
+      {
+        "id": "URB-45",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.network_sync_debounce_s.help",
+        "english": "Seconds a session's transcript must stay unchanged before its owner tells devices holding a copy to pull. A session going idle pushes at once, so its final message is never held back by this.",
+        "current": "مالک، نقل رکھنے والی ڈیوائسز کو pull کہنے سے پہلے سیشن ٹرانسکرپٹ کتنے سیکنڈ غیر بدلا رہے۔ بے کار ہوتے ہی push فوراً ہوتا ہے، اس لیے آخری پیغام اس سے نہیں رکتا۔",
+        "proposed": "نقل رکھنے والی ڈیوائسز کو تازہ نقل لینے کی اطلاع دینے سے پہلے سیشن کا ٹرانسکرپٹ کتنے سیکنڈ بغیر تبدیلی رہے۔ سیشن غیر فعال ہوتے ہی تازہ نقل فوراً بھیجی جاتی ہے، اس لیے آخری پیغام اس سے نہیں رکتا۔",
+        "reason": "An ordinary human-facing action, unit or descriptor remains Latin English; it is not an invocation, API field, named model or brand in this sentence.",
+        "group": "untranslated_human_prose"
+      },
+      {
+        "id": "URB-46",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.network_sync_tick_s.help",
+        "english": "How often the owner checks copied sessions for changes: one file stat each.",
+        "current": "مالک نقل شدہ سیشنز میں تبدیلی کتنی بار جانچ کرے: ہر بار ایک فائل stat۔",
+        "proposed": "مالک نقل شدہ سیشنز میں تبدیلی کتنی بار جانچے: ہر سیشن کی فائل کی حالت ایک بار۔",
+        "reason": "An ordinary human-facing action, unit or descriptor remains Latin English; it is not an invocation, API field, named model or brand in this sentence.",
+        "group": "untranslated_human_prose"
+      },
+      {
+        "id": "URB-47",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.session_scratchpad.title",
+        "english": "Scratchpad",
+        "current": "Scratchpad",
+        "proposed": "اسکریچ پیڈ",
+        "reason": "Scratchpad is a human section noun here, not the scratchpad:// URI or a named model/brand; the context calls for a compact noun.",
+        "group": "untranslated_human_prose"
+      },
+      {
+        "id": "URB-48",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.session_scratchpad_max_bytes.help",
+        "english": "Bytes a session's scratchpad may hold: 16 MiB to 8 GiB. Default 256 MiB.",
+        "current": "سیشن کے Scratchpad کی گنجائش: 16 MiB تا 8 GiB۔ ڈیفالٹ 256 MiB۔",
+        "proposed": "سیشن کے اسکریچ پیڈ کی گنجائش: 16 MiB تا 8 GiB۔ ڈیفالٹ 256 MiB۔",
+        "reason": "Human explanatory noun should match the localized section; MiB/GiB remain technical units.",
+        "group": "untranslated_human_prose"
+      },
+      {
+        "id": "URB-49",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.session_scratchpad_max_bytes.label",
+        "english": "Scratchpad size cap (bytes)",
+        "current": "Scratchpad حد (bytes)",
+        "proposed": "اسکریچ پیڈ کی حد (بائٹس)",
+        "reason": "Both Scratchpad and bytes are human label words here; preserve actual scratchpad:// URI elsewhere, not these words.",
+        "group": "untranslated_human_prose"
+      },
+      {
+        "id": "URB-50",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.librarian.description",
+        "english": "The Librarian keeps the global Library organised: her display name, the daily pass, and the pause switch. The Library is long-term and shared by every conversation.",
+        "current": "Librarian عالمی Library منظم رکھتی ہے: اس کا ظاہری نام، روزانہ پاس، اور روکنے کا اختیار۔ Library طویل مدت کی ہے اور ہر گفتگو میں مشترک ہے۔",
+        "proposed": "Librarian عالمی لائبریری کو منظم رکھتی ہے: اس کا ظاہری نام، روزانہ جائزہ، اور روکنے کا اختیار۔ لائبریری طویل مدت کے لیے ہے اور ہر گفتگو میں مشترک ہے۔",
+        "reason": "The capitalized Library denotes the shared long-term file collection, not a command/API/model; no brand-only exception is provided. Librarian is retained here only as the persona name.",
+        "group": "untranslated_human_prose"
+      },
+      {
+        "id": "URB-51",
+        "severity": "major",
+        "scope": "inherited_namespace",
+        "key": "wire.settings.mesh_move_working_set_max_bytes.help",
+        "english": "The most working-file data (bundled commits plus staged, unstaged and untracked files) one move sends to, or accepts from, another device. Over it, the move is refused and nothing changes. Default 256 MiB.",
+        "current": "ورکنگ فائل ڈیٹا (بنڈل شدہ commits کے ساتھ staged، unstaged اور untracked فائلیں) کی زیادہ سے زیادہ مقدار جو ایک منتقلی دوسری ڈیوائس کو بھیجتی ہے یا اس سے قبول کرتی ہے۔ اس سے زیادہ ہونے پر منتقلی مسترد ہو جاتی ہے اور کچھ نہیں بدلتا۔ ڈیفالٹ 256 MiB۔",
+        "proposed": "ورکنگ فائلوں کے ڈیٹا (بنڈل شدہ کمٹس اور اسٹیج کی گئی، اسٹیج نہ کی گئی اور گِٹ میں شامل نہ کی گئی فائلیں) کی زیادہ سے زیادہ مقدار جو ایک منتقلی دوسری ڈیوائس کو بھیج یا اس سے قبول کر سکتی ہے۔ اس حد سے زیادہ ہونے پر منتقلی مسترد ہو جاتی ہے اور کچھ نہیں بدلتا۔ ڈیفالٹ 256 MiB۔",
+        "reason": "commits, staged, unstaged and untracked are human descriptions of file states here, not literal command arguments or JSON keys.",
+        "group": "untranslated_human_prose"
+      }
+    ],
+    "unresolved_blockers": 0,
+    "unresolved_majors": 51,
+    "minor_count": 10
+  },
+  "fresh_read": {
+    "source_keys_total": 895,
+    "target_keys_total": 895,
+    "keysets_equal": true,
+    "complete_source_target_pairs_read": 895,
+    "masked_key_unread": null,
+    "context_entries_read": 104,
+    "retained_semantic_keys": 0,
+    "new_two_labels_read": 2,
+    "other_readable_pairs": 893,
+    "all_pairs_enumerated": 895,
+    "method": "Fresh side-by-side approved-envelope pages covering sorted keys 1–895; every elided middle was expanded. No current partner report read.",
+    "supplemental_key": "wire.settings.providers_bedrock_auth.help",
+    "supplemental_method": "One dedicated approved read_public_copy key call; remaining 894 not re-reviewed"
+  },
+  "per_key_subgroups": {
+    "new_approval_labels": {
+      "status": "passed",
+      "keys": [
+        "wire.settings.tool_approval_mode.choice.ask.label",
+        "wire.settings.tool_approval_mode.choice.auto.label"
+      ],
+      "reason": "پوچھیں is polite Ask mode; خودکار is Automatic. Neither promises all-call prompting, unconditional permission or guard bypass."
+    },
+    "inherited_readable_namespace": {
+      "status": "failed",
+      "keys_read": 893,
+      "reason": "Inherited English human controls/prose and meaning defects remain; no semantic approval carried from prior receipts."
+    },
+    "supplemental_bedrock_help": {
+      "status": "passed",
+      "key": "wire.settings.providers_bedrock_auth.help",
+      "current": "ambient: Bedrock کے لیے اس مشین کے AWS کریڈینشلز (IAM رول) استعمال کریں۔",
+      "reason": "Faithfully says ambient uses this machine’s AWS credentials (IAM role) for Bedrock; ambient is the literal input value, AWS/IAM/Bedrock are technical/product names. No secret values are present."
+    }
+  },
+  "minor_findings": [
+    {
+      "id": "URB-m1",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.mesh_move_working_set_roots.help",
+      "english": "Where on this device a session move may create or restore a repository: folders under your home, written with ~ and separated by commas (for example ~/code, ~/work). Hidden, system, command (on PATH) and node_modules folders are never used. Unset: a repository is restored where it already is, and a missing one is cloned only into a folder that already holds your repositories; set this to allow other folders.",
+      "current": "اس ڈیوائس پر سیشن کی منتقلی کہاں ریپوزٹری بنا یا بحال کر سکتی ہے: آپ کے ہوم کے اندر فولڈر، ~ کے ساتھ لکھے اور کاموں سے الگ کیے گئے (مثلاً ~/code, ~/work)۔ پوشیدہ، سسٹم، کمانڈ (PATH پر) اور node_modules فولڈر کبھی استعمال نہیں ہوتے۔ سیٹ نہ ہو تو: ریپوزٹری وہیں بحال ہوتی ہے جہاں وہ پہلے سے ہے، اور غائب ریپوزٹری صرف ایسے فولڈر میں کلون ہوتی ہے جس میں پہلے سے آپ کی ریپوزٹریز ہوں؛ دوسرے فولڈروں کی اجازت کے لیے اسے سیٹ کریں۔",
+      "proposed": "اس ڈیوائس پر سیشن کی منتقلی کہاں ریپوزٹری بنا یا بحال کر سکتی ہے: آپ کے ہوم کے اندر فولڈر، ~ کے ساتھ لکھے اور کوما سے الگ کیے گئے (مثلاً ~/code, ~/work)۔ پوشیدہ، سسٹم، کمانڈ (PATH پر) اور node_modules فولڈر کبھی استعمال نہیں ہوتے۔ سیٹ نہ ہو تو: ریپوزٹری وہیں بحال ہوتی ہے جہاں وہ پہلے سے ہے، اور غائب ریپوزٹری صرف ایسے فولڈر میں کلون ہوتی ہے جس میں پہلے سے آپ کی ریپوزٹریز ہوں؛ دوسرے فولڈروں کی اجازت کے لیے اسے سیٹ کریں۔",
+      "reason": "کاموں means tasks/works, not commas; the example mitigates the typo but the delimiter instruction itself is wrong.",
+      "group": "delimiter_typo"
+    },
+    {
+      "id": "URB-m2",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.speech_voice_tone.choice.warm.label",
+      "english": "warm",
+      "current": "وارم",
+      "proposed": "گرمجوش",
+      "reason": "وارم transliterates English thermal warm rather than the friendly vocal tone; گرمجوش is the natural adjective.",
+      "group": "voice_idiom"
+    },
+    {
+      "id": "URB-m3",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.speech_voice_tone.choice.warm.description",
+      "english": "Friendly and approachable.",
+      "current": "دوستانہ اور قریب۔",
+      "proposed": "دوستانہ اور مانوس۔",
+      "reason": "قریب means physically near/close; مانوس carries the intended approachable vocal tone.",
+      "group": "voice_idiom"
+    },
+    {
+      "id": "URB-m4",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.speech_voice_tone.choice.calm.description",
+      "english": "Unhurried and steady.",
+      "current": "بے جلدی اور مستقل۔",
+      "proposed": "ٹھہرا ہوا اور پُرسکون۔",
+      "reason": "بے جلدی is an English-shaped construction rather than idiomatic Urdu for unhurried delivery.",
+      "group": "voice_idiom"
+    },
+    {
+      "id": "URB-m5",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.speech_voice_tone.choice.neutral.description",
+      "english": "Even and unmarked.",
+      "current": "معمول اور بے امتیاز۔",
+      "proposed": "ہموار، کسی خاص تاثر کے بغیر۔",
+      "reason": "بے امتیاز suggests indiscriminate or undistinguished; the source describes even delivery without marked emotional coloring.",
+      "group": "voice_idiom"
+    },
+    {
+      "id": "URB-m6",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.asks_lapsed_visible_for.label",
+      "english": "Show timed-out asks for",
+      "current": "وقت ختم سوالات دکھائیں",
+      "proposed": "مہلت کے بعد سوالات دکھائیں",
+      "reason": "وقت ختم سوالات is a broken noun phrase and drops the duration relationship; the source is a duration control, not an action that times out questions.",
+      "group": "label_idiom"
+    },
+    {
+      "id": "URB-m7",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.aida_cadence_at.help",
+      "english": "Local wall-clock HH:MM. An invalid value falls back to 08:30 at the next arm.",
+      "current": "مقامی HH:MM وقت۔ غلط قیمت اگلی بار مقرر کرنے پر 08:30 ہو جائے گی۔",
+      "proposed": "مقامی HH:MM وقت۔ غلط قدر اگلی بار مقرر کرنے پر 08:30 ہو جائے گی۔",
+      "reason": "قیمت is price; the software setting is a value (قدر), consistent with قدریں elsewhere.",
+      "group": "value_glossary"
+    },
+    {
+      "id": "URB-m8",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.librarian_cadence_at.help",
+      "english": "Local wall-clock HH:MM. An invalid value falls back to 03:30 at the next arm.",
+      "current": "مقامی HH:MM وقت۔ غلط قیمت اگلی بار مقرر کرنے پر 03:30 ہو جائے گی۔",
+      "proposed": "مقامی HH:MM وقت۔ غلط قدر اگلی بار مقرر کرنے پر 03:30 ہو جائے گی۔",
+      "reason": "قیمت is price; the software setting is a value (قدر), consistent with قدریں elsewhere.",
+      "group": "value_glossary"
+    },
+    {
+      "id": "URB-m9",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.compaction_threshold_tokens.help",
+      "english": "Absolute trigger. The smaller of this and the percentage wins.",
+      "current": "مطلق محرک۔ اس اور فیصد میں سے چھوٹی قیمت لاگو ہوگی۔",
+      "proposed": "مطلق محرک۔ اس اور فیصد میں سے چھوٹی قدر لاگو ہوگی۔",
+      "reason": "قیمت is price; the software setting is a value (قدر), consistent with قدریں elsewhere.",
+      "group": "value_glossary"
+    },
+    {
+      "id": "URB-m10",
+      "severity": "minor",
+      "scope": "inherited_namespace",
+      "key": "wire.settings.speech_voice_gender.help",
+      "english": "auto picks per agent; a fixed value overrides the classifier.",
+      "current": "auto ہر ایجنٹ کے لیے منتخب کرتی ہے؛ مقررہ قیمت کلاسیفائر کو اووررائیڈ کرتی ہے۔",
+      "proposed": "auto ہر ایجنٹ کے لیے منتخب کرتی ہے؛ مقررہ قدر کلاسیفائر کو اووررائیڈ کرتی ہے۔",
+      "reason": "قیمت is price; the software setting is a value (قدر), consistent with قدریں elsewhere.",
+      "group": "value_glossary"
+    }
+  ],
+  "width_flags": [
+    {
+      "key": "wire.settings.classification_maxstatechars.label",
+      "english_cells": 17,
+      "urdu_cells": 29,
+      "current": "↳ حالت کے زیادہ سے زیادہ حروف",
+      "disposition": "Rendered check needed; measured relative expansion only, no clipping observed."
+    },
+    {
+      "key": "wire.settings.compaction_resume_replay.label",
+      "english_cells": 13,
+      "urdu_cells": 21,
+      "current": "دوبارہ شروع پر ری پلے",
+      "disposition": "Rendered check needed; measured relative expansion only, no clipping observed."
+    },
+    {
+      "key": "wire.settings.max_learnings_history.label",
+      "english_cells": 21,
+      "urdu_cells": 41,
+      "current": "سیکھے ہوئے نکات کی زیادہ سے زیادہ تاریخچہ",
+      "disposition": "Rendered check needed; measured relative expansion only, no clipping observed."
+    },
+    {
+      "key": "wire.settings.monitor_maxdeltalines.label",
+      "english_cells": 15,
+      "urdu_cells": 26,
+      "current": "زیادہ سے زیادہ ڈیلٹا سطریں",
+      "disposition": "Rendered check needed; measured relative expansion only, no clipping observed."
+    },
+    {
+      "key": "wire.settings.network_listen_address.label",
+      "english_cells": 14,
+      "urdu_cells": 25,
+      "current": "کنکشن قبول کرنے کا ایڈریس",
+      "disposition": "Rendered check needed; measured relative expansion only, no clipping observed."
+    },
+    {
+      "key": "wire.settings.providers_openai_use_max_context_window.label",
+      "english_cells": 26,
+      "urdu_cells": 46,
+      "current": "زیادہ سے زیادہ OpenAI سیاق و سباق استعمال کریں",
+      "disposition": "Rendered check needed; measured relative expansion only, no clipping observed."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_max_price.label",
+      "english_cells": 9,
+      "urdu_cells": 19,
+      "current": "زیادہ سے زیادہ قیمت",
+      "disposition": "Rendered check needed; measured relative expansion only, no clipping observed."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_preferred_max_latency.label",
+      "english_cells": 15,
+      "urdu_cells": 25,
+      "current": "زیادہ سے زیادہ لیٹنسی (s)",
+      "disposition": "Rendered check needed; measured relative expansion only, no clipping observed."
+    },
+    {
+      "key": "wire.settings.retry_maxretries.label",
+      "english_cells": 11,
+      "urdu_cells": 28,
+      "current": "زیادہ سے زیادہ دوبارہ کوششیں",
+      "disposition": "Rendered check needed; measured relative expansion only, no clipping observed."
+    },
+    {
+      "key": "wire.settings.session_cleanup_max_sessions.label",
+      "english_cells": 14,
+      "urdu_cells": 22,
+      "current": "↳ زیادہ سے زیادہ سیشنز",
+      "disposition": "Rendered check needed; measured relative expansion only, no clipping observed."
+    },
+    {
+      "key": "wire.settings.subagents_max_team_depth.label",
+      "english_cells": 21,
+      "urdu_cells": 34,
+      "current": "نیسٹڈ ٹیم کی زیادہ سے زیادہ گہرائی",
+      "disposition": "Rendered check needed; measured relative expansion only, no clipping observed."
+    },
+    {
+      "key": "wire.settings.supplements_denyprefixes.label",
+      "english_cells": 18,
+      "urdu_cells": 31,
+      "current": "↳ ان کے نیچے کبھی فہرست نہ کریں",
+      "disposition": "Rendered check needed; measured relative expansion only, no clipping observed."
+    },
+    {
+      "key": "wire.settings.supplements_maxoutputtokens.label",
+      "english_cells": 19,
+      "urdu_cells": 29,
+      "current": "↳ زیادہ سے زیادہ آؤٹ پٹ ٹوکنز",
+      "disposition": "Rendered check needed; measured relative expansion only, no clipping observed."
+    },
+    {
+      "key": "wire.settings.supplements_maxturns.label",
+      "english_cells": 11,
+      "urdu_cells": 20,
+      "current": "↳ زیادہ سے زیادہ ٹرن",
+      "disposition": "Rendered check needed; measured relative expansion only, no clipping observed."
+    },
+    {
+      "key": "wire.settings.web_fetch_max_redirects.label",
+      "english_cells": 13,
+      "urdu_cells": 26,
+      "current": "زیادہ سے زیادہ ری ڈائریکٹس",
+      "disposition": "Rendered check needed; measured relative expansion only, no clipping observed."
+    }
+  ],
+  "controls": {
+    "keys_total": 895,
+    "keys_validated": 895,
+    "masked_keys": [],
+    "rendered": 895,
+    "errors": [],
+    "argument_keys": [
+      [
+        "wire.settings.local_providers.base_url.label",
+        [
+          [
+            "name",
+            "simple"
+          ]
+        ]
+      ],
+      [
+        "wire.settings.local_providers.models.label",
+        [
+          [
+            "name",
+            "simple"
+          ]
+        ]
+      ]
+    ],
+    "plural_keys": [],
+    "ur_cldr_categories": [
+      "one",
+      "other"
+    ],
+    "ur_cldr_samples": {
+      "0": "other",
+      "1": "one",
+      "2": "other",
+      "1.5": "other",
+      "21": "other"
+    },
+    "negative_controls": {
+      "unmatched_brace": "MessageSyntaxError",
+      "missing_arg": "MessageFormatError"
+    },
+    "nonnfc": [],
+    "bidi_controls": [],
+    "context_entries": 104,
+    "width_exceeded": [],
+    "new_labels": [
+      {
+        "key": "wire.settings.tool_approval_mode.choice.ask.label",
+        "text": "پوچھیں",
+        "arguments": [],
+        "english_cells": 3,
+        "urdu_cells": 6,
+        "pseudo": "[پوچھیں··]",
+        "pseudo_cells": 10,
+        "isolated_codepoints": [
+          "U+2067",
+          "U+067E",
+          "U+0648",
+          "U+0686",
+          "U+06BE",
+          "U+06CC",
+          "U+06BA",
+          "U+2069"
+        ]
+      },
+      {
+        "key": "wire.settings.tool_approval_mode.choice.auto.label",
+        "text": "خودکار",
+        "arguments": [],
+        "english_cells": 9,
+        "urdu_cells": 6,
+        "pseudo": "[خودکار··]",
+        "pseudo_cells": 10,
+        "isolated_codepoints": [
+          "U+2067",
+          "U+062E",
+          "U+0648",
+          "U+062F",
+          "U+06A9",
+          "U+0627",
+          "U+0631",
+          "U+2069"
+        ]
+      }
+    ],
+    "same_as_english": {
+      "wire.settings.aida.title": "Aida",
+      "wire.settings.aida_cadence_at.placeholder": "08:30",
+      "wire.settings.aida_name.placeholder": "Aida",
+      "wire.settings.bash_memory_mode.choice.auto.label": "auto",
+      "wire.settings.bash_memory_mode.choice.manual.label": "manual",
+      "wire.settings.classification_vendor.choice.auto.label": "auto",
+      "wire.settings.classification_vendor.choice.openrouter.label": "openrouter",
+      "wire.settings.classification_vendor.choice.radient.label": "radient",
+      "wire.settings.classification_vendor.choice.typesafe.label": "typesafe",
+      "wire.settings.compaction_strategy.choice.auto.label": "auto",
+      "wire.settings.compaction_strategy.choice.context_full.label": "context-full",
+      "wire.settings.compaction_strategy.choice.snapcompact.label": "snapcompact",
+      "wire.settings.desktop_launch_command.placeholder": "local-operator-ui --open-session '{'session'}'",
+      "wire.settings.display_composer_command.placeholder": "~/bin/my-status.sh",
+      "wire.settings.display_nerd_icons.choice.none.label": "auto",
+      "wire.settings.display_time_format.choice.12h.description": "7:52 PM PDT",
+      "wire.settings.display_time_format.choice.24h.description": "19:52 PDT",
+      "wire.settings.hub.title": "Agent Hub",
+      "wire.settings.librarian.title": "Librarian",
+      "wire.settings.librarian_cadence_at.placeholder": "03:30",
+      "wire.settings.librarian_name.placeholder": "Librarian",
+      "wire.settings.model_effort.choice.unset.label": "auto",
+      "wire.settings.network_advertise_hosts.placeholder": "203.0.113.7:4097, tunnel.example.com:4100",
+      "wire.settings.network_credentials_github_repositories.placeholder": "damianvtran/scratch, damianvtran/sandbox",
+      "wire.settings.network_rollout_on_update.choice.auto.label": "auto",
+      "wire.settings.providers_openai_api.choice.chat_completions.label": "chat_completions",
+      "wire.settings.providers_openai_api.choice.responses.label": "responses",
+      "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label": "false",
+      "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label": "default",
+      "wire.settings.providers_openrouter_data_collection.choice.allow.label": "allow",
+      "wire.settings.providers_openrouter_data_collection.choice.deny.label": "deny",
+      "wire.settings.providers_openrouter_data_collection.choice.unset.label": "default",
+      "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label": "true",
+      "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label": "default",
+      "wire.settings.providers_openrouter_ignore.placeholder": "deepseek, groq, mistral, …",
+      "wire.settings.providers_openrouter_max_price.placeholder": "'{'\"prompt\": 1, \"completion\": 2'}'",
+      "wire.settings.providers_openrouter_only.placeholder": "deepseek, groq, mistral, …",
+      "wire.settings.providers_openrouter_order.placeholder": "deepseek, groq, mistral, …",
+      "wire.settings.providers_openrouter_quantizations.placeholder": "int8, fp8, mxfp4, …",
+      "wire.settings.providers_openrouter_require_parameters.choice.true.label": "true",
+      "wire.settings.providers_openrouter_require_parameters.choice.unset.label": "default",
+      "wire.settings.providers_openrouter_sort.choice.unset.label": "default",
+      "wire.settings.providers_openrouter_zdr.choice.true.label": "true",
+      "wire.settings.providers_openrouter_zdr.choice.unset.label": "default",
+      "wire.settings.session_scratchpad.title": "Scratchpad",
+      "wire.settings.shell_environment_exclude.placeholder": "OPENROUTER_API_KEY, …",
+      "wire.settings.shell_environment_inherit.placeholder": "LOCAL_OPERATOR_CONFIG_DIR, LANG, …",
+      "wire.settings.shell_environment_mode.choice.allowlist.label": "allowlist",
+      "wire.settings.shell_environment_mode.choice.inherit.label": "inherit",
+      "wire.settings.speech_transcription_cleanup.choice.auto.label": "auto",
+      "wire.settings.speech_transcription_cleanup.choice.client.label": "client",
+      "wire.settings.speech_transcription_cleanup.choice.provider.label": "provider",
+      "wire.settings.speech_voice_gender.choice.auto.label": "auto",
+      "wire.settings.speech_voice_gender.choice.female.label": "female",
+      "wire.settings.speech_voice_gender.choice.male.label": "male",
+      "wire.settings.static_roots.placeholder": "~/Documents, /Volumes/data/reports",
+      "wire.settings.supplements_denyprefixes.placeholder": "~/clients, ~/Documents/private",
+      "wire.settings.web_fetch_render_backend.choice.auto.label": "auto",
+      "wire.settings.web_fetch_render_backend.choice.stdlib.label": "stdlib",
+      "wire.settings.web_search_strategy.choice.ordered.label": "ordered",
+      "wire.settings.web_search_strategy.choice.round_robin.label": "round_robin"
+    },
+    "latin_runs": {
+      "wire.settings.agents.description": [
+        "reviewer",
+        "coder",
+        "aida",
+        "lop",
+        "agents",
+        "sync"
+      ],
+      "wire.settings.aida.description": [
+        "aida",
+        "pause",
+        "resume"
+      ],
+      "wire.settings.aida.title": [
+        "Aida"
+      ],
+      "wire.settings.aida_cadence_at.help": [
+        "HH",
+        "MM"
+      ],
+      "wire.settings.aida_cadence_paused.help": [
+        "aida",
+        "pause",
+        "resume"
+      ],
+      "wire.settings.aida_enabled.help": [
+        "aida"
+      ],
+      "wire.settings.aida_name.help": [
+        "aida",
+        "rename",
+        "name"
+      ],
+      "wire.settings.aida_name.placeholder": [
+        "Aida"
+      ],
+      "wire.settings.appearance.description": [
+        "TUI"
+      ],
+      "wire.settings.approvals.description": [
+        "approvals",
+        "auto",
+        "settings"
+      ],
+      "wire.settings.auto_save_conversation.help": [
+        "REPL",
+        "TUI"
+      ],
+      "wire.settings.bash_heavy_jobs_enabled.help": [
+        "bash"
+      ],
+      "wire.settings.bash_memory_enabled.help": [
+        "bash",
+        "RAM",
+        "lop"
+      ],
+      "wire.settings.bash_memory_limit_mb.help": [
+        "manual",
+        "auto"
+      ],
+      "wire.settings.bash_memory_limit_mb.label": [
+        "MB"
+      ],
+      "wire.settings.bash_memory_mode.choice.auto.label": [
+        "auto"
+      ],
+      "wire.settings.bash_memory_mode.choice.manual.description": [
+        "limit_mb"
+      ],
+      "wire.settings.bash_memory_mode.choice.manual.label": [
+        "manual"
+      ],
+      "wire.settings.bash_memory_mode.help": [
+        "auto",
+        "manual"
+      ],
+      "wire.settings.bash_query_budget_enabled.help": [
+        "grep",
+        "find",
+        "du",
+        "s"
+      ],
+      "wire.settings.bash_query_budget_seconds.help": [
+        "s",
+        "LOCAL_OPERATOR_ALLOW_SLOW_QUERY"
+      ],
+      "wire.settings.bash_shell.help": [
+        "bash",
+        "PATH",
+        "bash",
+        "bin",
+        "sh"
+      ],
+      "wire.settings.bash_shell.help.windows": [
+        "bash",
+        "PATH",
+        "bash",
+        "Git",
+        "bash",
+        "exe"
+      ],
+      "wire.settings.bash_shell.label": [
+        "Bash"
+      ],
+      "wire.settings.classification.description": [
+        "MCP"
+      ],
+      "wire.settings.classification_model.help": [
+        "id"
+      ],
+      "wire.settings.classification_timeoutms.help": [
+        "ms"
+      ],
+      "wire.settings.classification_timeoutms.label": [
+        "ms"
+      ],
+      "wire.settings.classification_vendor.choice.auto.label": [
+        "auto"
+      ],
+      "wire.settings.classification_vendor.choice.openrouter.description": [
+        "OpenRouter",
+        "alpha",
+        "decisions"
+      ],
+      "wire.settings.classification_vendor.choice.openrouter.label": [
+        "openrouter"
+      ],
+      "wire.settings.classification_vendor.choice.radient.description": [
+        "Radient"
+      ],
+      "wire.settings.classification_vendor.choice.radient.label": [
+        "radient"
+      ],
+      "wire.settings.classification_vendor.choice.typesafe.description": [
+        "TypeSafe",
+        "Jevons"
+      ],
+      "wire.settings.classification_vendor.choice.typesafe.label": [
+        "typesafe"
+      ],
+      "wire.settings.classification_vendor.help": [
+        "auto",
+        "Radient"
+      ],
+      "wire.settings.classification_waitms.help": [
+        "ms"
+      ],
+      "wire.settings.classification_waitms.label": [
+        "ms"
+      ],
+      "wire.settings.compaction_strategy.choice.auto.description": [
+        "snapcompact",
+        "context-full"
+      ],
+      "wire.settings.compaction_strategy.choice.auto.label": [
+        "auto"
+      ],
+      "wire.settings.compaction_strategy.choice.context_full.label": [
+        "context-full"
+      ],
+      "wire.settings.compaction_strategy.choice.snapcompact.label": [
+        "snapcompact"
+      ],
+      "wire.settings.compaction_strategy.help": [
+        "auto"
+      ],
+      "wire.settings.compaction_wire_bytes_budget.label": [
+        "bytes"
+      ],
+      "wire.settings.desktop_launch_command.help": [
+        "local-operator-ui",
+        "macOS",
+        "session",
+        "id"
+      ],
+      "wire.settings.desktop_launch_command.placeholder": [
+        "local-operator-ui",
+        "open-session",
+        "session"
+      ],
+      "wire.settings.display_composer_command.placeholder": [
+        "bin",
+        "my-status",
+        "sh"
+      ],
+      "wire.settings.display_composer_rate.help": [
+        "tok",
+        "s"
+      ],
+      "wire.settings.display_dock.help": [
+        "ctrl",
+        "g"
+      ],
+      "wire.settings.display_heading_markers.help": [
+        "markdown"
+      ],
+      "wire.settings.display_hide_cross_session.help": [
+        "lop",
+        "send"
+      ],
+      "wire.settings.display_nerd_icons.choice.none.label": [
+        "auto"
+      ],
+      "wire.settings.display_nerd_icons.help": [
+        "auto"
+      ],
+      "wire.settings.display_nerd_icons.label": [
+        "Nerd",
+        "Font"
+      ],
+      "wire.settings.display_notification_session_name.help": [
+        "Radient",
+        "push"
+      ],
+      "wire.settings.display_rail.help": [
+        "ANSWER"
+      ],
+      "wire.settings.display_terminal_title.help": [
+        "OSC"
+      ],
+      "wire.settings.display_time_format.choice.12h.description": [
+        "PM",
+        "PDT"
+      ],
+      "wire.settings.display_time_format.choice.24h.description": [
+        "PDT"
+      ],
+      "wire.settings.fork.description": [
+        "fork"
+      ],
+      "wire.settings.fork_cmux_placement.help": [
+        "cmux"
+      ],
+      "wire.settings.fork_cmux_placement.label": [
+        "cmux"
+      ],
+      "wire.settings.fork_mode.choice.switch.description": [
+        "resume"
+      ],
+      "wire.settings.guardrails_enabled.help": [
+        "dangerous-delete"
+      ],
+      "wire.settings.guardrails_rules_dir.help": [
+        "md",
+        "rules"
+      ],
+      "wire.settings.heavy_jobs.description": [
+        "GB"
+      ],
+      "wire.settings.hooks.description": [
+        "Claude",
+        "Code",
+        "Codex",
+        "PostToolUse"
+      ],
+      "wire.settings.hooks_forward_claude.help": [
+        "claude",
+        "PostToolUse"
+      ],
+      "wire.settings.hooks_forward_claude.label": [
+        "Claude",
+        "Code"
+      ],
+      "wire.settings.hooks_forward_codex.help": [
+        "codex",
+        "hooks",
+        "json",
+        "PostToolUse"
+      ],
+      "wire.settings.hooks_forward_codex.label": [
+        "Codex"
+      ],
+      "wire.settings.hooks_native.help": [
+        "lop",
+        "hooks",
+        "json"
+      ],
+      "wire.settings.hosting.help": [
+        "model",
+        "saved"
+      ],
+      "wire.settings.hub.description": [
+        "Agent",
+        "Hub",
+        "merge",
+        "hub",
+        "merge"
+      ],
+      "wire.settings.hub.title": [
+        "Agent",
+        "Hub"
+      ],
+      "wire.settings.hub_auto_update_agents.choice.true.description": [
+        "hub",
+        "merge"
+      ],
+      "wire.settings.hub_auto_update_agents.help": [
+        "hub",
+        "merge"
+      ],
+      "wire.settings.hub_auto_update_teams.choice.true.description": [
+        "hub",
+        "merge"
+      ],
+      "wire.settings.hub_auto_update_teams.help": [
+        "hub",
+        "merge"
+      ],
+      "wire.settings.hub_check_interval_min.help": [
+        "Hub"
+      ],
+      "wire.settings.keymap.description": [
+        "enter"
+      ],
+      "wire.settings.language.help": [
+        "auto"
+      ],
+      "wire.settings.librarian.description": [
+        "Librarian",
+        "Library",
+        "Library"
+      ],
+      "wire.settings.librarian.title": [
+        "Librarian"
+      ],
+      "wire.settings.librarian_cadence_at.help": [
+        "HH",
+        "MM"
+      ],
+      "wire.settings.librarian_cadence_paused.help": [
+        "resume",
+        "librarian"
+      ],
+      "wire.settings.librarian_enabled.help": [
+        "v",
+        "desktop",
+        "librarian"
+      ],
+      "wire.settings.librarian_enabled.label": [
+        "Librarian"
+      ],
+      "wire.settings.librarian_name.placeholder": [
+        "Librarian"
+      ],
+      "wire.settings.local_providers.base_url.help": [
+        "HTTP",
+        "S",
+        "API",
+        "login"
+      ],
+      "wire.settings.local_providers.base_url.label": [
+        "name",
+        "URL"
+      ],
+      "wire.settings.local_providers.description": [
+        "login",
+        "model",
+        "saved"
+      ],
+      "wire.settings.local_providers.models.help": [
+        "JSON",
+        "model-id",
+        "context_window"
+      ],
+      "wire.settings.local_providers.models.label": [
+        "name"
+      ],
+      "wire.settings.memory_guard.description": [
+        "RAM"
+      ],
+      "wire.settings.mesh_updates.description": [
+        "lop",
+        "update",
+        "update"
+      ],
+      "wire.settings.model.description": [
+        "model",
+        "saved"
+      ],
+      "wire.settings.model_effort.choice.unset.label": [
+        "auto"
+      ],
+      "wire.settings.model_name.help": [
+        "model",
+        "saved"
+      ],
+      "wire.settings.monitor_defaultintervals.help": [
+        "every",
+        "N",
+        "s"
+      ],
+      "wire.settings.monitor_defaultintervals.label": [
+        "s"
+      ],
+      "wire.settings.monitor_maxmonitors.help": [
+        "N"
+      ],
+      "wire.settings.monitor_runtimeoutms.help": [
+        "ms"
+      ],
+      "wire.settings.monitor_runtimeoutms.label": [
+        "ms"
+      ],
+      "wire.settings.network.description": [
+        "lop",
+        "network"
+      ],
+      "wire.settings.network_advertise_hosts.help": [
+        "host",
+        "port"
+      ],
+      "wire.settings.network_advertise_hosts.placeholder": [
+        "tunnel",
+        "example",
+        "com"
+      ],
+      "wire.settings.network_audit_max_age_days.help": [
+        "lop",
+        "network",
+        "log",
+        "export"
+      ],
+      "wire.settings.network_audit_max_bytes.help": [
+        "MiB",
+        "gzip",
+        "JSONL",
+        "k",
+        "MiB"
+      ],
+      "wire.settings.network_credentials_github_repositories.help": [
+        "GitHub",
+        "owner",
+        "repo",
+        "push",
+        "lop",
+        "network",
+        "credential",
+        "github",
+        "repos",
+        "use-default"
+      ],
+      "wire.settings.network_credentials_github_repositories.label": [
+        "GitHub"
+      ],
+      "wire.settings.network_credentials_github_repositories.placeholder": [
+        "damianvtran",
+        "scratch",
+        "damianvtran",
+        "sandbox"
+      ],
+      "wire.settings.network_credentials_grant_ttl_s.label": [
+        "s"
+      ],
+      "wire.settings.network_credentials_offline_hold_s.label": [
+        "s"
+      ],
+      "wire.settings.network_rollout_on_update.choice.auto.label": [
+        "auto"
+      ],
+      "wire.settings.network_rollout_on_update.choice.off.description": [
+        "lop",
+        "network",
+        "update"
+      ],
+      "wire.settings.network_rollout_on_update.help": [
+        "lop",
+        "update",
+        "lop",
+        "network",
+        "update",
+        "update"
+      ],
+      "wire.settings.network_sync_debounce_s.help": [
+        "pull",
+        "push"
+      ],
+      "wire.settings.network_sync_debounce_s.label": [
+        "s"
+      ],
+      "wire.settings.network_sync_tick_s.help": [
+        "stat"
+      ],
+      "wire.settings.network_sync_tick_s.label": [
+        "s"
+      ],
+      "wire.settings.openrouter.description": [
+        "OpenRouter",
+        "unset"
+      ],
+      "wire.settings.openrouter.title": [
+        "OpenRouter"
+      ],
+      "wire.settings.proactive_patience_default_ms.help": [
+        "s",
+        "h"
+      ],
+      "wire.settings.proactive_patience_default_ms.label": [
+        "ms"
+      ],
+      "wire.settings.proactive_patience_episode_ttl_ms.label": [
+        "TTL",
+        "ms"
+      ],
+      "wire.settings.providers.description": [
+        "API",
+        "TTL"
+      ],
+      "wire.settings.providers.title": [
+        "Wire"
+      ],
+      "wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.help": [
+        "API",
+        "Anthropic",
+        "TTL",
+        "x",
+        "Claude"
+      ],
+      "wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.label": [
+        "Anthropic",
+        "h"
+      ],
+      "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.help": [
+        "TTL",
+        "Claude"
+      ],
+      "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.label": [
+        "Anthropic",
+        "h"
+      ],
+      "wire.settings.providers_bedrock_auth.label": [
+        "Amazon",
+        "Bedrock"
+      ],
+      "wire.settings.providers_bedrock_region.help": [
+        "Bedrock",
+        "AWS",
+        "AWS_REGION"
+      ],
+      "wire.settings.providers_bedrock_region.label": [
+        "Amazon",
+        "Bedrock"
+      ],
+      "wire.settings.providers_openai_api.choice.chat_completions.label": [
+        "chat_completions"
+      ],
+      "wire.settings.providers_openai_api.choice.responses.description": [
+        "Responses",
+        "API"
+      ],
+      "wire.settings.providers_openai_api.choice.responses.label": [
+        "responses"
+      ],
+      "wire.settings.providers_openai_api.help": [
+        "OpenAI",
+        "GPT-",
+        "Responses",
+        "API"
+      ],
+      "wire.settings.providers_openai_api.label": [
+        "OpenAI",
+        "API"
+      ],
+      "wire.settings.providers_openai_use_max_context_window.label": [
+        "OpenAI"
+      ],
+      "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label": [
+        "false"
+      ],
+      "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.description": [
+        "OpenRouter"
+      ],
+      "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label": [
+        "default"
+      ],
+      "wire.settings.providers_openrouter_allow_fallbacks.help": [
+        "default",
+        "OpenRouter",
+        "false"
+      ],
+      "wire.settings.providers_openrouter_data_collection.choice.allow.label": [
+        "allow"
+      ],
+      "wire.settings.providers_openrouter_data_collection.choice.deny.label": [
+        "deny"
+      ],
+      "wire.settings.providers_openrouter_data_collection.choice.unset.label": [
+        "default"
+      ],
+      "wire.settings.providers_openrouter_data_collection.help": [
+        "deny",
+        "default",
+        "OpenRouter",
+        "allow"
+      ],
+      "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label": [
+        "true"
+      ],
+      "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label": [
+        "default"
+      ],
+      "wire.settings.providers_openrouter_enforce_distillable_text.help": [
+        "true",
+        "default"
+      ],
+      "wire.settings.providers_openrouter_ignore.placeholder": [
+        "deepseek",
+        "groq",
+        "mistral"
+      ],
+      "wire.settings.providers_openrouter_max_price.help": [
+        "prompt",
+        "completion",
+        "USD"
+      ],
+      "wire.settings.providers_openrouter_max_price.placeholder": [
+        "prompt",
+        "completion"
+      ],
+      "wire.settings.providers_openrouter_only.placeholder": [
+        "deepseek",
+        "groq",
+        "mistral"
+      ],
+      "wire.settings.providers_openrouter_order.placeholder": [
+        "deepseek",
+        "groq",
+        "mistral"
+      ],
+      "wire.settings.providers_openrouter_preferred_max_latency.help": [
+        "p"
+      ],
+      "wire.settings.providers_openrouter_preferred_max_latency.label": [
+        "s"
+      ],
+      "wire.settings.providers_openrouter_preferred_min_throughput.help": [
+        "p"
+      ],
+      "wire.settings.providers_openrouter_preferred_min_throughput.label": [
+        "tok",
+        "s"
+      ],
+      "wire.settings.providers_openrouter_provider_affinity.help": [
+        "OpenRouter"
+      ],
+      "wire.settings.providers_openrouter_quantizations.help": [
+        "int",
+        "fp",
+        "mxfp"
+      ],
+      "wire.settings.providers_openrouter_quantizations.placeholder": [
+        "int",
+        "fp",
+        "mxfp"
+      ],
+      "wire.settings.providers_openrouter_require_parameters.choice.true.label": [
+        "true"
+      ],
+      "wire.settings.providers_openrouter_require_parameters.choice.unset.label": [
+        "default"
+      ],
+      "wire.settings.providers_openrouter_require_parameters.help": [
+        "true",
+        "default",
+        "OpenRouter"
+      ],
+      "wire.settings.providers_openrouter_sort.choice.unset.label": [
+        "default"
+      ],
+      "wire.settings.providers_openrouter_sort.help": [
+        "OpenRouter",
+        "default"
+      ],
+      "wire.settings.providers_openrouter_zdr.choice.true.label": [
+        "true"
+      ],
+      "wire.settings.providers_openrouter_zdr.choice.unset.label": [
+        "default"
+      ],
+      "wire.settings.providers_openrouter_zdr.help": [
+        "true",
+        "default"
+      ],
+      "wire.settings.query_budget.description": [
+        "grep",
+        "find",
+        "du",
+        "s"
+      ],
+      "wire.settings.remote_compute.description": [
+        "Radient"
+      ],
+      "wire.settings.remote_compute_enabled.help": [
+        "Radient"
+      ],
+      "wire.settings.retry_basedelayms.label": [
+        "ms"
+      ],
+      "wire.settings.retry_connectivitybackoffcapms.label": [
+        "ms"
+      ],
+      "wire.settings.retry_maxretries.help": [
+        "xx"
+      ],
+      "wire.settings.retry_usageawareaccountpick.help": [
+        "usage"
+      ],
+      "wire.settings.runtime_background_on_resume.label": [
+        "resume"
+      ],
+      "wire.settings.runtime_keep_alive_seconds.label": [
+        "s"
+      ],
+      "wire.settings.runtime_unattended_gate_timeout.label": [
+        "h"
+      ],
+      "wire.settings.send_journal_unconfirmed.help": [
+        "send"
+      ],
+      "wire.settings.send_journal_unconfirmed.label": [
+        "send"
+      ],
+      "wire.settings.session_cleanup_max_sessions.help": [
+        "N",
+        "resume"
+      ],
+      "wire.settings.session_cleanup_max_total_bytes.label": [
+        "bytes"
+      ],
+      "wire.settings.session_delegated.description": [
+        "push",
+        "commit",
+        "git"
+      ],
+      "wire.settings.session_scratchpad.title": [
+        "Scratchpad"
+      ],
+      "wire.settings.session_scratchpad_max_bytes.help": [
+        "Scratchpad",
+        "MiB",
+        "GiB",
+        "MiB"
+      ],
+      "wire.settings.session_scratchpad_max_bytes.label": [
+        "Scratchpad",
+        "bytes"
+      ],
+      "wire.settings.shell_environment_exclude.help": [
+        "bash",
+        "eval",
+        "MCP"
+      ],
+      "wire.settings.shell_environment_exclude.placeholder": [
+        "OPENROUTER_API_KEY"
+      ],
+      "wire.settings.shell_environment_inherit.help": [
+        "allowlist",
+        "LOCAL_OPERATOR_CONFIG_DIR",
+        "lop",
+        "secret",
+        "get",
+        "NAME",
+        "LANG",
+        "inherit"
+      ],
+      "wire.settings.shell_environment_inherit.label": [
+        "allowlist"
+      ],
+      "wire.settings.shell_environment_inherit.placeholder": [
+        "LOCAL_OPERATOR_CONFIG_DIR",
+        "LANG"
+      ],
+      "wire.settings.shell_environment_mode.choice.allowlist.label": [
+        "allowlist"
+      ],
+      "wire.settings.shell_environment_mode.choice.inherit.label": [
+        "inherit"
+      ],
+      "wire.settings.shell_environment_mode.help": [
+        "inherit",
+        "gh",
+        "aws",
+        "npm",
+        "allowlist",
+        "PATH",
+        "HOME",
+        "SHELL",
+        "TERM",
+        "USER",
+        "LOGNAME"
+      ],
+      "wire.settings.speech.description": [
+        "hub"
+      ],
+      "wire.settings.speech_transcription_cleanup.choice.auto.label": [
+        "auto"
+      ],
+      "wire.settings.speech_transcription_cleanup.choice.client.label": [
+        "client"
+      ],
+      "wire.settings.speech_transcription_cleanup.choice.provider.label": [
+        "provider"
+      ],
+      "wire.settings.speech_transcription_cleanup.help": [
+        "auto",
+        "provider",
+        "client",
+        "cleanup"
+      ],
+      "wire.settings.speech_voice_accent.help": [
+        "en-GB"
+      ],
+      "wire.settings.speech_voice_expressiveness.help": [
+        "ElevenLabs",
+        "OpenAI"
+      ],
+      "wire.settings.speech_voice_gender.choice.auto.label": [
+        "auto"
+      ],
+      "wire.settings.speech_voice_gender.choice.female.label": [
+        "female"
+      ],
+      "wire.settings.speech_voice_gender.choice.male.label": [
+        "male"
+      ],
+      "wire.settings.speech_voice_gender.help": [
+        "auto"
+      ],
+      "wire.settings.speech_voice_instructions.help": [
+        "OpenAI"
+      ],
+      "wire.settings.speech_voice_language.help": [
+        "auto",
+        "es"
+      ],
+      "wire.settings.static.description": [
+        "HTML"
+      ],
+      "wire.settings.static_roots.help": [
+        "loopback",
+        "loopback"
+      ],
+      "wire.settings.static_roots.placeholder": [
+        "Documents",
+        "Volumes",
+        "data",
+        "reports"
+      ],
+      "wire.settings.static_roots.warning": [
+        "non-loopback"
+      ],
+      "wire.settings.subagents_max_running.help": [
+        "bash"
+      ],
+      "wire.settings.subagents_model_choice.choice.operator.description": [
+        "inherit"
+      ],
+      "wire.settings.subagents_models_hi.help": [
+        "default"
+      ],
+      "wire.settings.subagents_models_hi.label": [
+        "hi"
+      ],
+      "wire.settings.subagents_models_lo.help": [
+        "default"
+      ],
+      "wire.settings.subagents_models_lo.label": [
+        "lo"
+      ],
+      "wire.settings.subagents_models_med.help": [
+        "default"
+      ],
+      "wire.settings.subagents_models_med.label": [
+        "med"
+      ],
+      "wire.settings.supplements.description": [
+        "LOP_SUPPLEMENTS"
+      ],
+      "wire.settings.supplements_denyprefixes.placeholder": [
+        "clients",
+        "Documents",
+        "private"
+      ],
+      "wire.settings.supplements_maxfeatured.help": [
+        "N"
+      ],
+      "wire.settings.supplements_model.help": [
+        "auto",
+        "session"
+      ],
+      "wire.settings.supplements_timeouts.label": [
+        "s"
+      ],
+      "wire.settings.team_bridge_enabled.help": [
+        "Radient"
+      ],
+      "wire.settings.team_bridge_session.label": [
+        "CoS"
+      ],
+      "wire.settings.tool_approval_mode.help": [
+        "approvals",
+        "auto"
+      ],
+      "wire.settings.tools_defer.help": [
+        "tool",
+        "name"
+      ],
+      "wire.settings.tools_search_interception_enabled.help": [
+        "grep",
+        "rg",
+        "find",
+        "grep"
+      ],
+      "wire.settings.tools_search_interception_rg_excludes.help": [
+        "ripgrep",
+        "node_modules",
+        "git",
+        "out",
+        "rg",
+        "ripgrep"
+      ],
+      "wire.settings.tools_search_interception_rg_excludes.label": [
+        "ripgrep"
+      ],
+      "wire.settings.tui_sidebar_show_subagents.help": [
+        "Ctrl",
+        "A"
+      ],
+      "wire.settings.tui_sidebar_visible.help": [
+        "Ctrl",
+        "B"
+      ],
+      "wire.settings.tui_theme.help": [
+        "theme"
+      ],
+      "wire.settings.update_auto_prune.help": [
+        "lop",
+        "install",
+        "prune"
+      ],
+      "wire.settings.updates.description": [
+        "lop",
+        "update"
+      ],
+      "wire.settings.wakes_triggers_max_per_day.help": [
+        "h"
+      ],
+      "wire.settings.wakes_triggers_project_staleness_enabled.help": [
+        "done",
+        "paused",
+        "archived"
+      ],
+      "wire.settings.web_fetch_allow_private.help": [
+        "SSRF",
+        "loopback",
+        "link-local"
+      ],
+      "wire.settings.web_fetch_cache_ttl_seconds.help": [
+        "URL"
+      ],
+      "wire.settings.web_fetch_cache_ttl_seconds.label": [
+        "TTL",
+        "s"
+      ],
+      "wire.settings.web_fetch_enabled.help": [
+        "read",
+        "url"
+      ],
+      "wire.settings.web_fetch_enrich.choice.false.description": [
+        "HTML"
+      ],
+      "wire.settings.web_fetch_enrich.help": [
+        "HTML",
+        "md",
+        "llms",
+        "txt"
+      ],
+      "wire.settings.web_fetch_render_backend.choice.auto.description": [
+        "markdownify",
+        "stdlib"
+      ],
+      "wire.settings.web_fetch_render_backend.choice.auto.label": [
+        "auto"
+      ],
+      "wire.settings.web_fetch_render_backend.choice.stdlib.label": [
+        "stdlib"
+      ],
+      "wire.settings.web_fetch_render_backend.help": [
+        "fetch",
+        "extra",
+        "auto",
+        "markdownify"
+      ],
+      "wire.settings.web_fetch_render_backend.label": [
+        "HTML"
+      ],
+      "wire.settings.web_fetch_timeout_seconds.label": [
+        "s"
+      ],
+      "wire.settings.web_search_deepseek_evidence.help": [
+        "DeepSeek"
+      ],
+      "wire.settings.web_search_deepseek_evidence.label": [
+        "DeepSeek"
+      ],
+      "wire.settings.web_search_read_enabled.help": [
+        "web_read"
+      ],
+      "wire.settings.web_search_searxng_endpoint.help": [
+        "SearXNG",
+        "URL"
+      ],
+      "wire.settings.web_search_searxng_endpoint.label": [
+        "SearXNG",
+        "URL"
+      ],
+      "wire.settings.web_search_strategy.choice.ordered.label": [
+        "ordered"
+      ],
+      "wire.settings.web_search_strategy.choice.round_robin.label": [
+        "round_robin"
+      ],
+      "wire.settings.web_search_timeout_seconds.label": [
+        "s"
+      ],
+      "wire.settings.mesh_move_working_set_max_bytes.help": [
+        "commits",
+        "staged",
+        "unstaged",
+        "untracked",
+        "MiB"
+      ],
+      "wire.settings.mesh_move_working_set_roots.help": [
+        "code",
+        "work",
+        "PATH",
+        "node_modules"
+      ],
+      "wire.settings.providers_bedrock_auth.help": [
+        "ambient",
+        "Bedrock",
+        "AWS",
+        "IAM"
+      ]
+    },
+    "supplemental_key": {
+      "key": "wire.settings.providers_bedrock_auth.help",
+      "arguments": [],
+      "plural_selectors": [],
+      "literal_roundtrip": true,
+      "NFC": true,
+      "authored_bidi_controls": false,
+      "cells": 72,
+      "syntax": "literal text; zero ICU arguments",
+      "source": "/Users/damian/.local-operator/sessions/28a481e6b878/scratchpad/ur-B-bedrock-approved-observation.json",
+      "source_sha256": "e8c782c861f58697c13ca3c1c73806f8e215e6897aa1eed0c43150b881cb4846"
+    },
+    "prior_894_control_file": "/Users/damian/.local-operator/sessions/28a481e6b878/scratchpad/ur-B-controls.json",
+    "scope_note": "894 cached readable pairs validated once plus one separately validated dedicated-key response; no second whole-namespace run."
+  },
+  "exceptions": {
+    "proper_persona_names": [
+      "wire.settings.aida.title",
+      "wire.settings.aida_name.placeholder",
+      "wire.settings.librarian.title",
+      "wire.settings.librarian_name.placeholder",
+      "wire.settings.librarian_enabled.label"
+    ],
+    "reason_persona": "Aida/Librarian identify the configured assistant persona; not blanket permission for the common noun Library.",
+    "brand_labels": [
+      "wire.settings.hub.title",
+      "wire.settings.classification_vendor.choice.openrouter.label",
+      "wire.settings.classification_vendor.choice.radient.label",
+      "wire.settings.classification_vendor.choice.typesafe.label"
+    ],
+    "named_technical_choice_labels": {
+      "wire.settings.compaction_strategy.choice.context_full.label": "Named compaction mechanism context-full",
+      "wire.settings.compaction_strategy.choice.snapcompact.label": "Named compaction mechanism snapcompact",
+      "wire.settings.providers_openai_api.choice.chat_completions.label": "OpenAI API surface identifier",
+      "wire.settings.providers_openai_api.choice.responses.label": "OpenAI API surface identifier",
+      "wire.settings.web_fetch_render_backend.choice.stdlib.label": "Named Python standard-library implementation"
+    },
+    "syntax": "Commands, slash commands, paths, file globs, tool names, APIs, HH:MM/time examples, environment names, API JSON keys, provider/model brands, endpoint slugs, units MB/MiB/GiB/ms/s/h/tok/s and explicitly quoted input sentinel default in subagent model help remain named technical exceptions, not human-label exceptions."
+  },
+  "limits": [
+    "No real renderer/browser/TUI/native RTL shaping or clipping tested; codepoint isolation and cell counts are not visual proof.",
+    "No whole-UI, merge, release or translation-ledger clearance.",
+    "No repository edits, generated catalogues, commits, settings or live credentials touched.",
+    "Suggestions are audit findings only; translator must implement in the one manager-owned remediation batch."
+  ],
+  "inputs": {
+    "en_path": "/Users/damian/.local-operator/sessions/6448acb16e8d/scratchpad/approval-full-en-A-approved-capture.json",
+    "ur_path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-full-inputs/ur-approved-envelope.json",
+    "en_envelope_sha256": "9ff37d2efa1d9c367ce7dcc9a01f1fa9f60f74601daf20dbb9d86c85698bf096",
+    "ur_envelope_sha256": "409c3ef0a5e038d9d7f946f4deef6320fe3a1b3b84d506664b29b9fe3a7a8cc3",
+    "en_canonical_map_sha256": "f621866fb5e74c1b617e29e17d02008cb42dce6574aa3624ff9a557e1ef2a7b6",
+    "ur_canonical_map_sha256": "e6c63341892cd662978163945003e96c0630c6a61a4e2f1cb856a18b4a5aa2c0",
+    "binding": "Both envelopes public_copy=true repository_verified=true repository=damianvtran/local-operator root=pinned worktree commit=H; original en/ur/context file hashes independently checked as metadata only. details.sha256 refers to formatted tool text, not original source file.",
+    "supplemental_approved_key_observation": "/Users/damian/.local-operator/sessions/28a481e6b878/scratchpad/ur-B-bedrock-approved-observation.json",
+    "partial_receipt": "/Users/damian/.local-operator/sessions/28a481e6b878/scratchpad/approval-full-ur-B-partial-894.json",
+    "partial_receipt_sha256": "0da17ff84bc19726461c72d63a4b4c2a6147f3a8f1f8aa11c5114caf291fe429"
+  },
+  "overall_verdict": "FAIL: all 895 EN/UR pairs and 104 context entries freshly read. Two changed approval labels pass; inherited namespace has 51 per-key major findings. Dedicated remaining-key reader resolved display masking; no unread keys remain."
+}

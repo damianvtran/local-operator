@@ -1,0 +1,66 @@
+{
+  "locale": "hi",
+  "namespace": "wire.settings",
+  "side": "B",
+  "round": 1,
+  "head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+  "source_sha256": "298fc1100cb10bfa34909aa245307a735dad318f456e5bbfb5337fbcdb1e8962",
+  "target_sha256": "64bf453ca81721ed35d89ba95d7e5e5aac343765d5e6010fbd37ccbc50704f48",
+  "status": "failed",
+  "prior_receipt": {
+    "path": "/Users/damian/.local-operator/sessions/bbc40416334c/scratchpad/approval-full-hi-B.json",
+    "sha256": "e4e1d05e7b637bc9268e3aab267f21f1a0469208113cb8081c5b393267a23ba6",
+    "preserved_unchanged": true
+  },
+  "scope": "Only previously unreadable Bedrock help key; prior 894 semantic reviews and findings retained, not re-run.",
+  "auditor": {
+    "agent": "approval-full-hi-B-cached / bbc40416334c",
+    "model": "anthropic/claude-opus-5-5",
+    "model_source": "Current resumed host system Model metadata; no fallback notice in this completion turn. Prior full audit model remains openai/gpt-6.1-sol as recorded in original receipt.",
+    "findings": 35,
+    "minor_count": 1
+  },
+  "actual_public_copy_call": {
+    "tool": "read_public_copy",
+    "arguments": {
+      "path": "local_operator/i18n/catalogues/hi/wire.settings.json",
+      "key": "wire.settings.providers_bedrock_auth.help",
+      "repo_root": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy"
+    },
+    "response": {
+      "wire.settings.providers_bedrock_auth.help": "ambient: Bedrock के लिए इस मशीन के AWS क्रेडेंशियल्स (IAM रोल) इस्तेमाल करें।"
+    },
+    "response_canonical_sha256": "2d38ab48ca0d1f597c7a24ac23fe18d85543845df194b3f877893c6b3cc0ce1b",
+    "metadata_limit": "The visible dedicated tool response exposes the key/value only, not an original tool envelope, commit metadata or audit-log ID; none invented. Authorization pins the same frozen H. This canonical response hash is not the original catalogue hash."
+  },
+  "independent_key_review": {
+    "key": "wire.settings.providers_bedrock_auth.help",
+    "english_source": "ambient: use this machine's AWS credentials (IAM role) for Bedrock.",
+    "current": "ambient: Bedrock के लिए इस मशीन के AWS क्रेडेंशियल्स (IAM रोल) इस्तेमाल करें।",
+    "status": "passed",
+    "findings": [],
+    "reason": "Accurately instructs use of this machine’s AWS credentials/IAM role for Bedrock. ambient is the literal input value and Bedrock/AWS/IAM are named technical identifiers. Polite imperative इस्तेमाल करें matches locale register. No permission or cross-device credential claim introduced.",
+    "nfc": true,
+    "literal_arguments": 0,
+    "plural_select_skeleton_nodes": 0,
+    "bidi_controls": 0,
+    "rendered_fit": "Not exercised; no claim."
+  },
+  "combined_coverage": {
+    "pairs_inspected": 895,
+    "pairs_semantically_readable": 895,
+    "context_entries_read": 104,
+    "retained_semantic_keys_from_prior_receipt": 894,
+    "newly_completed_semantic_keys": 1,
+    "remaining_unreadable_keys": []
+  },
+  "combined_verdict": "FAILED: inherited majors in prior receipt remain unchanged. Newly completed key and two approval labels pass; this is not whole-namespace approval.",
+  "reader_lease": "Released immediately by hub callback after successful one-key read; no additional public-copy calls.",
+  "limits": [
+    "No repo edits or translation changes.",
+    "No repeat 895-key matrix, native tests, browser or real-settings access.",
+    "Prior catalogue mask was a generic output masking limitation, not a literal catalogue defect.",
+    "No whole-UI, merge or release clearance."
+  ],
+  "created_at": "2026-11-22T02:01:25.201415+00:00"
+}

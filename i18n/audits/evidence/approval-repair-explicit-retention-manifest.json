@@ -1,0 +1,257 @@
+{
+  "schema": "approval-repair-explicit-retention-manifest/v1",
+  "head": "4880031aeed59ef17ae6ffccc15d28e1fc0db104",
+  "disposition": "Do not stage now. Explicit retained-candidate list for final owner; prior original bytes immutable. Unknown paths left untouched.",
+  "prior_untracked_inputs": [
+    {
+      "path": "i18n/audits/evidence/approval-choice-postauthor-input-cache.json",
+      "sha256": "319e6a8f0024bd98d48eabf2fbd1889c1b0994e95d4cd4daef44cb6263d67595",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-choice-postauthor-manifest.json",
+      "sha256": "32f10398c98e0396c6e6aed4678417844dedae052cf5060888ca9b935cfef24c",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-artifact-manifest.json",
+      "sha256": "e721b80b8b119620cf58a71d079b53968d89c263f2b285ce06b4815ba06810c3",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-deduplicated-ledger.json",
+      "sha256": "49545fbab400cf28b982979241348787f5132da4c63f1825c3f1bf52da7585d1",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-deduplicated-ledger.md",
+      "sha256": "6664b77f9b4c49ddb96d0cd9273a8eeb0cc867411eb3dede72e6a3d51c8e6e08",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-es-A-controls-original.json",
+      "sha256": "addb175a09fd74a49d99746f53d33e88bf092ee5898ed8641cc61dcedbe831bb",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-es-A-original.json",
+      "sha256": "a358c64f26216f1f1f64b16106280ce68930e10e0da78064c5bf4dc09677c58f",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-es-B-original.json",
+      "sha256": "71f78716b085361399a1eb11972f29f63b1939a7824e512277ab2c115c14143b",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-fr-A-completion-original.json",
+      "sha256": "bd893fcc27192a4278c7bbe98db1e0e8a3070d18554f87975b9c7a8c004d205c",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-fr-A-original.json",
+      "sha256": "fc01b10cc9654466b8d7642ac8abc56a7134b6f65f366c14c92d7e10828ec260",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-fr-B-original.json",
+      "sha256": "91f97ad0d5a0eee3bbd725f95e7557afeec9b6c4c88432797095808ea76f3403",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-hi-A-original.json",
+      "sha256": "5ac08be8343013a12e7ddb7c67f76e2f39e77f9187a4fdba311c8e638f56712e",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-hi-B-original.json",
+      "sha256": "e4e1d05e7b637bc9268e3aab267f21f1a0469208113cb8081c5b393267a23ba6",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-hi-B-supplement-original.json",
+      "sha256": "4ff4d63195be535d53353bd40cad86badf907a3c47e27a8d4591fcd7c271e33b",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-inputs/Englishvoiceconstant-full-en-approved-capture.json",
+      "sha256": "c17b1262dc76d312cfa21313bd0d1414e2b4132d9900265119d4c1d8d9c237f6",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-inputs/en-approved-envelope.json",
+      "sha256": "9ff37d2efa1d9c367ce7dcc9a01f1fa9f60f74601daf20dbb9d86c85698bf096",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-inputs/es-approved-envelope.json",
+      "sha256": "ba48ba9c815b8a17b106c6b7d31248ca3d9dc41e1a8a7fd024e396f0011e5c3d",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-inputs/fr-approved-envelope.json",
+      "sha256": "447eb746d2587c0a9f9e751de50ac1eab3f0ca86fd1304c1b4556e2ea3fcdbd3",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-inputs/hi-approved-envelope.json",
+      "sha256": "444e3b4284616f74b29316a4086e57acd9ba2a3cfdc7b6bef5223ea947c62399",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-inputs/manifest.json",
+      "sha256": "f449f139ce2ea003f4c462c8b4e881b5aa12b92e5afdd8bf4e856dbd662216cf",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-inputs/ru-approved-envelope.json",
+      "sha256": "5456f858a3d0e6313a94516363026f64bea9275ab84f8ff0337fa2e2c77a0efc",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-inputs/ur-approved-envelope.json",
+      "sha256": "409c3ef0a5e038d9d7f946f4deef6320fe3a1b3b84d506664b29b9fe3a7a8cc3",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-inputs/vi-approved-envelope.json",
+      "sha256": "52e670c402ed50980476898f124309bff68fd2d7fbe290e6fb72f6339fc10791",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-inputs/zh-CN-approved-envelope.json",
+      "sha256": "1f2b4b9dddcd1059cc52c023b8bacd05de07a7695b222a3cbe82ba77672e4849",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-root-adjudication.json",
+      "sha256": "eb7019f1489f26e7f2aec5dee38aa082cf3e45fb6bef5cce609f5ddc5663f0d8",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-ru-A-original.json",
+      "sha256": "64132c31b410d70ec6141b01a2a73381ce96d631eb98be4dfae20e6bc9552487",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-ru-B-original.json",
+      "sha256": "e32d06161fb91b228db83f62303203fe020e666a34b53eb80822b1789203a067",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-ur-A-controls-original.json",
+      "sha256": "76e689b6c0d3ecf738cda184d27c07487918bddcc539184d29bcd758add64e32",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-ur-A-original.json",
+      "sha256": "aa7b06e7e8bc644b545c6e67ceb69c0668b0a1ba8c0b31996e36de59f91b1f2e",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-ur-A-scoped-observation-original.json",
+      "sha256": "0e4d30af753d54f339836222604c6a1e41877c02ad30d4c47b99aa6961dd84e9",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-ur-B-completed-original.json",
+      "sha256": "02d5d916f1b0b633ec537fb9d44dfca774278dcfe6330e81407595d0928b9ea2",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-ur-B-original.json",
+      "sha256": "0da17ff84bc19726461c72d63a4b4c2a6147f3a8f1f8aa11c5114caf291fe429",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-vi-A-controls-original.json",
+      "sha256": "70284ba1ca7b10085f9a85013f59ca15b741316713ba6d92159c0e60fce6d0bf",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-vi-A-original.json",
+      "sha256": "e8b01da98da13e3dd13920082996c326fc9cef187dc7e611e5e2b28139df7fe9",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-vi-B-original.json",
+      "sha256": "216f6ddc816932cf7d933311f191f2f3235d2ea732bb74d14a67ffe476aaedf2",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-zh-CN-A-original.json",
+      "sha256": "3dd534f7a038b3b9584307c4e2daf678b09589c976d8417e479121d8bcffce26",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-full-zh-CN-B-original.json",
+      "sha256": "fc9c9490aef2a16e6263965c63647188eb2073b404524a3d951b4e114676935c",
+      "owner": "Root/auditors; owner final disposition pending"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-repair-parent-count-verification.json",
+      "sha256": "322a955f93dd7aa616741bf95847d28caa13881c0d3c202ceba0f432ae7c107a",
+      "owner": "Root/auditors; owner final disposition pending"
+    }
+  ],
+  "new_integrator_evidence": [
+    {
+      "path": "i18n/audits/evidence/approval-repair-postauthor-inputs/zh-CN-approved-envelope.json",
+      "sha256": "0a5d86bc93aed322c629905a1f7ce7e995f694d1b4397055329a44ccf1ab6d83"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-repair-postauthor-inputs/fr-approved-envelope.json",
+      "sha256": "0908ec27c12a67a5fcfea065afe1e41d32f16a0c976e76be2940e00ba1e277ac"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-repair-postauthor-inputs/es-approved-envelope.json",
+      "sha256": "c6695c9c7498c0da21bebc643199c5fe50f979beb4adb47cac9761e04e210265"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-repair-postauthor-inputs/ru-approved-envelope.json",
+      "sha256": "d02b2b66f514b794a1309fb349b6236fd02786cbc34e24f3b3de1d6c88e00848"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-repair-postauthor-inputs/vi-approved-envelope.json",
+      "sha256": "4a1da59eb3602aa4ffa2a7c426431605a16cd4aaeddfc6da09b02bcc0d469792"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-repair-postauthor-inputs/hi-approved-envelope.json",
+      "sha256": "504bc524811de4012caa9b040bd4e697dcb46277636d7dc24556af97d30ad418"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-repair-postauthor-inputs/ur-approved-envelope.json",
+      "sha256": "1eb49bedaaae1880005cf5ba5d114524d2863c00acc585338b27a953c0acf5c7"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-repair-postauthor-inputs/manifest.json",
+      "sha256": "ded49b2ba05e698f284de1676ee4fa16ee5f89a91dc23be4fc714f4175595390"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-repair-private-freeze-controls.json",
+      "sha256": "4da0496e51e46c1037993d59ac267e147374364ff5267f10de3cad694c406486"
+    },
+    {
+      "path": "i18n/audits/evidence/approval-repair-root-ready-readerbrief.json",
+      "sha256": "e06649f101e397c32acd49b83cdc816209687d86c0f491fcafa12be03f9adf29"
+    }
+  ],
+  "unknown_untracked_paths_left_untouched": [],
+  "private_commit_exact_paths": [
+    "local_operator/i18n/catalogues/zh-CN/wire.settings.json",
+    "local_operator/i18n/catalogues/fr/wire.settings.json",
+    "local_operator/i18n/catalogues/es/wire.settings.json",
+    "local_operator/i18n/catalogues/ru/wire.settings.json",
+    "local_operator/i18n/catalogues/vi/wire.settings.json",
+    "local_operator/i18n/catalogues/hi/wire.settings.json",
+    "local_operator/i18n/catalogues/ur/wire.settings.json",
+    "i18n/audits/evidence/approval-full-repair-author-zh-CN.json",
+    "i18n/audits/evidence/approval-full-repair-author-fr.json",
+    "i18n/audits/evidence/approval-full-repair-author-es.json",
+    "i18n/audits/evidence/approval-full-repair-author-ru.json",
+    "i18n/audits/evidence/approval-full-repair-author-vi.json",
+    "i18n/audits/evidence/approval-full-repair-author-hi.json",
+    "i18n/audits/evidence/approval-full-repair-author-ur.json",
+    "i18n/audits/evidence/approval-repair-private-freeze-sourcebinding.json"
+  ]
+}

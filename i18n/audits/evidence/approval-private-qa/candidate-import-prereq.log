@@ -1,0 +1,40 @@
+{
+  "python": "/Users/damian/local-operator/.venv/bin/python",
+  "HOME": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/private-qa-import/home",
+  "config": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/private-qa-import/home/config",
+  "cwd": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/private-qa-import",
+  "versions": {
+    "textual": "8.2.8",
+    "fastapi": "0.143.0",
+    "httpx": "0.28.1",
+    "pydantic": "2.14.1",
+    "rich": "15.0.0"
+  }
+}
+IMPORT_ATTEMPT local_operator
+IMPORT_OK local_operator /Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/local_operator/__init__.py
+IMPORT_ATTEMPT local_operator.settings_io
+IMPORT_OK local_operator.settings_io /Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/local_operator/settings_io.py
+IMPORT_ATTEMPT local_operator.tui.app
+IMPORT_OK local_operator.tui.app /Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/local_operator/tui/app.py
+CSS_PATH local_operator.tcss
+IMPORT_ATTEMPT tests.unit.tui.test_app_pilot
+IMPORT_OK tests.unit.tui.test_app_pilot /Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/tests/unit/tui/test_app_pilot.py
+IMPORT_ATTEMPT local_operator.server.routes.settings
+IMPORT_OK local_operator.server.routes.settings /Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/local_operator/server/routes/settings.py
+SHIPPED {
+  "locales": [
+    "en",
+    "fr",
+    "es",
+    "zh-CN",
+    "ru",
+    "vi",
+    "ur",
+    "hi"
+  ],
+  "schema": 1
+}
+
+EN_SOURCE_SHA256 d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1
+IMPORT_PREREQUISITE_PASS

@@ -1,0 +1,51 @@
+{
+  "head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+  "records": [
+    {
+      "locale": "es",
+      "head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+      "path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-full-inputs/es-approved-envelope.json",
+      "envelope_sha256": "ba48ba9c815b8a17b106c6b7d31248ca3d9dc41e1a8a7fd024e396f0011e5c3d",
+      "canonical_map_sha256": "f23f987795b13044ef9107441dbe55ab37db9221c6198dfaa19a381056ddcbd8",
+      "original_file_sha256": "e1026565e8003ddb8985c82e0b23de028a7ac4e01b5fbd5e4b6a3294660c64a5",
+      "keys": 895
+    },
+    {
+      "locale": "ru",
+      "head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+      "path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-full-inputs/ru-approved-envelope.json",
+      "envelope_sha256": "5456f858a3d0e6313a94516363026f64bea9275ab84f8ff0337fa2e2c77a0efc",
+      "canonical_map_sha256": "8bbe29760a31a538fefbf2848c9f2cf32a52e2fc92bd04e45c464e98071cdc52",
+      "original_file_sha256": "87ac6464c94f359c7ba6a045fe0e8d0ed1297c653d036d47da0aaedf3b90f4f8",
+      "keys": 895
+    },
+    {
+      "locale": "vi",
+      "head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+      "path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-full-inputs/vi-approved-envelope.json",
+      "envelope_sha256": "52e670c402ed50980476898f124309bff68fd2d7fbe290e6fb72f6339fc10791",
+      "canonical_map_sha256": "205044157074ec080724acc44010dede27b5cfa81d797b01bb451cf46648e3dc",
+      "original_file_sha256": "830fc55bf9a1df0dfb3d915574800b0aa563b83a95a9ed36caf7ebeb9ecbf28b",
+      "keys": 895
+    },
+    {
+      "locale": "hi",
+      "head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+      "path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-full-inputs/hi-approved-envelope.json",
+      "envelope_sha256": "444e3b4284616f74b29316a4086e57acd9ba2a3cfdc7b6bef5223ea947c62399",
+      "canonical_map_sha256": "5b23e59e189b2a767a4c47ddd5af911cc0f1d2187c52f4d914b00687dc56bafc",
+      "original_file_sha256": "64bf453ca81721ed35d89ba95d7e5e5aac343765d5e6010fbd37ccbc50704f48",
+      "keys": 895
+    },
+    {
+      "locale": "ur",
+      "head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+      "path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-full-inputs/ur-approved-envelope.json",
+      "envelope_sha256": "409c3ef0a5e038d9d7f946f4deef6320fe3a1b3b84d506664b29b9fe3a7a8cc3",
+      "canonical_map_sha256": "e6c63341892cd662978163945003e96c0630c6a61a4e2f1cb856a18b4a5aa2c0",
+      "original_file_sha256": "79869c119f2cb73152c50a4a3ffb647441cd0b0db0fb1f49a76f29a15324bc5e",
+      "keys": 895
+    }
+  ],
+  "invariant": "Each complete 895-key map acquired sequentially by read_public_copy; API canonical digest equals actual pinned catalogue canonical digest; envelopes persisted byte-verified. Inputs only, no semantic opinions."
+}
