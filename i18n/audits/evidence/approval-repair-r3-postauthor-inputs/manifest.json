@@ -1,0 +1,220 @@
+{
+  "schema": "approval-repair-r3-postauthor-inputs/v1",
+  "head": "e1c00f8c6bc4c06f2519c63d0ac406e31628dcf8",
+  "base_K": "4880031aeed59ef17ae6ffccc15d28e1fc0db104",
+  "repo_root": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+  "origin": "damianvtran/local-operator",
+  "tool": "read_public_copy",
+  "serial": true,
+  "call_order": [
+    "es",
+    "vi"
+  ],
+  "call_count": 2,
+  "captures": [
+    {
+      "locale": "es",
+      "path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-repair-r3-postauthor-inputs/es-approved-envelope.json",
+      "envelope_sha256": "4a19391b248248b90df7778e0c885769cf90d8bdc5aa1efb69a6daeb87917886",
+      "catalogue_path": "local_operator/i18n/catalogues/es/wire.settings.json",
+      "raw_file_sha256": "36132ff7f31a6a42c941661fb983f8b14b54954bdaf54f268f8f69eb9672c52b",
+      "canonical_sha256": "b9a695630ba8d744739476368ccbf4df7b1680565e5aed4dfcf3bc996632a77e",
+      "canonical_matches_raw_target": true,
+      "tool_formatted_text_sha256": "451a8b421b0a0b2ba49becdb53efbbd84ae84913c500aafdb56645a0e2d971ad",
+      "key_count": 895,
+      "tool_call_id": "call_5179f9f6c66743e0bf1a8de1bac018b7:97479977e8704865ab0f57a66e9b9c61",
+      "details": {
+        "path": "local_operator/i18n/catalogues/es/wire.settings.json",
+        "key": null,
+        "public_copy": true,
+        "policy": "docs/security/redaction-policy.md",
+        "audit_log": "/Users/damian/.local-operator/audit/public-copy-reads.jsonl",
+        "sha256": "451a8b421b0a0b2ba49becdb53efbbd84ae84913c500aafdb56645a0e2d971ad",
+        "repository_root": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+        "repository": "damianvtran/local-operator",
+        "repository_verified": true,
+        "commit": "e1c00f8c6bc4c06f2519c63d0ac406e31628dcf8",
+        "checkout_head": "e1c00f8c6bc4c06f2519c63d0ac406e31628dcf8"
+      }
+    },
+    {
+      "locale": "vi",
+      "path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-repair-r3-postauthor-inputs/vi-approved-envelope.json",
+      "envelope_sha256": "09b9926dbdf120e9a049ed171522656312a2d9720e3e6db8e035f2a67c95946f",
+      "catalogue_path": "local_operator/i18n/catalogues/vi/wire.settings.json",
+      "raw_file_sha256": "100fc2ccedd6bc0def2837912b4332d9b0438c1f0dc5451e072d37bf94e1e964",
+      "canonical_sha256": "332a6f0bfa576e504d3964c60bc2176f08ee803edd6153f2270c6d2227c270b7",
+      "canonical_matches_raw_target": true,
+      "tool_formatted_text_sha256": "df282941539068168f19728bc6c532c9afcfd7d08248541a6b44e73813661944",
+      "key_count": 895,
+      "tool_call_id": "call_b09d4eeda78e4821a623956c835f6648:f3766d2e418540cd84b3b407b36109ad",
+      "details": {
+        "path": "local_operator/i18n/catalogues/vi/wire.settings.json",
+        "key": null,
+        "public_copy": true,
+        "policy": "docs/security/redaction-policy.md",
+        "audit_log": "/Users/damian/.local-operator/audit/public-copy-reads.jsonl",
+        "sha256": "df282941539068168f19728bc6c532c9afcfd7d08248541a6b44e73813661944",
+        "repository_root": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+        "repository": "damianvtran/local-operator",
+        "repository_verified": true,
+        "commit": "e1c00f8c6bc4c06f2519c63d0ac406e31628dcf8",
+        "checkout_head": "e1c00f8c6bc4c06f2519c63d0ac406e31628dcf8"
+      }
+    }
+  ],
+  "English_retained": {
+    "path": "/Users/damian/.local-operator/sessions/0be89bc16927/scratchpad/Englishvoiceconstant-full-en-approved-capture.json",
+    "envelope_sha256": "c17b1262dc76d312cfa21313bd0d1414e2b4132d9900265119d4c1d8d9c237f6",
+    "original_checkout_head": "90009effa833836ce4471e99d90d3b6438de7f60",
+    "bound_head": "4880031aeed59ef17ae6ffccc15d28e1fc0db104",
+    "official_public_copy": true,
+    "repository_verified": true,
+    "canonical_sha256": "8df2396d637f817a9b184aaf6f5c46fbde24f29532c9c8dd937a58fc3ecf3ae9",
+    "raw_file_sha256": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+    "key_count": 895,
+    "retention_proof": "Exact EN bytes at 90009 and K equal; approved map canonical equals raw map canonical. No fresh English call needed.",
+    "candidate_raw_sha256": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+    "K_exact": true
+  },
+  "context_retained": {
+    "path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+    "sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+    "entries": 104,
+    "K_exact": true
+  },
+  "five_clean_locale_compatibility": [
+    {
+      "locale": "zh-CN",
+      "path": "local_operator/i18n/catalogues/zh-CN/wire.settings.json",
+      "K_raw_sha256": "c17c1cf7e60d836a2e15bfdb341977ceab0ff15d4c62cfa92e7f03b8ed2e53ba",
+      "candidate_raw_sha256": "c17c1cf7e60d836a2e15bfdb341977ceab0ff15d4c62cfa92e7f03b8ed2e53ba",
+      "key_count": 895,
+      "approved_K_envelope_sha256": "0a5d86bc93aed322c629905a1f7ce7e995f694d1b4397055329a44ccf1ab6d83",
+      "A_B_receipts": [
+        {
+          "side": "A",
+          "path": "i18n/audits/evidence/approval-repair-r2-originals/zh-A.json",
+          "sha256": "857122c0a9a2694131a9a47e819f84612861e5caeb5cf4621bfee99a50e7a726",
+          "fresh_pointer": "/coverage/fresh_decisions",
+          "retained_pointer": "/retention/per_key_records"
+        },
+        {
+          "side": "B",
+          "path": "i18n/audits/evidence/approval-repair-r2-originals/zh-B.json",
+          "sha256": "58ef1782be215667c4a77f9af03afe52f83efdd5b075cdc4eb4d2ece649cc5fa",
+          "fresh_pointer": "/per_key_R2_decisions",
+          "retained_pointer": "/retained_840_records"
+        }
+      ],
+      "compatibility": "exact target/source/context bytes; retain prior whole-namespace attestations, not a new pass"
+    },
+    {
+      "locale": "fr",
+      "path": "local_operator/i18n/catalogues/fr/wire.settings.json",
+      "K_raw_sha256": "e093d4481ac0d477c86b562ff8ab1f59c2a00e948fddce1b3f34c1da73064ffa",
+      "candidate_raw_sha256": "e093d4481ac0d477c86b562ff8ab1f59c2a00e948fddce1b3f34c1da73064ffa",
+      "key_count": 895,
+      "approved_K_envelope_sha256": "0908ec27c12a67a5fcfea065afe1e41d32f16a0c976e76be2940e00ba1e277ac",
+      "A_B_receipts": [
+        {
+          "side": "A",
+          "path": "i18n/audits/evidence/approval-repair-r2-originals/fr-A.json",
+          "sha256": "7cf0718177880cf515076fbb1798fddc21614fcd9f4242164a48b286561d0fa3",
+          "fresh_pointer": "/fresh_key_decisions",
+          "retained_pointer": "/retained_per_key_compatibility"
+        },
+        {
+          "side": "B",
+          "path": "i18n/audits/evidence/approval-repair-r2-originals/fr-B.json",
+          "sha256": "6aa8034ab21b3acef0244b6a560aafbd6041ab9ba92fae84cc49c00409579bcc",
+          "fresh_pointer": "/fresh_decisions",
+          "retained_pointer": "/retention/per_key"
+        }
+      ],
+      "compatibility": "exact target/source/context bytes; retain prior whole-namespace attestations, not a new pass"
+    },
+    {
+      "locale": "ru",
+      "path": "local_operator/i18n/catalogues/ru/wire.settings.json",
+      "K_raw_sha256": "5c50edd1aa20e5755f5704f95835117852dd9e0e39b222ce421bf6c47f003651",
+      "candidate_raw_sha256": "5c50edd1aa20e5755f5704f95835117852dd9e0e39b222ce421bf6c47f003651",
+      "key_count": 895,
+      "approved_K_envelope_sha256": "d02b2b66f514b794a1309fb349b6236fd02786cbc34e24f3b3de1d6c88e00848",
+      "A_B_receipts": [
+        {
+          "side": "A",
+          "path": "i18n/audits/evidence/approval-repair-r2-originals/ru-A.json",
+          "sha256": "13c66554a633a761fe33da6b48c93f8d5f0ecd30db47ed78f392d19636c38f7a",
+          "fresh_pointer": "/fresh_decisions",
+          "retained_pointer": "/retained_records"
+        },
+        {
+          "side": "B",
+          "path": "i18n/audits/evidence/approval-repair-r2-originals/ru-B.json",
+          "sha256": "c1c916440ba7989e27988042c449b2d129a40d8b3371f2060cfa418c843611de",
+          "fresh_pointer": "/fresh_decisions",
+          "retained_pointer": "/retained_per_key_compatibility"
+        }
+      ],
+      "compatibility": "exact target/source/context bytes; retain prior whole-namespace attestations, not a new pass"
+    },
+    {
+      "locale": "hi",
+      "path": "local_operator/i18n/catalogues/hi/wire.settings.json",
+      "K_raw_sha256": "b030c730c0f8a179773b082a8e907d4487e8cf31a590714b62bab51614a5c30a",
+      "candidate_raw_sha256": "b030c730c0f8a179773b082a8e907d4487e8cf31a590714b62bab51614a5c30a",
+      "key_count": 895,
+      "approved_K_envelope_sha256": "504bc524811de4012caa9b040bd4e697dcb46277636d7dc24556af97d30ad418",
+      "A_B_receipts": [
+        {
+          "side": "A",
+          "path": "i18n/audits/evidence/approval-repair-r2-originals/hi-A.json",
+          "sha256": "a58762cd180e8ed17c317641e15e345318a965bc03fc62c684db2e4ac9c26e37",
+          "fresh_pointer": "/decisions",
+          "retained_pointer": "/coverage/retained_per_key_proof"
+        },
+        {
+          "side": "B",
+          "path": "i18n/audits/evidence/approval-repair-r2-originals/hi-B.json",
+          "sha256": "3b76370ea1c6816c2e89fbb8a2afcc8189faf1a03bd458ba991642633e6285b7",
+          "fresh_pointer": "/per_key_R2_decisions",
+          "retained_pointer": "/retained_records"
+        }
+      ],
+      "compatibility": "exact target/source/context bytes; retain prior whole-namespace attestations, not a new pass"
+    },
+    {
+      "locale": "ur",
+      "path": "local_operator/i18n/catalogues/ur/wire.settings.json",
+      "K_raw_sha256": "66c856c3c9ab823665241301511c50286e4dae574a0dd617d0c764a43d99331b",
+      "candidate_raw_sha256": "66c856c3c9ab823665241301511c50286e4dae574a0dd617d0c764a43d99331b",
+      "key_count": 895,
+      "approved_K_envelope_sha256": "1eb49bedaaae1880005cf5ba5d114524d2863c00acc585338b27a953c0acf5c7",
+      "A_B_receipts": [
+        {
+          "side": "A",
+          "path": "i18n/audits/evidence/approval-repair-r2-originals/ur-A.json",
+          "sha256": "eb6f8ab7775afde03ca6c379c524717d94dfa4fe6f38f7a24a931d0b6eeaf1e2",
+          "fresh_pointer": "/keyed_decisions",
+          "retained_pointer": "/retention/validated_records"
+        },
+        {
+          "side": "B",
+          "path": "i18n/audits/evidence/approval-repair-r2-originals/ur-B.json",
+          "sha256": "d5c1fcedc8d79efff2e17784aea581ceff4f65fd50d4cb639591a6fce9302f51",
+          "fresh_pointer": "/per_key_decisions",
+          "retained_pointer": "/retained_records/records"
+        }
+      ],
+      "compatibility": "exact target/source/context bytes; retain prior whole-namespace attestations, not a new pass"
+    }
+  ],
+  "source_binding_receipt": {
+    "path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-repair-r3-K2-source-binding.json",
+    "sha256": "e6fd243ec7a9c29b5b93555f646b8aac3d336b6d70904c8412ae2f51346afd1d",
+    "containing_commit": "e1c00f8c6bc4c06f2519c63d0ac406e31628dcf8"
+  },
+  "publication": "not attempted",
+  "not_a_semantic_or_native_pass": true
+}

@@ -1,0 +1,62 @@
+{
+  "locale": "es",
+  "role": "translator",
+  "session_id": "9d62afa9b687",
+  "agent": "approval-labels-author-es",
+  "authoring_model": "openai/gpt-6.1-sol",
+  "initial_model": "anthropic/claude-opus-5-5",
+  "fallback": "Host announced provider quota failure and switched to openai/gpt-6.1-sol before choosing or editing the new Spanish value. Initial model only read input material.",
+  "status": "authoring complete; independent safety audits pending; not native-speaker approval",
+  "frozen_head": "69b7e09c9b56924a7fefe561e283a73045b0a845",
+  "target_path": "local_operator/i18n/catalogues/es/wire.settings.json",
+  "scope": [
+    "wire.settings.tool_approval_mode.choice.ask.label",
+    "wire.settings.tool_approval_mode.choice.auto.label"
+  ],
+  "changed_keys": ["wire.settings.tool_approval_mode.choice.auto.label"],
+  "retained_keys": ["wire.settings.tool_approval_mode.choice.ask.label"],
+  "choices": {
+    "wire.settings.tool_approval_mode.choice.ask.label": {
+      "value": "preguntar",
+      "authorship": "RETAINED unchanged from pinned existing catalogue; original author/model unknown, not attributed to this translator",
+      "backtranslation": "ask",
+      "rationale": "Existing infinitive is idiomatic neutral Spanish for the prompting-mode choice. Retained lowercase fragment register; no always/every-tool modifier and no new permission semantics. Spanish style guide permits lowercase fragments and uses infinitives for action labels."
+    },
+    "wire.settings.tool_approval_mode.choice.auto.label": {
+      "before": "auto",
+      "value": "automático",
+      "authorship": "new value authored here by openai/gpt-6.1-sol",
+      "backtranslation": "automatic",
+      "rationale": "Natural adjective for implicit modo (masculine), accented in standard Spanish. Lowercase fragment matches the retained choice. The guide accepts auto when budgets demand it; no hard budget was supplied for this key, so the unambiguous full native word avoids the bare wire-token appearance. This names a mode only; it adds no promise of unconditional approval or guardrail bypass."
+    }
+  },
+  "invented_terms": [],
+  "style_inputs": ["i18n/style-guides/es.md", "i18n/glossary.md"],
+  "approved_copy_input": "i18n/audits/evidence/approval-choice-input-cache.json",
+  "source_pin": "i18n/audits/evidence/approval-choice-source-pin.json",
+  "source_sha256": "298fc1100cb10bfa34909aa245307a735dad318f456e5bbfb5337fbcdb1e8962",
+  "context_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+  "before_full_file_sha256": "69ea99a4a07d996963c9ac597b5f0a0a855d0fecd4660fbab776660061cdfb93",
+  "after_full_file_sha256": "e1026565e8003ddb8985c82e0b23de028a7ac4e01b5fbd5e4b6a3294660c64a5",
+  "before_selected_canonical_sha256": "e59acb3dce14fe4f2caaedc57f8cf416ceeb4cd4b6b3a1d59538a8088902e29b",
+  "after_selected_canonical_sha256": "b3137442b15468777e795f323bd276f56a688d8c1109dcd9ce65e160bd44fd64",
+  "canonicalization": "UTF-8 json.dumps(ensure_ascii=False, sort_keys=True, separators=(',', ':'))",
+  "authoring_controls": {
+    "input_checks": "Derived selected-map hashes from approved cache; checked originals against current target full SHA and source-pin locale SHA; current English and context full SHA match cache pins; selected contexts match verified actual sidecar; HEAD unchanged.",
+    "key_count_before": 895,
+    "key_count_after": 895,
+    "key_order_unchanged": true,
+    "unchanged_other_keys_and_formatting": "Exact byte comparison: reversing only the one literal auto-label edit reproduces pinned original full-file SHA; all other bytes unchanged.",
+    "ICU": "Both candidate values parsed with the frozen worktree local_operator.i18n.runtime.parse_message in a clean Python subprocess; each yields one _Text node, zero arguments and zero selectors. No placeholders in source or targets; plural/select branches N/A.",
+    "NFC": true,
+    "authored_bidi_controls": 0,
+    "punctuation": "Both labels have none; no markup, escapes or keyboard shortcuts added.",
+    "synthetic_literal_only": {
+      "ask": {"text": "preguntar", "cells": 9, "english_cells": 3, "pseudo": "[preguntar~~~]", "pseudo_cells": 14},
+      "auto": {"text": "automático", "cells": 10, "english_cells": 9, "pseudo": "[automático~~~~]", "pseudo_cells": 16}
+    },
+    "width_risk": "No measured real-fit claim. preguntar is 9 cells versus English Ask at 3 (retained pre-existing expansion); automático is 10 versus Automatic at 9. Both compact, but flag the retained preguntar expansion if a very narrow label budget exists. Pseudo strings are literal synthetic stress only.",
+    "execution_notes": "Persistent eval state was evicted once; reconstructed inputs and rechecked hashes. Parent eval had the installed runtime preloaded, so its source-identity assertion failed; repeated parser checks in a fresh isolated subprocess with frozen worktree first on sys.path, asserted actual module path, and obtained the literal parse results above. No tests, browser, native UI or real fit exercised."
+  },
+  "safety_boundary": "Authored display catalogue text only; no wire values, guards, person-only gates, English/context files, ledger, staging, commits or HEAD modified. Two independent safety auditors must evaluate the parent's common candidate head after all locale writers finish."
+}

@@ -164,7 +164,14 @@ def merge_metadata(items: list[Any]) -> Any:
     kinds = {item.sender_kind for item in items}
     labels = {item.sender_label for item in items}
     sender_kind = newest.sender_kind if len(kinds) == 1 else "mixed"
-    sender_label = newest.sender_label if len(labels) == 1 else "several members"
+    displays = {item.session_agent_display for item in items}
+    same_presentation = len(kinds) == len(labels) == len(displays) == 1
+    # Names are presentation equality only, never endpoint/session routing keys.
+    # Unknown session provenance cannot name an entire agent burst.
+    if sender_kind == "agent" and newest.session_agent_display is None:
+        same_presentation = False
+    sender_label = newest.sender_label if same_presentation else "several members"
+    session_display = newest.session_agent_display if same_presentation else None
     attachments = sum(int(item.attachments or 0) for item in items)
     note = next((item.attachments_note for item in reversed(items) if item.attachments_note), None)
     # Files coalesce the same way: the count is a sum, and one withheld line rides the
@@ -176,6 +183,7 @@ def merge_metadata(items: list[Any]) -> Any:
         mention=any(item.mention for item in items),
         sender_kind=sender_kind,
         sender_label=sender_label,
+        session_agent_display=session_display,
         attachments=attachments,
         attachments_note=note,
         files=files,

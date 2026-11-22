@@ -1,0 +1,28 @@
+{
+  "head": "e1c00f8c6bc4c06f2519c63d0ac406e31628dcf8",
+  "resolvable": 4,
+  "unresolvable": 0,
+  "absent": 0,
+  "rows": [
+    {
+      "label": "settings-R3-es-A",
+      "path": "/Users/damian/.local-operator/sessions/ea91e88ee8b8/scratchpad/approval-repair-audit-es-A-r3.json",
+      "sha256": "11efd126b5ea1acd53e517e511e0009302e55ccdb6828ce7df7c7539204f875c"
+    },
+    {
+      "label": "settings-R3-es-B",
+      "path": "/Users/damian/.local-operator/sessions/9bd62915622e/scratchpad/approval-repair-audit-es-B-r3.json",
+      "sha256": "d56400ac74d33e26f4360a1457a6cae2fd2fd23f5c39de69541a103c548ac74c"
+    },
+    {
+      "label": "settings-R3-vi-A",
+      "path": "/Users/damian/.local-operator/sessions/69be550029f8/scratchpad/approval-repair-audit-vi-A-r3.json",
+      "sha256": "2f3f5716a1f3a4e4645ecf3279e96441ed78734cc390c081d3943ac991758f64"
+    },
+    {
+      "label": "settings-R3-vi-B",
+      "path": "/Users/damian/.local-operator/sessions/ce150bbc4e1b/scratchpad/approval-repair-audit-vi-B-r3.json",
+      "sha256": "a4603af62f86a24a3e94b3e3fbf518ae47841a010792bf290111de1a7e553a5a"
+    }
+  ]
+}

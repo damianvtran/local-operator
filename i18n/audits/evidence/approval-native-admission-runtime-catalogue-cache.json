@@ -1,0 +1,45 @@
+{
+  "runtime": {
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "-c",
+      "import json,hashlib,pathlib\nfrom local_operator.i18n import catalogues\nfrom scripts.i18n import ledger\nroot=pathlib.Path.cwd(); latest={}\nfor row in ledger.load_entries(root): latest[row['locale'],row['namespace']]=row\nout=[]\nfor locale in ['zh-CN','fr','ru','hi','ur','es','vi']:\n row=latest[locale,'wire.settings']; expected=row['source_binding']['target_raw_sha256']\n assert catalogues.catalogue_sha256(locale,'wire.settings')==expected\n messages=catalogues.load_catalogue(locale,'wire.settings'); assert len(messages)==895\n bundle=catalogues.wire_bundle(locale)\n entry=next((x for x in bundle['deferred'] if x['namespace']=='wire.settings'),None)\n if entry is not None: assert entry['content_sha256']==expected\n else:\n  assert bundle['namespaces']['wire.settings']==expected\n  assert all(bundle['messages'][k]==v for k,v in messages.items())\n out.append({'locale':locale,'wire_settings_raw_sha256':expected,'keys':len(messages),'wire_bundle_cache_sha256':bundle['content_sha256'],'membership':'deferred' if entry else 'eager'})\nprint(json.dumps(out,indent=2))\n"
+    ],
+    "returncode": 0,
+    "stdout": "[\n  {\n    \"locale\": \"zh-CN\",\n    \"wire_settings_raw_sha256\": \"c17c1cf7e60d836a2e15bfdb341977ceab0ff15d4c62cfa92e7f03b8ed2e53ba\",\n    \"keys\": 895,\n    \"wire_bundle_cache_sha256\": \"77324858a7ebe09ed00ae42cf3c40a369662c03fec82b3d4fa5e6b24885f6445\",\n    \"membership\": \"deferred\"\n  },\n  {\n    \"locale\": \"fr\",\n    \"wire_settings_raw_sha256\": \"e093d4481ac0d477c86b562ff8ab1f59c2a00e948fddce1b3f34c1da73064ffa\",\n    \"keys\": 895,\n    \"wire_bundle_cache_sha256\": \"8674e77ba8159d75bd0fb31d4d1a8491d81fa9300fdb066a8778bb711b335e8b\",\n    \"membership\": \"deferred\"\n  },\n  {\n    \"locale\": \"ru\",\n    \"wire_settings_raw_sha256\": \"5c50edd1aa20e5755f5704f95835117852dd9e0e39b222ce421bf6c47f003651\",\n    \"keys\": 895,\n    \"wire_bundle_cache_sha256\": \"dc1dbd5735a1b8b031470a72a9d87d94c8cd3221dbcb6d4e8bfa1d2ccf9d3dc9\",\n    \"membership\": \"deferred\"\n  },\n  {\n    \"locale\": \"hi\",\n    \"wire_settings_raw_sha256\": \"b030c730c0f8a179773b082a8e907d4487e8cf31a590714b62bab51614a5c30a\",\n    \"keys\": 895,\n    \"wire_bundle_cache_sha256\": \"6923533609f3abb67cb97b8ffa1e5d8ddc5b547f0dbec1373e6e4ac621fbcc9c\",\n    \"membership\": \"deferred\"\n  },\n  {\n    \"locale\": \"ur\",\n    \"wire_settings_raw_sha256\": \"66c856c3c9ab823665241301511c50286e4dae574a0dd617d0c764a43d99331b\",\n    \"keys\": 895,\n    \"wire_bundle_cache_sha256\": \"93a9acff0a269ddbc6ed2609ee72316299775fb548e4997c96ea1b6977d17ce1\",\n    \"membership\": \"deferred\"\n  },\n  {\n    \"locale\": \"es\",\n    \"wire_settings_raw_sha256\": \"36132ff7f31a6a42c941661fb983f8b14b54954bdaf54f268f8f69eb9672c52b\",\n    \"keys\": 895,\n    \"wire_bundle_cache_sha256\": \"08aeb74531ec297f5a3567ae859345827a8b4128cc732c89a995d9b0defaa65a\",\n    \"membership\": \"deferred\"\n  },\n  {\n    \"locale\": \"vi\",\n    \"wire_settings_raw_sha256\": \"100fc2ccedd6bc0def2837912b4332d9b0438c1f0dc5451e072d37bf94e1e964\",\n    \"keys\": 895,\n    \"wire_bundle_cache_sha256\": \"bfecd4ef2d5f3a15417dcee3616ee9c470a1c03e51a93d35fac0b7b7b222f205\",\n    \"membership\": \"deferred\"\n  }\n]\n",
+    "stderr": ""
+  },
+  "approved_capture_maps_all_exact": true,
+  "keys_compared_total": 6265,
+  "captures": {
+    "zh-CN": {
+      "path": "i18n/audits/evidence/approval-repair-postauthor-inputs/zh-CN-approved-envelope.json",
+      "sha256": "0a5d86bc93aed322c629905a1f7ce7e995f694d1b4397055329a44ccf1ab6d83"
+    },
+    "fr": {
+      "path": "i18n/audits/evidence/approval-repair-postauthor-inputs/fr-approved-envelope.json",
+      "sha256": "0908ec27c12a67a5fcfea065afe1e41d32f16a0c976e76be2940e00ba1e277ac"
+    },
+    "ru": {
+      "path": "i18n/audits/evidence/approval-repair-postauthor-inputs/ru-approved-envelope.json",
+      "sha256": "d02b2b66f514b794a1309fb349b6236fd02786cbc34e24f3b3de1d6c88e00848"
+    },
+    "hi": {
+      "path": "i18n/audits/evidence/approval-repair-postauthor-inputs/hi-approved-envelope.json",
+      "sha256": "504bc524811de4012caa9b040bd4e697dcb46277636d7dc24556af97d30ad418"
+    },
+    "ur": {
+      "path": "i18n/audits/evidence/approval-repair-postauthor-inputs/ur-approved-envelope.json",
+      "sha256": "1eb49bedaaae1880005cf5ba5d114524d2863c00acc585338b27a953c0acf5c7"
+    },
+    "es": {
+      "path": "i18n/audits/evidence/approval-repair-r3-postauthor-inputs/es-approved-envelope.json",
+      "sha256": "4a19391b248248b90df7778e0c885769cf90d8bdc5aa1efb69a6daeb87917886"
+    },
+    "vi": {
+      "path": "i18n/audits/evidence/approval-repair-r3-postauthor-inputs/vi-approved-envelope.json",
+      "sha256": "09b9926dbdf120e9a049ed171522656312a2d9720e3e6db8e035f2a67c95946f"
+    }
+  },
+  "scope": "Catalogue loader and wire bundle cache identity only, NOT app/UI/native/render QA"
+}

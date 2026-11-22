@@ -1,0 +1,30 @@
+{
+  "head": "fad3ab5703fc5bb159f48cb43755c8d9e1323b6c",
+  "after_flows": 27,
+  "after_stable_pairs": 27,
+  "after_config_unchanged": true,
+  "before_config_unchanged": true,
+  "changed_keys": 365,
+  "changed_live_registry_slots": 362,
+  "resolver_only_slots": [
+    {
+      "locale": "hi",
+      "slots": [
+        "wire.settings.hub_auto_update_agents.help"
+      ]
+    },
+    {
+      "locale": "ur",
+      "slots": [
+        "wire.settings.hub_auto_update_agents.choice.true.description",
+        "wire.settings.hub_auto_update_agents.help"
+      ]
+    }
+  ],
+  "GET_200_count": 8,
+  "PATCH_200_count": 5,
+  "PATCH_422_count": 2,
+  "baseline_frame_comparison_valid": false,
+  "baseline_refusal": "symlinked unchanged namespaces escape catalogue root; wire.settings old files accepted",
+  "qa_clearance": false
+}
