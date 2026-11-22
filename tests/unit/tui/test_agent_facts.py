@@ -15,6 +15,7 @@ from local_operator.agent_profiles import (
     agent_listing_rows,
 )
 from local_operator.i18n import text as i18n_text
+from local_operator.i18n.messages import Msg
 from local_operator.tui.widgets.settings_view import (
     _paint_facts,
     _paint_facts_lines,
@@ -101,13 +102,15 @@ def test_opaque_model_never_acquires_style_or_scope(model):
 def test_fact_is_immutable_and_unknown_codes_are_raw():
     fact = AgentFact("kind", "a-future-kind")
     with pytest.raises(FrozenInstanceError):
-        fact.value = "role"
+        setattr(fact, "value", "role")
     for fact in (fact, AgentFact("unknown", "proactive"), AgentFact("model", "role")):
         assert agent_fact_message(fact) == fact.value
         assert agent_fact_record(fact).source_locale is None
         line = _paint_facts((fact,), 80, muted=MUTED, faint=FAINT)
         assert all(style == FAINT for _, style in line)
-    assert agent_fact_message(AgentFact("effort", "custom-tier")).params == {"value": "custom-tier"}
+    effort_message = agent_fact_message(AgentFact("effort", "custom-tier"))
+    assert isinstance(effort_message, Msg)
+    assert effort_message.params == {"value": "custom-tier"}
 
 
 def test_single_enumeration_seed_suppression_and_string_wire_shape(tmp_path, monkeypatch):
@@ -188,6 +191,44 @@ def test_whole_safety_and_scope_markers_share_one_27_cell_budget(monkeypatch):
     assert all(cell_len(line) <= 31 for line in plain(expanded))
 
 
+def test_spilling_duplicate_facts_projects_only_first_occurrences(monkeypatch):
+    import local_operator.tui.widgets.settings_view as view
+    from local_operator.i18n.messages import RenderedMessage
+
+    original = view.agent_fact_record
+
+    def expanded_record(fact):
+        return RenderedMessage("K" * 24, "en") if fact.code == "kind" else original(fact)
+
+    monkeypatch.setattr(view, "agent_fact_record", expanded_record)
+    kind = AgentFact("kind", "role")
+    scope = AgentFact("scope", "session")
+    marker = AgentFact("action_class", "proactive")
+    model = AgentFact("model", "opaque · proactive")
+    facts = (kind, scope, model, marker, scope, marker)
+    before = tuple(facts)
+    painted_facts = []
+    original_paint = view._paint_facts
+
+    def record_paint(items, room, *, muted, faint):
+        painted_facts.append(items)
+        return original_paint(items, room, muted=muted, faint=faint)
+
+    monkeypatch.setattr(view, "_paint_facts", record_paint)
+    # Both first occurrences spill, but equal later facts must remain in order.
+    # This pins list.remove semantics, not a remove-all filtering shortcut.
+    lines = _paint_facts_lines(facts, 27, muted=MUTED, faint=FAINT)
+    assert lines == [
+        _paint_facts((kind, model, scope, marker), 27, muted=MUTED, faint=FAINT),
+        _paint_facts((marker,), 27, muted=MUTED, faint=FAINT),
+        _paint_facts((scope,), 27, muted=MUTED, faint=FAINT),
+    ]
+    # Inspect the projection too: truncation can hide later duplicate tokens,
+    # so pixel equality alone would not catch accidentally removing them all.
+    assert painted_facts == [(kind, model, scope, marker), (marker,), (scope,)]
+    assert facts == before
+
+
 def test_urdu_fallback_provenance_and_raw_fit_before_controls(monkeypatch):
     monkeypatch.setattr(i18n_text._locale, "eligible_locale", lambda locale: locale)
     original = i18n_text._sources
@@ -266,6 +307,7 @@ async def test_real_app_language_switch_keeps_raw_snapshot_without_registry_io(
         app._open_settings_view()
         await pilot.pause()
         view = app._settings_view
+        assert view is not None
         view._pane = "agents"
         snapshot = view._agents
         assert snapshot and all(isinstance(row[1], tuple) for row in snapshot)

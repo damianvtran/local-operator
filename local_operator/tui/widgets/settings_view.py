@@ -533,11 +533,15 @@ def _paint_facts_lines(
 
     scope = AgentFact("scope", "session")
     if scope in head and width(head) > room:
-        head.remove(scope)
+        # Project out only the first occurrence, matching list.remove while
+        # keeping this local display transformation free of destructive calls.
+        scope_index = head.index(scope)
+        head = head[:scope_index] + head[scope_index + 1 :]
         spill.append(scope)
     marker = AgentFact("action_class", "proactive")
     if marker in head and width(head[: head.index(marker) + 1]) > room:
-        head.remove(marker)
+        marker_index = head.index(marker)
+        head = head[:marker_index] + head[marker_index + 1 :]
         spill.insert(0, marker)
     return [_paint_facts(tuple(head), room, muted=muted, faint=faint)] + [
         _paint_facts((fact,), max(room, width([fact])), muted=muted, faint=faint) for fact in spill
