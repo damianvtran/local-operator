@@ -192,12 +192,13 @@ around it: the three are ONE ledger, and a receipt left on the plain spine while
 the tool rows beside it stepped in is the column defect the operator reported
 long before the fold existed ("the peer message doesn't have the proper left
 padding like the other tool cards"). Receipt bodies follow their row like a
-card's. Notices, prose and the fold's own bars are not ledger rows and keep their
-column. The inset is NOT
-CSS padding: it is threaded through `row_indent(width, depth)` and read by the row
-builder AND the copy gutter, so a selection of a fold-covered row cannot eat a
-character of its tool name; `detail_indent` does the same for the body rows and
-`copy_gutter` reads it back. A bar does not nest further when it is inside an
+card's. Notices, prose and the fold's own bars are not ledger rows and keep
+their column.
+
+The inset is NOT CSS padding: it is threaded through `row_indent(width, depth)`
+and read by the row builder AND the copy gutter, so a selection of a fold-covered
+row cannot eat a character of its tool name; `detail_indent` does the same for
+the body rows and `copy_gutter` reads it back. A bar does not nest further when it is inside an
 open bar: the grid has two columns, and a run bar stepping in beside its turn
 bar read as a second kind of row.
 
