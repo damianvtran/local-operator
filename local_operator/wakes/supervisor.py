@@ -1475,14 +1475,11 @@ async def _engage_one(
             outcome("wedged")
             return False
         if is_goal:
-            from local_operator.wakes.goals import retry_at
-            from local_operator.wakes.store import is_held, read_entry
+            from local_operator.wakes.goals import permits_wake
 
             # The scan is only a hint. Clear/replace/stop may have landed while
             # this task was waiting for a slot or probing the previous owner.
-            if is_held(read_entry(config_dir, session_id)) or (
-                retry_at(config_dir / "sessions" / session_id) != due_ms
-            ):
+            if not permits_wake(config_dir / "sessions" / session_id, due_ms):
                 return False
         # Only the conditions we just cleared: reaching here means the session
         # is no longer skipped for a live/ghost/wedged/stale reason (nor
@@ -3086,8 +3083,8 @@ async def serve(config_dir: Path, *, once: bool = False, move: "_BuildMove | Non
     is not the supervisor's, and an in-place exec of THAT process would replace a
     command the operator is watching. ``--once`` never moves either.
     """
-    from local_operator.wakes.goals import candidates as goal_candidates
     from local_operator.wakes.goals import GOAL_RETRY_S
+    from local_operator.wakes.goals import candidates as goal_candidates
     from local_operator.wakes.owned_runtimes import (
         OWNER_ENV,
         SUPERVISOR_PID_ENV,

@@ -985,6 +985,29 @@ def _ensure_task_installed(config_dir: Path) -> InstallOutcome:
         return InstallOutcome(installed=False, reason=f"install failed: {exc}")
 
 
+def _has_recoverable_goals(root: Path) -> bool:
+    from local_operator.wakes.goals import candidates
+    from local_operator.wakes.store import read_index
+
+    # Future-due obligations count: without a supervisor nothing will spot
+    # them when the existing recovery fence elapses.
+    return bool(candidates(root, read_index(root)))
+
+
+def bootstrap_goal_recovery(root: Path) -> None:
+    """Migrate cold obligations on first startup, even with no unit to refresh."""
+    receipt = root / ".goal-recovery-bootstrap-v1"
+    if receipt.exists() or not (root / "sessions").is_dir() or not is_supported():
+        return
+    # The old updater can skip its refresh child entirely if no service was
+    # installed. First startup of the new build is independent of that gate.
+    # Retry a refused install; a successful migration is not permission to
+    # undo a subsequent explicit wake uninstall on every CLI invocation.
+    if _has_recoverable_goals(root) and not ensure_supervisor_installed(root).installed:
+        return
+    receipt.touch()
+
+
 def refresh_plist_if_stale() -> launchd.PlistRefresh:
     """Rewrite the supervisor's plist when an older build wrote it.
 
@@ -1032,13 +1055,21 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
             # shim, so its content is byte-identical across generations while a
             # daemon started from an older one keeps serving it. See
             # :func:`launchd.restart_if_build_moved`.
-            return launchd.restart_if_build_moved(
+            outcome = launchd.restart_if_build_moved(
                 name=name,
                 label=LABEL,
                 path=path,
                 recovery="lop wake install",
                 run=_launchctl,
             )
+        if outcome.kind in {"not-installed", "current"} and _has_recoverable_goals(store):
+            if not supervisor_state(store).running:
+                installed = ensure_supervisor_installed(store)
+                return launchd.PlistRefresh(
+                    name=name,
+                    kind="revived" if installed.installed else "failed",
+                    detail=installed.reason,
+                )
         if outcome.kind != "repaired":
             return outcome
         # bootout + bootstrap through the shared helper, unlike the

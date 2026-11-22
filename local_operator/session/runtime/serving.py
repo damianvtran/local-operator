@@ -13233,6 +13233,7 @@ async def spawn_owned_session(
     birth_fast: bool = False,
     resume: str | None = None,
     model_selection_override: bool = True,
+    goal_wake_due: int | None = None,
 ) -> ServingSessionHandle:
     """Build a session for the phone with the CLI's composition root.
 
@@ -13332,6 +13333,7 @@ async def spawn_owned_session(
         birth_effort=birth_effort,
         birth_fast=birth_fast,
         model_selection_override=model_selection_override,
+        goal_wake_due=goal_wake_due,
     )
 
     # PAY THE COMPOSITION ROOT'S IMPORTS HERE, AND IN A THREAD.

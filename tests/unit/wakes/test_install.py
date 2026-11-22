@@ -1303,3 +1303,77 @@ def test_the_uninstall_refuses_a_store_the_shared_unit_does_not_serve(
     assert outcome.installed is False, outcome
     assert "not the default one the shared unit serves" in outcome.reason, outcome.reason
     assert calls == [], f"a refused uninstall must not reach launchctl: {calls}"
+
+
+@pytest.mark.parametrize("entrypoint", ["startup", "refresh"])
+@pytest.mark.parametrize("retired", [False, True])
+@pytest.mark.parametrize("held", [False, True])
+def test_goal_recovery_bootstraps_a_missing_or_retired_supervisor(
+    redirected_home: Path,
+    tmp_path: Path,
+    shared_label_allowed: None,
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+    retired: bool,
+    held: bool,
+) -> None:
+    from subprocess import CompletedProcess
+
+    from local_operator import launchd, supervisors
+    from local_operator.config_migrations import run_startup_migrations
+    from local_operator.resume import TRANSCRIPT_NAME, write_goal_record
+    from local_operator.wakes import install
+    from local_operator.wakes.store import write_entry
+
+    root = tmp_path / "config"
+    directory = root / "sessions" / "syntheticgoal"
+    directory.mkdir(parents=True)
+    (directory / TRANSCRIPT_NAME).touch()
+    write_goal_record(
+        directory,
+        {
+            "status": "active",
+            "goal": "Finish fixture",
+            "token": "goal-1",
+            "judge": {"state": "waiting"},
+        },
+    )
+    if held:
+        write_entry(
+            root,
+            directory.name,
+            cwd="",
+            schedules=[],
+            preserve={"goal_only": True, "stopped_at": 1},
+        )
+    path = plist_path()
+    if retired:
+        path.parent.mkdir(parents=True)
+        path.write_bytes(plistlib.dumps(render_plist(root)))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    monkeypatch.setattr(supervisors, "supervisor", lambda: supervisors.LAUNCHCTL)
+    monkeypatch.setattr(install, "_launchd_is_addressable", lambda: True)
+    monkeypatch.setattr(
+        launchd, "is_own_plist", lambda candidate, label: candidate == path and label == LABEL
+    )
+    calls: list[str] = []
+
+    def launchctl(*args: str) -> CompletedProcess[str]:
+        calls.append(args[0])
+        if args[0] == "print":
+            loaded = retired or "bootstrap" in calls
+            return CompletedProcess(args, 0 if loaded else 1, "state = not running", "")
+        return CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(install, "_launchctl", launchctl)
+    if entrypoint == "refresh":
+        result = install.refresh_plist_if_stale()
+        assert result.kind == (("current" if retired else "not-installed") if held else "revived")
+    else:
+        run_startup_migrations(root)
+        first = calls.copy()
+        run_startup_migrations(root)
+        assert calls == first
+    assert ("kickstart" in calls) == (retired and not held)
+    assert ("bootstrap" in calls) == (not retired and not held)
+    assert path.exists() == (retired or not held)

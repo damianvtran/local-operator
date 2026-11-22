@@ -3921,6 +3921,7 @@ class Session:
         #: ``no_seam`` refusal byte for byte; the CLI headless path and the
         #: runtime that serves the TUI/desktop/phone turn it on.
         owner_prompt_consent: bool = False,
+        goal_wake_due: int | None = None,
         #: HOST-ONLY taint snapshot for a subagent: whether ANY ancestor run
         #: (parent, grandparent, ...) had read untrusted input when this child
         #: was spawned. A child's own inputs are its parent's text, so without
@@ -6116,7 +6117,17 @@ class Session:
         # and an empty schedule list removes it. Runs before the catch-up
         # snapshot only because ``load()`` has already re-armed overdue rows,
         # so what lands on disk is the post-load truth.
-        self._rebuild_wake_index_entry()
+        if goal_wake_due is None:
+            self._rebuild_wake_index_entry()
+        else:
+            from local_operator.session.runtime.launch import RuntimeStartupError
+            from local_operator.wakes.goals import permits_wake
+
+            # Preparation can yield again after lease admission. More
+            # importantly, automation is not a manual reopen: do not rewrite
+            # the index at all, even if a stop lands just after this read.
+            if not permits_wake(self._transcript.directory, goal_wake_due):
+                raise RuntimeStartupError("automatic goal wake is no longer eligible")
         self._prepare_missed_wake_catchup()
         # Monitors load and rebuild their own derived index on EVERY open,
         # exactly like the wake pair above: the transcript is the source of

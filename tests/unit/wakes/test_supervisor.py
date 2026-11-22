@@ -2245,13 +2245,25 @@ def test_due_sessions_does_not_turn_an_omitted_cwd_into_an_explicit_home(produce
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "mode", ["parked", "cold", "stopped", "recent", "cleared", "worker", "exec", "fork"]
+    "mode",
+    [
+        "parked",
+        "cold",
+        "stopped",
+        "recent",
+        "cleared",
+        "worker",
+        "exec",
+        "fork",
+        "legacy-stop",
+        "legacy-park",
+        "legacy-reopen",
+        "legacy-evicted",
+    ],
 )
 async def test_legacy_waiting_goal_with_no_schedules(
     tmp_path: Path, engagements, no_live_runtimes, mode: str
 ) -> None:
-    from types import SimpleNamespace
-
     from local_operator.resume import (
         GOAL_SIDECAR_NAME,
         ORIGIN_FORK,
@@ -2259,7 +2271,14 @@ async def test_legacy_waiting_goal_with_no_schedules(
         mark_session_origin,
         write_goal_record,
     )
-    from local_operator.session.runtime.control import PARK_MARKER, STOP_MARKER, _mark_wakes_dormant
+    from local_operator.session.runtime import journal, registry
+    from local_operator.session.runtime.control import (
+        PARK_MARKER,
+        STOP_MARKER,
+        _mark_wakes_dormant,
+        _stop_marker_payload,
+    )
+    from local_operator.session.runtime.types import SessionRecord
     from local_operator.wakes.goals import GOAL_RETRY_S
     from local_operator.wakes.store import read_entry
 
@@ -2285,15 +2304,42 @@ async def test_legacy_waiting_goal_with_no_schedules(
     if mode == "fork":
         mark_session_origin(directory, ORIGIN_FORK, parent="syntheticparent", forked_at=time.time())
     assert read_entry(tmp_path, sid) is None
+    record = SessionRecord(
+        pid=123,
+        kind="tui",
+        session_id=sid,
+        conversation_name="test",
+        cwd=str(tmp_path),
+        model_label="m",
+        control_port=0,
+        control_key="",
+        started_at=1,
+    )
+    if mode.startswith("legacy-"):
+        registry.write_stop_marker(
+            directory,
+            _stop_marker_payload(
+                record,
+                "socket",
+                command=(
+                    "sessions tool park (self)" if mode == "legacy-park" else "control.stop_session"
+                ),
+                deliberate=mode != "legacy-evicted",
+            ),
+        )
+        if mode == "legacy-reopen":
+            journal.write_exit_record(
+                sid, conversation_dir=directory, pid=124, started_at=2, reason="idle-exit"
+            )
+        assert read_entry(tmp_path, sid) is None
     if mode in {"parked", "stopped"}:
-        record = SimpleNamespace(session_id=sid, cwd=str(tmp_path))
         marker = PARK_MARKER if mode == "parked" else STOP_MARKER
         assert _mark_wakes_dormant(record, tmp_path, marker) == 0
         entry = read_entry(tmp_path, sid)
         assert entry is not None and entry[marker] and entry["schedules"] == []
 
     assert await serve(tmp_path, once=True) == 0
-    if mode in {"parked", "cold"}:
+    if mode in {"parked", "cold", "legacy-park", "legacy-reopen", "legacy-evicted"}:
         assert [call["session_id"] for call in engagements] == [sid]
         assert getattr(engagements[0]["work"], "schedule_id") == "goal"
     else:

@@ -55,6 +55,48 @@ def retry_at(session_dir: Path) -> int | None:
     return int((updated + GOAL_RETRY_S) * 1000)
 
 
+def legacy_stopped(session_dir: Path) -> bool:
+    """Before goal-only holds, a deliberate stop could leave only a run receipt."""
+    from local_operator.session.runtime import journal, registry
+
+    marker = registry.read_stop_marker(session_dir)
+    if not marker or marker.get("deliberate") is not True:
+        return False
+    killer = marker.get("killer")
+    command = killer.get("command") if isinstance(killer, dict) else None
+    if isinstance(command, str) and command in {
+        "control.park_session",
+        "sessions tool park",
+        "sessions tool park (self)",
+        "fleet guard park",
+    }:
+        # Older parks used the deliberate stop ladder, but did not suspend work.
+        return False
+    stopped_run = marker.get("started_at")
+    if isinstance(stopped_run, (int, float)):
+        # The live-run receipt survives an unclean exit; a clean exit replaces
+        # it with the exit receipt. Neither depends on a still-addressable PID.
+        for receipt in (
+            journal.read_run_record(session_dir),
+            journal.read_exit_record(session_dir),
+        ):
+            if receipt is not None and receipt.started_at > stopped_run:
+                return False
+    return True
+
+
+def permits_wake(directory: Path, due: int) -> bool:
+    """Revalidate the selected occurrence against the current durable hold and goal."""
+    from local_operator.wakes.store import is_held, read_entry
+
+    entry = read_entry(directory.parent.parent, directory.name) or {}
+    return (
+        not is_held(entry)
+        and retry_at(directory) == due
+        and (bool(entry.get("parked_at")) or not legacy_stopped(directory))
+    )
+
+
 def candidates(config_dir: Path, index: Mapping[str, Any]) -> list[tuple[str, str, int]]:
     """Find persisted goals, including those that never had an armed wake row."""
     from local_operator.resume import GOAL_SIDECAR_NAME, read_goal_record
@@ -69,6 +111,8 @@ def candidates(config_dir: Path, index: Mapping[str, Any]) -> list[tuple[str, st
             continue
         try:
             if (due := retry_at(directory)) is None or not has_transcript(directory):
+                continue
+            if not entry.get("parked_at") and legacy_stopped(directory):
                 continue
         except OSError:
             continue
