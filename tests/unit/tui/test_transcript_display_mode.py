@@ -15,7 +15,7 @@ the developer's own settings.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Iterator, Literal
+from typing import Any, Iterator
 
 import pytest
 import yaml
@@ -145,33 +145,23 @@ async def test_the_view_stores_the_mode_and_hands_it_back() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("source", ["local", "disk"])
-async def test_a_config_change_hands_the_new_mode_to_the_view(
-    tmp_path: Path, source: Literal["local", "disk"]
-) -> None:
-    """Both sources: the command/page write is `local`, an outside edit is `disk`.
+@pytest.mark.parametrize("stored", ["by-response", "by-turn"])
+async def test_the_stored_mode_applies_at_boot(tmp_path: Path, stored: str) -> None:
+    """Boot reads the setting; it is not a value only a CHANGE can deliver.
 
-    Without the arm the view would keep the mode it booted with while the page
-    and the command both claimed the switch had happened — the "page states
-    something untrue about its own effect" class.
+    The stored token used to survive on disk and be ignored at mount: the page
+    and the command both said "By response" while the transcript drew By turn
+    until the next `/transcript` press. The stored value is read where the view
+    is created, for every launch and every replay of the same view.
     """
-    from local_operator.config_watch import ConfigChange
-
-    _stored(tmp_path, "by-response")
+    _stored(tmp_path, stored)
+    # The settings cache is per PROCESS: this test writes the file after the
+    # fixture's reload, so the boot has to see it the way a fresh process would.
+    settings_reload()
     app = _app()
     async with app.run_test(size=(120, 32)) as pilot:
         await pilot.pause()
-        view = app._transcript_view()
-        assert view.display_mode == "by-turn"
-        app._on_config_change(
-            ConfigChange(
-                values={"display.transcript_display": "by-response"},
-                changed_keys=frozenset({"display.transcript_display"}),
-                source=source,
-            )
-        )
-        await pilot.pause()
-        assert view.display_mode == "by-response"
+        assert app._transcript_view().display_mode == stored
 
 
 @pytest.mark.asyncio

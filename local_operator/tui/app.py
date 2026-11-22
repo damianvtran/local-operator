@@ -12938,6 +12938,12 @@ class OperatorApp(App[None]):
         # then removed. Straight after the band exists, before the first
         # session is asked for.
         self._apply_composer_settings()
+        # The stored transcript layout, for the same reason and at the same
+        # point: the view starts on the class default, and until now only a
+        # CHANGE reached it. A setting that says "By response" survived on disk
+        # but the transcript drew By turn until the next `/transcript` press —
+        # the page and the command each stated a mode the boot frame ignored.
+        self._apply_transcript_display()
         # Attached AFTER the first `update`, so the first STABLE title already
         # carries the working directory it falls back to while the conversation
         # is unnamed. Attaching first would leave a bare `lo ›` on screen for
@@ -28667,6 +28673,11 @@ class OperatorApp(App[None]):
                 taint_raised=taint_raised,
             )
             self._approval = prompt
+            # The LIVE transcript card for this call is still `running`, so the
+            # fold's derive can only learn about the gate by re-reading the
+            # session's pending ids. Ask it to, at BOTH edges: a collapse while
+            # the prompt is open must never hide the row the prompt names.
+            self._refresh_tool_fold()
             # The QUESTION goes in the dock, where it cannot scroll away from
             # the turn it is blocking and where it reliably owns its own answer
             # keys. The transcript gets a RECEIPT instead, and only once the
@@ -28696,6 +28707,7 @@ class OperatorApp(App[None]):
             if self._approval is prompt:
                 self._approval = None
             self._unmount_prompt(prompt)
+            self._refresh_tool_fold()
             if self._is_current(source):
                 self._notify_mobile_approval_settled(prompt)
                 # THE BAND SAID WHICH SENTENCE THE CARD OWED; the card is gone
@@ -49259,7 +49271,6 @@ class OperatorApp(App[None]):
 
     def _apply_transcript_display(self) -> None:
         """Hand a changed ``display.transcript_display`` to the transcript view.
-
         LIVE for the same reason ``display.dock`` is: the `/settings` row, the
         `/transcript` command and an edit from another process all repaint
         without a relaunch. The mode is read through ``tui.settings`` (which
@@ -49272,6 +49283,20 @@ class OperatorApp(App[None]):
             self._transcript_view().set_display_mode(transcript_display_mode())
         except Exception:  # noqa: BLE001 — the write landed; the apply is a bonus
             logger.debug("display.transcript_display live apply failed", exc_info=True)
+
+    def _refresh_tool_fold(self) -> None:
+        """Re-derive the transcript fold after a fact outside the rows moved.
+
+        The one such fact today is the approval gate: the live card stays
+        `running` while the question is open, so the layer reads the session's
+        pending ids — and only a re-derive notices them changing. Called at both
+        edges of ``request_tool_approval``; a failure to reach the view (an
+        unmounted transcript) is not worth failing the gate over.
+        """
+        try:
+            self._transcript_view().invalidate_tool_fold()
+        except Exception:  # noqa: BLE001 — the gate itself is what matters
+            logger.debug("tool fold approval refresh failed", exc_info=True)
 
     def _apply_composer_settings(self) -> None:
         """Apply the ``display.composer.*`` widget-visibility flags.
