@@ -198,6 +198,7 @@ from local_operator.harness.types import (
     PeerMessageDeliveredEvent,
     ReasoningDeltaEvent,
     SteeringDeliveredEvent,
+    StreamEndEvent,
     StreamEvent,
     StreamTextDelta,
     StreamToolCallDelta,
@@ -3992,6 +3993,7 @@ class Session:
         #: "fall through" value, which is what every non-child session holds.
         self._saver_agent_pin_value: bool | None = None
         self._stream_fn = stream_fn
+        self._public_evidence: Any = None
         saver_bridge = getattr(self._stream_fn, "bind_saver_session", None)
         if callable(saver_bridge):
             saver_bridge(self)
@@ -16701,6 +16703,35 @@ class Session:
         else:
             self._merge_capability_tools(("no_reply", "notify"))
 
+    def set_public_research(self, policy: Any) -> None:
+        from local_operator.model.configure import SessionStreamFn
+        from local_operator.research_evidence import (
+            PublicEvidenceConditioner,
+            PublicResearchPolicy,
+        )
+
+        if (
+            isinstance(policy, PublicResearchPolicy)
+            and policy.mode == "extract"
+            and isinstance(self._stream_fn, SessionStreamFn)
+        ):
+            self._public_evidence = PublicEvidenceConditioner(
+                policy, self._stream_fn, self._transcript, self._accrue_auxiliary_usage
+            )
+            self._context.condition_public_evidence = self._public_evidence
+
+    def _accrue_auxiliary_usage(self, usage: Usage | None) -> None:
+        # A receipt is not an assistant turn. Use the money-only accumulator,
+        # not the turn accrual path that also advances context/cache occupancy.
+        from local_operator.session.channel_spend import usd_to_micro
+        from local_operator.session.spend import serving_identity
+
+        if usage is None:
+            self.accrue_spend(None)
+            return
+        dollars = usage.usd_cost if usage.usd_cost is not None else usage.estimated_usd_cost
+        self.accrue_spend(usd_to_micro(dollars), serving_identity(usage), usage.billing_basis)
+
     def set_first_turn_mcp_wait(self, timeout_s: float | None) -> None:
         """Hold the first turn for EVERY configured MCP server, bounded; ``None`` opts out.
 
@@ -23697,6 +23728,16 @@ class Session:
                     )
                     request.validate_required_images()
                 request._codex_turn_state = codex_turn_state
+                evidence = self._public_evidence if request.purpose == "turn" else None
+                binding = None
+                if evidence is not None:
+                    evidence.main = None
+                    if not request.has_one_turn_secrets and request.model.provider == "bedrock":
+                        from local_operator.research_evidence import (
+                            BedrockEvidenceBinding,
+                        )
+
+                        binding = request._evidence_binding = BedrockEvidenceBinding()
                 inner = base_stream_fn(request, stream_signal)
                 # The context this request was built from, taken before any
                 # later boundary can extend it.
@@ -23748,6 +23789,20 @@ class Session:
                         # any owed card it carries has now been read.
                         self._settle_bridge_card_wakes(carried)
                     async for event in inner:
+                        if (
+                            binding is not None
+                            and evidence is not None
+                            and isinstance(event, StreamEndEvent)
+                        ):
+                            selected, usage = binding.selected, event.usage
+                            if (
+                                selected is not None
+                                and event.stop_reason in ("toolUse", "stop")
+                                and usage is not None
+                                and usage.provider == "bedrock"
+                                and usage.model_id == selected.model_id
+                            ):
+                                evidence.main = selected
                         yield event
 
                 return witness()

@@ -5318,6 +5318,7 @@ async def _stream_with_failover_events(
                 if not retry.enabled:
                     if (
                         request.isolated
+                        and not request.same_route_retry
                         and not isolated_auth_resolved
                         and is_rotation_eligible(exc)
                     ):

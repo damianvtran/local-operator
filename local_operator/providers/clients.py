@@ -6063,7 +6063,12 @@ class AnthropicClient:
     # ``tests/unit/providers/bedrock/test_client.py`` T4 regression cells).
 
     async def _messages_request(
-        self, body: dict[str, Any], headers: dict[str, str], api_key: str | None
+        self,
+        body: dict[str, Any],
+        headers: dict[str, str],
+        api_key: str | None,
+        *,
+        evidence_binding: Any = None,
     ) -> tuple[str, bytes, dict[str, str]]:
         """``(url, exact body bytes, headers)`` for one Messages POST.
 
@@ -6094,7 +6099,12 @@ class AnthropicClient:
 
     @contextlib.asynccontextmanager
     async def _open_messages_stream(
-        self, body: dict[str, Any], headers: dict[str, str], api_key: str | None = None
+        self,
+        body: dict[str, Any],
+        headers: dict[str, str],
+        api_key: str | None = None,
+        *,
+        evidence_binding: Any = None,
     ) -> AsyncIterator[httpx.Response]:
         """Open the Messages stream, shedding a refused ``diagnostics`` key once.
 
@@ -6105,7 +6115,12 @@ class AnthropicClient:
         identical request is sent again. Nothing has been streamed yet, so the
         retry is invisible to the turn; every other status passes through.
         """
-        url, content, sent_headers = await self._messages_request(body, headers, api_key)
+        evidence_kwargs = (
+            {"evidence_binding": evidence_binding} if evidence_binding is not None else {}
+        )
+        url, content, sent_headers = await self._messages_request(
+            body, headers, api_key, **evidence_kwargs
+        )
         async with self._http.stream(
             "POST", url, content=content, headers=sent_headers
         ) as response:
@@ -6118,7 +6133,9 @@ class AnthropicClient:
             "anthropic: cache diagnostics refused by the API (HTTP 400); "
             "disabled for this process"
         )
-        url, content, sent_headers = await self._messages_request(body, headers, api_key)
+        url, content, sent_headers = await self._messages_request(
+            body, headers, api_key, **evidence_kwargs
+        )
         async with self._http.stream(
             "POST", url, content=content, headers=sent_headers
         ) as response:
@@ -6195,6 +6212,11 @@ class AnthropicClient:
                 ),
             ),
             api_key,
+            **(
+                {"evidence_binding": request._evidence_binding}
+                if request._evidence_binding is not None and request.model.provider == "bedrock"
+                else {}
+            ),
         ) as response:
             if overage_account:
                 # Before the status check: a 429 carries the same headers, and

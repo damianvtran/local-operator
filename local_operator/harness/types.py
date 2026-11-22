@@ -5455,6 +5455,9 @@ class ChatRequest(BaseModel):
     # Shared only by the main turn's request clones; never serialized to a
     # transcript, telemetry row, helper call or independent conversation.
     _codex_turn_state: Any = PrivateAttr(default=None)
+    # Shallow request clones must carry the same wire proof and receipt ID.
+    _evidence_binding: Any = PrivateAttr(default=None)
+    _auxiliary_request_id: str | None = PrivateAttr(default=None)
 
     _one_turn_secrets: dict[str, SecretStr] = PrivateAttr(default_factory=dict)
 

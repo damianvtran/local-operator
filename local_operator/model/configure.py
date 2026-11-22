@@ -7812,7 +7812,7 @@ class SessionStreamFn:
         sent.
         """
         started_at = time.monotonic()
-        request_id = uuid.uuid4().hex
+        request_id = request._auxiliary_request_id or uuid.uuid4().hex
         # Resolved ONCE here, at request start (see
         # ``_request_observation_target``): the ordinary path pays two
         # attribute reads and a ``None`` check per REQUEST, never per delta.

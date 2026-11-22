@@ -1,0 +1,472 @@
+"""The tool-result seam, fail-closed policy, and SDK durable receipts."""
+
+import json
+import sqlite3
+from types import SimpleNamespace
+from typing import Any, Literal, cast
+
+import pytest
+import pytest_asyncio
+
+from local_operator.harness.loop import AgentLoop, LoopContext
+from local_operator.harness.types import (
+    AbortSignal,
+    Message,
+    StreamEndEvent,
+    StreamTextDelta,
+    StreamUsageEvent,
+    TextContent,
+    ToolResult,
+    Usage,
+)
+from local_operator.research_evidence import (
+    CANADA,
+    COMPANION,
+    BedrockWireIdentity,
+    PublicEvidenceConditioner,
+    _Evidence,
+)
+from local_operator.sdk import (
+    PublicResearchPolicy,
+    SessionSpec,
+    auxiliary_usage,
+    raw_public_evidence,
+)
+from local_operator.session.transcript import Transcript
+
+FETCH = "mcp__fixture__fetch"
+SEARCH = "mcp__fixture__search"
+MAIN = BedrockWireIdentity("ca.anthropic.claude-sonnet-5", CANADA, "test-binding")
+NEEDLE = "The source explicitly says the committee did not approve the plan."
+OMITTED = "The later vote had 27 abstentions."
+
+
+def page():
+    content = "\n".join(
+        [NEEDLE, OMITTED]
+        + [
+            f"Archive paragraph {i}: " + "Background about the legislative agenda. " * 12
+            for i in range(22)
+        ]
+    )
+    return json.dumps(
+        {
+            "url": "https://example.org/page",
+            "offset": 14,
+            "next_offset": 14 + len(content),
+            "total_chars": 14 + len(content) + 35,
+            "source_partial": True,
+            "content": content,
+        }
+    )
+
+
+def text_of(result: ToolResult) -> str:
+    block = result.content[0]
+    assert isinstance(block, TextContent)
+    return block.text
+
+
+def fake_usage():
+    return Usage(
+        input_tokens=2500,
+        output_tokens=4,
+        context_tokens=2504,
+        provider="bedrock",
+        model_id=COMPANION,
+        estimated_usd_cost=0.0003,
+    )
+
+
+@pytest_asyncio.fixture
+async def wire(tmp_path):
+    transcript = Transcript(tmp_path / "synthetic-evidence-session")
+    await transcript.append_custom("test_fixture", {})
+    return SimpleNamespace(
+        transcript=transcript, requests=[], response="[[1]]", stop="stop", abort=None
+    )
+
+
+async def append(
+    wire,
+    *,
+    text=None,
+    name=FETCH,
+    is_error=False,
+    secret=False,
+    raw=False,
+    mode: Literal["extract", "raw"] = "extract",
+    masker=lambda value: value,
+    extra_content=(),
+    signal=None,
+):
+    async def stream(request, abort):
+        wire.requests.append(request)
+        request._evidence_binding.selected = request._evidence_binding.expected
+        if wire.abort == "unknown":
+            abort.abort()
+            return
+        yield StreamUsageEvent(usage=fake_usage())
+        if wire.abort == "known":
+            abort.abort()
+            return
+        if wire.abort == "exception":
+            raise RuntimeError("connection interrupted after usage")
+        yield StreamTextDelta(delta=wire.response)
+        yield StreamEndEvent(stop_reason=wire.stop, usage=fake_usage())
+
+    condition = PublicEvidenceConditioner(
+        PublicResearchPolicy(
+            "Find the vote's public outcome",
+            {FETCH: "paginated_web_text", SEARCH: "search_results"},
+            mode=mode,
+        ),
+        stream,
+        wire.transcript,
+    )
+    condition.main = MAIN
+    wire._public_evidence = condition
+    raw_result = ToolResult(
+        tool_name=name,
+        tool_call_id="call-1",
+        is_error=is_error,
+        duration_s=1.25,
+        details={"status": "original"},
+        content=[TextContent(text=page() if text is None else text), *extra_content],
+    )
+    context = LoopContext(
+        condition_public_evidence=condition,
+        one_turn_secret_run_active=secret,
+        original_call_args={"call-1": {"raw": raw, "token": "not-for-the-companion"}},
+    )
+    messages = []
+    await AgentLoop()._append_results(
+        context,
+        [raw_result],
+        messages,
+        redact=masker,
+        evidence_signal=signal,
+        condition_evidence=True,
+    )
+    return raw_result, messages[0]
+
+
+@pytest.mark.asyncio
+async def test_partial_verbatim_omission_recoverable_without_refetch(wire):
+    result, last = await append(wire)
+    assert len(wire.requests) == 1
+    request = wire.requests[0]
+    assert request.isolated and request.same_route_retry and request.cache_markers == "none"
+    assert request.model.model_id == COMPANION and not request.tools
+    assert "not-for-the-companion" not in request.messages[0].text
+    assert "https://example.org/page" not in request.messages[0].text
+    header, encoded = last.text.split("\n", 1)
+    selected = json.loads(encoded)
+    raw = json.loads(page())
+    assert "not complete" in header and OMITTED not in selected["content"]
+    assert NEEDLE in selected.pop("content")
+    assert selected == {key: value for key, value in raw.items() if key != "content"}
+    assert text_of(result) == page()
+    assert await raw_public_evidence(wire, result.tool_call_id) == page()
+    [receipt] = await auxiliary_usage(wire)
+    assert receipt.usage == fake_usage() and receipt.tool_call_id == result.tool_call_id
+    assert len(wire.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "unauthorized",
+        "code",
+        "secret",
+        "raw-policy",
+        "raw-tool",
+        "error",
+        "redacted",
+        "wrong-kind",
+        "signed-url",
+        "truncated",
+        "mixed-content",
+    ],
+)
+@pytest.mark.asyncio
+async def test_fail_closed_without_dispatch(wire, case):
+    args = {
+        "unauthorized": {"name": "mcp__elsewhere__fetch"},
+        "code": {"name": "read"},
+        "secret": {"secret": True},
+        "raw-policy": {"mode": "raw"},
+        "raw-tool": {"raw": True},
+        "error": {"is_error": True},
+        "redacted": {"masker": lambda value: value.replace("abstentions", "MASKED")},
+        "wrong-kind": {"name": SEARCH},
+        "signed-url": {"text": page().replace("/page", "/page?signature=example")},
+        "truncated": {"text": page()[:-3]},
+        "mixed-content": {"extra_content": [TextContent(text="other block")]},
+    }[case]
+    raw, result = await append(wire, **args)
+    assert not wire.requests and not await auxiliary_usage(wire)
+    assert await raw_public_evidence(wire, raw.tool_call_id) is None
+    assert ("MASKED" if case == "redacted" else text_of(raw)) in result.text
+
+
+@pytest.mark.parametrize(
+    "reply,stop",
+    [
+        ("[[999]]", "stop"),
+        ("[[1],[2]]", "stop"),
+        ("[[]]", "stop"),
+        ("[[true]]", "stop"),
+        ("[[1]]", "length"),
+        ("null", "stop"),
+        (json.dumps([list(range(1, 25))]), "stop"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_invalid_capped_omitted_or_uneconomical_response_keeps_paid_usage(wire, reply, stop):
+    wire.response, wire.stop = reply, stop
+    original, result = await append(wire)
+    assert result.text == text_of(original)
+    assert await raw_public_evidence(wire, original.tool_call_id) is None
+    [receipt] = await auxiliary_usage(wire)
+    assert receipt.usage == fake_usage()
+
+
+@pytest.mark.parametrize("case", ["known", "unknown", "exception"])
+@pytest.mark.asyncio
+async def test_abort_or_transport_failure_retains_known_or_unknown_billing(wire, case):
+    wire.abort = case
+    original, result = await append(wire, signal=AbortSignal())
+    assert result.text == text_of(original)
+    [receipt] = await auxiliary_usage(wire)
+    assert receipt.usage == (None if case == "unknown" else fake_usage())
+    assert receipt.outcome == ("error" if case == "exception" else "aborted")
+    reopened = SimpleNamespace(transcript=Transcript(wire.transcript.directory, read_only=True))
+    assert (await auxiliary_usage(reopened)) == [receipt]
+
+
+def test_search_preserves_rank_titles_urls_dates_flags_and_every_row():
+    rows = [
+        {
+            "title": 'A "quoted" title',
+            "url": "https://example.org/a",
+            "id": 7,
+            "date": None,
+            "snippet": "line 1\nline 2\nline 3",
+        },
+        {
+            "title": "B",
+            "url": "https://example.org/b",
+            "id": 1,
+            "date": "2026-04-07",
+            "snippet": "line 4\nline 5",
+        },
+    ]
+    value = _Evidence.parse(
+        json.dumps({"results": rows, "total": 9, "capped": True}), "search_results"
+    )
+    assert value is not None
+    assert value.render("[[2],[]]") is None
+    output = value.render("[[2],[1]]")
+    assert output is not None
+    decoded = json.loads(output.split("\n", 1)[1])
+    assert decoded["total"] == 9 and decoded["capped"] is True
+    for row, observed, line in zip(rows, decoded["results"], ["line 2", "line 4"], strict=True):
+        assert line in observed.pop("snippet")
+        assert observed == {key: data for key, data in row.items() if key != "snippet"}
+
+
+def test_default_off_and_untrustable_policy_rejected():
+    assert SessionSpec().public_research is None
+    with pytest.raises(ValueError):
+        PublicResearchPolicy("public", {"bash": "paginated_web_text"})
+    with pytest.raises(ValueError):
+        PublicResearchPolicy("public", {FETCH: cast(Any, "unexpected_kind")})
+
+
+@pytest.mark.parametrize("on", ["started", "stop"])
+@pytest.mark.asyncio
+async def test_failed_billing_append_never_disappears_as_zero(wire, monkeypatch, on):
+    real_append = wire.transcript.append_custom
+
+    async def append_with_failure(kind, details, **kwargs):
+        if details["outcome"] == on:
+            raise OSError("fixture journal error")
+        return await real_append(kind, details, **kwargs)
+
+    monkeypatch.setattr(wire.transcript, "append_custom", append_with_failure)
+    raw, result = await append(wire)
+    assert result.text == text_of(raw)
+    if on == "started":
+        assert wire.requests == [] and await auxiliary_usage(wire) == []
+    else:
+        [live] = await auxiliary_usage(wire)
+        assert live.outcome == "journal_error" and live.usage == fake_usage()
+        reopened = SimpleNamespace(transcript=Transcript(wire.transcript.directory, read_only=True))
+        [durable] = await auxiliary_usage(reopened)
+        assert durable.request_id == live.request_id
+        assert durable.outcome == "started" and durable.usage is None
+
+
+@pytest.mark.asyncio
+async def test_unreadable_journal_raises_instead_of_returning_empty(wire, monkeypatch):
+    from local_operator.session import transcript as journal
+
+    def unreadable(*args, **kwargs):
+        raise PermissionError("fixture cannot open journal")
+
+    monkeypatch.setattr(journal, "_resolved_transcript_path", unreadable)
+    with pytest.raises(PermissionError):
+        await auxiliary_usage(wire)
+
+
+@pytest.fixture
+def analytics_ledger(tmp_path):
+    from local_operator.analytics.recorder import reset_recorder_for_test
+    from local_operator.analytics.store import AnalyticsStore
+
+    path = tmp_path / "test-analytics.sqlite"
+    recorder = reset_recorder_for_test(AnalyticsStore(path))
+    try:
+        yield recorder, path
+    finally:
+        reset_recorder_for_test()
+
+
+@pytest.mark.parametrize("change_connection", [False, True])
+@pytest.mark.asyncio
+async def test_sdk_prompt_uses_real_bedrock_wire_and_single_ledger_id(
+    tmp_path, monkeypatch, change_connection, analytics_ledger
+):
+    import httpx
+
+    from local_operator.harness.types import AgentTool
+    from local_operator.model.configure import SessionStreamFn
+    from local_operator.providers.bedrock.client import BedrockAnthropicClient
+    from local_operator.sdk import SessionRoots, open_session
+    from local_operator.session.session import Session
+    from tests.unit.providers.bedrock.eventstream import anthropic_events, stream_bytes
+
+    home = tmp_path / "isolated-home"
+    config, agent_home, work = (home / part for part in ("config", "agent", "work"))
+    for directory in (config, agent_home, work):
+        directory.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("AWS_REGION", CANADA)
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "synthetic-first-bearer")
+    monkeypatch.chdir(work)
+
+    calls = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        calls.append((request.url.host, request.url.path, body))
+        if COMPANION in request.url.path:
+            events = anthropic_events(text="[[1]]", usage={"input_tokens": 2500}, output_tokens=4)
+        elif len(calls) == 1:
+            block = [
+                {
+                    "type": "content_block_start",
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": "toolu_fixture",
+                        "name": FETCH,
+                        "input": {},
+                    },
+                },
+                {
+                    "type": "content_block_delta",
+                    "delta": {"type": "input_json_delta", "partial_json": "{}"},
+                },
+                {"type": "content_block_stop"},
+            ]
+            events = anthropic_events(
+                text="", usage={"input_tokens": 800}, extra_blocks=[block], stop_reason="tool_use"
+            )
+        else:
+            events = anthropic_events(text="Fixture answer", usage={"input_tokens": 1000})
+        return httpx.Response(200, content=stream_bytes(events))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+
+        def client_for(stream, spec):
+            if spec.provider == "bedrock":
+                return BedrockAnthropicClient(http_client=http)
+            raise AssertionError(f"Unexpected provider: {spec.provider}")
+
+        monkeypatch.setattr(SessionStreamFn, "_client_for", client_for)
+
+        async def execute(call_id, args, signal, on_update, context):
+            if change_connection:
+                monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "synthetic-changed-bearer")
+            return ToolResult(
+                tool_call_id=call_id, tool_name=FETCH, content=[TextContent(text=page())]
+            )
+
+        roots = SessionRoots(
+            config_dir=config, agent_home=agent_home, cwd=work, allow_volatile=True
+        )
+        policy = PublicResearchPolicy("Find the public outcome", {FETCH: "paginated_web_text"})
+        spec = SessionSpec(hosting="bedrock", model=MAIN.model_id, public_research=policy)
+        observed = []
+        async with open_session(spec, roots=roots) as session:
+            assert isinstance(session, Session)
+            session.refresh_tools(
+                [
+                    AgentTool(
+                        name=FETCH,
+                        parameters={"type": "object", "properties": {}},
+                        execute=execute,
+                        approval_tier="read",
+                    )
+                ]
+            )
+            unbind = session.subscribe_requests(observed.append)
+            try:
+                await session.prompt("Look up the public outcome and report it.")
+            finally:
+                unbind()
+            [receipt] = await auxiliary_usage(session)
+            [auxiliary] = [record for record in observed if record.purpose == "tool_conditioning"]
+            assert auxiliary.request_id == receipt.request_id
+            recorder, db_path = analytics_ledger
+            recorder.flush_for_test()
+            with sqlite3.connect(db_path) as conn:
+                rows = conn.execute(
+                    "SELECT purpose, request_id, cost_known FROM calls WHERE session_id = ?",
+                    (session.session_id,),
+                ).fetchall()
+            assert len(rows) == 3
+            assert [row for row in rows if row[0] == "tool_conditioning"] == [
+                ("tool_conditioning", receipt.request_id, int(not change_connection))
+            ]
+            assert len([record for record in observed if record.purpose == "turn"]) == 2
+            turns = [
+                m
+                for m in session._context.messages
+                if isinstance(m, Message) and m.role == "assistant"
+            ]
+            assert len(turns) == 2 and turns[-1].text == "Fixture answer"
+            assert session._last_usage is not None and session._last_usage.context_tokens == 1000
+            assert session.spend.calls == 3  # two main calls plus one auxiliary
+            assert all(host == "bedrock-runtime.ca-central-1.amazonaws.com" for host, *_ in calls)
+            final_prompt = json.dumps(calls[-1][2])
+            if change_connection:
+                assert len(calls) == 2 and receipt.usage is None
+                assert OMITTED in final_prompt
+            else:
+                assert len(calls) == 3 and COMPANION in calls[1][1]
+                assert receipt.usage is not None and receipt.usage.model_id == COMPANION
+                assert receipt.usage.estimated_usd_cost is not None
+                assert not calls[1][2].get("tools")
+                raw = await raw_public_evidence(session, "toolu_fixture")
+                assert raw is not None and OMITTED in raw
+                assert NEEDLE in final_prompt and OMITTED not in final_prompt
+
+
+@pytest.mark.asyncio
+async def test_unreadable_attempt_row_is_not_an_empty_rollup(wire):
+    with wire.transcript.path.open("ab") as journal:
+        journal.write(b'{"type":"custom","payload":{"custom_type":"auxiliary_usage_v1"\n')
+    with pytest.raises(ValueError, match="candidate session journal record"):
+        await auxiliary_usage(wire)

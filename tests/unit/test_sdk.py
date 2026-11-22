@@ -1125,6 +1125,10 @@ def test_public_surface_is_pinned() -> None:
     assert sdk.__all__ == [
         "AgentEvent",
         "ApprovalPolicy",
+        "AuxiliaryUsageReceipt",
+        "PublicResearchPolicy",
+        "auxiliary_usage",
+        "raw_public_evidence",
         "EngageOutcome",
         "Errand",
         "EventHandler",
