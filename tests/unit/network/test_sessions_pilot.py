@@ -798,9 +798,7 @@ def test_a_mailbox_send_retries_locate_while_a_spawned_runtime_publishes(
     assert [row.text for row in peek_inbox(mailbox_dir)] == ["hi"]
 
 
-def _use_real_cold_bind(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake: _FakeOwner
-) -> None:
+def _use_real_cold_bind(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake: _FakeOwner) -> None:
     from local_operator.session.attached import AttachedSession
     from local_operator.session.owner import LocalOwner
 

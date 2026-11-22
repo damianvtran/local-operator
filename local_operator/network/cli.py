@@ -8982,7 +8982,9 @@ async def _pilot_wait_for_runtime_record(
         )
         raise MeshRefusal(
             "session_unreachable",
-            tr("cli.network_send")(_network_send.still_starting(session_id=session_id, peer=device)),
+            tr("cli.network_send")(
+                _network_send.still_starting(session_id=session_id, peer=device)
+            ),
         ) from exc
 
 

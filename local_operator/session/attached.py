@@ -5043,7 +5043,9 @@ class AttachedSession:
                 await self._bind_under_lock(foreground=foreground, deadline=deadline)
             else:
                 await self._bind_under_lock(
-                    foreground=foreground, deadline=deadline, wait_for_publication=wait_for_publication
+                    foreground=foreground,
+                    deadline=deadline,
+                    wait_for_publication=wait_for_publication,
                 )
             # Cover every winning-owner path, including another attach/recovery
             # completing during an await. A failed model RPC is not a failed
