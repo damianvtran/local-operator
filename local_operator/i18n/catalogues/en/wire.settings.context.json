@@ -521,6 +521,16 @@
     "width": "short label column; painted in a 29-cell column; keep <=29 cells in every locale",
     "note": "An on/off switch: delete old unused install generations automatically after each update."
   },
+  "wire.settings.tool_approval_mode.choice.ask.label": {
+    "role": "approval mode dropdown choice label",
+    "tone": "concise, neutral, sentence case",
+    "note": "Human-facing name for the prompting mode, not the ask tool or a command. Translate naturally as a mode label; do not preserve the raw English enum token. Choice.value remains the machine value ask, while Choice.label is independently localized display copy. Ask mode prompts for write and command tools, not unconditionally for every tool call. Existing guardrail risk checks and mandatory human-approval requirements still apply in both modes. This label is neither authorization nor permission to execute a tool. Keep it compact; no ICU arguments. See settings_io.py's tool_approval_mode choices, harness/approval.py and guardrails/check.py."
+  },
+  "wire.settings.tool_approval_mode.choice.auto.label": {
+    "role": "approval mode dropdown choice label",
+    "tone": "concise, neutral, sentence case",
+    "note": "Human-facing name for the automatic tool-approval mode. Translate naturally as a mode label, not as an untranslated machine token; use an idiomatic local abbreviation only if natural. Choice.value remains the machine value auto, while Choice.label is independently localized display copy. Automatic does not mean every action is allowed: existing guardrail risk checks and mandatory human-approval requirements still apply, including person-only gates for account profile saves and community posts. Do not imply a guardrail bypass, unconditional approval, authorization or permission to execute a tool. Keep it compact; no ICU arguments. See settings_io.py's tool_approval_mode choices, harness/approval.py and guardrails/check.py."
+  },
   "wire.settings.update_keep_generations.help": {
     "role": "settings row help",
     "tone": "plain",
