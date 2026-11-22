@@ -96,7 +96,11 @@ from local_operator.session.attached import (
     AttachedSession,
 )
 from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
-from local_operator.session.attention import AttentionStore, acknowledge_session_receipt
+from local_operator.session.attention import (
+    BULK_RECEIPT_SESSION_ID_RE,
+    AttentionStore,
+    acknowledge_session_receipt,
+)
 from local_operator.session.catalog import (
     DECORATION_ATTENTION,
     CatalogueScope,
@@ -9419,12 +9423,10 @@ class DesktopSessions:
             outcomes: list[tuple[str, dict[str, Any] | None]] = [("unknown", None) for _ in items]
             batched: list[int] = []
             for index, (session_id, token) in enumerate(items):
+                if not BULK_RECEIPT_SESSION_ID_RE.fullmatch(session_id):
+                    continue
                 path = self.root / "sessions" / session_id
-                if (
-                    not SESSION_ID.fullmatch(session_id)
-                    or not path.is_dir()
-                    or not is_user_session(path)
-                ):
+                if not path.is_dir() or not is_user_session(path):
                     continue
                 batched.append(index)
             verdicts = store.acknowledge_many(
