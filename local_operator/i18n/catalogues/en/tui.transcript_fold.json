@@ -4,7 +4,7 @@
   "tui.transcript_fold.foot_actions_no_time": "{count, plural, one {{label} action} other {{label} actions}}",
   "tui.transcript_fold.foot_failed": "turn failed · {reason}",
   "tui.transcript_fold.foot_failed_no_reason": "turn failed",
-  "tui.transcript_fold.legend_all": "+ opens every level of this turn; - back to defaults",
+  "tui.transcript_fold.legend_all": "+ opens every level of this turn; - resets it",
   "tui.transcript_fold.legend_enter": "open or close the bar",
   "tui.transcript_fold.legend_failed": "f/F jump to the next/previous failed call",
   "tui.transcript_fold.legend_heading": "the transcript fold",

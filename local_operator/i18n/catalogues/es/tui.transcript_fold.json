@@ -1,5 +1,5 @@
 {
-  "tui.transcript_fold.failed": "✗ {label} fallidas",
+  "tui.transcript_fold.failed": "✗ {label} con error",
   "tui.transcript_fold.foot_actions": "{count, plural, one {{label} acción} many {{label} acciones} other {{label} acciones}} · {time}",
   "tui.transcript_fold.foot_actions_no_time": "{count, plural, one {{label} acción} many {{label} acciones} other {{label} acciones}}",
   "tui.transcript_fold.foot_failed": "turno fallido · {reason}",

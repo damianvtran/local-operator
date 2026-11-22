@@ -1,8 +1,8 @@
 {
   "wire.settings.transcript_display.choice.by_response.description": "ہر مکمل جواب",
-  "wire.settings.transcript_display.choice.by_response.label": "جواب وار",
+  "wire.settings.transcript_display.choice.by_response.label": "جواب کے مطابق",
   "wire.settings.transcript_display.choice.by_turn.description": "ہر ٹرن میں ایک جواب",
-  "wire.settings.transcript_display.choice.by_turn.label": "ٹرن وار",
-  "wire.settings.transcript_display.help": "“ٹرن وار” ہر ٹرن کو اس کے جواب تک سمیٹ دیتا ہے۔ “جواب وار” ہر مکمل جواب اسکرین پر رکھتا ہے، اور ٹرن کا آخری جواب پھر بھی نشان زد رہتا ہے۔",
+  "wire.settings.transcript_display.choice.by_turn.label": "ٹرن کے مطابق",
+  "wire.settings.transcript_display.help": "“ٹرن کے مطابق” ہر ٹرن کو اس کے جواب تک سمیٹ دیتا ہے۔ “جواب کے مطابق” ہر مکمل جواب اسکرین پر رکھتا ہے، اور ٹرن کا آخری جواب پھر بھی نشان زد رہتا ہے۔",
   "wire.settings.transcript_display.label": "ٹرانسکرپٹ کی نمائش"
 }

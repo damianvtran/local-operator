@@ -26,7 +26,7 @@
     "tone": "terse"
   },
   "tui.transcript_fold.legend_all": {
-    "note": "Keys-card row for the +/- keys on a focused fold bar: plus opens every fold level of the turn the bar belongs to, minus returns that turn to its default open/closed states. ASCII + and - are the key names; keep them.",
+    "note": "Keys-card row for the +/- keys on a focused fold bar: plus opens every fold level of the turn the bar belongs to, minus resets that turn to its default open/closed states. ASCII + and - are the key names; keep them.",
     "maxCells": 48,
     "role": "legend description",
     "tone": "terse instruction"

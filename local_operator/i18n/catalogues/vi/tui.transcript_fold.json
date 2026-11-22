@@ -4,7 +4,7 @@
   "tui.transcript_fold.foot_actions_no_time": "{count, plural, other {{label} thao tác}}",
   "tui.transcript_fold.foot_failed": "lượt thất bại · {reason}",
   "tui.transcript_fold.foot_failed_no_reason": "lượt thất bại",
-  "tui.transcript_fold.legend_all": "+ mở mọi cấp của lượt; - về mặc định",
+  "tui.transcript_fold.legend_all": "+ mở mọi cấp của lượt; - đặt lại về mặc định",
   "tui.transcript_fold.legend_enter": "mở hoặc đóng thanh",
   "tui.transcript_fold.legend_failed": "f/F nhảy tới lệnh gọi lỗi kế/trước",
   "tui.transcript_fold.legend_heading": "thu gọn bản ghi",
