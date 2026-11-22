@@ -4421,10 +4421,14 @@ async def bridge_card_body(
     """What one inbound Team Bridge card's messages are to THIS viewer.
 
     ``{v:1, items:[{message_id, conversation_id, state, body?, source?, hold?,
-    reason?}], more}`` (bridge-body design §4; feature key
-    ``team_bridge_card_body``). ``state`` is one of admitted, pending, held,
-    refused, not_admitted, unavailable; ``body`` is UNTRUSTED third-party
-    markdown, present only when admitted. A READ: keyed by the transcript row
+    reason?}], more, card?: {received_at?, thread_reply}}`` (bridge-body design
+    §4; feature key ``team_bridge_card_body``). ``card`` is additive within
+    ``v:1``: facts of the card's own journal row (``received_at`` ISO-8601 UTC,
+    ``thread_reply`` bool), present on every answer for a found card so a client
+    can show when and where beside the body (``card_body._card_facts``).
+    ``state`` is one of admitted, pending, held, refused, not_admitted,
+    unavailable; ``body`` is UNTRUSTED third-party markdown, present only when
+    admitted. A READ: keyed by the transcript row
     the caller can already page, so it cannot be used to probe message ids.
     The display store and the hub's admitted-only history read are the only
     sources; the screener's classification fetch (``/messages/{id}/body``) is

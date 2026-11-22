@@ -262,7 +262,7 @@ from local_operator.tui.ask_open_policy import (
     read_queue,
 )
 from local_operator.tui.autocomplete import ArgumentChoice, SlashCommand
-from local_operator.tui.bridge_card_body import card_body_loader
+from local_operator.tui.bridge_card_body import card_body_loader, card_conversation
 from local_operator.tui.command_palette import (
     OperatorCommandPalette,
     OperatorCommandProvider,
@@ -64229,6 +64229,7 @@ class OperatorApp(App[None]):
                     body_loader=card_body_loader(
                         getattr(self, "_session", None), message.message_id or ""
                     ),
+                    conversation=card_conversation(message.details),
                 )
             )
         else:

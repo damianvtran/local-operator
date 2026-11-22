@@ -61,6 +61,10 @@ def bridge_signed_out() -> Msg:
     return Msg("relay.transcript.bridge.signed_out", {})
 
 
+def bridge_thread_reply() -> Msg:
+    return Msg("relay.transcript.bridge.thread_reply", {})
+
+
 def bridge_unavailable() -> Msg:
     return Msg("relay.transcript.bridge.unavailable", {})
 

@@ -1,0 +1,75 @@
+{
+  "schema": 1,
+  "receipt_kind": "independent-translation-audit",
+  "instance": "9b6c7373a45f",
+  "date": "2026-11-22",
+  "repository": "local-operator",
+  "pr_url": "https://github.com/damianvtran/local-operator/pull/4408",
+  "head": "9be06fc428a0f5f9617a87d762f59c1b0ffbd8a8",
+  "base": "f815ea7b74fe06e13266bef583e15293fbce7532",
+  "locale": "zh-CN",
+  "namespace": "relay.transcript",
+  "auditor": {
+    "agent": "independent-translation-auditor (lopdev reviewer; audit-zhcn)",
+    "session": "9b6c7373a45f",
+    "model": "openai/gpt-6.2-sol",
+    "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.2-sol due to provider quota, before semantic audit",
+    "date": "2026-11-22",
+    "result": "passed",
+    "findings": [],
+    "unresolved_blocker_major": []
+  },
+  "status": "passed",
+  "source_sha256": "87a3e3d62fddefb9212eeba2d1981e15ebf532237c5034d56f464ab47dde0af1",
+  "target_sha256": "2db6a2020e7f4378b4282fe91f30df5d4928ac435699c42c26f572143aee4da5",
+  "source_path": "local_operator/i18n/catalogues/en/relay.transcript.json",
+  "target_path": "local_operator/i18n/catalogues/zh-CN/relay.transcript.json",
+  "context_path": "local_operator/i18n/catalogues/en/relay.transcript.context.json",
+  "keys_reviewed": [
+    "relay.transcript.bridge.held",
+    "relay.transcript.bridge.offline",
+    "relay.transcript.bridge.thread_reply",
+    "relay.transcript.jump.latest",
+    "relay.transcript.jump.latest_short"
+  ],
+  "reviewed_values": {
+    "relay.transcript.bridge.held": {
+      "english": "Held for review",
+      "target": "已暂扣，等待审核",
+      "result": "passed",
+      "note": "A temporary hold awaiting review, not a refusal or pending delivery."
+    },
+    "relay.transcript.bridge.offline": {
+      "english": "Couldn't reach Radient — retrying",
+      "target": "无法连接Radient——正在重试",
+      "result": "passed",
+      "note": "Reports a connection failure and ongoing retry without asking the reader to act."
+    },
+    "relay.transcript.bridge.thread_reply": {
+      "english": "Thread reply",
+      "target": "讨论串回复",
+      "result": "passed",
+      "note": "Identifies a reply inside a thread rather than a top-level post."
+    },
+    "relay.transcript.jump.latest": {
+      "english": "Jump to latest",
+      "target": "跳到最新消息",
+      "result": "retained",
+      "note": "Direct navigation to the newest message, without a hand-inserted arrow."
+    },
+    "relay.transcript.jump.latest_short": {
+      "english": "Latest",
+      "target": "最新",
+      "result": "retained",
+      "note": "Natural shortening of the full label."
+    }
+  },
+  "checks": {
+    "key_and_placeholder_parity": "43/43 exact key set, no duplicates; ICU argument names, types, select arms, braces and # preserved after projecting English plurals to zh-CN other-only.",
+    "semantics": "Read every value against English, context, i18n/glossary.md and i18n/style-guides/zh-CN.md. The untrusted label describes provenance and trust, not moderation. Awaiting screening and awaiting delivery do not imply moderation acted; actual refusal explicitly does.",
+    "target_delta_coverage": "Compared raw JSON value tokens against origin/main: exactly held, offline and thread_reply differ (thread_reply is new); all 40 other value tokens, including both jump keys, are byte-identical despite file indentation changes.",
+    "text_integrity": "All 43 target strings are NFC; no Unicode format/control characters, manual direction markers, or escaped entities found."
+  },
+  "scope_note": "This independent merged-namespace audit binds the listed source and target hashes. Unchanged keys are byte-identical at the value-token level to origin/main and retain prior audits, including the jump keys; this does not grant them new approvals. No native-speaker claim, rendered-fit review, or locale activation approval. Underlying review unchanged; delta vs the previously attested bytes is whitespace-only (tab -> 2-space re-serialization). Verified parsed-JSON equality.",
+  "filing_note": "The evidence tool is unavailable in this build; filed this one receipt via the manager-authorized single cat fallback."
+}
