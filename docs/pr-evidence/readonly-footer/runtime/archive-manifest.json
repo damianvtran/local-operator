@@ -1,0 +1,586 @@
+{
+  "schema": 1,
+  "kind": "exact-independent-runtime-proof-retention-not-new-QA",
+  "source_head": "3fca695e29bafbf0ea8539dd7a147f2f87183c6d",
+  "source_actor": "a7646aff80aa",
+  "source_model": "openai/gpt-6.1-sol (host-reported fallback in original report)",
+  "archive_actor": "61203766acfe",
+  "source_worktree": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer",
+  "archive_authorization": "Explicit manager instruction to preserve runtime proof on this product branch; exception to AGENTS.md evidence-storage default. No general policy change.",
+  "files": [
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/UX-PRIVATE-RUNTIME.md",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/UX-PRIVATE-RUNTIME.md",
+      "bytes": 9017,
+      "sha256": "18f28f1c44514707629c4badeb7f40028e9f952243b77b6ca88b56ba68d0ec8f",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/all8-contact.png",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/all8-contact.png",
+      "bytes": 239082,
+      "sha256": "fe3bd55891d04220005d15fcc0b949fe05cad5902da368eef6ae1f49b696c518",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/config-escape-supplement.json",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/config-escape-supplement.json",
+      "bytes": 2062,
+      "sha256": "5854336d94e4d9c2859ca0eabb56e4036cca6f5da30ed1c060c58218cd134e7a",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/en-first-rich.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/en-first-rich.svg",
+      "bytes": 28719,
+      "sha256": "b2f5e4b9b48ad0aefaac15ec8e2e674747b695c5dd58a82e00e7ab50f6bea318",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/en-first.geometry.json",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/en-first.geometry.json",
+      "bytes": 8983,
+      "sha256": "3d66effb207e3233d63af0df806bae023a0511290dde28502fce5a529917374f",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/en-first.png",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/en-first.png",
+      "bytes": 26959,
+      "sha256": "9ee5441d0c4cbd89eed235e6efdca0173c52260eb5d2ad50bb37ca4254e76d96",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/en-first.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/en-first.svg",
+      "bytes": 36273,
+      "sha256": "bc75f763fb489560b6d4ebbc36c814ab90838da9c9a851adb7ac44211f7be684",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/en-settled-rich.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/en-settled-rich.svg",
+      "bytes": 28719,
+      "sha256": "b2f5e4b9b48ad0aefaac15ec8e2e674747b695c5dd58a82e00e7ab50f6bea318",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/en-settled.geometry.json",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/en-settled.geometry.json",
+      "bytes": 8983,
+      "sha256": "3d66effb207e3233d63af0df806bae023a0511290dde28502fce5a529917374f",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/en-settled.png",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/en-settled.png",
+      "bytes": 26959,
+      "sha256": "9ee5441d0c4cbd89eed235e6efdca0173c52260eb5d2ad50bb37ca4254e76d96",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/en-settled.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/en-settled.svg",
+      "bytes": 36273,
+      "sha256": "bc75f763fb489560b6d4ebbc36c814ab90838da9c9a851adb7ac44211f7be684",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/es-first-rich.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/es-first-rich.svg",
+      "bytes": 28628,
+      "sha256": "d3679b7804926dba4fc1ca47b69082d8f512f315c3d4509e9517ae9ccdda020a",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/es-first.geometry.json",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/es-first.geometry.json",
+      "bytes": 8983,
+      "sha256": "e1d9d4617e0055fa1443668889997f8d536aae8d59b6c3d53d24125fb42fba5e",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/es-first.png",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/es-first.png",
+      "bytes": 27172,
+      "sha256": "2891fe0bae985c417346f8e7951a63c40ac3f2f5309bf6d463447cc689b5a098",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/es-first.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/es-first.svg",
+      "bytes": 36636,
+      "sha256": "c95b4ff56d0bb836602c2a3c072956a28ef01fda41844370fddea1951407a77c",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/es-settled-rich.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/es-settled-rich.svg",
+      "bytes": 28628,
+      "sha256": "d3679b7804926dba4fc1ca47b69082d8f512f315c3d4509e9517ae9ccdda020a",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/es-settled.geometry.json",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/es-settled.geometry.json",
+      "bytes": 8983,
+      "sha256": "e1d9d4617e0055fa1443668889997f8d536aae8d59b6c3d53d24125fb42fba5e",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/es-settled.png",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/es-settled.png",
+      "bytes": 27172,
+      "sha256": "2891fe0bae985c417346f8e7951a63c40ac3f2f5309bf6d463447cc689b5a098",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/es-settled.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/es-settled.svg",
+      "bytes": 36636,
+      "sha256": "c95b4ff56d0bb836602c2a3c072956a28ef01fda41844370fddea1951407a77c",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/fingerprints.json",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/fingerprints.json",
+      "bytes": 2463,
+      "sha256": "9b61e12d7d1fd93c531f134e6ff560cd4dd5dcc5553ff8b0eaa67af472f4f0f9",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/fr-first-rich.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/fr-first-rich.svg",
+      "bytes": 28703,
+      "sha256": "6fca5df165d7c9d1e1b070dd857719a9ab570066f84fee3c22d570f3e661bdfa",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/fr-first.geometry.json",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/fr-first.geometry.json",
+      "bytes": 8987,
+      "sha256": "815b7e0ccb5f6032bcfc4e81dd62b9b4f1b8dd40df9ec4bb1342455ce9811713",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/fr-first.png",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/fr-first.png",
+      "bytes": 27154,
+      "sha256": "af2868d44a7ccaedb8b6ff2ef1b7f27635fb3390df63c39696296bd22c25df9f",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/fr-first.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/fr-first.svg",
+      "bytes": 36848,
+      "sha256": "2c1f11dfb6f0ae0edb120b8de9b1cafdf295691416514bfebe5bfc7e036e192f",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/fr-settled-rich.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/fr-settled-rich.svg",
+      "bytes": 28703,
+      "sha256": "6fca5df165d7c9d1e1b070dd857719a9ab570066f84fee3c22d570f3e661bdfa",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/fr-settled.geometry.json",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/fr-settled.geometry.json",
+      "bytes": 8987,
+      "sha256": "815b7e0ccb5f6032bcfc4e81dd62b9b4f1b8dd40df9ec4bb1342455ce9811713",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/fr-settled.png",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/fr-settled.png",
+      "bytes": 27154,
+      "sha256": "af2868d44a7ccaedb8b6ff2ef1b7f27635fb3390df63c39696296bd22c25df9f",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/fr-settled.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/fr-settled.svg",
+      "bytes": 36848,
+      "sha256": "2c1f11dfb6f0ae0edb120b8de9b1cafdf295691416514bfebe5bfc7e036e192f",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/hi-first-rich.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/hi-first-rich.svg",
+      "bytes": 29990,
+      "sha256": "c2e7f301da95b5eb0b45c743e31280792900697dc7bb780ef9a72c47519442ba",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/hi-first.geometry.json",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/hi-first.geometry.json",
+      "bytes": 9358,
+      "sha256": "cf4f5a08ae5021cd30156e97698729d9b157eadb63146d4ea86f0e1cf69edc0e",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/hi-first.png",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/hi-first.png",
+      "bytes": 30746,
+      "sha256": "c62752fbff11333cd8381b1a7e24eb455d6e67a290ff01c3f97e0fa18b4e82ed",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/hi-first.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/hi-first.svg",
+      "bytes": 37234,
+      "sha256": "a18fea7f9cd01d9a46e00294ed2bcd5a9a3b958863939424a601dfd040b679cd",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/hi-settled-rich.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/hi-settled-rich.svg",
+      "bytes": 29990,
+      "sha256": "c2e7f301da95b5eb0b45c743e31280792900697dc7bb780ef9a72c47519442ba",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/hi-settled.geometry.json",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/hi-settled.geometry.json",
+      "bytes": 9358,
+      "sha256": "cf4f5a08ae5021cd30156e97698729d9b157eadb63146d4ea86f0e1cf69edc0e",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/hi-settled.png",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/hi-settled.png",
+      "bytes": 30746,
+      "sha256": "c62752fbff11333cd8381b1a7e24eb455d6e67a290ff01c3f97e0fa18b4e82ed",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/hi-settled.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/hi-settled.svg",
+      "bytes": 37234,
+      "sha256": "a18fea7f9cd01d9a46e00294ed2bcd5a9a3b958863939424a601dfd040b679cd",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/returned-rich.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/returned-rich.svg",
+      "bytes": 23122,
+      "sha256": "0e18ca0b4d24e0e2ea5bb1b14d1988d97a3b54b31d3ffe6a2c9fbfc17a428742",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/returned.geometry.json",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/returned.geometry.json",
+      "bytes": 5997,
+      "sha256": "68c231d3de21fc19943f7c3d6caaeaa70aa0e6c4ff73889191f5c8fbaab4587f",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/returned.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/returned.svg",
+      "bytes": 26659,
+      "sha256": "c7efdf22a25b9cf090c7da55dea3f97008cdc6f39f1588b5d16c9c146a29055c",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/ru-first-rich.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/ru-first-rich.svg",
+      "bytes": 28880,
+      "sha256": "c1723f443bafe9ff1f64dbcab1ca982ee3bee054f04c00bbad8668400efcec6e",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/ru-first.geometry.json",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/ru-first.geometry.json",
+      "bytes": 8987,
+      "sha256": "c693f360f34b95c34187be33c2ce9833824f7f2caa63cd687cd75dff859390dc",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/ru-first.png",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/ru-first.png",
+      "bytes": 30760,
+      "sha256": "32e51a871ec1609940e5518d4933022e48ca5ef9f97b825669214671d91e69f6",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/ru-first.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/ru-first.svg",
+      "bytes": 36858,
+      "sha256": "a414e162ea847f20687d121b82c0d4c1d51edfd9b31c858f4276f7e0e20dfa9f",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/ru-settled-rich.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/ru-settled-rich.svg",
+      "bytes": 28880,
+      "sha256": "c1723f443bafe9ff1f64dbcab1ca982ee3bee054f04c00bbad8668400efcec6e",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/ru-settled.geometry.json",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/ru-settled.geometry.json",
+      "bytes": 8987,
+      "sha256": "c693f360f34b95c34187be33c2ce9833824f7f2caa63cd687cd75dff859390dc",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/ru-settled.png",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/ru-settled.png",
+      "bytes": 30760,
+      "sha256": "32e51a871ec1609940e5518d4933022e48ca5ef9f97b825669214671d91e69f6",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/ru-settled.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/ru-settled.svg",
+      "bytes": 36858,
+      "sha256": "a414e162ea847f20687d121b82c0d4c1d51edfd9b31c858f4276f7e0e20dfa9f",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/runtime.json",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/runtime.json",
+      "bytes": 9757,
+      "sha256": "dee0af17bc7e0e592c420e0738b3dfc49781f8fdae209e479a0aa6652a570e1a",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/ur-first-rich.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/ur-first-rich.svg",
+      "bytes": 29680,
+      "sha256": "9b5c53f541beffe2795aecb9d31574c893c5c2a170388d2432595415a53769db",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/ur-first.geometry.json",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/ur-first.geometry.json",
+      "bytes": 9358,
+      "sha256": "5e7171b88d19028f71762f6ec0ccd7fdd66707d04b47a2aef1771f13d38de6eb",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/ur-first.png",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/ur-first.png",
+      "bytes": 24164,
+      "sha256": "1002a4bfd707a1a0b68435db4578093db4a8dae07cfc48164cb1c2b8a7237a52",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/ur-first.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/ur-first.svg",
+      "bytes": 37789,
+      "sha256": "dfd1eb84c8f49eaf9ba671b38c451cfd041825cd30a4351bab1a3925c7812143",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/ur-settled-rich.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/ur-settled-rich.svg",
+      "bytes": 29680,
+      "sha256": "9b5c53f541beffe2795aecb9d31574c893c5c2a170388d2432595415a53769db",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/ur-settled.geometry.json",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/ur-settled.geometry.json",
+      "bytes": 9358,
+      "sha256": "5e7171b88d19028f71762f6ec0ccd7fdd66707d04b47a2aef1771f13d38de6eb",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/ur-settled.png",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/ur-settled.png",
+      "bytes": 24164,
+      "sha256": "1002a4bfd707a1a0b68435db4578093db4a8dae07cfc48164cb1c2b8a7237a52",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/ur-settled.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/ur-settled.svg",
+      "bytes": 37789,
+      "sha256": "dfd1eb84c8f49eaf9ba671b38c451cfd041825cd30a4351bab1a3925c7812143",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/vi-first-rich.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/vi-first-rich.svg",
+      "bytes": 28916,
+      "sha256": "0c4b8b9d30cc17a617b9a940dd2f2531fd7d067531bf8e328c49f571646fb925",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/vi-first.geometry.json",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/vi-first.geometry.json",
+      "bytes": 8987,
+      "sha256": "1f0a18d4f22f0c6fa1603c974d4e91b21d60f27cf36628d5d3c375ee53542895",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/vi-first.png",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/vi-first.png",
+      "bytes": 29093,
+      "sha256": "945f92cc7b1ba7b01cc3c594a0efc6205c16ae5e6e9a0032c5b669c7eef20882",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/vi-first.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/vi-first.svg",
+      "bytes": 36743,
+      "sha256": "3e3dbf8d241098bb01a03bb7cf350b8a57a14741abb3396818830cb8dc9175ea",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/vi-settled-rich.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/vi-settled-rich.svg",
+      "bytes": 28916,
+      "sha256": "0c4b8b9d30cc17a617b9a940dd2f2531fd7d067531bf8e328c49f571646fb925",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/vi-settled.geometry.json",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/vi-settled.geometry.json",
+      "bytes": 8987,
+      "sha256": "1f0a18d4f22f0c6fa1603c974d4e91b21d60f27cf36628d5d3c375ee53542895",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/vi-settled.png",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/vi-settled.png",
+      "bytes": 29093,
+      "sha256": "945f92cc7b1ba7b01cc3c594a0efc6205c16ae5e6e9a0032c5b669c7eef20882",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/vi-settled.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/vi-settled.svg",
+      "bytes": 36743,
+      "sha256": "3e3dbf8d241098bb01a03bb7cf350b8a57a14741abb3396818830cb8dc9175ea",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/zh-CN-first-rich.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/zh-CN-first-rich.svg",
+      "bytes": 29391,
+      "sha256": "5a53aeb8fdabef8fac4dea730bfd6cc8c5ee1ff04f0829dd25c6385d8dcd371e",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/zh-CN-first.geometry.json",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/zh-CN-first.geometry.json",
+      "bytes": 9358,
+      "sha256": "abde9a7a2b2af75fb63607c92000d5cef3e48ded4f7a37a9c16e62e403836da3",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/zh-CN-first.png",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/zh-CN-first.png",
+      "bytes": 32603,
+      "sha256": "fcb4a724458c662f0a3e253353f29c21d5afb01c1d809a9967524cea602abb76",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/zh-CN-first.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/zh-CN-first.svg",
+      "bytes": 35511,
+      "sha256": "2fbb15f919a203c0299bd8e90dfa6c805ac4d109d2878b986f4b4ed998f32f97",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/zh-CN-settled-rich.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/zh-CN-settled-rich.svg",
+      "bytes": 29391,
+      "sha256": "5a53aeb8fdabef8fac4dea730bfd6cc8c5ee1ff04f0829dd25c6385d8dcd371e",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/zh-CN-settled.geometry.json",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/zh-CN-settled.geometry.json",
+      "bytes": 9358,
+      "sha256": "abde9a7a2b2af75fb63607c92000d5cef3e48ded4f7a37a9c16e62e403836da3",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/zh-CN-settled.png",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/zh-CN-settled.png",
+      "bytes": 32603,
+      "sha256": "fcb4a724458c662f0a3e253353f29c21d5afb01c1d809a9967524cea602abb76",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime/zh-CN-settled.svg",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/zh-CN-settled.svg",
+      "bytes": 35511,
+      "sha256": "2fbb15f919a203c0299bd8e90dfa6c805ac4d109d2878b986f4b4ed998f32f97",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly_runtime.py",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/readonly_runtime.py.txt",
+      "bytes": 5743,
+      "sha256": "6100ab99a6053c09613382b341b358e28034d2890049c9592acbffb7dc36323c",
+      "mode": "inert-text-driver"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly_supplement.py",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/readonly_supplement.py.txt",
+      "bytes": 4025,
+      "sha256": "cae1b45c9ca539c08f517b86ad2072286434124bd70c44ba3e179953c5011746",
+      "mode": "inert-text-driver"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/copy_scan.py",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/copy_scan.py.txt",
+      "bytes": 10157,
+      "sha256": "2b3f3f043c05883f7411daabf5ccc4776b28b967e728e3a86350b0cb75f63d6f",
+      "mode": "inert-text-driver"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime.log",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/readonly-runtime.log",
+      "bytes": 19233,
+      "sha256": "112c5322124313f5e98ae5e07d31945a55bf2fc851f62824ba688c93537ce7cb",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime-attempt2.log",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/readonly-runtime-attempt2.log",
+      "bytes": 1367,
+      "sha256": "1f0bd97e009d6220b261b2bf2fa7726b2786eab0873bd3e6e42c0d00b207363c",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-runtime-attempt3.log",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/readonly-runtime-attempt3.log",
+      "bytes": 4639,
+      "sha256": "109fca3886fa0adeeb224c93e954390771681d556bfbea7089e0c0b3c789e923",
+      "mode": "original-bytes"
+    },
+    {
+      "source": "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly-supplement.log",
+      "archived_path": "docs/pr-evidence/readonly-footer/runtime/readonly-supplement.log",
+      "bytes": 1997,
+      "sha256": "9d58edaa6b6ce04d5ffb106fa43a3318bc644ae43cf727ed9695e6d79548ef6b",
+      "mode": "original-bytes"
+    }
+  ],
+  "original_file_count": 79,
+  "original_total_bytes": 2022222,
+  "excluded": [
+    "readonly-runtime/home/** (isolated config/account/auth database)",
+    "font caches and unrelated session files"
+  ],
+  "native_limitations": [
+    "Urdu native glyph/bidi shaping not certified",
+    "Hindi native cluster shaping unverified",
+    "Textual compositor/SVG/librsvg proof is not native-terminal proof"
+  ],
+  "first_settled_png_byte_equal_locales": [
+    "en",
+    "fr",
+    "zh-CN",
+    "es",
+    "ru",
+    "vi",
+    "hi",
+    "ur"
+  ]
+}

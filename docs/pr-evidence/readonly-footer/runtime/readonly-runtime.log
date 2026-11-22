@@ -1,0 +1,217 @@
+╭───────────────────── Traceback (most recent call last) ──────────────────────╮
+│ /Users/damian/local-operator/.worktrees/i18n-readonly-footer/local_operator/ │
+│ tui/app.py:12859 in on_mount                                                 │
+│                                                                              │
+│   12856 │   │   # `/language` and the config watcher move it later without a │
+│   12857 │   │   from local_operator.i18n.resolve import resolve_language     │
+│   12858 │   │                                                                │
+│ ❱ 12859 │   │   self._apply_language(resolve_language())                     │
+│   12860 │   │   self._sidebar_timer = self.set_interval(2.0, self._refresh_s │
+│   12861 │   │   # THE FOREGROUND OWNER PROBE. `verified_at` is written only  │
+│   12862 │   │   # answer and every one of those surfaces is EVENT-DRIVEN, so │
+│                                                                              │
+│ ╭────────────────── locals ───────────────────╮                              │
+│ │ self = OperatorApp(                         │                              │
+│ │        │   title='Local Operator',          │                              │
+│ │        │   classes={'-dark-mode'},          │                              │
+│ │        │   pseudo_classes={                 │                              │
+│ │        │   │   'dark',                      │                              │
+│ │        │   │   'focus'                      │                              │
+│ │        │   }                                │                              │
+│ │        )                                    │                              │
+│ ╰─────────────────────────────────────────────╯                              │
+│                                                                              │
+│ /Users/damian/local-operator/.worktrees/i18n-readonly-footer/local_operator/ │
+│ i18n/resolve.py:362 in resolve_language                                      │
+│                                                                              │
+│   359 │   SHIPPED locale — today that means ``"en"`` — so every consumer can │
+│   360 │   it as renderable.                                                  │
+│   361 │   """                                                                │
+│ ❱ 362 │   candidate = _resolve_candidate(config, environ, system, home)      │
+│   363 │   return candidate if candidate in shipped_locales() else "en"       │
+│   364                                                                        │
+│   365                                                                        │
+│                                                                              │
+│ ╭──── locals ────╮                                                           │
+│ │  config = None │                                                           │
+│ │ environ = None │                                                           │
+│ │    home = None │                                                           │
+│ │  system = None │                                                           │
+│ ╰────────────────╯                                                           │
+│                                                                              │
+│ /Users/damian/local-operator/.worktrees/i18n-readonly-footer/local_operator/ │
+│ i18n/resolve.py:342 in _resolve_candidate                                    │
+│                                                                              │
+│   339 │   if candidate is None:                                              │
+│   340 │   │   candidate = env_value(environ)                                 │
+│   341 │   if candidate is None:                                              │
+│ ❱ 342 │   │   candidate = os_language(system=system, environ=environ, home=h │
+│   343 │   if candidate is None:                                              │
+│   344 │   │   return "en"                                                    │
+│   345 │   return candidate                                                   │
+│                                                                              │
+│ ╭───── locals ─────╮                                                         │
+│ │ candidate = None │                                                         │
+│ │    config = None │                                                         │
+│ │   environ = None │                                                         │
+│ │      home = None │                                                         │
+│ │    system = None │                                                         │
+│ ╰──────────────────╯                                                         │
+│                                                                              │
+│ /Users/damian/local-operator/.worktrees/i18n-readonly-footer/local_operator/ │
+│ i18n/resolve.py:186 in os_language                                           │
+│                                                                              │
+│   183 │   """                                                                │
+│   184 │   system = system if system is not None else platform.system()       │
+│   185 │   if system == "Darwin":                                             │
+│ ❱ 186 │   │   return _macos_language(home if home is not None else Path.home │
+│   187 │   if system == "Windows":                                            │
+│   188 │   │   return _windows_language()                                     │
+│   189 │   return _posix_language(environ if environ is not None else os.envi │
+│                                                                              │
+│ ╭────── locals ──────╮                                                       │
+│ │ environ = None     │                                                       │
+│ │    home = None     │                                                       │
+│ │  system = 'Darwin' │                                                       │
+│ ╰────────────────────╯                                                       │
+│                                                                              │
+│ /Users/damian/local-operator/.worktrees/i18n-readonly-footer/local_operator/ │
+│ i18n/resolve.py:233 in _macos_language                                       │
+│                                                                              │
+│   230 │   │   │   return None                                                │
+│   231 │   except (OSError, plistlib.InvalidFileException, ValueError):       │
+│   232 │   │   pass                                                           │
+│ ❱ 233 │   return _macos_defaults_language()                                  │
+│   234                                                                        │
+│   235                                                                        │
+│   236 def _macos_defaults_language() -> str | None:                          │
+│                                                                              │
+│ ╭───────────────────────────────── locals ─────────────────────────────────╮ │
+│ │  home = PosixPath('/Users/damian/.local-operator/sessions/a7646aff80aa/… │ │
+│ │ plist = PosixPath('/Users/damian/.local-operator/sessions/a7646aff80aa/… │ │
+│ ╰──────────────────────────────────────────────────────────────────────────╯ │
+│                                                                              │
+│ /Users/damian/local-operator/.worktrees/i18n-readonly-footer/local_operator/ │
+│ i18n/resolve.py:239 in _macos_defaults_language                              │
+│                                                                              │
+│   236 def _macos_defaults_language() -> str | None:                          │
+│   237 │   """``defaults read -g AppleLanguages`` fallback: parse the quoted  │
+│   238 │   try:                                                               │
+│ ❱ 239 │   │   result = subprocess.run(                                       │
+│   240 │   │   │   ["defaults", "read", "-g", "AppleLanguages"],              │
+│   241 │   │   │   capture_output=True,                                       │
+│   242 │   │   │   text=True,                                                 │
+│                                                                              │
+│ /Users/damian/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/ │
+│ python3.12/subprocess.py:548 in run                                          │
+│                                                                              │
+│    545 │   │   kwargs['stdout'] = PIPE                                       │
+│    546 │   │   kwargs['stderr'] = PIPE                                       │
+│    547 │                                                                     │
+│ ❱  548 │   with Popen(*popenargs, **kwargs) as process:                      │
+│    549 │   │   try:                                                          │
+│    550 │   │   │   stdout, stderr = process.communicate(input, timeout=timeo │
+│    551 │   │   except TimeoutExpired as exc:                                 │
+│                                                                              │
+│ ╭───────────────────────────── locals ─────────────────────────────╮         │
+│ │ capture_output = True                                            │         │
+│ │          check = False                                           │         │
+│ │          input = None                                            │         │
+│ │         kwargs = {'text': True, 'stdout': -1, 'stderr': -1}      │         │
+│ │      popenargs = (['defaults', 'read', '-g', 'AppleLanguages'],) │         │
+│ │        timeout = 3                                               │         │
+│ ╰──────────────────────────────────────────────────────────────────╯         │
+│                                                                              │
+│ /Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly_runt │
+│ ime.py:33 in deny                                                            │
+│                                                                              │
+│   30 │   # Preserve the public app screenshot as requested, plus calibrated  │
+│   31 │   app.save_screenshot(filename=stem+'-rich.svg',path=str(OUT))        │
+│   32 │   save_capture(app,OUT/(stem+'.svg'),profile=PROFILE)                 │
+│ ❱ 33 def deny(*args,**kwargs):raise AssertionError('Private runtime rig forb │
+│   34                                                                         │
+│   35 async def main():                                                       │
+│   36 │   assert str(ROOT) in local_operator.__file__                         │
+│                                                                              │
+│ ╭───────────────────────── locals ─────────────────────────╮                 │
+│ │   args = (['defaults', 'read', '-g', 'AppleLanguages'],) │                 │
+│ │ kwargs = {'text': True, 'stdout': -1, 'stderr': -1}      │                 │
+│ ╰──────────────────────────────────────────────────────────╯                 │
+╰──────────────────────────────────────────────────────────────────────────────╯
+AssertionError: Private runtime rig forbids network/process creation
+Traceback (most recent call last):
+  File "/Users/damian/local-operator/.venv/lib/python3.12/site-packages/textual/app.py", line 2210, in run_test
+    yield pilot
+  File "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly_runtime.py", line 50, in main
+    native=json.loads((ROOT/'local_operator/i18n/catalogues'/locale/'tui.editor_readonly.json').read_text())['hint'].replace('{key}','esc')
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+KeyError: 'hint'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly_runtime.py", line 82, in <module>
+    asyncio.run(main())
+  File "/Users/damian/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/Users/damian/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/damian/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly_runtime.py", line 40, in main
+    async with app.run_test(size=(40,24)) as pilot:
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/damian/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/contextlib.py", line 231, in __aexit__
+    await self.gen.athrow(value)
+  File "/Users/damian/local-operator/.venv/lib/python3.12/site-packages/textual/app.py", line 2218, in run_test
+    raise self._exception
+  File "/Users/damian/local-operator/.venv/lib/python3.12/site-packages/textual/app.py", line 3493, in _process_messages
+    await run_process_messages()
+  File "/Users/damian/local-operator/.venv/lib/python3.12/site-packages/textual/app.py", line 3438, in run_process_messages
+    await self._dispatch_message(events.Mount())
+  File "/Users/damian/local-operator/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 727, in _dispatch_message
+    await self.on_event(message)
+  File "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/local_operator/tui/app.py", line 34741, in on_event
+    await super().on_event(event)
+  File "/Users/damian/local-operator/.venv/lib/python3.12/site-packages/textual/app.py", line 4148, in on_event
+    await super().on_event(event)
+  File "/Users/damian/local-operator/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 808, in on_event
+    await self._on_message(event)
+  File "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/local_operator/tui/app.py", line 7296, in _on_message
+    await super()._on_message(message)
+  File "/Users/damian/local-operator/.venv/lib/python3.12/site-packages/textual/message_pump.py", line 829, in _on_message
+    await invoke(method, message)
+  File "/Users/damian/local-operator/.venv/lib/python3.12/site-packages/textual/_callback.py", line 96, in invoke
+    return await _invoke(callback, *params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/damian/local-operator/.venv/lib/python3.12/site-packages/textual/_callback.py", line 58, in _invoke
+    result = await result
+             ^^^^^^^^^^^^
+  File "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/local_operator/tui/app.py", line 12859, in on_mount
+    self._apply_language(resolve_language())
+                         ^^^^^^^^^^^^^^^^^^
+  File "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/local_operator/i18n/resolve.py", line 362, in resolve_language
+    candidate = _resolve_candidate(config, environ, system, home)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/local_operator/i18n/resolve.py", line 342, in _resolve_candidate
+    candidate = os_language(system=system, environ=environ, home=home)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/local_operator/i18n/resolve.py", line 186, in os_language
+    return _macos_language(home if home is not None else Path.home())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/local_operator/i18n/resolve.py", line 233, in _macos_language
+    return _macos_defaults_language()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/local_operator/i18n/resolve.py", line 239, in _macos_defaults_language
+    result = subprocess.run(
+             ^^^^^^^^^^^^^^^
+  File "/Users/damian/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/subprocess.py", line 548, in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/damian/.local-operator/sessions/a7646aff80aa/scratchpad/readonly_runtime.py", line 33, in deny
+    def deny(*args,**kwargs):raise AssertionError('Private runtime rig forbids network/process creation')
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Private runtime rig forbids network/process creation

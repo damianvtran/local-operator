@@ -23,6 +23,7 @@ from typing import Any
 
 import pytest
 from textual.app import App, ComposeResult
+from textual.pilot import Pilot
 from textual.widget import Widget
 
 from local_operator.tui import animation
@@ -152,6 +153,32 @@ async def await_session_boot(app: App[None]) -> None:
         "no session worker is pending and no session was adopted -- the boot "
         "worker never ran, so waiting here would have waited on nothing"
     )
+
+
+async def await_booted(app: App[None], pilot: Pilot[Any], turns: int = 3) -> None:
+    """Block until the boot worker has ADOPTED the session, then settle.
+
+    WHY NOT ``_settle`` ALONE. Three ``pilot.pause()`` turns yield to the message
+    pump; they do not wait for the boot worker's ``_warm_session_imports`` thread
+    hop. A test whose assertion depends on ``app._session`` (the owner contract
+    keys on the ADOPTED session's id, the sidebar marks union the live session's
+    count in, and a fleet door opened on the boot card mounts no
+    ``AskQueueList``) is therefore betting the hop beats three turns. On a
+    GIL-starved CI shard it loses: main run 44077850873, job 134039629936,
+    ``_fleet_answer_starts_here(own) is True`` because ``current`` was ``""``.
+    ``LOP_TEST_SLOW_BOOT_WARM_S=0.4`` reproduces it on any machine. Waiting on
+    the worker (:func:`await_session_boot`) has no turn or clock budget to lose.
+
+    THE TRAILING SETTLE IS FOR THE ADOPTION'S OWN UI WORK, not for the boot to
+    finish. And the ``boot-card`` class on the screen is NOT an adoption signal,
+    in either direction: the card stands down when a conversation starts, so an
+    app whose synthetic session never starts one keeps ``boot-card boot`` for the
+    whole test after a perfectly successful adoption (measured here). Do not wait
+    on it; wait on the worker.
+    """
+    await await_session_boot(app)
+    for _ in range(turns):
+        await pilot.pause()
 
 
 @pytest.fixture(autouse=True)

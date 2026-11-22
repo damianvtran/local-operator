@@ -44,6 +44,7 @@ from local_operator.tui.widgets.ask_queue import (
 )
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock
+from tests.unit.tui.conftest import await_booted
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 # The whole module drives the real app through Textual's pilot, so every test
@@ -169,7 +170,7 @@ async def test_flag_off_renders_no_ask_surface(monkeypatch):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(100, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
         await _settle(pilot)
         assert app._ask_rows == []
@@ -185,7 +186,7 @@ async def test_minimized_bar_counts_and_names_the_head_question(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
         await _settle(pilot)
         bar = app.query_one(AskBar)
@@ -218,7 +219,7 @@ async def test_bar_is_absent_at_zero_asks(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
         await _settle(pilot)
         assert app.query_one(AskBar).display
@@ -238,7 +239,7 @@ async def test_a_live_empty_queue_renders_no_surface_and_keeps_the_tally(enabled
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface([], open_count=0, truncated=False)
         await _settle(pilot)
         assert not app.query_one(AskBar).display, "empty rows paint no bar"
@@ -281,7 +282,7 @@ async def test_clicking_the_bar_expands_the_card_and_does_not_flip_the_placehold
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
         await _settle(pilot)
         editor = app._editor()
@@ -319,7 +320,7 @@ async def test_enter_in_the_composer_sends_chat_whether_the_card_is_up_or_not(en
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
         await _settle(pilot)
 
@@ -363,7 +364,7 @@ async def test_a_collapsed_paste_sent_with_the_card_up_reaches_the_conversation_
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
         await _settle(pilot)
         app._expand_asks()
@@ -396,7 +397,7 @@ async def test_collapsing_preserves_both_drafts_and_reexpanding_restores_the_ask
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
         await _settle(pilot)
         editor = app._editor()
@@ -440,7 +441,7 @@ async def test_text_typed_while_the_card_is_up_never_costs_the_earlier_draft(ena
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
         await _settle(pilot)
         editor = app._editor()
@@ -472,7 +473,7 @@ async def test_a_draft_survives_switching_conversation_while_the_card_is_up(enab
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
         await _settle(pilot)
         editor = app._editor()
@@ -494,7 +495,7 @@ async def test_an_ask_settling_while_expanded_collapses_and_keeps_the_chat_draft
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
         await _settle(pilot)
         editor = app._editor()
@@ -521,7 +522,7 @@ async def test_several_asks_open_the_list_and_enter_mounts_that_ask(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(
             ask_rows(
                 [
@@ -554,7 +555,7 @@ async def test_a_single_ask_expands_straight_to_its_card(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
         await _settle(pilot)
         app._expand_asks()
@@ -569,7 +570,7 @@ async def test_the_list_declines_and_dismisses_explicitly(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(
             ask_rows(
                 [
@@ -598,7 +599,7 @@ async def test_the_list_marks_a_timed_out_ask_as_timed_out_and_read_only(enabled
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(
             ask_rows(
                 [
@@ -624,7 +625,7 @@ async def test_a_refused_answer_says_so_and_does_not_lose_the_ask(enabled):
     session.refusals["a1"] = "already answered by phone."
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
         await _settle(pilot)
         app._expand_asks()
@@ -698,7 +699,7 @@ async def test_a_secret_only_ask_refuses_chat_and_keeps_the_text(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(140, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_secret_row()]))
         await _settle(pilot)
         await _submit_chat(app, pilot, "PASTED-CREDENTIAL-SENTINEL")
@@ -727,7 +728,7 @@ async def test_the_secret_refusal_is_one_row_however_many_times_enter_is_pressed
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(140, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_secret_row()]))
         await _settle(pilot)
         for _ in range(3):
@@ -741,7 +742,7 @@ async def test_the_secret_refusal_comes_down_when_the_ask_is_answered(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(140, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_secret_row()]))
         await _settle(pilot)
         await _submit_chat(app, pilot, "PASTED-CREDENTIAL-SENTINEL")
@@ -769,7 +770,7 @@ async def test_the_refusal_names_the_route_the_open_surface_offers(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(140, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_secret_row()]))
         await _settle(pilot)
         await _submit_chat(app, pilot, "PASTED-CREDENTIAL-SENTINEL")
@@ -802,7 +803,7 @@ async def test_the_refusal_on_a_list_names_tab_then_the_ask_card(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(140, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_secret_row("s1"), _secret_row("s2")]))
         await _settle(pilot)
         await pilot.press(ASK_TOGGLE_KEY)
@@ -828,7 +829,7 @@ async def test_a_row_the_card_cannot_draw_does_not_trap_the_composer(enabled):
     undrawable = _secret_row()
     undrawable["questions"][0]["options"] = [{"label": "Keep", "description": ""}]
     async with app.run_test(size=(140, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([undrawable]))
         await _settle(pilot)
         await _submit_chat(app, pilot, "an ordinary sentence")
@@ -852,7 +853,7 @@ async def test_the_secret_guard_is_bounded_to_all_secret_asks_and_to_chat(enable
         session = _AskSession()
         app = _app(session)
         async with app.run_test(size=(140, 30)) as pilot:
-            await _settle(pilot)
+            await await_booted(app, pilot)
             app._sync_ask_surface(ask_rows(rows))
             await _settle(pilot)
             await _submit_chat(app, pilot, text)
@@ -868,7 +869,7 @@ async def test_the_secret_guard_is_bounded_to_all_secret_asks_and_to_chat(enable
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(140, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_secret_row()]))
         await _settle(pilot)
         await _submit_chat(app, pilot, "/help")
@@ -882,7 +883,7 @@ async def test_the_sidebar_mark_is_painted_for_the_current_session(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
         await _settle(pilot)
         sidebar = app._session_sidebar
@@ -904,7 +905,7 @@ async def test_a_queue_that_only_timed_out_marks_nothing_but_keeps_its_bar(enabl
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?", status="timed_out")]))
         await _settle(pilot)
         sidebar = app._session_sidebar
@@ -984,7 +985,7 @@ async def test_an_incomplete_answer_is_never_submitted_and_a_complete_one_is():
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         # Adopt, as the app does before the dock can be clicked: the queue OPS
         # are the session's, and the surfaces resolve them through it.
         app._session = session
@@ -1029,7 +1030,7 @@ async def test_the_chat_draft_survives_picking_an_ask_out_of_the_list(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         editor = app.query_one(Editor)
         editor.load_text("a chat draft in progress")
         await _settle(pilot)
@@ -1058,7 +1059,7 @@ async def test_the_composer_says_and_does_the_same_thing_on_the_list_and_on_the_
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         editor = app.query_one(Editor)
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?"), _row("a2", "Which region?")]))
         await _settle(pilot)
@@ -1098,7 +1099,7 @@ async def test_escape_from_the_composer_collapses_and_does_not_stop(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         editor = app.query_one(Editor)
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
         await _settle(pilot)
@@ -1122,7 +1123,7 @@ async def test_escape_out_of_a_card_returns_to_the_list_at_the_same_row(enabled)
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(
             ask_rows(
                 [_row("a1", "Deploy now?"), _row("a2", "Which region?"), _row("a3", "Roll back?")]
@@ -1162,7 +1163,7 @@ async def test_a_click_on_a_row_opens_that_ask(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(
             ask_rows(
                 [_row("a1", "Deploy now?"), _row("a2", "Which region?"), _row("a3", "Roll back?")]
@@ -1214,7 +1215,7 @@ async def test_the_list_header_stays_one_line_and_never_splits_a_hint(enabled, s
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=size) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(
             ask_rows(
                 [
@@ -1256,7 +1257,7 @@ async def test_the_bar_says_how_many_are_urgent(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(
             ask_rows(
                 [
@@ -1285,7 +1286,7 @@ async def test_the_head_question_fills_a_wide_bar(enabled):
     app = _app(session)
     question = "Which rollout should the stale-row migration take tonight?"
     async with app.run_test(size=(130, 40)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._append_block(UserBlock("what should we do about the stale rows?"))
         await _settle(pilot)
         app._sync_ask_surface(ask_rows([_row("a1", question)]))
@@ -1302,7 +1303,7 @@ async def test_a_card_that_cannot_be_built_does_not_strand_ask_mode(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
         await _settle(pilot)
         app._expand_asks()
@@ -1349,7 +1350,7 @@ async def test_the_key_route_reaches_the_surface_from_the_composer(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app.query_one("Editor").focus()
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?"), _row("a2", "Which region?")]))
         await _settle(pilot)
@@ -1367,7 +1368,7 @@ async def test_the_open_list_follows_the_wire(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(
             ask_rows(
                 [_row("a1", "Deploy now?"), _row("a2", "Which region?"), _row("a3", "Roll back?")]
@@ -1392,7 +1393,7 @@ async def test_a_late_answer_leaves_the_answerable_surfaces(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(
             ask_rows([_row("a1", "Deploy now?", status="late"), _row("a2", "Which region?")])
         )
@@ -1421,7 +1422,7 @@ async def test_the_bar_and_the_list_speak_from_one_fold(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(170, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(
             ask_rows(
                 [
@@ -1458,7 +1459,7 @@ async def test_the_bar_keeps_its_chevron_at_eighty_columns(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(80, 24)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(
             ask_rows(
                 [
@@ -1489,7 +1490,7 @@ async def test_the_card_title_never_claims_the_agent_is_waiting(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
         await _settle(pilot)
         app._expand_asks()
@@ -1532,7 +1533,7 @@ async def test_a_refused_dismiss_reports_at_the_gesture(enabled):
     session.dismiss_refusals["a1"] = "only a timed-out ask can be dismissed; it is still open."
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
         await _settle(pilot)
         app._dismiss_ask("a1")
@@ -1566,7 +1567,7 @@ async def test_every_row_paints_one_line_and_every_painted_row_is_clickable(enab
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=size) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(
             ask_rows(
                 [
@@ -1608,7 +1609,7 @@ async def test_the_urgency_word_counts_the_same_set_on_both_surfaces(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(170, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(
             ask_rows(
                 [
@@ -1717,7 +1718,7 @@ async def test_a_viewer_answers_a_queued_ask_through_its_async_op(enabled):
     session = _ViewerAskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?"), _row("a2", "Which region?")]))
         await _settle(pilot)
         app._expand_asks()
@@ -1751,7 +1752,7 @@ async def test_a_viewer_decides_a_bridge_request_through_its_async_op(enabled):
     session = _ViewerAskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_bridge_row("b1")]))
         await _settle(pilot)
         app._expand_asks()
@@ -1769,7 +1770,7 @@ async def test_a_viewer_refusal_reaches_the_screen_in_the_owners_words(enabled):
     session = _ViewerAskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?"), _row("a2", "Which region?")]))
         await _settle(pilot)
         app._expand_asks()
@@ -1792,7 +1793,7 @@ async def test_a_row_too_wide_for_the_box_keeps_its_expiry_and_shows_the_cut(ena
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(100, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         # TWO asks, because one expands straight to its card — the list is what
         # this test is about.
         app._sync_ask_surface(
@@ -1837,7 +1838,7 @@ async def test_the_countdown_repaints_between_snapshots(enabled, monkeypatch):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         assert app._ask_tick is None, "a session with no asks carries no clock"
         # TWO asks with a deadline five seconds out: two rows keep the LIST up
         # (one ask expands straight to its card), and a five-second deadline
@@ -1943,7 +1944,7 @@ async def test_a_clock_tick_does_not_re_cut_the_question(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(100, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         # TWO asks, because one expands straight to its card and this is about
         # the LIST's rows.
         deadline = int(time.time() * 1000) + 600_000
@@ -1985,7 +1986,7 @@ async def test_answering_one_ask_advances_the_list_to_the_next(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._session = session
         app._sync_ask_surface(
             ask_rows(
@@ -2026,7 +2027,7 @@ async def test_answering_the_last_row_falls_back_to_the_one_before_it(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._session = session
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?"), _row("a2", "Which region?")]))
         await _settle(pilot)
@@ -2077,7 +2078,7 @@ async def test_the_ask_marker_paints_the_derived_ink_not_the_raw_accent(enabled)
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         # TWO asks: one expands to its CARD, and this test is about the LIST
         # (whose header paints the marker this asserts on).
         app._sync_ask_surface(ask_rows([_row("a1", "Ship it?"), _row("a2", "And to where?")]))

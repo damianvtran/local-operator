@@ -9581,7 +9581,14 @@ def _install_ask_remote(app: FastAPI, remote: Any, *, remote_row: Any = None) ->
 
     class _Pool:
         @contextlib.asynccontextmanager
-        async def session(self, session_id: str, *, read: bool = False, allow_draft: bool = False):
+        async def session(
+            self,
+            session_id: str,
+            *,
+            read: bool = False,
+            allow_draft: bool = False,
+            control_only: bool = False,
+        ):
             del session_id, read, allow_draft
             yield bridge
 

@@ -1,0 +1,5984 @@
+{
+  "receipt": {
+    "locale": "ru",
+    "namespace": "tui.info",
+    "source_sha256": "909a00c7f98b291863ae6508648ede30b3edddf868e5c0d84a23999666e3cdaf",
+    "translator": {
+      "agent": "info-translate-ru / translator; session 217837a8d6b4",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21"
+    },
+    "auditor": {
+      "agent": "translation-auditor / info-audit-ru; session 31e286639a33",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "result": "failed",
+      "findings": 1,
+      "unresolved_blocker_major": 1
+    },
+    "status": "failed",
+    "note": "Round 1 independent full277-key audit at e9e6c3711149cba6899083eab019342d98d5fa55. Actual auditor fallback from anthropic/claude-opus-5-5 following provider quota; translator actual model/fallback independently read from named translator mechanical receipt. 1 major safety overclaim; 10 minor grammar findings; 12 measured compact-width risks (not observed overflow, overlaps major key). EN/target read through audited public-copy reader; full context reader refused on >200000-character size cap; parent authorized metadata-only exact-sidecar parse, losslessly factored with roundtrip equality. No repo edits, App/native/browser/whole-suite/generation/CI. Not ship clearance."
+  },
+  "commit": "e9e6c3711149cba6899083eab019342d98d5fa55",
+  "scope": "ea92d3c2faa7..e9e6c3711149",
+  "source_context_target_hashes": {
+    "source": "909a00c7f98b291863ae6508648ede30b3edddf868e5c0d84a23999666e3cdaf",
+    "context": "905690aae095d0ec8fe0b36f6dfe92db05e9c6e3bfdbc0fe87577a37002b9d11",
+    "target": "c6b6287844dcc19f0a98d71d5a72a6da38599c7f15c085066b2ee1754a8cd071"
+  },
+  "all_keys_read": 277,
+  "context_entries_read": 277,
+  "findings": [
+    {
+      "id": "R1",
+      "key": "tui.info.status.bound_held",
+      "severity": "major",
+      "current": "завис; не остановлен",
+      "proposed": "срок истёк; процесс жив",
+      "reason": "The label asserts a hung process (завис), but the listing also paints HELD_UNPROVEN artifacts where recovery cannot be confirmed. Elapsed bound plus still-alive is supported; a diagnosis of hanging is not.",
+      "code_path": "info_panel.py:1097-1098; stall_watchdog.py:4276-4323; control.py:1640-1666"
+    },
+    {
+      "id": "R2",
+      "key": "tui.info.sessions.not_answering_clause",
+      "severity": "minor",
+      "current": " · {wedged} не отвечают",
+      "proposed": " · {wedged} без ответа",
+      "reason": "A reachable count of 1 renders «1 не отвечают»; the count-neutral noun phrase is idiomatic for every count and preserves the simple argument contract.",
+      "code_path": "info_panel.py session/runtimes summary or info/render.py build_export; sessions.wedged can equal 1"
+    },
+    {
+      "id": "R3",
+      "key": "tui.info.agents.runtimes",
+      "severity": "minor",
+      "current": "{live, plural, one {# активный} few {# активных} many {# активных} other {# активного}}{has_wedged, select, yes { · {wedged} не отвечают} other {}}",
+      "proposed": "{live, plural, one {# активный} few {# активных} many {# активных} other {# активного}}{has_wedged, select, yes { · {wedged} без ответа} other {}}",
+      "reason": "A reachable count of 1 renders «1 не отвечают»; the count-neutral noun phrase is idiomatic for every count and preserves the simple argument contract.",
+      "code_path": "info_panel.py session/runtimes summary or info/render.py build_export; sessions.wedged can equal 1"
+    },
+    {
+      "id": "R4",
+      "key": "tui.info.export.sessions_summary",
+      "severity": "minor",
+      "current": "  {live, plural, one {# активная} few {# активные} many {# активных} other {# активной}} · {wedged} не отвечают · {total, plural, one {# всего} few {# всего} many {# всего} other {# всего}}{has_build_skew, select, yes { · РАЗНЫЕ СБОРКИ} other {}}",
+      "proposed": "  {live, plural, one {# активная} few {# активные} many {# активных} other {# активной}} · {wedged} без ответа · {total, plural, one {# всего} few {# всего} many {# всего} other {# всего}}{has_build_skew, select, yes { · РАЗНЫЕ СБОРКИ} other {}}",
+      "reason": "A reachable count of 1 renders «1 не отвечают»; the count-neutral noun phrase is idiomatic for every count and preserves the simple argument contract.",
+      "code_path": "info_panel.py session/runtimes summary or info/render.py build_export; sessions.wedged can equal 1"
+    },
+    {
+      "id": "R5",
+      "key": "tui.info.export.runtimes",
+      "severity": "minor",
+      "current": "  рантаймы          {sessions_live_sessions_wedged, plural, one {# всего} few {# всего} many {# всего} other {# всего}} — {live, plural, one {# активный} few {# активных} many {# активных} other {# активного}} · {wedged} не отвечают",
+      "proposed": "  рантаймы          {sessions_live_sessions_wedged, plural, one {# всего} few {# всего} many {# всего} other {# всего}} — {live, plural, one {# активный} few {# активных} many {# активных} other {# активного}} · {wedged} без ответа",
+      "reason": "A reachable count of 1 renders «1 не отвечают»; the count-neutral noun phrase is idiomatic for every count and preserves the simple argument contract.",
+      "code_path": "info_panel.py session/runtimes summary or info/render.py build_export; sessions.wedged can equal 1"
+    },
+    {
+      "id": "R6",
+      "key": "tui.info.agents.unreported_full",
+      "severity": "minor",
+      "current": "{subagents_unreported} из {runtimes, plural, one {# рантайма} few {# рантаймов} many {# рантаймов} other {# рантайма}} не передали данные",
+      "proposed": "{subagents_unreported} из {runtimes, plural, one {# рантайма} few {# рантаймов} many {# рантаймов} other {# рантайма}} — данные не переданы",
+      "reason": "A reachable missing-reporter count of 1 renders «1 … не передали данные»; use a count-neutral construction instead of the fixed plural verb.",
+      "code_path": "info_panel.py agent reporting ladder or info/render.py build_export; subagents_unreported can equal 1"
+    },
+    {
+      "id": "R7",
+      "key": "tui.info.agents.unreported_short",
+      "severity": "minor",
+      "current": "{subagents_unreported} не передали данные",
+      "proposed": "{subagents_unreported} без данных",
+      "reason": "A reachable missing-reporter count of 1 renders «1 … не передали данные»; use a count-neutral construction instead of the fixed plural verb.",
+      "code_path": "info_panel.py agent reporting ladder or info/render.py build_export; subagents_unreported can equal 1"
+    },
+    {
+      "id": "R8",
+      "key": "tui.info.agents.unreported_suffix",
+      "severity": "minor",
+      "current": " · {subagents_unreported} не передали данные",
+      "proposed": " · {subagents_unreported} без данных",
+      "reason": "A reachable missing-reporter count of 1 renders «1 … не передали данные»; use a count-neutral construction instead of the fixed plural verb.",
+      "code_path": "info_panel.py agent reporting ladder or info/render.py build_export; subagents_unreported can equal 1"
+    },
+    {
+      "id": "R9",
+      "key": "tui.info.export.trajectories_unreported",
+      "severity": "minor",
+      "current": "  траектории        — ({subagents_unreported} из {sessions_live_sessions_wedged, plural, one {# рантайма} few {# рантаймов} many {# рантаймов} other {# рантайма}} не передали данные)",
+      "proposed": "  траектории        — ({subagents_unreported} из {sessions_live_sessions_wedged, plural, one {# рантайма} few {# рантаймов} many {# рантаймов} other {# рантайма}} — данные не переданы)",
+      "reason": "A reachable missing-reporter count of 1 renders «1 … не передали данные»; use a count-neutral construction instead of the fixed plural verb.",
+      "code_path": "info_panel.py agent reporting ladder or info/render.py build_export; subagents_unreported can equal 1"
+    },
+    {
+      "id": "R10",
+      "key": "tui.info.env.mcp_connected",
+      "severity": "minor",
+      "current": "{mcp_connected} из {mcp_configured} подключены",
+      "proposed": "подключено: {mcp_connected} из {mcp_configured}",
+      "reason": "A one-server configuration renders «1 из 1 подключены»; the impersonal construction avoids number disagreement without changing argument types/order.",
+      "code_path": "info_panel.py environment MCP row; mcp_connected=mcp_configured=1"
+    },
+    {
+      "id": "R11",
+      "key": "tui.info.export.mcp",
+      "severity": "minor",
+      "current": "  MCP               {mcp_connected}/{mcp_configured} подключены{has_mcp_settling, select, yes { · подключение ещё идёт} other {}}{has_env_mcp_failed_and_not_env_mcp_settling, select, yes { · {mcp_failed, plural, one {# сбой} few {# сбоя} many {# сбоев} other {# сбоя}}} other {}}",
+      "proposed": "  MCP               {mcp_connected}/{mcp_configured} подключено{has_mcp_settling, select, yes { · подключение ещё идёт} other {}}{has_env_mcp_failed_and_not_env_mcp_settling, select, yes { · {mcp_failed, plural, one {# сбой} few {# сбоя} many {# сбоев} other {# сбоя}}} other {}}",
+      "reason": "A one-server configuration renders «1/1 подключены»; the impersonal predicate is idiomatic for arbitrary counts.",
+      "code_path": "info/render.py build_export MCP row; mcp_connected=mcp_configured=1"
+    }
+  ],
+  "width_risks": [
+    {
+      "key": "tui.info.status.leaving_silent",
+      "en": 33,
+      "ru": 42,
+      "delta": 9,
+      "severity": "minor",
+      "kind": "fit-risk-not-observed-overflow",
+      "current": "завершается (нет отклика {SIGNAL_DRAIN_S})",
+      "proposed": "завершается (нет отклика {SIGNAL_DRAIN_S})",
+      "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+    },
+    {
+      "key": "tui.info.status.leaving_for_build",
+      "en": 17,
+      "ru": 28,
+      "delta": 11,
+      "severity": "minor",
+      "kind": "fit-risk-not-observed-overflow",
+      "current": "завершается для смены сборки",
+      "proposed": "завершается для смены сборки",
+      "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+    },
+    {
+      "key": "tui.info.status.bound_held",
+      "en": 10,
+      "ru": 20,
+      "delta": 10,
+      "severity": "minor",
+      "kind": "fit-risk-not-observed-overflow",
+      "current": "завис; не остановлен",
+      "proposed": "завис; не остановлен",
+      "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+    },
+    {
+      "key": "tui.info.install.shadow_label_terse",
+      "en": 22,
+      "ru": 27,
+      "delta": 5,
+      "severity": "minor",
+      "kind": "fit-risk-not-observed-overflow",
+      "current": "не из установленного дерева",
+      "proposed": "не из установленного дерева",
+      "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+    },
+    {
+      "key": "tui.info.install.shadow_meta_short",
+      "en": 26,
+      "ru": 31,
+      "delta": 5,
+      "severity": "minor",
+      "kind": "fit-risk-not-observed-overflow",
+      "current": "исполняет код из другого дерева",
+      "proposed": "исполняет код из другого дерева",
+      "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+    },
+    {
+      "key": "tui.info.kind_of_runtime.attached_short",
+      "en": 8,
+      "ru": 20,
+      "delta": 12,
+      "severity": "minor",
+      "kind": "fit-risk-not-observed-overflow",
+      "current": "привязан к терминалу",
+      "proposed": "привязан к терминалу",
+      "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+    },
+    {
+      "key": "tui.info.import_path.editable_short",
+      "en": 17,
+      "ru": 27,
+      "delta": 10,
+      "severity": "minor",
+      "kind": "fit-risk-not-observed-overflow",
+      "current": "редактируемая рабочая копия",
+      "proposed": "редактируемая рабочая копия",
+      "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+    },
+    {
+      "key": "tui.info.import_path.editable_terse",
+      "en": 8,
+      "ru": 13,
+      "delta": 5,
+      "severity": "minor",
+      "kind": "fit-risk-not-observed-overflow",
+      "current": "редактируемая",
+      "proposed": "редактируемая",
+      "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+    },
+    {
+      "key": "tui.info.kind.editable_short",
+      "en": 22,
+      "ru": 35,
+      "delta": 13,
+      "severity": "minor",
+      "kind": "fit-risk-not-observed-overflow",
+      "current": "редактируемая · код действует сразу",
+      "proposed": "редактируемая · код действует сразу",
+      "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+    },
+    {
+      "key": "tui.info.session.failover_short",
+      "en": 8,
+      "ru": 16,
+      "delta": 8,
+      "severity": "minor",
+      "kind": "fit-risk-not-observed-overflow",
+      "current": "резервная модель",
+      "proposed": "резервная модель",
+      "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+    },
+    {
+      "key": "tui.info.approval.ask_short",
+      "en": 9,
+      "ru": 16,
+      "delta": 7,
+      "severity": "minor",
+      "kind": "fit-risk-not-observed-overflow",
+      "current": "с подтверждением",
+      "proposed": "с подтверждением",
+      "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+    },
+    {
+      "key": "tui.info.agents.unreported_terse",
+      "en": 12,
+      "ru": 18,
+      "delta": 6,
+      "severity": "minor",
+      "kind": "fit-risk-not-observed-overflow",
+      "current": "данные не переданы",
+      "proposed": "данные не переданы",
+      "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+    }
+  ],
+  "per_key_results": {
+    "tui.info.heading.install": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.version": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.install_kind": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.install_path": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.interpreter": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.running_code": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.source": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.built": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.python": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.platform": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.heading.this_session": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.session_id": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.kind": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.model": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.working_dir": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.answering": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.started": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.config_dir": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.cache_dir": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.agent_home": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.log_dir": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.control_port": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.heading.sessions_on_this_machine": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.heading.sessions_unavailable": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.heading.agents_and_subagents": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.runtimes": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.trajectories": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.agent_profiles": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.teams": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.subagent_capacity": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.heading.environment": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.terminal": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.theme": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.approvals": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.mcp_servers": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.browser": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.mobile_relay": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.multiplexer": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.guides": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.skills": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.label.credentials": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.heading.could_not_read": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.status.leaving_silent": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": true,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.status.leaving_for_build": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": true,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.status.no_movement": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.status.leaving": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.status.bound_held": {
+      "result": "findings",
+      "finding_ids": [
+        "R1"
+      ],
+      "width_risk": true,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.status.updating": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.status.updated": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.status.update_failed": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.status.moving_to_a_new_build": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.install.description": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.install.full_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.install.loading": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.install.unavailable": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.install.shadow_label_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.install.shadow_label_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.install.shadow_label_terse": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": true,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.install.shadow_meta_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.install.shadow_meta_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": true,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.install.shadow_meta_terse": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.install.source_snapshot": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.install.source_snapshot_unknown": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.install.snapshot_note_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.install.snapshot_note_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.install.source_wheel": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.install.build_age": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.install.shadow_explanation": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.latest.installed_unreadable": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.latest.full_unknown": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.latest.unknown": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.latest.never_checked": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.latest.behind_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.latest.behind_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.latest.current": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.latest.stale": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.latest.checked_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.latest.checked_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.kind_of_runtime.daemon_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.kind_of_runtime.daemon_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.kind_of_runtime.daemon_terse": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.kind_of_runtime.attached_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.kind_of_runtime.attached_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": true,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.kind_of_runtime.exec_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.kind_of_runtime.exec_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.kind_of_runtime.exec_terse": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.import_path.editable_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.import_path.editable_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": true,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.import_path.editable_terse": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": true,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.import_path.shadowed_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.import_path.shadowed_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.import_path.shadowed_terse": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.kind.editable_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.kind.editable_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": true,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.kind.uv_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.kind.uv_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.kind.non_editable": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.kind.pip_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.kind.pip_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.session.description": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.session.description_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.session.failover_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.session.failover_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": true,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.session.started": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.session.protocol": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.approval.ask_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.approval.ask_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": true,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.approval.auto_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.approval.auto_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.redirect.full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.redirect.short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.redirect.terse": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.sessions.loading": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.sessions.registry_loading": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.sessions.registry_unavailable": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.sessions.summary_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.sessions.not_answering_clause": {
+      "result": "findings",
+      "finding_ids": [
+        "R2"
+      ],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.sessions.summary_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.sessions.empty": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.sessions.self": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.sessions.pid": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.sessions.build_skew": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.sessions.memory_unavailable": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.fleet_caveats.lower_bound": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.loading_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.loading_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.loading_mid": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.loading_terse": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.summary_terse": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.unknown_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.unknown_terse": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.queued_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.queued_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.queued_terse": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.quiet_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.quiet_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.runtimes": {
+      "result": "findings",
+      "finding_ids": [
+        "R3"
+      ],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.unreported_full": {
+      "result": "findings",
+      "finding_ids": [
+        "R6"
+      ],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.unreported_short": {
+      "result": "findings",
+      "finding_ids": [
+        "R7"
+      ],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.unreported_terse": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": true,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.queued_suffix": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.queued_count": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.queued_count_terse": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.trajectories_total": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.unreported_suffix": {
+      "result": "findings",
+      "finding_ids": [
+        "R8"
+      ],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.roster_unreadable": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.session_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.session_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.session_terse": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.retained_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.retained_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.retained_terse": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.capacity": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.capacity_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.capacity_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.roster_failure": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.empty": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.waiting": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.tree_counts": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.tree_legacy": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.env.description": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.env.description_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.env.mcp_connected": {
+      "result": "findings",
+      "finding_ids": [
+        "R10"
+      ],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.env.mcp_connecting_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.env.mcp_connecting_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.env.mcp_failed_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.env.mcp_failed_short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.env.mcp_empty": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.env.none": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.env.mobile_installed": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.env.mobile_absent": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.env.mobile_healthy": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.env.mobile_up": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.env.credentials_unreadable": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.env.credential_count": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.env.credentials_more": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.env.credentials_set": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.env.credentials_empty": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.report.degraded_count": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.report.degraded": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.report.captured": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.info_hint.short": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.info_hint.full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.action_copy_report.loading": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.action_copy_report.redacted": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.latest_line.installed_unreadable": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.latest_line.never_checked": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.latest_line.checked": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.not_answering_clause.no_rows": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.not_answering_clause.more": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.not_answering_clause.remedy_one": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.not_answering_clause.remedy_many": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.not_answering_clause.full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.tree_lines.deeper": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.heading_install": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.version": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.latest_known": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.install_kind": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.install_path": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.interpreter": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.running_code": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.source": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.build_age": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.python": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.platform": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.heading_session": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.session_id": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.kind": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.pid": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.model": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.effective_model": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.uptime": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.working_dir": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.config_dir": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.cache_dir": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.agent_home": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.log_dir": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.control_port": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.protocol": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.heading_sessions": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.sessions_unavailable": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.sessions_empty": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.sessions_summary": {
+      "result": "findings",
+      "finding_ids": [
+        "R4"
+      ],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.pid_fallback": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.heading_agents": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.runtimes": {
+      "result": "findings",
+      "finding_ids": [
+        "R5"
+      ],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.trajectories_unreported": {
+      "result": "findings",
+      "finding_ids": [
+        "R9"
+      ],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.queued_suffix": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.trajectories": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.profiles": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.teams": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.roster_unreadable": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.session_counts": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.capacity": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.tree_heading": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.tree_unreadable": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.tree_empty": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.tree_counts": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.tree_legacy": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.lower_bound": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.heading_environment": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.terminal": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.multiplexer": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.tty": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.theme": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.approvals": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.browser": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.mobile": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.mcp": {
+      "result": "findings",
+      "finding_ids": [
+        "R11"
+      ],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.guides": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.skills": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.credentials": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.heading_degraded": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.count.session": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.count.runtime": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.count.trajectory": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.count.subagent": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.state.running": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.state.starting": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.state.queued": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.state.pausing": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.state.paused": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.state.completed": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.state.failed": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.state.cancelled": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.state.gone": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.state.live": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.state.stale": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.state.unknown": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.leaving.signal": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.leaving.build": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.leaving.overdue": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.update.target": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.update.done_target": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.summary_full": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.agents.addends": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    },
+    "tui.info.export.summary": {
+      "result": "passed",
+      "finding_ids": [],
+      "width_risk": false,
+      "read": {
+        "en": true,
+        "ru": true,
+        "context": true
+      },
+      "note": "Read source/target/context; checked semantics, idiom, register, glossary, count/unknown/history distinctions and applicable technical literals. Width warning does not certify pixels."
+    }
+  },
+  "actual_reproductions": [
+    {
+      "id": "R1",
+      "key": "tui.info.status.bound_held",
+      "params": {},
+      "actual": "завис; не остановлен",
+      "source_locale": "ru",
+      "proposed_counterfactual": "срок истёк; процесс жив"
+    },
+    {
+      "id": "R2",
+      "key": "tui.info.sessions.not_answering_clause",
+      "params": {
+        "wedged": "1"
+      },
+      "actual": " · 1 не отвечают",
+      "source_locale": "ru",
+      "proposed_counterfactual": " · 1 без ответа"
+    },
+    {
+      "id": "R3",
+      "key": "tui.info.agents.runtimes",
+      "params": {
+        "live": 1,
+        "has_wedged": "yes",
+        "wedged": "1"
+      },
+      "actual": "1 активный · 1 не отвечают",
+      "source_locale": "ru",
+      "proposed_counterfactual": "1 активный · 1 без ответа"
+    },
+    {
+      "id": "R4",
+      "key": "tui.info.export.sessions_summary",
+      "params": {
+        "live": 1,
+        "wedged": "1",
+        "total": 1,
+        "has_build_skew": "yes"
+      },
+      "actual": "  1 активная · 1 не отвечают · 1 всего · РАЗНЫЕ СБОРКИ",
+      "source_locale": "ru",
+      "proposed_counterfactual": "  1 активная · 1 без ответа · 1 всего · РАЗНЫЕ СБОРКИ"
+    },
+    {
+      "id": "R5",
+      "key": "tui.info.export.runtimes",
+      "params": {
+        "sessions_live_sessions_wedged": 1,
+        "live": 1,
+        "wedged": "1"
+      },
+      "actual": "  рантаймы          1 всего — 1 активный · 1 не отвечают",
+      "source_locale": "ru",
+      "proposed_counterfactual": "  рантаймы          1 всего — 1 активный · 1 без ответа"
+    },
+    {
+      "id": "R6",
+      "key": "tui.info.agents.unreported_full",
+      "params": {
+        "subagents_unreported": "1",
+        "runtimes": 1
+      },
+      "actual": "1 из 1 рантайма не передали данные",
+      "source_locale": "ru",
+      "proposed_counterfactual": "1 из 1 рантайма — данные не переданы"
+    },
+    {
+      "id": "R7",
+      "key": "tui.info.agents.unreported_short",
+      "params": {
+        "subagents_unreported": "1"
+      },
+      "actual": "1 не передали данные",
+      "source_locale": "ru",
+      "proposed_counterfactual": "1 без данных"
+    },
+    {
+      "id": "R8",
+      "key": "tui.info.agents.unreported_suffix",
+      "params": {
+        "subagents_unreported": "1"
+      },
+      "actual": " · 1 не передали данные",
+      "source_locale": "ru",
+      "proposed_counterfactual": " · 1 без данных"
+    },
+    {
+      "id": "R9",
+      "key": "tui.info.export.trajectories_unreported",
+      "params": {
+        "subagents_unreported": "1",
+        "sessions_live_sessions_wedged": 1
+      },
+      "actual": "  траектории        — (1 из 1 рантайма не передали данные)",
+      "source_locale": "ru",
+      "proposed_counterfactual": "  траектории        — (1 из 1 рантайма — данные не переданы)"
+    },
+    {
+      "id": "R10",
+      "key": "tui.info.env.mcp_connected",
+      "params": {
+        "mcp_connected": "1",
+        "mcp_configured": "1"
+      },
+      "actual": "1 из 1 подключены",
+      "source_locale": "ru",
+      "proposed_counterfactual": "подключено: 1 из 1"
+    },
+    {
+      "id": "R11",
+      "key": "tui.info.export.mcp",
+      "params": {
+        "mcp_connected": "1",
+        "mcp_configured": "1",
+        "has_mcp_settling": "yes",
+        "has_env_mcp_failed_and_not_env_mcp_settling": "yes",
+        "mcp_failed": 1
+      },
+      "actual": "  MCP               1/1 подключены · подключение ещё идёт · 1 сбой",
+      "source_locale": "ru",
+      "proposed_counterfactual": "  MCP               1/1 подключено · подключение ещё идёт · 1 сбой"
+    }
+  ],
+  "literal_latin_inventory": [
+    {
+      "key": "tui.info.label.python",
+      "tokens": [
+        "Python"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "Python",
+          "reason": "Official technology/product name; glossary §1."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.label.session_id",
+      "tokens": [
+        "ID"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "ID",
+          "reason": "Established diagnostic abbreviation; generic session noun translated."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.label.mcp_servers",
+      "tokens": [
+        "MCP"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "MCP",
+          "reason": "Protocol acronym in server label; generic server noun translated."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.install.description",
+      "tokens": [
+        "lop"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "lop",
+          "reason": "Command, flag, pid diagnostic identifier or literal command pattern; surrounding prose translated."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.install.source_snapshot",
+      "tokens": [
+        "Git"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "Git",
+          "reason": "Official technology/product name; glossary §1."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.install.source_snapshot_unknown",
+      "tokens": [
+        "Git"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "Git",
+          "reason": "Official technology/product name; glossary §1."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.install.snapshot_note_full",
+      "tokens": [
+        "lop-update",
+        "wheel",
+        "PyPI"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "PyPI",
+          "reason": "Official technology/product name; glossary §1."
+        },
+        {
+          "token": "lop-update",
+          "reason": "Command, flag, pid diagnostic identifier or literal command pattern; surrounding prose translated."
+        },
+        {
+          "token": "wheel",
+          "reason": "Python package archive/distribution-format name; PyPI wheel contrasts with source snapshot, not a generic human wheel."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.install.snapshot_note_short",
+      "tokens": [
+        "lop-update"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "lop-update",
+          "reason": "Command, flag, pid diagnostic identifier or literal command pattern; surrounding prose translated."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.install.source_wheel",
+      "tokens": [
+        "wheel",
+        "PyPI"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "PyPI",
+          "reason": "Official technology/product name; glossary §1."
+        },
+        {
+          "token": "wheel",
+          "reason": "Python package archive/distribution-format name; PyPI wheel contrasts with source snapshot, not a generic human wheel."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.install.shadow_explanation",
+      "tokens": [
+        "reload"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "reload",
+          "reason": "Command, flag, pid diagnostic identifier or literal command pattern; surrounding prose translated."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.import_path.shadowed_full",
+      "tokens": [
+        "sys.path"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "sys.path",
+          "reason": "Exact Python attribute identifier."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.kind.uv_full",
+      "tokens": [
+        "lop-update"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "lop-update",
+          "reason": "Command, flag, pid diagnostic identifier or literal command pattern; surrounding prose translated."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.kind.uv_short",
+      "tokens": [
+        "lop-update"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "lop-update",
+          "reason": "Command, flag, pid diagnostic identifier or literal command pattern; surrounding prose translated."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.session.protocol",
+      "tokens": [
+        "v"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "v",
+          "reason": "Version notation immediately followed by protected protocol number."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.sessions.registry_unavailable",
+      "tokens": [
+        "r"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "r",
+          "reason": "Literal keyboard key/key chord accepted by the actual control, not a translatable action verb."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.sessions.empty",
+      "tokens": [
+        "lop"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "lop",
+          "reason": "Command, flag, pid diagnostic identifier or literal command pattern; surrounding prose translated."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.sessions.pid",
+      "tokens": [
+        "pid"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "pid",
+          "reason": "Command, flag, pid diagnostic identifier or literal command pattern; surrounding prose translated."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.info_hint.short",
+      "tokens": [
+        "esc"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "esc",
+          "reason": "Literal keyboard key/key chord accepted by the actual control, not a translatable action verb."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.info_hint.full",
+      "tokens": [
+        "esc",
+        "q",
+        "r"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "esc",
+          "reason": "Literal keyboard key/key chord accepted by the actual control, not a translatable action verb."
+        },
+        {
+          "token": "q",
+          "reason": "Literal keyboard key/key chord accepted by the actual control, not a translatable action verb."
+        },
+        {
+          "token": "r",
+          "reason": "Literal keyboard key/key chord accepted by the actual control, not a translatable action verb."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.action_copy_report.loading",
+      "tokens": [
+        "ctrl",
+        "r"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "ctrl",
+          "reason": "Literal keyboard key/key chord accepted by the actual control, not a translatable action verb."
+        },
+        {
+          "token": "r",
+          "reason": "Literal keyboard key/key chord accepted by the actual control, not a translatable action verb."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.action_copy_report.redacted",
+      "tokens": [
+        "info"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "info",
+          "reason": "Command, flag, pid diagnostic identifier or literal command pattern; surrounding prose translated."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.not_answering_clause.remedy_one",
+      "tokens": [
+        "lop",
+        "stop",
+        "pid",
+        "stop",
+        "lop",
+        "stop",
+        "pid",
+        "force"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "force",
+          "reason": "Command, flag, pid diagnostic identifier or literal command pattern; surrounding prose translated."
+        },
+        {
+          "token": "lop",
+          "reason": "Command, flag, pid diagnostic identifier or literal command pattern; surrounding prose translated."
+        },
+        {
+          "token": "pid",
+          "reason": "Command, flag, pid diagnostic identifier or literal command pattern; surrounding prose translated."
+        },
+        {
+          "token": "stop",
+          "reason": "Command, flag, pid diagnostic identifier or literal command pattern; surrounding prose translated."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.not_answering_clause.remedy_many",
+      "tokens": [
+        "lop",
+        "stop",
+        "pid",
+        "N",
+        "pid",
+        "stop",
+        "N",
+        "lop",
+        "stop",
+        "pid",
+        "N",
+        "force"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "N",
+          "reason": "Command, flag, pid diagnostic identifier or literal command pattern; surrounding prose translated."
+        },
+        {
+          "token": "force",
+          "reason": "Command, flag, pid diagnostic identifier or literal command pattern; surrounding prose translated."
+        },
+        {
+          "token": "lop",
+          "reason": "Command, flag, pid diagnostic identifier or literal command pattern; surrounding prose translated."
+        },
+        {
+          "token": "pid",
+          "reason": "Command, flag, pid diagnostic identifier or literal command pattern; surrounding prose translated."
+        },
+        {
+          "token": "stop",
+          "reason": "Command, flag, pid diagnostic identifier or literal command pattern; surrounding prose translated."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.not_answering_clause.full",
+      "tokens": [
+        "pid",
+        "pid",
+        "pid",
+        "pid"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "pid",
+          "reason": "Command, flag, pid diagnostic identifier or literal command pattern; surrounding prose translated."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.export.source",
+      "tokens": [
+        "Git",
+        "wheel",
+        "PyPI"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "Git",
+          "reason": "Official technology/product name; glossary §1."
+        },
+        {
+          "token": "PyPI",
+          "reason": "Official technology/product name; glossary §1."
+        },
+        {
+          "token": "wheel",
+          "reason": "Python package archive/distribution-format name; PyPI wheel contrasts with source snapshot, not a generic human wheel."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.export.python",
+      "tokens": [
+        "Python"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "Python",
+          "reason": "Official technology/product name; glossary §1."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.export.session_id",
+      "tokens": [
+        "ID"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "ID",
+          "reason": "Established diagnostic abbreviation; generic session noun translated."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.export.pid",
+      "tokens": [
+        "pid"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "pid",
+          "reason": "Command, flag, pid diagnostic identifier or literal command pattern; surrounding prose translated."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.export.pid_fallback",
+      "tokens": [
+        "pid"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "pid",
+          "reason": "Command, flag, pid diagnostic identifier or literal command pattern; surrounding prose translated."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.export.terminal",
+      "tokens": [
+        "x"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "x",
+          "reason": "Dimension separator between measured terminal columns and rows, not an English word."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.export.tty",
+      "tokens": [
+        "tty"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "tty",
+          "reason": "Unix terminal device/diagnostic identifier."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.export.mcp",
+      "tokens": [
+        "MCP"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "MCP",
+          "reason": "Protocol acronym in server label; generic server noun translated."
+        }
+      ]
+    },
+    {
+      "key": "tui.info.export.summary",
+      "tokens": [
+        "info"
+      ],
+      "individual_exemptions": [
+        {
+          "token": "info",
+          "reason": "Command, flag, pid diagnostic identifier or literal command pattern; surrounding prose translated."
+        }
+      ]
+    }
+  ],
+  "namespace_verdict": {
+    "tui.info": "FAILED: 1 unresolved major; mechanical contracts pass, linguistic remediation required"
+  },
+  "mechanical": {
+    "keys": 277,
+    "missing": [],
+    "extra": [],
+    "ordered_keys_equal": true,
+    "issues": [],
+    "plural_nodes": 47,
+    "select_nodes": 23,
+    "render_cases": 722,
+    "render_samples": {
+      "tui.info.status.bound_held": [
+        "завис; не остановлен"
+      ],
+      "tui.info.agents.retained_full": [
+        "0 завершённых (в истории)",
+        "1 завершённый (в истории)",
+        "2 завершённых (в истории)",
+        "4 завершённых (в истории)",
+        "5 завершённых (в истории)",
+        "11 завершённых (в истории)",
+        "21 завершённый (в истории)",
+        "22 завершённых (в истории)",
+        "25 завершённых (в истории)",
+        "1,5 завершённого (в истории)"
+      ],
+      "tui.info.env.credentials_set": [
+        "0 заданы",
+        "1 задан",
+        "2 заданы",
+        "4 заданы",
+        "5 заданы",
+        "11 заданы",
+        "21 задан",
+        "22 заданы",
+        "25 заданы",
+        "1,5 задано"
+      ],
+      "tui.info.tree_lines.deeper": [
+        "  + 0 субагентов глубже",
+        "  + 1 субагент глубже",
+        "  + 2 субагента глубже",
+        "  + 4 субагента глубже",
+        "  + 5 субагентов глубже",
+        "  + 11 субагентов глубже",
+        "  + 21 субагент глубже",
+        "  + 22 субагента глубже",
+        "  + 25 субагентов глубже",
+        "  + 1,5 субагента глубже"
+      ],
+      "tui.info.count.session": [
+        "0 сессий",
+        "1 сессия",
+        "2 сессии",
+        "4 сессии",
+        "5 сессий",
+        "11 сессий",
+        "21 сессия",
+        "22 сессии",
+        "25 сессий",
+        "1,5 сессии"
+      ]
+    },
+    "widths": [
+      {
+        "key": "tui.info.heading.install",
+        "en": 7,
+        "ru": 9,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.label.version",
+        "en": 7,
+        "ru": 6,
+        "delta": -1
+      },
+      {
+        "key": "tui.info.label.install_kind",
+        "en": 12,
+        "ru": 13,
+        "delta": 1
+      },
+      {
+        "key": "tui.info.label.install_path",
+        "en": 12,
+        "ru": 14,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.label.interpreter",
+        "en": 11,
+        "ru": 13,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.label.running_code",
+        "en": 12,
+        "ru": 15,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.label.source",
+        "en": 6,
+        "ru": 8,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.label.built",
+        "en": 5,
+        "ru": 7,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.label.python",
+        "en": 6,
+        "ru": 6,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.label.platform",
+        "en": 8,
+        "ru": 9,
+        "delta": 1
+      },
+      {
+        "key": "tui.info.heading.this_session",
+        "en": 12,
+        "ru": 10,
+        "delta": -2
+      },
+      {
+        "key": "tui.info.label.session_id",
+        "en": 10,
+        "ru": 9,
+        "delta": -1
+      },
+      {
+        "key": "tui.info.label.kind",
+        "en": 4,
+        "ru": 3,
+        "delta": -1
+      },
+      {
+        "key": "tui.info.label.model",
+        "en": 5,
+        "ru": 6,
+        "delta": 1
+      },
+      {
+        "key": "tui.info.label.working_dir",
+        "en": 11,
+        "ru": 13,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.label.answering",
+        "en": 9,
+        "ru": 8,
+        "delta": -1
+      },
+      {
+        "key": "tui.info.label.started",
+        "en": 7,
+        "ru": 8,
+        "delta": 1
+      },
+      {
+        "key": "tui.info.label.config_dir",
+        "en": 10,
+        "ru": 14,
+        "delta": 4
+      },
+      {
+        "key": "tui.info.label.cache_dir",
+        "en": 9,
+        "ru": 10,
+        "delta": 1
+      },
+      {
+        "key": "tui.info.label.agent_home",
+        "en": 10,
+        "ru": 12,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.label.log_dir",
+        "en": 7,
+        "ru": 14,
+        "delta": 7
+      },
+      {
+        "key": "tui.info.label.control_port",
+        "en": 12,
+        "ru": 15,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.heading.sessions_on_this_machine",
+        "en": 24,
+        "ru": 25,
+        "delta": 1
+      },
+      {
+        "key": "tui.info.heading.sessions_unavailable",
+        "en": 20,
+        "ru": 17,
+        "delta": -3
+      },
+      {
+        "key": "tui.info.heading.agents_and_subagents",
+        "en": 20,
+        "ru": 18,
+        "delta": -2
+      },
+      {
+        "key": "tui.info.label.runtimes",
+        "en": 8,
+        "ru": 8,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.label.trajectories",
+        "en": 12,
+        "ru": 10,
+        "delta": -2
+      },
+      {
+        "key": "tui.info.label.agent_profiles",
+        "en": 14,
+        "ru": 15,
+        "delta": 1
+      },
+      {
+        "key": "tui.info.label.teams",
+        "en": 5,
+        "ru": 7,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.label.subagent_capacity",
+        "en": 17,
+        "ru": 16,
+        "delta": -1
+      },
+      {
+        "key": "tui.info.heading.environment",
+        "en": 11,
+        "ru": 9,
+        "delta": -2
+      },
+      {
+        "key": "tui.info.label.terminal",
+        "en": 8,
+        "ru": 8,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.label.theme",
+        "en": 5,
+        "ru": 4,
+        "delta": -1
+      },
+      {
+        "key": "tui.info.label.approvals",
+        "en": 9,
+        "ru": 9,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.label.mcp_servers",
+        "en": 11,
+        "ru": 11,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.label.browser",
+        "en": 7,
+        "ru": 7,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.label.mobile_relay",
+        "en": 12,
+        "ru": 17,
+        "delta": 5
+      },
+      {
+        "key": "tui.info.label.multiplexer",
+        "en": 11,
+        "ru": 13,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.label.guides",
+        "en": 6,
+        "ru": 11,
+        "delta": 5
+      },
+      {
+        "key": "tui.info.label.skills",
+        "en": 6,
+        "ru": 6,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.label.credentials",
+        "en": 11,
+        "ru": 14,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.heading.could_not_read",
+        "en": 14,
+        "ru": 20,
+        "delta": 6
+      },
+      {
+        "key": "tui.info.status.leaving_silent",
+        "en": 33,
+        "ru": 42,
+        "delta": 9,
+        "severity": "minor",
+        "kind": "fit-risk-not-observed-overflow",
+        "current": "завершается (нет отклика {SIGNAL_DRAIN_S})",
+        "proposed": "завершается (нет отклика {SIGNAL_DRAIN_S})",
+        "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+      },
+      {
+        "key": "tui.info.status.leaving_for_build",
+        "en": 17,
+        "ru": 28,
+        "delta": 11,
+        "severity": "minor",
+        "kind": "fit-risk-not-observed-overflow",
+        "current": "завершается для смены сборки",
+        "proposed": "завершается для смены сборки",
+        "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+      },
+      {
+        "key": "tui.info.status.no_movement",
+        "en": 36,
+        "ru": 40,
+        "delta": 4
+      },
+      {
+        "key": "tui.info.status.leaving",
+        "en": 7,
+        "ru": 11,
+        "delta": 4
+      },
+      {
+        "key": "tui.info.status.bound_held",
+        "en": 10,
+        "ru": 20,
+        "delta": 10,
+        "severity": "minor",
+        "kind": "fit-risk-not-observed-overflow",
+        "current": "завис; не остановлен",
+        "proposed": "завис; не остановлен",
+        "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+      },
+      {
+        "key": "tui.info.status.updating",
+        "en": 8,
+        "ru": 11,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.status.updated",
+        "en": 7,
+        "ru": 8,
+        "delta": 1
+      },
+      {
+        "key": "tui.info.status.update_failed",
+        "en": 13,
+        "ru": 15,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.status.moving_to_a_new_build",
+        "en": 21,
+        "ru": 25,
+        "delta": 4
+      },
+      {
+        "key": "tui.info.install.description",
+        "en": 26,
+        "ru": 23,
+        "delta": -3
+      },
+      {
+        "key": "tui.info.install.full_short",
+        "en": 7,
+        "ru": 9,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.install.loading",
+        "en": 9,
+        "ru": 9,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.install.unavailable",
+        "en": 11,
+        "ru": 10,
+        "delta": -1
+      },
+      {
+        "key": "tui.info.install.shadow_label_full",
+        "en": 32,
+        "ru": 34,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.install.shadow_label_short",
+        "en": 26,
+        "ru": 18,
+        "delta": -8
+      },
+      {
+        "key": "tui.info.install.shadow_label_terse",
+        "en": 22,
+        "ru": 27,
+        "delta": 5,
+        "severity": "minor",
+        "kind": "fit-risk-not-observed-overflow",
+        "current": "не из установленного дерева",
+        "proposed": "не из установленного дерева",
+        "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+      },
+      {
+        "key": "tui.info.install.shadow_meta_full",
+        "en": 42,
+        "ru": 44,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.install.shadow_meta_short",
+        "en": 26,
+        "ru": 31,
+        "delta": 5,
+        "severity": "minor",
+        "kind": "fit-risk-not-observed-overflow",
+        "current": "исполняет код из другого дерева",
+        "proposed": "исполняет код из другого дерева",
+        "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+      },
+      {
+        "key": "tui.info.install.shadow_meta_terse",
+        "en": 14,
+        "ru": 13,
+        "delta": -1
+      },
+      {
+        "key": "tui.info.install.source_snapshot",
+        "en": 27,
+        "ru": 25,
+        "delta": -2
+      },
+      {
+        "key": "tui.info.install.source_snapshot_unknown",
+        "en": 12,
+        "ru": 10,
+        "delta": -2
+      },
+      {
+        "key": "tui.info.install.snapshot_note_full",
+        "en": 37,
+        "ru": 35,
+        "delta": -2
+      },
+      {
+        "key": "tui.info.install.snapshot_note_short",
+        "en": 16,
+        "ru": 17,
+        "delta": 1
+      },
+      {
+        "key": "tui.info.install.source_wheel",
+        "en": 10,
+        "ru": 13,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.install.build_age",
+        "en": 17,
+        "ru": 19,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.install.shadow_explanation",
+        "en": 255,
+        "ru": 265,
+        "delta": 10
+      },
+      {
+        "key": "tui.info.latest.installed_unreadable",
+        "en": 45,
+        "ru": 62,
+        "delta": 17
+      },
+      {
+        "key": "tui.info.latest.full_unknown",
+        "en": 14,
+        "ru": 27,
+        "delta": 13
+      },
+      {
+        "key": "tui.info.latest.unknown",
+        "en": 7,
+        "ru": 10,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.latest.never_checked",
+        "en": 30,
+        "ru": 48,
+        "delta": 18
+      },
+      {
+        "key": "tui.info.latest.behind_full",
+        "en": 15,
+        "ru": 15,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.latest.behind_short",
+        "en": 6,
+        "ru": 8,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.latest.current",
+        "en": 6,
+        "ru": 9,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.latest.stale",
+        "en": 8,
+        "ru": 18,
+        "delta": 10
+      },
+      {
+        "key": "tui.info.latest.checked_full",
+        "en": 33,
+        "ru": 40,
+        "delta": 7
+      },
+      {
+        "key": "tui.info.latest.checked_short",
+        "en": 17,
+        "ru": 21,
+        "delta": 4
+      },
+      {
+        "key": "tui.info.kind_of_runtime.daemon_full",
+        "en": 41,
+        "ru": 48,
+        "delta": 7
+      },
+      {
+        "key": "tui.info.kind_of_runtime.daemon_short",
+        "en": 15,
+        "ru": 17,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.kind_of_runtime.daemon_terse",
+        "en": 7,
+        "ru": 9,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.kind_of_runtime.attached_full",
+        "en": 37,
+        "ru": 46,
+        "delta": 9
+      },
+      {
+        "key": "tui.info.kind_of_runtime.attached_short",
+        "en": 8,
+        "ru": 20,
+        "delta": 12,
+        "severity": "minor",
+        "kind": "fit-risk-not-observed-overflow",
+        "current": "привязан к терминалу",
+        "proposed": "привязан к терминалу",
+        "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+      },
+      {
+        "key": "tui.info.kind_of_runtime.exec_full",
+        "en": 28,
+        "ru": 30,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.kind_of_runtime.exec_short",
+        "en": 12,
+        "ru": 14,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.kind_of_runtime.exec_terse",
+        "en": 8,
+        "ru": 7,
+        "delta": -1
+      },
+      {
+        "key": "tui.info.import_path.editable_full",
+        "en": 33,
+        "ru": 40,
+        "delta": 7
+      },
+      {
+        "key": "tui.info.import_path.editable_short",
+        "en": 17,
+        "ru": 27,
+        "delta": 10,
+        "severity": "minor",
+        "kind": "fit-risk-not-observed-overflow",
+        "current": "редактируемая рабочая копия",
+        "proposed": "редактируемая рабочая копия",
+        "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+      },
+      {
+        "key": "tui.info.import_path.editable_terse",
+        "en": 8,
+        "ru": 13,
+        "delta": 5,
+        "severity": "minor",
+        "kind": "fit-risk-not-observed-overflow",
+        "current": "редактируемая",
+        "proposed": "редактируемая",
+        "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+      },
+      {
+        "key": "tui.info.import_path.shadowed_full",
+        "en": 47,
+        "ru": 50,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.import_path.shadowed_short",
+        "en": 35,
+        "ru": 39,
+        "delta": 4
+      },
+      {
+        "key": "tui.info.import_path.shadowed_terse",
+        "en": 22,
+        "ru": 24,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.kind.editable_full",
+        "en": 40,
+        "ru": 59,
+        "delta": 19
+      },
+      {
+        "key": "tui.info.kind.editable_short",
+        "en": 22,
+        "ru": 35,
+        "delta": 13,
+        "severity": "minor",
+        "kind": "fit-risk-not-observed-overflow",
+        "current": "редактируемая · код действует сразу",
+        "proposed": "редактируемая · код действует сразу",
+        "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+      },
+      {
+        "key": "tui.info.kind.uv_full",
+        "en": 38,
+        "ru": 45,
+        "delta": 7
+      },
+      {
+        "key": "tui.info.kind.uv_short",
+        "en": 25,
+        "ru": 28,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.kind.non_editable",
+        "en": 12,
+        "ru": 15,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.kind.pip_full",
+        "en": 27,
+        "ru": 32,
+        "delta": 5
+      },
+      {
+        "key": "tui.info.kind.pip_short",
+        "en": 19,
+        "ru": 22,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.session.description",
+        "en": 31,
+        "ru": 42,
+        "delta": 11
+      },
+      {
+        "key": "tui.info.session.description_short",
+        "en": 12,
+        "ru": 12,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.session.failover_full",
+        "en": 20,
+        "ru": 25,
+        "delta": 5
+      },
+      {
+        "key": "tui.info.session.failover_short",
+        "en": 8,
+        "ru": 16,
+        "delta": 8,
+        "severity": "minor",
+        "kind": "fit-risk-not-observed-overflow",
+        "current": "резервная модель",
+        "proposed": "резервная модель",
+        "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+      },
+      {
+        "key": "tui.info.session.started",
+        "en": 14,
+        "ru": 16,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.session.protocol",
+        "en": 20,
+        "ru": 20,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.approval.ask_full",
+        "en": 28,
+        "ru": 46,
+        "delta": 18
+      },
+      {
+        "key": "tui.info.approval.ask_short",
+        "en": 9,
+        "ru": 16,
+        "delta": 7,
+        "severity": "minor",
+        "kind": "fit-risk-not-observed-overflow",
+        "current": "с подтверждением",
+        "proposed": "с подтверждением",
+        "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+      },
+      {
+        "key": "tui.info.approval.auto_full",
+        "en": 31,
+        "ru": 35,
+        "delta": 4
+      },
+      {
+        "key": "tui.info.approval.auto_short",
+        "en": 4,
+        "ru": 4,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.redirect.full",
+        "en": 24,
+        "ru": 31,
+        "delta": 7
+      },
+      {
+        "key": "tui.info.redirect.short",
+        "en": 17,
+        "ru": 30,
+        "delta": 13
+      },
+      {
+        "key": "tui.info.redirect.terse",
+        "en": 10,
+        "ru": 14,
+        "delta": 4
+      },
+      {
+        "key": "tui.info.sessions.loading",
+        "en": 9,
+        "ru": 6,
+        "delta": -3
+      },
+      {
+        "key": "tui.info.sessions.registry_loading",
+        "en": 29,
+        "ru": 22,
+        "delta": -7
+      },
+      {
+        "key": "tui.info.sessions.registry_unavailable",
+        "en": 58,
+        "ru": 63,
+        "delta": 5
+      },
+      {
+        "key": "tui.info.sessions.summary_full",
+        "en": 16,
+        "ru": 20,
+        "delta": 4
+      },
+      {
+        "key": "tui.info.sessions.not_answering_clause",
+        "en": 25,
+        "ru": 23,
+        "delta": -2
+      },
+      {
+        "key": "tui.info.sessions.summary_short",
+        "en": 6,
+        "ru": 10,
+        "delta": 4
+      },
+      {
+        "key": "tui.info.sessions.empty",
+        "en": 50,
+        "ru": 52,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.sessions.self",
+        "en": 12,
+        "ru": 10,
+        "delta": -2
+      },
+      {
+        "key": "tui.info.sessions.pid",
+        "en": 9,
+        "ru": 9,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.sessions.build_skew",
+        "en": 115,
+        "ru": 98,
+        "delta": -17
+      },
+      {
+        "key": "tui.info.sessions.memory_unavailable",
+        "en": 42,
+        "ru": 58,
+        "delta": 16
+      },
+      {
+        "key": "tui.info.fleet_caveats.lower_bound",
+        "en": 95,
+        "ru": 119,
+        "delta": 24
+      },
+      {
+        "key": "tui.info.agents.loading_full",
+        "en": 45,
+        "ru": 43,
+        "delta": -2
+      },
+      {
+        "key": "tui.info.agents.loading_short",
+        "en": 13,
+        "ru": 14,
+        "delta": 1
+      },
+      {
+        "key": "tui.info.agents.loading_mid",
+        "en": 25,
+        "ru": 24,
+        "delta": -1
+      },
+      {
+        "key": "tui.info.agents.loading_terse",
+        "en": 16,
+        "ru": 16,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.agents.summary_terse",
+        "en": 31,
+        "ru": 31,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.agents.unknown_full",
+        "en": 33,
+        "ru": 31,
+        "delta": -2
+      },
+      {
+        "key": "tui.info.agents.unknown_terse",
+        "en": 27,
+        "ru": 27,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.agents.queued_full",
+        "en": 34,
+        "ru": 37,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.agents.queued_short",
+        "en": 29,
+        "ru": 32,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.agents.queued_terse",
+        "en": 24,
+        "ru": 25,
+        "delta": 1
+      },
+      {
+        "key": "tui.info.agents.quiet_full",
+        "en": 23,
+        "ru": 23,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.agents.quiet_short",
+        "en": 19,
+        "ru": 18,
+        "delta": -1
+      },
+      {
+        "key": "tui.info.agents.runtimes",
+        "en": 31,
+        "ru": 33,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.agents.unreported_full",
+        "en": 51,
+        "ru": 55,
+        "delta": 4
+      },
+      {
+        "key": "tui.info.agents.unreported_short",
+        "en": 37,
+        "ru": 41,
+        "delta": 4
+      },
+      {
+        "key": "tui.info.agents.unreported_terse",
+        "en": 12,
+        "ru": 18,
+        "delta": 6,
+        "severity": "minor",
+        "kind": "fit-risk-not-observed-overflow",
+        "current": "данные не переданы",
+        "proposed": "данные не переданы",
+        "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+      },
+      {
+        "key": "tui.info.agents.queued_suffix",
+        "en": 11,
+        "ru": 14,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.agents.queued_count",
+        "en": 8,
+        "ru": 11,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.agents.queued_count_terse",
+        "en": 25,
+        "ru": 26,
+        "delta": 1
+      },
+      {
+        "key": "tui.info.agents.trajectories_total",
+        "en": 14,
+        "ru": 14,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.agents.unreported_suffix",
+        "en": 40,
+        "ru": 44,
+        "delta": 4
+      },
+      {
+        "key": "tui.info.agents.roster_unreadable",
+        "en": 25,
+        "ru": 27,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.agents.session_full",
+        "en": 36,
+        "ru": 42,
+        "delta": 6
+      },
+      {
+        "key": "tui.info.agents.session_short",
+        "en": 20,
+        "ru": 24,
+        "delta": 4
+      },
+      {
+        "key": "tui.info.agents.session_terse",
+        "en": 22,
+        "ru": 25,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.agents.retained_full",
+        "en": 20,
+        "ru": 25,
+        "delta": 5
+      },
+      {
+        "key": "tui.info.agents.retained_short",
+        "en": 9,
+        "ru": 13,
+        "delta": 4
+      },
+      {
+        "key": "tui.info.agents.retained_terse",
+        "en": 6,
+        "ru": 9,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.agents.capacity",
+        "en": 12,
+        "ru": 14,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.agents.capacity_full",
+        "en": 32,
+        "ru": 47,
+        "delta": 15
+      },
+      {
+        "key": "tui.info.agents.capacity_short",
+        "en": 11,
+        "ru": 14,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.agents.roster_failure",
+        "en": 49,
+        "ru": 51,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.agents.empty",
+        "en": 48,
+        "ru": 43,
+        "delta": -5
+      },
+      {
+        "key": "tui.info.agents.waiting",
+        "en": 46,
+        "ru": 55,
+        "delta": 9
+      },
+      {
+        "key": "tui.info.agents.tree_counts",
+        "en": 99,
+        "ru": 131,
+        "delta": 32
+      },
+      {
+        "key": "tui.info.agents.tree_legacy",
+        "en": 119,
+        "ru": 155,
+        "delta": 36
+      },
+      {
+        "key": "tui.info.env.description",
+        "en": 15,
+        "ru": 22,
+        "delta": 7
+      },
+      {
+        "key": "tui.info.env.description_short",
+        "en": 11,
+        "ru": 9,
+        "delta": -2
+      },
+      {
+        "key": "tui.info.env.mcp_connected",
+        "en": 45,
+        "ru": 46,
+        "delta": 1
+      },
+      {
+        "key": "tui.info.env.mcp_connecting_full",
+        "en": 16,
+        "ru": 20,
+        "delta": 4
+      },
+      {
+        "key": "tui.info.env.mcp_connecting_short",
+        "en": 10,
+        "ru": 11,
+        "delta": 1
+      },
+      {
+        "key": "tui.info.env.mcp_failed_full",
+        "en": 8,
+        "ru": 6,
+        "delta": -2
+      },
+      {
+        "key": "tui.info.env.mcp_failed_short",
+        "en": 6,
+        "ru": 4,
+        "delta": -2
+      },
+      {
+        "key": "tui.info.env.mcp_empty",
+        "en": 15,
+        "ru": 12,
+        "delta": -3
+      },
+      {
+        "key": "tui.info.env.none",
+        "en": 4,
+        "ru": 3,
+        "delta": -1
+      },
+      {
+        "key": "tui.info.env.mobile_installed",
+        "en": 9,
+        "ru": 10,
+        "delta": 1
+      },
+      {
+        "key": "tui.info.env.mobile_absent",
+        "en": 13,
+        "ru": 13,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.env.mobile_healthy",
+        "en": 7,
+        "ru": 17,
+        "delta": 10
+      },
+      {
+        "key": "tui.info.env.mobile_up",
+        "en": 2,
+        "ru": 8,
+        "delta": 6
+      },
+      {
+        "key": "tui.info.env.credentials_unreadable",
+        "en": 14,
+        "ru": 20,
+        "delta": 6
+      },
+      {
+        "key": "tui.info.env.credential_count",
+        "en": 6,
+        "ru": 6,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.env.credentials_more",
+        "en": 25,
+        "ru": 25,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.env.credentials_set",
+        "en": 5,
+        "ru": 7,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.env.credentials_empty",
+        "en": 11,
+        "ru": 12,
+        "delta": 1
+      },
+      {
+        "key": "tui.info.report.degraded_count",
+        "en": 8,
+        "ru": 10,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.report.degraded",
+        "en": 8,
+        "ru": 15,
+        "delta": 7
+      },
+      {
+        "key": "tui.info.report.captured",
+        "en": 24,
+        "ru": 22,
+        "delta": -2
+      },
+      {
+        "key": "tui.info.info_hint.short",
+        "en": 31,
+        "ru": 38,
+        "delta": 7
+      },
+      {
+        "key": "tui.info.info_hint.full",
+        "en": 47,
+        "ru": 55,
+        "delta": 8
+      },
+      {
+        "key": "tui.info.action_copy_report.loading",
+        "en": 57,
+        "ru": 59,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.action_copy_report.redacted",
+        "en": 60,
+        "ru": 64,
+        "delta": 4
+      },
+      {
+        "key": "tui.info.latest_line.installed_unreadable",
+        "en": 38,
+        "ru": 45,
+        "delta": 7
+      },
+      {
+        "key": "tui.info.latest_line.never_checked",
+        "en": 23,
+        "ru": 31,
+        "delta": 8
+      },
+      {
+        "key": "tui.info.latest_line.checked",
+        "en": 41,
+        "ru": 45,
+        "delta": 4
+      },
+      {
+        "key": "tui.info.not_answering_clause.no_rows",
+        "en": 67,
+        "ru": 84,
+        "delta": 17
+      },
+      {
+        "key": "tui.info.not_answering_clause.more",
+        "en": 21,
+        "ru": 18,
+        "delta": -3
+      },
+      {
+        "key": "tui.info.not_answering_clause.remedy_one",
+        "en": 260,
+        "ru": 279,
+        "delta": 19
+      },
+      {
+        "key": "tui.info.not_answering_clause.remedy_many",
+        "en": 271,
+        "ru": 288,
+        "delta": 17
+      },
+      {
+        "key": "tui.info.not_answering_clause.full",
+        "en": 121,
+        "ru": 129,
+        "delta": 8
+      },
+      {
+        "key": "tui.info.tree_lines.deeper",
+        "en": 12,
+        "ru": 21,
+        "delta": 9
+      },
+      {
+        "key": "tui.info.export.heading_install",
+        "en": 10,
+        "ru": 12,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.export.version",
+        "en": 29,
+        "ru": 29,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.latest_known",
+        "en": 33,
+        "ru": 35,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.export.install_kind",
+        "en": 26,
+        "ru": 26,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.install_path",
+        "en": 28,
+        "ru": 28,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.interpreter",
+        "en": 32,
+        "ru": 32,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.running_code",
+        "en": 92,
+        "ru": 97,
+        "delta": 5
+      },
+      {
+        "key": "tui.info.export.source",
+        "en": 47,
+        "ru": 45,
+        "delta": -2
+      },
+      {
+        "key": "tui.info.export.build_age",
+        "en": 33,
+        "ru": 33,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.python",
+        "en": 62,
+        "ru": 62,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.platform",
+        "en": 42,
+        "ru": 42,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.heading_session",
+        "en": 15,
+        "ru": 13,
+        "delta": -2
+      },
+      {
+        "key": "tui.info.export.session_id",
+        "en": 32,
+        "ru": 32,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.kind",
+        "en": 26,
+        "ru": 26,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.pid",
+        "en": 25,
+        "ru": 25,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.model",
+        "en": 33,
+        "ru": 33,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.effective_model",
+        "en": 68,
+        "ru": 69,
+        "delta": 1
+      },
+      {
+        "key": "tui.info.export.uptime",
+        "en": 30,
+        "ru": 30,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.working_dir",
+        "en": 25,
+        "ru": 25,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.config_dir",
+        "en": 46,
+        "ru": 50,
+        "delta": 4
+      },
+      {
+        "key": "tui.info.export.cache_dir",
+        "en": 31,
+        "ru": 31,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.agent_home",
+        "en": 46,
+        "ru": 50,
+        "delta": 4
+      },
+      {
+        "key": "tui.info.export.log_dir",
+        "en": 29,
+        "ru": 29,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.control_port",
+        "en": 34,
+        "ru": 34,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.protocol",
+        "en": 30,
+        "ru": 30,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.heading_sessions",
+        "en": 27,
+        "ru": 28,
+        "delta": 1
+      },
+      {
+        "key": "tui.info.export.sessions_unavailable",
+        "en": 57,
+        "ru": 49,
+        "delta": -8
+      },
+      {
+        "key": "tui.info.export.sessions_empty",
+        "en": 6,
+        "ru": 5,
+        "delta": -1
+      },
+      {
+        "key": "tui.info.export.sessions_summary",
+        "en": 56,
+        "ru": 61,
+        "delta": 5
+      },
+      {
+        "key": "tui.info.export.pid_fallback",
+        "en": 9,
+        "ru": 9,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.heading_agents",
+        "en": 23,
+        "ru": 21,
+        "delta": -2
+      },
+      {
+        "key": "tui.info.export.runtimes",
+        "en": 61,
+        "ru": 63,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.export.trajectories_unreported",
+        "en": 75,
+        "ru": 79,
+        "delta": 4
+      },
+      {
+        "key": "tui.info.export.queued_suffix",
+        "en": 11,
+        "ru": 14,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.export.trajectories",
+        "en": 46,
+        "ru": 46,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.profiles",
+        "en": 30,
+        "ru": 30,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.teams",
+        "en": 27,
+        "ru": 27,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.roster_unreadable",
+        "en": 49,
+        "ru": 51,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.export.session_counts",
+        "en": 63,
+        "ru": 72,
+        "delta": 9
+      },
+      {
+        "key": "tui.info.export.capacity",
+        "en": 47,
+        "ru": 46,
+        "delta": -1
+      },
+      {
+        "key": "tui.info.export.tree_heading",
+        "en": 46,
+        "ru": 50,
+        "delta": 4
+      },
+      {
+        "key": "tui.info.export.tree_unreadable",
+        "en": 29,
+        "ru": 33,
+        "delta": 4
+      },
+      {
+        "key": "tui.info.export.tree_empty",
+        "en": 39,
+        "ru": 44,
+        "delta": 5
+      },
+      {
+        "key": "tui.info.export.tree_counts",
+        "en": 67,
+        "ru": 67,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.tree_legacy",
+        "en": 54,
+        "ru": 77,
+        "delta": 23
+      },
+      {
+        "key": "tui.info.export.lower_bound",
+        "en": 73,
+        "ru": 78,
+        "delta": 5
+      },
+      {
+        "key": "tui.info.export.heading_environment",
+        "en": 14,
+        "ru": 12,
+        "delta": -2
+      },
+      {
+        "key": "tui.info.export.terminal",
+        "en": 85,
+        "ru": 85,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.multiplexer",
+        "en": 45,
+        "ru": 45,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.tty",
+        "en": 23,
+        "ru": 22,
+        "delta": -1
+      },
+      {
+        "key": "tui.info.export.theme",
+        "en": 34,
+        "ru": 34,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.approvals",
+        "en": 42,
+        "ru": 42,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.browser",
+        "en": 66,
+        "ru": 66,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.mobile",
+        "en": 60,
+        "ru": 62,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.export.mcp",
+        "en": 92,
+        "ru": 95,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.export.guides",
+        "en": 28,
+        "ru": 28,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.skills",
+        "en": 28,
+        "ru": 28,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.credentials",
+        "en": 34,
+        "ru": 34,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.export.heading_degraded",
+        "en": 17,
+        "ru": 23,
+        "delta": 6
+      },
+      {
+        "key": "tui.info.count.session",
+        "en": 9,
+        "ru": 8,
+        "delta": -1
+      },
+      {
+        "key": "tui.info.count.runtime",
+        "en": 9,
+        "ru": 9,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.count.trajectory",
+        "en": 12,
+        "ru": 12,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.count.subagent",
+        "en": 10,
+        "ru": 10,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.state.running",
+        "en": 7,
+        "ru": 11,
+        "delta": 4
+      },
+      {
+        "key": "tui.info.state.starting",
+        "en": 8,
+        "ru": 11,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.state.queued",
+        "en": 6,
+        "ru": 9,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.state.pausing",
+        "en": 7,
+        "ru": 18,
+        "delta": 11
+      },
+      {
+        "key": "tui.info.state.paused",
+        "en": 6,
+        "ru": 14,
+        "delta": 8
+      },
+      {
+        "key": "tui.info.state.completed",
+        "en": 9,
+        "ru": 9,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.state.failed",
+        "en": 6,
+        "ru": 4,
+        "delta": -2
+      },
+      {
+        "key": "tui.info.state.cancelled",
+        "en": 9,
+        "ru": 8,
+        "delta": -1
+      },
+      {
+        "key": "tui.info.state.gone",
+        "en": 4,
+        "ru": 7,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.state.live",
+        "en": 4,
+        "ru": 7,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.state.stale",
+        "en": 5,
+        "ru": 15,
+        "delta": 10
+      },
+      {
+        "key": "tui.info.state.unknown",
+        "en": 7,
+        "ru": 10,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.leaving.signal",
+        "en": 53,
+        "ru": 66,
+        "delta": 13
+      },
+      {
+        "key": "tui.info.leaving.build",
+        "en": 48,
+        "ru": 48,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.leaving.overdue",
+        "en": 52,
+        "ru": 54,
+        "delta": 2
+      },
+      {
+        "key": "tui.info.update.target",
+        "en": 19,
+        "ru": 22,
+        "delta": 3
+      },
+      {
+        "key": "tui.info.update.done_target",
+        "en": 18,
+        "ru": 19,
+        "delta": 1
+      },
+      {
+        "key": "tui.info.agents.summary_full",
+        "en": 31,
+        "ru": 31,
+        "delta": 0
+      },
+      {
+        "key": "tui.info.agents.addends",
+        "en": 22,
+        "ru": 21,
+        "delta": -1
+      },
+      {
+        "key": "tui.info.export.summary",
+        "en": 31,
+        "ru": 28,
+        "delta": -3
+      }
+    ],
+    "source_provenance": {
+      "ru": 722
+    },
+    "hashes": {
+      "source": "909a00c7f98b291863ae6508648ede30b3edddf868e5c0d84a23999666e3cdaf",
+      "context": "905690aae095d0ec8fe0b36f6dfe92db05e9c6e3bfdbc0fe87577a37002b9d11",
+      "target": "c6b6287844dcc19f0a98d71d5a72a6da38599c7f15c085066b2ee1754a8cd071"
+    },
+    "negative_controls": {
+      "dropped_count_detected": true,
+      "renamed_argument_detected": true,
+      "missing_few_detected": true
+    }
+  },
+  "not_run": [
+    "App/InfoPanel rendered frames",
+    "pixel/native/RTL approval",
+    "browser",
+    "process/runtime launches",
+    "generation",
+    "targeted or full test suites",
+    "CI"
+  ],
+  "glossary_choices": {
+    "session": "сессия",
+    "runtime": "рантайм",
+    "trajectory": "траектория (distinct from runtime count)",
+    "subagent": "субагент",
+    "credentials": "учётные данные",
+    "approvals": "одобрения (confirmation uses подтверждение)",
+    "job": "задание",
+    "skill": "навык",
+    "guide": "руководство",
+    "relay": "ретранслятор",
+    "retained_settled": "завершённые (в истории); does not assert successful outcome",
+    "register": "impersonal / lowercase вы; sentence case"
+  },
+  "metadata_fallback": "Only exact public English context sidecar parsed locally, authorized parent metadata-only size-cap fallback; ru-info-context-lossless.json asserted decode == original 277-entry object. EN/target prose never bypassed audited reader.",
+  "context_lossless_proof": {
+    "entries": 277,
+    "raw_sha256": "905690aae095d0ec8fe0b36f6dfe92db05e9c6e3bfdbc0fe87577a37002b9d11",
+    "original_canonical_sha256": "bc9693e1f6a11f0d55fff0cf103846b24ce4bbe27fa61472104557168615342e",
+    "decoded_canonical_sha256": "bc9693e1f6a11f0d55fff0cf103846b24ce4bbe27fa61472104557168615342e",
+    "decode_equals_original": true,
+    "numeric_maxCells_entries": 0
+  },
+  "held_counterfactual": {
+    "held_reading": "unproven",
+    "listing_held_predicate": true,
+    "proven_for_stop_predicate": false,
+    "production_text": "завис; не остановлен",
+    "source_locale": "ru",
+    "no_runtime_or_process_started": true,
+    "unchanged_duration_caller_examples": {
+      "unknown": "unknown",
+      "seconds": "42s",
+      "minutes": "4m",
+      "hours": "3h 12m",
+      "days": "2d 4h"
+    }
+  },
+  "commands": [
+    {
+      "command": "env -i HOME=\"$LOCAL_OPERATOR_SCRATCHPAD/ru-audit-home\" LOCAL_OPERATOR_CONFIG_DIR=\"$LOCAL_OPERATOR_SCRATCHPAD/ru-audit-home/config\" PATH=\"$PATH\" TERM=xterm-256color PYTHONPATH=/Users/damian/local-operator/.worktrees/i18n-info-readout /Users/damian/local-operator/.venv/bin/python \"$LOCAL_OPERATOR_SCRATCHPAD/ru_info_audit_mechanical.py\"",
+      "exit": 0,
+      "actual_stdout_file": "/Users/damian/.local-operator/sessions/31e286639a33/scratchpad/ru-info-audit-mechanical.stdout",
+      "actual_summary": "277 keys, zero missing/extra, same order and ordered argument/type contracts; 47 plural nodes with one/few/many/other and counts in all188 branches; 23 select nodes machine arms retained; 722 real ICU/tr_record renders all source_locale=ru; no issues; 3 negative controls true."
+    },
+    {
+      "command": "env -i HOME=<scratch>/ru-audit-home LOCAL_OPERATOR_CONFIG_DIR=<scratch>/ru-audit-home/config PATH=\"$PATH\" TERM=xterm-256color PYTHONPATH=<worktree> <primary>/.venv/bin/python <scratch>/ru_info_audit_findings.py",
+      "exit": 0,
+      "actual_summary": "Counter(minor=10, major=1), width risks12, key_results277; all proposed copies preserve ordered arguments/kinds."
+    },
+    {
+      "command": "env -i HOME=<scratch>/ru-audit-home LOCAL_OPERATOR_CONFIG_DIR=<scratch>/ru-audit-home/config PATH=\"$PATH\" TERM=xterm-256color PYTHONPATH=<worktree> <primary>/.venv/bin/python <scratch>/ru_info_held_repro.py",
+      "exit": 0,
+      "actual_output": {
+        "held_reading": "unproven",
+        "listing_held_predicate": true,
+        "proven_for_stop_predicate": false,
+        "production_text": "завис; не остановлен",
+        "source_locale": "ru",
+        "no_runtime_or_process_started": true,
+        "unchanged_duration_caller_examples": {
+          "unknown": "unknown",
+          "seconds": "42s",
+          "minutes": "4m",
+          "hours": "3h 12m",
+          "days": "2d 4h"
+        }
+      }
+    }
+  ],
+  "unchanged_caller_limitations": {
+    "path": "local_operator/info/model.py:458-482",
+    "actual_examples": {
+      "unknown": "unknown",
+      "seconds": "42s",
+      "minutes": "4m",
+      "hours": "3h 12m",
+      "days": "2d 4h"
+    },
+    "disposition": "Not an English-prose exemption or global UI clearance: these unchanged caller-owned raw values are outside target catalogue wording. The named duration/unknown params were assessed individually; no catalogue can translate a value inserted as an opaque string without breaking the caller contract. Parent must retain separate AppQA/global-scope accounting.",
+    "affected_keys": [
+      "tui.info.install.build_age",
+      "tui.info.latest.checked_full",
+      "tui.info.latest.checked_short",
+      "tui.info.session.started",
+      "tui.info.latest_line.checked",
+      "tui.info.not_answering_clause.full",
+      "tui.info.export.build_age",
+      "tui.info.export.uptime"
+    ],
+    "units": "s/m/h/d retained in existing compact duration notation; no blanket English-unit allowlist approval from this audit."
+  },
+  "subgroup_verdicts": {
+    "heading": {
+      "keys_read": 7,
+      "verdict": "CLEAN_SEMANTIC_READ",
+      "fit_risks": 0
+    },
+    "label": {
+      "keys_read": 35,
+      "verdict": "CLEAN_SEMANTIC_READ",
+      "fit_risks": 0
+    },
+    "status": {
+      "keys_read": 9,
+      "verdict": "FAILED",
+      "fit_risks": 3
+    },
+    "install": {
+      "keys_read": 17,
+      "verdict": "CLEAN_SEMANTIC_READ",
+      "fit_risks": 2
+    },
+    "latest": {
+      "keys_read": 10,
+      "verdict": "CLEAN_SEMANTIC_READ",
+      "fit_risks": 0
+    },
+    "kind_of_runtime": {
+      "keys_read": 8,
+      "verdict": "CLEAN_SEMANTIC_READ",
+      "fit_risks": 1
+    },
+    "import_path": {
+      "keys_read": 6,
+      "verdict": "CLEAN_SEMANTIC_READ",
+      "fit_risks": 2
+    },
+    "kind": {
+      "keys_read": 7,
+      "verdict": "CLEAN_SEMANTIC_READ",
+      "fit_risks": 1
+    },
+    "session": {
+      "keys_read": 6,
+      "verdict": "CLEAN_SEMANTIC_READ",
+      "fit_risks": 1
+    },
+    "approval": {
+      "keys_read": 4,
+      "verdict": "CLEAN_SEMANTIC_READ",
+      "fit_risks": 1
+    },
+    "redirect": {
+      "keys_read": 3,
+      "verdict": "CLEAN_SEMANTIC_READ",
+      "fit_risks": 0
+    },
+    "sessions": {
+      "keys_read": 11,
+      "verdict": "MINOR_FINDINGS",
+      "fit_risks": 0
+    },
+    "fleet_caveats": {
+      "keys_read": 1,
+      "verdict": "CLEAN_SEMANTIC_READ",
+      "fit_risks": 0
+    },
+    "agents": {
+      "keys_read": 38,
+      "verdict": "MINOR_FINDINGS",
+      "fit_risks": 1
+    },
+    "env": {
+      "keys_read": 18,
+      "verdict": "MINOR_FINDINGS",
+      "fit_risks": 0
+    },
+    "report": {
+      "keys_read": 3,
+      "verdict": "CLEAN_SEMANTIC_READ",
+      "fit_risks": 0
+    },
+    "info_hint": {
+      "keys_read": 2,
+      "verdict": "CLEAN_SEMANTIC_READ",
+      "fit_risks": 0
+    },
+    "action_copy_report": {
+      "keys_read": 2,
+      "verdict": "CLEAN_SEMANTIC_READ",
+      "fit_risks": 0
+    },
+    "latest_line": {
+      "keys_read": 3,
+      "verdict": "CLEAN_SEMANTIC_READ",
+      "fit_risks": 0
+    },
+    "not_answering_clause": {
+      "keys_read": 5,
+      "verdict": "CLEAN_SEMANTIC_READ",
+      "fit_risks": 0
+    },
+    "tree_lines": {
+      "keys_read": 1,
+      "verdict": "CLEAN_SEMANTIC_READ",
+      "fit_risks": 0
+    },
+    "export": {
+      "keys_read": 60,
+      "verdict": "MINOR_FINDINGS",
+      "fit_risks": 0
+    },
+    "count": {
+      "keys_read": 4,
+      "verdict": "CLEAN_SEMANTIC_READ",
+      "fit_risks": 0
+    },
+    "state": {
+      "keys_read": 12,
+      "verdict": "CLEAN_SEMANTIC_READ",
+      "fit_risks": 0
+    },
+    "leaving": {
+      "keys_read": 3,
+      "verdict": "CLEAN_SEMANTIC_READ",
+      "fit_risks": 0
+    },
+    "update": {
+      "keys_read": 2,
+      "verdict": "CLEAN_SEMANTIC_READ",
+      "fit_risks": 0
+    }
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "kind": "real-python-composer-resolver-not-rendered-frame",
+  "module": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/local_operator/__init__.py",
+  "rows": [
+    {
+      "locale": "en",
+      "actual": "Read-only · esc back",
+      "matches_catalogue": true
+    },
+    {
+      "locale": "fr",
+      "actual": "Lecture seule · esc retour",
+      "matches_catalogue": true
+    },
+    {
+      "locale": "zh-CN",
+      "actual": "只读 · esc返回",
+      "matches_catalogue": true
+    },
+    {
+      "locale": "es",
+      "actual": "Solo lectura · esc volver",
+      "matches_catalogue": true
+    },
+    {
+      "locale": "ru",
+      "actual": "Только чтение · esc назад",
+      "matches_catalogue": true
+    },
+    {
+      "locale": "vi",
+      "actual": "Chỉ đọc · esc quay lại",
+      "matches_catalogue": true
+    },
+    {
+      "locale": "hi",
+      "actual": "केवल पढ़ने के लिए · esc लौटें",
+      "matches_catalogue": true
+    },
+    {
+      "locale": "ur",
+      "actual": "صرف پڑھنے کے لیے · esc واپس",
+      "matches_catalogue": true
+    }
+  ],
+  "english_length": 20,
+  "setup_note": "First probe did not start: unrelated rg absence short-circuited script creation. No application ran in that attempt; fixed probe creation only."
+}

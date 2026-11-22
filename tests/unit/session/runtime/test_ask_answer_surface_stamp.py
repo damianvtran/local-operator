@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import types
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -1037,8 +1037,18 @@ class _SendClient:
 
 def _facade_with(client: Any) -> Any:
     from local_operator.session.attached import AttachedSession
+    from local_operator.session.owner import SessionOwner
+    from local_operator.session.placement import SessionPlacement
 
     facade = AttachedSession.__new__(AttachedSession)
+    # These contracts exercise proof on the existing bound desktop client,
+    # including reconnects. A peer owner keeps that production path; a local
+    # desktop owner instead opens a separate one-shot control connection, covered
+    # in test_ask_control_client.py rather than by this sending-client double.
+    facade._surface = "desktop"
+    facade._owner = cast(
+        SessionOwner, types.SimpleNamespace(placement=SessionPlacement(mode="peer"))
+    )
     facade._client = client  # type: ignore[attr-defined]
     facade._ask_proof_at_send = False  # type: ignore[attr-defined]
 

@@ -1,0 +1,28 @@
+{
+  "kind": "independent-realpath-qa",
+  "round": 2,
+  "head": "db684f29e586eea63c9428ab11f56a9008cf2645",
+  "scope_base": "e9e6c3711149cba6899083eab019342d98d5fa55",
+  "session": "9d351e8047b7",
+  "model": "openai/gpt-6.1-sol",
+  "fallback": "host-announced anthropic/claude-opus-5-5 quota failure",
+  "verdict": "PASS bounded remediation and convergence QA only",
+  "environment": "Darwin arm64, primary Python3.12.13 venv; manager worktree imports; real OperatorApp production CSS; env-i synthetic HOME/config/CWD; no OS clipboard writes",
+  "evidence_root": "/Users/damian/.local-operator/sessions/9d351e8047b7/scratchpad",
+  "report": "qa-report.md",
+  "scripts": ["qa_realpath.py", "qa_neighbors.py", "qa_warnings.py"],
+  "results": {
+    "middle_first_frame_transitions": 6,
+    "end_pinned_first_frame_transitions_three_widths": 18,
+    "unknown_vs_zero_locales": 8,
+    "mounted_source_identity_geometry_cases": 24,
+    "mounted_urdu_technical_commands": 3,
+    "explicit_behind_warning_frames": 9,
+    "targeted_tests": "48 passed, 2 warnings in 8.43s",
+    "convergence_manifest_hashes": "78/78 match, zero mismatch"
+  },
+  "setup_failure": "Initial neighbors warning fixture loaded without behind=True; assertion failed after 18 successful transitions and mounted technical checks. Original neighbors.log retained. Dedicated qa_warnings.py repaired only fixture and ran 9 actual behind=True frames successfully.",
+  "viewed": ["frames/command-contact.png", "frames/external-contact.png", "frames/narrow-first-contact.png", "frames/width-120-contact.png", "frames/width-80-contact.png", "frames/width-60-contact.png", "frames/warnings-contact.png", "frames/mounted-ur-technical.png"],
+  "limits": ["Not native Urdu shaping", "Not whole-UI clearance", "Not linguistic quality audit", "No production/auth/tenant/provider calls", "No full suite, CI, merge or release claim", "Source input40 characters; intended displayed12-character ref preserved, not arbitrary full40 fitting claim"],
+  "retained_source": "R1 QA comment7069781495, actor convergence comment7072293610, own source-compatibility.json and verified retention-proof.json hashes"
+}

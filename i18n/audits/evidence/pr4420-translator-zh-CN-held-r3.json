@@ -1,0 +1,79 @@
+{
+  "kind": "translator_authorship_not_audit",
+  "round": "3native",
+  "locale": "zh-CN",
+  "created_at": "2026-11-22T00:25:37.716113+00:00",
+  "actor": {
+    "role": "translator",
+    "session_id": "ab255ad6f7e0",
+    "actual_authoring_model": "openai/gpt-6.1-sol",
+    "host_fallback": true,
+    "fallback_from": "anthropic/claude-opus-5-5",
+    "host_reason": "provider failure: quota",
+    "provenance_note": "Initial ledger read preceded host fallback; source/target reading, Chinese wording decision, edit and mechanical checks used the host-declared fallback model."
+  },
+  "scope": {
+    "head": "2c282261f27b66390061563359f9cf72f2520538",
+    "key": "tui.info.status.bound_held",
+    "target_path": "local_operator/i18n/catalogues/zh-CN/tui.info.json",
+    "changed_value_count": 1,
+    "key_count_before": 277,
+    "key_count_after": 277,
+    "unchanged_value_count": 276,
+    "key_order_preserved": true,
+    "formatting_preserved": "After bytes equal before bytes with exactly the authorized UTF-8 value replacement"
+  },
+  "binding": {
+    "english_path": "local_operator/i18n/catalogues/en/tui.info.json",
+    "english_file_sha256": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+    "english_key_utf8_sha256": "9e64c72183a0291feb4c32512d221778214811d89371f97e26d4e89a6717a071",
+    "context_path": "local_operator/i18n/catalogues/en/tui.info.context.json",
+    "context_file_sha256": "aee21715fca769227b3bda5b500a5e81e51763cf86817f741baff8b1a5ef0ae7",
+    "target_file_before_sha256": "a3c7fef5c7f39382aad8ee62e2e2d90915344119892a45719531e14115ba8e02",
+    "target_file_after_sha256": "697cd28a1ebab12ce0c9709d954c118ab819666c4749ed7bf115a1e6700249d8",
+    "target_value_before_utf8_sha256": "063a6bdad660d47fde8f9fe1754dd756034f163af7c059474905f44762c7bafd",
+    "target_value_after_utf8_sha256": "e95378b5fb0610dba599334e0a3cbe510f33027232ee521904b77a41e9b06349",
+    "other_276_values_canonical_json_sha256": "b6dccaeeea6acc3b661ffd62c217ab4aae060ed352a740df1da4556b036555ca"
+  },
+  "authorship": {
+    "new_value": "超限标记未清，仍存活",
+    "backtranslation": "Bound-exceeded marker not cleared; still alive",
+    "reason": "Make the persistent diagnostic marker explicit rather than diagnosing a current stall. Retain known process liveness. The wording makes no claim of proven recovery, unresponsiveness, or authorization to stop the runtime. Applies to both proven and unproven held readings in the SHA-bound context.",
+    "terminology_choice": "超限标记 for the bound-exceeded diagnostic marker; 未清 for marker still present; 仍存活 retains known liveness. No glossary term added.",
+    "prior_four_key_authors": "Unchanged; no authorship claimed for the prior PID-gone, confirmation or whole-unknown-field corrections. All other 276 values remain byte-preserved from the supplied before file."
+  },
+  "mechanical_checks": {
+    "parse": "PASS",
+    "format": "PASS",
+    "arguments": [],
+    "selectors": [],
+    "skeletons": [],
+    "pseudo_synthetic_expansion_parse_format": "PASS",
+    "authored_bidi_controls": 0,
+    "source_cells": 10,
+    "target_cells": 20,
+    "synthetic_pseudo_cells": 39,
+    "native_fit": "NOT TESTED"
+  },
+  "width_risk": {
+    "measurement": "rich.cells.cell_len",
+    "source_cells": 10,
+    "target_cells": 20,
+    "risk": "10 cells longer than English; numeric key budget not provided in context. Requires real renderer fit check; no clipping or native-fit claim."
+  },
+  "preservation": {
+    "catalogue_and_generated_files_snapshotted": 1645,
+    "only_changed_snapshotted_path": "local_operator/i18n/catalogues/zh-CN/tui.info.json",
+    "english_context_other_locales_generated_unchanged": true,
+    "head_unchanged": true,
+    "ledger_or_prior_audit_receipts_edited": false,
+    "prior_four_authorship_unchanged": true
+  },
+  "execution_notes": [
+    "Requested worktree has no .venv/bin/python; no process launched on first attempt.",
+    "Reused primary checkout .venv interpreter with PYTHONPATH bound to this worktree; wcwidth unavailable, so used existing rich.cells.cell_len. No dependency install.",
+    "Successful pure parse/format and synthetic expansion smoke used isolated scratch HOME/config, stripped CMUX_/LOP_ environment, and disabled bytecode writes.",
+    "Synthetic pseudo wrapper is not a project pseudo-locale generator, rendered evidence, or semantic audit. No generation or native/full tests run."
+  ],
+  "independence": "No self-audit performed or clearance granted. Two independent Chinese R3 delta auditors remain required; manager owns integration and commit."
+}
