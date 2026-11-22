@@ -624,17 +624,25 @@ class MonitorScheduler:
                 logger.warning("dropping invalid monitor spec %r", getattr(raw, "id", raw))
                 continue
             counters = monitor_state.read_counters(self._config_dir, self._session_id, spec.id)
+            had_readable_counters = counters is not None
             if counters is None or counters.get("monitor_id") != spec.id:
                 counters = fresh_counters(spec.id, None)
             next_due = counters.get("next_due_at")
-            if (
+            rearmed = (
                 not counters.get("disabled")
                 and (not isinstance(next_due, int) or next_due <= now)
                 and (spec.until_at is None or now < spec.until_at)
-            ):
-                next_due = now + self._first_check_delay_ms()
-            counters["next_due_at"] = next_due
-            adopted.append(_Entry(spec=spec, counters=counters))
+            )
+            counters["next_due_at"] = now + self._first_check_delay_ms() if rearmed else next_due
+            entry = _Entry(spec=spec, counters=counters)
+            if rearmed and had_readable_counters:
+                # Cold readers overlay counters on the rebuilt index so quiet
+                # checks do not need index writes. Publish this one-time due
+                # change first, or the old counters undo the reopen until a tick.
+                # If no counters can be read, the index already covers it. The
+                # best-effort write keeps an I/O error from failing the open.
+                self._write_counters(entry)
+            adopted.append(entry)
         adopted.sort(key=lambda entry: entry.spec.created_at)
         self._entries = {entry.spec.id: entry for entry in adopted}
         self._next_seq = next_monitor_seq([entry.spec.id for entry in adopted], next_seq)
