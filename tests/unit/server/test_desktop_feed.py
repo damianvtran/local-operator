@@ -44,6 +44,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -76,6 +77,7 @@ from local_operator.session.catalog import (
 )
 from local_operator.session.creation import CREATED_AT_NAME
 from local_operator.session.model_selection import ENV_ALLOW_TEST_HOSTING_NOTIFY
+from local_operator.session.row_clip import ROW_RANGE_MAX_BYTES
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.presence import (
     desktop_attending_session,
@@ -2094,11 +2096,14 @@ def _cold_workspace_session(root: Path, sid: str) -> Path:
     return directory
 
 
-def _workspace_row(root: Path, sid: str, feed: DesktopFeed) -> dict[str, Any]:
+def _workspace_row(
+    root: Path, sid: str, feed: DesktopFeed, *, include_archived: bool = False
+) -> dict[str, Any]:
     page = asyncio.run(
         DesktopSessions(root).list(
             50,
             status_stamps=feed.status_stamps(),
+            include_archived=include_archived,
             workspace_rest_ids=frozenset({sid}),
             workspace_rest_epoch=feed.epoch,
         )
@@ -2245,11 +2250,250 @@ def test_workspace_rest_keeps_over_budget_or_partial_discovery_unknown(tmp_path,
 
     run = registry.ensure_run_dir(tmp_path)
     (run / "12345.json").write_text("[]", encoding="utf-8")
-    assert workspace_rest.capture_workspace_registry(tmp_path) is None
     assert "workspace_rest" not in _workspace_row(tmp_path, sid, feed)
 
-    monkeypatch.setattr(workspace_rest, "capture_workspace_registry", unexpected_read)
+    monkeypatch.setattr(workspace_rest, "capture_veto_fence", unexpected_read)
     assert "workspace_rest" not in asyncio.run(DesktopSessions(tmp_path).list(50)).rows[0]
+
+
+@pytest.mark.parametrize(
+    "change", ["pin", "archive", "wake", "error", "pin-undo", "archive-undo", "wake-undo"]
+)
+def test_workspace_rest_fences_durable_writes_after_catalogue(tmp_path, monkeypatch, change):
+    from local_operator.harness.wake import WAKE_SCHEDULES_CUSTOM_TYPE
+    from local_operator.server.utils import desktop_sessions
+    from local_operator.session.archived import read_archived
+    from local_operator.session.transcript import Transcript
+    from local_operator.tui.sidebar_pins import load_pin_ids
+    from local_operator.wakes.store import remove_entry
+
+    sid = "e5" * 6
+    directory = _cold_workspace_session(tmp_path, sid)
+    feed = _feed(tmp_path)
+    feed._take_baseline()
+    arm = _workspace_row(tmp_path, sid, feed)["workspace_rest"]
+    ready = threading.Event()
+    resume = threading.Event()
+    real_page = desktop_sessions.catalogue_page
+
+    def parked_page(*args, **kwargs):
+        page = real_page(*args, **kwargs)
+        ready.set()
+        assert resume.wait(10), "writer never released the real catalogue snapshot"
+        return page
+
+    async def overlap():
+        pool = DesktopSessions(tmp_path)
+        pending = asyncio.create_task(
+            pool.list(50, workspace_rest_ids=frozenset({sid}), workspace_rest_epoch=feed.epoch)
+        )
+        try:
+            assert await asyncio.to_thread(ready.wait, 5)
+            if change.startswith("pin"):
+                assert (await pool.set_pin(sid, True))["pinned"] is True
+                assert sid in load_pin_ids(tmp_path)
+                if change.endswith("undo"):
+                    assert (await pool.set_pin(sid, False))["pinned"] is False
+                    assert sid not in load_pin_ids(tmp_path)
+            elif change.startswith("archive"):
+                assert (await pool.set_archived(sid, True))["archived"] is True
+                assert sid in read_archived(tmp_path)
+                if change.endswith("undo"):
+                    assert (await pool.set_archived(sid, False))["archived"] is False
+                    assert sid not in read_archived(tmp_path)
+            elif change.startswith("wake"):
+                if change.endswith("undo"):
+                    # The wake writer persists the transcript first; the
+                    # index may disappear when the last schedule is removed.
+                    transcript = await asyncio.to_thread(Transcript, directory)
+                    await transcript.append_custom(
+                        WAKE_SCHEDULES_CUSTOM_TYPE, {"schedules": [{"id": "w"}]}
+                    )
+                entry = await asyncio.to_thread(_wake, tmp_path, sid)
+                assert entry is not None and entry.is_file()
+                if change.endswith("undo"):
+                    await transcript.append_custom(WAKE_SCHEDULES_CUSTOM_TYPE, {"schedules": []})
+                    assert await asyncio.to_thread(remove_entry, tmp_path, sid)
+            else:
+                token = await asyncio.to_thread(_publish, tmp_path, sid, kind="error")
+                state = await asyncio.to_thread(
+                    AttentionStore(tmp_path / "attention.db").acknowledge, f"session/{sid}", token
+                )
+                assert state["unseen"] is False
+        finally:
+            resume.set()
+        return (await pending).rows[0]
+
+    with monkeypatch.context() as patch:
+        patch.setattr(desktop_sessions, "catalogue_page", parked_page)
+        stale = asyncio.run(overlap())
+    # The catalogue result stays permissive/stale, but it cannot carry proof.
+    assert stale["status"]["code"] == "complete"
+    assert stale["pinned"] is False and stale["archived"] is False
+    assert "workspace_rest" not in stale
+    current = _workspace_row(tmp_path, sid, feed, include_archived=True)
+    if change.endswith("undo"):
+        new = current["workspace_rest"]
+        assert new["epoch"] == arm["epoch"] and new["revision"] != arm["revision"]
+        assert _workspace_row(tmp_path, sid, feed)["workspace_rest"] == new
+    else:
+        assert "workspace_rest" not in current
+
+
+@pytest.mark.parametrize("witness", ["sidebar-pins.json", "archived-sessions.json", "wake"])
+def test_workspace_rest_rejects_corrupt_veto_without_changing_display(tmp_path, witness):
+    from local_operator.wakes.store import entry_path
+
+    sid = "e5" * 6
+    _cold_workspace_session(tmp_path, sid)
+    feed = _feed(tmp_path)
+    feed._take_baseline()
+    assert "workspace_rest" in _workspace_row(tmp_path, sid, feed)
+    path = entry_path(tmp_path, sid) if witness == "wake" else tmp_path / witness
+    path.parent.mkdir(exist_ok=True)
+    path.write_text('[{"truncated":', encoding="utf-8")
+    row = _workspace_row(tmp_path, sid, feed)
+    assert row["pinned"] is False and row["archived"] is False and row["wakes"] == 0
+    assert row["status"]["code"] == "complete" and "workspace_rest" not in row
+    ordinary = asyncio.run(DesktopSessions(tmp_path).list(50)).rows[0]
+    assert ordinary["status"]["code"] == "complete" and "workspace_rest" not in ordinary
+
+
+def test_workspace_rest_reads_durable_wake_when_the_projection_is_missing(tmp_path):
+    from local_operator.harness.wake import WAKE_SCHEDULES_CUSTOM_TYPE
+    from local_operator.session.transcript import Transcript
+    from local_operator.wakes.store import entry_path
+
+    sid = "e5" * 6
+    directory = _cold_workspace_session(tmp_path, sid)
+    feed = _feed(tmp_path)
+    feed._take_baseline()
+    first = _workspace_row(tmp_path, sid, feed)["workspace_rest"]
+    transcript = Transcript(directory)
+    asyncio.run(transcript.append_custom(WAKE_SCHEDULES_CUSTOM_TYPE, {"schedules": [{"id": "w"}]}))
+    assert not entry_path(tmp_path, sid).exists()
+    row = _workspace_row(tmp_path, sid, feed)
+    assert row["status"]["code"] == "complete" and "workspace_rest" not in row
+    asyncio.run(transcript.append_custom(WAKE_SCHEDULES_CUSTOM_TYPE, {"schedules": []}))
+    assert _workspace_row(tmp_path, sid, feed)["workspace_rest"]["revision"] != first["revision"]
+
+
+@pytest.mark.parametrize("order", ["answered-first", "queued-first", "queued-only", "answer-only"])
+def test_workspace_rest_requires_ask_birth_before_updates(tmp_path, order):
+    from local_operator.asks import store
+
+    sid = "e5" * 6
+    directory = _cold_workspace_session(tmp_path, sid)
+    feed = _feed(tmp_path)
+    feed._take_baseline()
+    now = store.now_ms()
+    queued = {
+        "v": store.EVENT_SCHEMA,
+        "kind": store.EVENT_QUEUED,
+        "ask_id": "a-test",
+        "at": now,
+        "expires_at": now + 60_000,
+    }
+    answered = {**queued, "kind": store.EVENT_ANSWERED, "at": now + 1, "answers": {}}
+    for event in {
+        "answered-first": [answered, queued],
+        "queued-first": [queued, answered],
+        "queued-only": [queued],
+        "answer-only": [answered],
+    }[order]:
+        assert store.append_event(directory, event)
+    assert not store.entry_path(tmp_path, sid).exists()
+    assert ("workspace_rest" in _workspace_row(tmp_path, sid, feed)) is (order == "queued-first")
+
+
+def test_workspace_rest_registry_io_requires_eligible_page_row(tmp_path, monkeypatch):
+    from local_operator.server.utils import workspace_rest
+
+    cold, other, missing = "e5" * 6, "e6" * 6, "e7" * 6
+    _cold_workspace_session(tmp_path, cold)
+    _listable_session(tmp_path, other)
+    feed = _feed(tmp_path)
+    feed._take_baseline()
+    # A normal-sized unrelated running record does not make a healthy candidate
+    # unknown or change its rest revision when the owner heartbeats between polls.
+    first = _workspace_row(tmp_path, cold, feed)["workspace_rest"]
+    registry.publish(_record(other, jobs_running=1), tmp_path)
+    assert _wake(tmp_path, other) is not None
+    assert _workspace_row(tmp_path, cold, feed)["workspace_rest"] == first
+    path = registry.publish(
+        replace(_record(other, jobs_running=1), conversation_name="x" * (2 * ROW_RANGE_MAX_BYTES)),
+        tmp_path,
+    )
+    list_reads, proof_reads = [], []
+    read_text, read_witness = Path.read_text, workspace_rest._read_witness
+
+    def normal_read(file, *args, **kwargs):
+        value = read_text(file, *args, **kwargs)
+        if file == path:
+            list_reads.append(len(value.encode()))
+        return value
+
+    def bounded_read(file, stamp):
+        if file == path:
+            proof_reads.append(stamp[-1])
+        return read_witness(file, stamp)
+
+    def rows(ids, limit):
+        list_reads.clear()
+        proof_reads.clear()
+        result = asyncio.run(
+            DesktopSessions(tmp_path).list(
+                limit, workspace_rest_ids=frozenset(ids), workspace_rest_epoch=feed.epoch
+            )
+        ).rows
+        assert list_reads == [path.stat().st_size] and not proof_reads
+        assert all("workspace_rest" not in row for row in result)
+        return result
+
+    monkeypatch.setattr(Path, "read_text", normal_read)
+    monkeypatch.setattr(workspace_rest, "_read_witness", bounded_read)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            workspace_rest, "_registry_owners", lambda *_: pytest.fail("extra registry census")
+        )
+        assert rows([missing], 1)[0]["id"] == other
+        assert rows([cold], 1)[0]["id"] == other  # existing but off-page
+        assert rows([other], 1)[0]["id"] == other  # present but ineligible
+    assert any(row["id"] == cold for row in rows([cold], 50))  # eligible, census exceeds bytes
+
+
+def test_workspace_rest_registry_entries_and_total_bytes_are_bounded(tmp_path, monkeypatch):
+    from local_operator.server.utils import workspace_rest
+
+    directory = registry.ensure_run_dir(tmp_path)
+    for i in range(workspace_rest._REGISTRY_ENTRY_BUDGET + 1):
+        (directory / f"entry-{i}.tmp").touch()
+    fence = workspace_rest.capture_veto_fence(tmp_path)
+    assert fence is not None
+    with pytest.raises(ValueError, match="entry budget"):
+        workspace_rest._registry_owners(directory, fence.registry)
+
+    # Each record can fit in isolation, but their combined reservation cannot.
+    other = "e6" * 6
+    directory = registry.ensure_run_dir(tmp_path / "byte-budget")
+    for pid in (12345, 12346):
+        record = replace(
+            _record(other), pid=pid, conversation_name="x" * (ROW_RANGE_MAX_BYTES // 2)
+        )
+        registry.publish(record, tmp_path / "byte-budget")
+    fence = workspace_rest.capture_veto_fence(tmp_path / "byte-budget")
+    assert fence is not None
+    reads = []
+    read_witness = workspace_rest._read_witness
+
+    def count(file, stamp):
+        reads.append(stamp[-1] + 1)
+        return read_witness(file, stamp)
+
+    monkeypatch.setattr(workspace_rest, "_read_witness", count)
+    with pytest.raises(ValueError, match="read budget"):
+        workspace_rest._registry_owners(directory, fence.registry)
+    assert len(reads) == 1 and sum(reads) <= ROW_RANGE_MAX_BYTES
 
 
 def test_workspace_rest_never_certifies_a_mesh_row(tmp_path):

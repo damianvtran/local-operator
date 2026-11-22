@@ -10585,13 +10585,15 @@ class DesktopSessions:
             # states for its own lazy imports).
             from local_operator.server.utils.desktop_mesh import remote_session_rows
 
-            rest_census = None
+            rest_fence = None
             if workspace_rest_ids and workspace_rest_epoch:
                 from local_operator.server.utils.workspace_rest import (
-                    capture_workspace_registry,
+                    capture_veto_fence,
                 )
 
-                rest_census = capture_workspace_registry(self.root)
+                # Capture generations, not contents, before any permissive
+                # projection. Only an eligible on-page row justifies proof I/O.
+                rest_fence = capture_veto_fence(self.root)
 
             # ONE ``read_pins`` per request, and it is read BEFORE the catalogue
             # so the catalogue can resolve the pins the page will not carry.
@@ -10832,7 +10834,7 @@ class DesktopSessions:
                         row["status_epoch"] = epoch
                         row["status_revision"] = revision
                 projected[entry.id] = row
-            if rest_census is not None and workspace_rest_epoch:
+            if rest_fence is not None and workspace_rest_epoch:
                 from local_operator.server.utils.workspace_rest import (
                     decorate_workspace_rest,
                 )
@@ -10847,7 +10849,7 @@ class DesktopSessions:
                         if entry.id in workspace_rest_ids
                     ],
                     workspace_rest_epoch,
-                    rest_census,
+                    rest_fence,
                 )
             return SessionPage(
                 rows=[projected[entry.id] for entry in page_entries],
