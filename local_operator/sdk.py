@@ -1441,13 +1441,28 @@ _TRACE_SNIPPET_LIMIT = 160
 #: be scrubbed reliably, so the entire field is withheld beyond this budget.
 _TRACE_CONTAINER_MAX_DEPTH = 6
 _TRACE_REDACT_SCAN_LIMIT = 4096
+#: Legacy env markers match anywhere in the name (e.g. DB_PASSWORD_FALLBACK).
+#: Keep the length floor only for this broad match so short flags stay readable.
+_TRACE_SECRET_ENV_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "AUTHORIZATION")
+_TRACE_SECRET_MIN_LEN = 8
 
 
 def _env_secret_values() -> list[str]:
     """Read fresh so credentials injected after SDK import are still scrubbed."""
     from local_operator.redaction_shapes import is_credential_name
 
-    return [value for name, value in os.environ.items() if value and is_credential_name(name)]
+    return [
+        value
+        for name, value in os.environ.items()
+        if value
+        and (
+            is_credential_name(name)
+            or (
+                len(value) >= _TRACE_SECRET_MIN_LEN
+                and any(marker in name.upper() for marker in _TRACE_SECRET_ENV_MARKERS)
+            )
+        )
+    ]
 
 
 def _redact_trace_text(text: str, env_secrets: list[str]) -> str:
@@ -1706,9 +1721,7 @@ def trace_events(
     formatting error never escapes to abort the session's event dispatch.
     """
     target_logger = (
-        logger
-        if logger is not None
-        else (logging.getLogger(__name__) if stream is None else None)
+        logger if logger is not None else (logging.getLogger(__name__) if stream is None else None)
     )
 
     def _on_event(event: Any) -> None:

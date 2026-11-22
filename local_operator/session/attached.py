@@ -1709,6 +1709,9 @@ class AttachedSession:
         # otherwise a fast owner can stream between factory return and app
         # adoption and the first visible delta vanishes.
         self._buffered_events: list[AgentEvent[Any]] = []
+        # Older buffered frames can already have reached observers while waiting
+        # for a caller. Only the new sync frames still need observer delivery.
+        self._pending_observer_ids: set[int] = set()
         self._ready_for_events = False
         self._approval_handler: ApprovalGate | None = None
         #: Where a REFUSED gate reply goes when the host has a surface for it
@@ -7476,10 +7479,9 @@ class AttachedSession:
         ):
             insert_at += 1
         self._buffered_events[insert_at:insert_at] = seeded
+        self._pending_observer_ids.update(map(id, seeded))
         self._ready_for_events = True
         self._runtime_ready.set()
-        for event in seeded:
-            self._notify_event_handlers(self._event_observers, event)
         self._drain_buffered_events()
         self._maybe_start_gate()
 
@@ -7858,8 +7860,22 @@ class AttachedSession:
             self._live_history[message_id] = message
 
     def _drain_buffered_events(self) -> None:
-        """Deliver buffered sync frames once both ordering and a subscriber exist."""
-        if not self._ready_for_events or not self._handlers or not self._buffered_events:
+        """Release ordered sync frames without taking the caller's replay for observers."""
+        if not self._ready_for_events:
+            return
+        if self._pending_observer_ids:
+            pending, self._pending_observer_ids = self._pending_observer_ids, set()
+            observers = list(self._event_observers)
+            if observers:
+                # Late observers replay for themselves, and must not join a
+                # flush in progress. Honor unsubscriptions between frames.
+                for event in tuple(self._buffered_events):
+                    if id(event) in pending:
+                        self._notify_event_handlers(
+                            [handler for handler in observers if handler in self._event_observers],
+                            event,
+                        )
+        if not self._handlers or not self._buffered_events:
             return
         buffered, self._buffered_events = self._buffered_events, []
         for event in buffered:
@@ -8192,6 +8208,7 @@ class AttachedSession:
             message = getattr(event, "message", None)
             message_id = str(getattr(message, "id", "") or "")
             if message_id and message_id in self._history_ids:
+                self._pending_observer_ids.discard(id(event))
                 continue
             kept.append(event)
         self._buffered_events = kept
@@ -8200,7 +8217,10 @@ class AttachedSession:
         if not self._ready_for_events or not self._handlers:
             self._buffered_events.append(event)
             if notify_observers:
-                self._notify_event_handlers(self._event_observers, event)
+                if self._ready_for_events:
+                    self._notify_event_handlers(self._event_observers, event)
+                else:
+                    self._pending_observer_ids.add(id(event))
             return
         self._deliver(event, notify_observers=notify_observers)
 
@@ -12125,12 +12145,13 @@ class AttachedSession:
     def _observe_events(self, handler: EventHandler) -> Callable[[], None]:
         """Tap current backlog and new frames without becoming the first consumer.
 
-        Diagnostics see arrivals even during sync; the caller still owns the
-        ordered replay. Draining to that caller must not notify observers again.
+        Unseeded sync arrivals wait for their final order. The caller still
+        owns the replay; draining it must not notify observers again.
         """
         self._event_observers.append(handler)
         for event in tuple(self._buffered_events):
-            self._notify_event_handlers([handler], event)
+            if id(event) not in self._pending_observer_ids:
+                self._notify_event_handlers([handler], event)
 
         def unsubscribe() -> None:
             if handler in self._event_observers:

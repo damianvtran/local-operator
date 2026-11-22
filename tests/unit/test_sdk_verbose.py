@@ -520,11 +520,16 @@ async def test_open_session_verbose_default_silent_and_opt_in_traces_real_turn(
 ) -> None:
     from local_operator.providers.clients import MockClient
 
-    value = "qA!7-zX"  # Synthetic short env credential; only used in capture assertions.
+    credentials = {
+        "SDK_QA_PASSWORD": "qA!7-zX",
+        "DB_PASSWORD_FALLBACK": "pR!9-fallback-4Z",
+        "EXAMPLE_TOKEN_PRIMARY": "tQ!2-primary-7X",
+    }
     control = "\x1b[31m"
-    monkeypatch.setenv("SDK_QA_PASSWORD", value)
+    for name, value in credentials.items():
+        monkeypatch.setenv(name, value)
     path = Path(scratch.cwd) / "fixture.txt"
-    path.write_text(f"visible {value} {control}text\n", encoding="utf-8")
+    path.write_text(f"visible {' '.join(credentials.values())} {control}text\n", encoding="utf-8")
     spec = SessionSpec(
         hosting="test",
         model="mock",
@@ -571,8 +576,9 @@ async def test_open_session_verbose_default_silent_and_opt_in_traces_real_turn(
     assert any(line.startswith("[turn:end]") for line in sdk_lines)
     assert any(line.startswith("[agent:end] completed") for line in sdk_lines)
     read_line = next(line for line in sdk_lines if line.startswith("[tool:end] read "))
-    assert "visible" in read_line and REDACTION_MARKER in read_line
-    assert value not in read_line and control not in read_line
+    assert "visible" in read_line and read_line.count(REDACTION_MARKER) == len(credentials)
+    assert all(value not in read_line for value in credentials.values())
+    assert control not in read_line
     assert all(char.isprintable() for char in read_line)
     bash_line = next(line for line in sdk_lines if line.startswith("[tool:end] bash "))
     assert " returned " in bash_line and "exit code: 7" in bash_line
@@ -623,6 +629,62 @@ async def test_open_session_attached_trace_preserves_backlog_and_logs_each_frame
         if verbose
         else []
     )
+
+
+@pytest.mark.parametrize("caller_subscribed", [False, True])
+def test_attached_trace_follows_sync_seed_order_without_consuming_replay(
+    scratch: SessionRoots, caller_subscribed: bool
+) -> None:
+    from local_operator.session.attached import AttachedSession
+    from local_operator.session.frontend_state import FrontendSessionState
+
+    viewer = AttachedSession(
+        config_dir=scratch.config_dir, session_id="viewer", takeover_factory=lambda: None
+    )
+    start = ToolExecutionStartEvent(tool_call_id="call_fixture", tool_name="read", args={})
+    end = ToolExecutionEndEvent(
+        tool_call_id="call_fixture",
+        tool_name="read",
+        result=ToolResult(tool_call_id="call_fixture", content=[]),
+    )
+    buffer = io.StringIO()
+    received: list[Any] = []
+    expected_lines = []
+    expected_call_ids = ["call_fixture", "call_fixture"]
+    if caller_subscribed:
+        viewer.subscribe(received.append)
+        sdk.trace_events(viewer, stream=buffer)
+    else:
+        # An older ready frame can still be waiting for the first caller.
+        viewer._ready_for_events = True
+        viewer._emit_or_buffer(
+            ToolExecutionStartEvent(tool_call_id="call_older", tool_name="read", args={})
+        )
+        viewer._ready_for_events = False
+        expected_lines.append("[tool:start] read (call_older) {}")
+        expected_call_ids.insert(1, "call_older")
+    viewer._install_frontend(
+        FrontendSessionState(
+            session_id="viewer",
+            epoch="e1",
+            streaming=True,
+            live_events=[start.model_dump(mode="json")],
+        )
+    )
+    viewer._on_wire_event(end.model_dump(mode="json"))
+    if not caller_subscribed:
+        sdk.trace_events(viewer, stream=buffer)
+    viewer._finish_sync()
+    if not caller_subscribed:
+        viewer.subscribe(received.append)
+
+    assert received[0].type == "agent_start"
+    assert [event.tool_call_id for event in received[1:]] == expected_call_ids
+    assert isinstance(received[1], ToolExecutionStartEvent)
+    assert isinstance(received[-1], ToolExecutionEndEvent)
+    lines = buffer.getvalue().splitlines()
+    assert lines[:-1] == [*expected_lines, "[tool:start] read (call_fixture) {}"]
+    assert lines[-1].startswith("[tool:end] read (call_fixture) returned")
 
 
 @pytest.mark.asyncio
