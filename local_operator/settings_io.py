@@ -2958,6 +2958,33 @@ SETTINGS: tuple[Setting, ...] = (
             ),
         ),
     ),
+    Setting(
+        key="display.transcript_display",
+        # FLAT-DOTTED like every other ``display.*`` key: the dot is part of a
+        # literal top-level key, which is what ``tui/settings.py`` reads. Written
+        # as a nested tuple this key would be stored where nothing looks for it.
+        path=("display.transcript_display",),
+        section="appearance",
+        label=_t(_ws.display_transcript_display_label()),
+        kind=Kind.ENUM,
+        # A literal, not an import (this module must stay off the consumers'
+        # import path); ``tests/unit/test_settings_io.py``'s ``_consumer_defaults``
+        # pins it to ``tui.settings.DEFAULT_TRANSCRIPT_DISPLAY``.
+        default="by-turn",
+        help=_t(_ws.display_transcript_display_help()),
+        choices=(
+            Choice(
+                "by-turn",
+                _t(_ws.display_transcript_display_choice_by_turn_label()),
+                _t(_ws.display_transcript_display_choice_by_turn_description()),
+            ),
+            Choice(
+                "by-response",
+                _t(_ws.display_transcript_display_choice_by_response_label()),
+                _t(_ws.display_transcript_display_choice_by_response_description()),
+            ),
+        ),
+    ),
     # -- notification sound (notification-sounds design §1.2) ------------------
     # Genuinely NESTED paths (``values.notifications.sound.*``), unlike the
     # flat ``display.*`` keys above: the consumer is

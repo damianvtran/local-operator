@@ -7330,6 +7330,40 @@ class TranscriptView(ScrollableContainer):
         tracker._last_record = None
         tracker._last_owner = None
 
+    # -- the transcript layout mode (`display.transcript_display`) --------------
+
+    #: The layout a settled turn draws in: ``by-turn`` condenses each turn to its
+    #: answer, ``by-response`` keeps every settled response on screen. A class
+    #: default rather than an ``__init__`` line because it is one immutable
+    #: token: a view that is never handed a mode reads this, and the first
+    #: :meth:`set_display_mode` shadows it per instance. The shipped value's
+    #: authority is ``tui.settings.DEFAULT_TRANSCRIPT_DISPLAY``;
+    #: ``tests/unit/tui/test_transcript_display_mode.py`` pins the two together
+    #: so this copy cannot drift into a second truth.
+    _display_mode: str = "by-turn"
+
+    def set_display_mode(self, mode: str) -> None:
+        """Switch the layout mode the transcript draws a settled turn in.
+
+        Slice 1 stores the mode and hands it out; the re-derivation that makes a
+        switch visible belongs to the fold layer (slice 4), which diffs its bars
+        by key on this change so only bars mount and no ToolCard is remounted.
+        The widget does not read the setting itself: the app owns the config
+        read (``OperatorApp._apply_transcript_display``), which keeps this
+        widget pure for the mounted-frame tests.
+        """
+        if mode == self._display_mode:
+            return
+        self._display_mode = mode
+        # slice 4: re-derive from the earliest dirty turn here — mode switch
+        # keeps focus on the same entry or the nearest visible bar, and open
+        # state survives because the fold layer keys its bars by row id.
+
+    @property
+    def display_mode(self) -> str:
+        """The layout mode in force: ``by-turn`` (default) or ``by-response``."""
+        return self._display_mode
+
     def prepare_owned_head_page(
         self, blocks: list[TranscriptBlock], index: int, *, head_cut: bool
     ) -> list[TranscriptBlock]:

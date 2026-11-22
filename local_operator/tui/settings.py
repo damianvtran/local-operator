@@ -37,6 +37,18 @@ from typing import Any, Callable
 #: Documentation of the flags this module serves, kept as prose beside the
 #: derivation below. The VALUES come from ``settings_io`` (see
 #: :func:`_defaults`); this dict is not consulted at runtime.
+#:
+#: The transcript layout mode's two tokens, in the order the setting lists them.
+#: ``by-turn`` first because it is the default: it is the shipped condensation.
+#: The tokens are stored values (what ``config.yml`` holds) and must never be
+#: translated — only the labels beside them are copy.
+TRANSCRIPT_DISPLAY_MODES: tuple[str, ...] = ("by-turn", "by-response")
+
+#: The mode the transcript draws in when the key is absent, unreadable or holds
+#: something this build does not know. The registry carries the same literal (it
+#: must not import this module); ``tests/unit/test_settings_io.py`` pins them.
+DEFAULT_TRANSCRIPT_DISPLAY: str = TRANSCRIPT_DISPLAY_MODES[0]
+
 _DEFAULT_NOTES: dict[str, Any] = {
     "display.shimmer": True,
     # Mid-turn narration — the prose a model call streams before it finalizes
@@ -254,6 +266,14 @@ _DEFAULT_NOTES: dict[str, Any] = {
     "display.composer.command": "",
     "display.composer.command_interval": 30,
     "display.time_format": "12h",
+    # The transcript layout mode (`display.transcript_display`, operator request
+    # 2026-11-21): `by-turn` condenses each turn to its answer, `by-response`
+    # keeps every settled response on screen with the turn's final answer still
+    # marked. Read through :func:`transcript_display_mode`, which maps anything
+    # unrecognised to the default — a token from a build that renamed one, or a
+    # hand edit that never passed the registry, must paint the shipped layout
+    # rather than crash a frame or invent a third one.
+    "display.transcript_display": DEFAULT_TRANSCRIPT_DISPLAY,
 }
 
 _cache: dict[str, Any] | None = None
@@ -331,6 +351,25 @@ def settings_reload() -> None:
     """Drop the cache so the next lookup re-reads the config file."""
     global _cache
     _cache = None
+
+
+def transcript_display_mode() -> str:
+    """The transcript layout mode: ``by-turn`` or ``by-response``.
+
+    UNKNOWN IS THE DEFAULT, deliberately — the rule the desktop's
+    ``parseTranscriptDisplayMode`` states for the same two tokens. The registry
+    validates every write, but ``config.yml`` is a file people edit by hand and
+    an older or newer build may have stored a token this one does not know; both
+    must paint the shipped layout, not break a frame. Case and surrounding space
+    are forgiven because that is the shape a hand edit actually takes (a
+    capitalised token names the same mode); anything else falls back.
+    """
+    try:
+        raw = settings_get("display.transcript_display", DEFAULT_TRANSCRIPT_DISPLAY)
+        mode = str(raw).strip().lower()
+        return mode if mode in TRANSCRIPT_DISPLAY_MODES else DEFAULT_TRANSCRIPT_DISPLAY
+    except Exception:  # pragma: no cover - settings_get's own load swallows everything
+        return DEFAULT_TRANSCRIPT_DISPLAY
 
 
 def follow_display_settings(

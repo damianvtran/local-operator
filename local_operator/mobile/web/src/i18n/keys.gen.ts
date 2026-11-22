@@ -1595,6 +1595,12 @@ export type MessageParams = {
   "wire.settings.display_time_format.choice.24h.label": undefined;
   "wire.settings.display_time_format.help": undefined;
   "wire.settings.display_time_format.label": undefined;
+  "wire.settings.display_transcript_display.choice.by_response.description": undefined;
+  "wire.settings.display_transcript_display.choice.by_response.label": undefined;
+  "wire.settings.display_transcript_display.choice.by_turn.description": undefined;
+  "wire.settings.display_transcript_display.choice.by_turn.label": undefined;
+  "wire.settings.display_transcript_display.help": undefined;
+  "wire.settings.display_transcript_display.label": undefined;
   "wire.settings.display_turn_answer_rail.choice.false.description": undefined;
   "wire.settings.display_turn_answer_rail.choice.true.description": undefined;
   "wire.settings.display_turn_answer_rail.help": undefined;

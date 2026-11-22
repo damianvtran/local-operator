@@ -1101,6 +1101,30 @@ def display_time_format_label() -> Msg:
     return Msg("wire.settings.display_time_format.label", {})
 
 
+def display_transcript_display_choice_by_response_description() -> Msg:
+    return Msg("wire.settings.display_transcript_display.choice.by_response.description", {})
+
+
+def display_transcript_display_choice_by_response_label() -> Msg:
+    return Msg("wire.settings.display_transcript_display.choice.by_response.label", {})
+
+
+def display_transcript_display_choice_by_turn_description() -> Msg:
+    return Msg("wire.settings.display_transcript_display.choice.by_turn.description", {})
+
+
+def display_transcript_display_choice_by_turn_label() -> Msg:
+    return Msg("wire.settings.display_transcript_display.choice.by_turn.label", {})
+
+
+def display_transcript_display_help() -> Msg:
+    return Msg("wire.settings.display_transcript_display.help", {})
+
+
+def display_transcript_display_label() -> Msg:
+    return Msg("wire.settings.display_transcript_display.label", {})
+
+
 def display_turn_answer_rail_choice_false_description() -> Msg:
     return Msg("wire.settings.display_turn_answer_rail.choice.false.description", {})
 
