@@ -415,7 +415,9 @@ async def test_the_foot_totals_a_settled_turn_and_is_absent_while_live() -> None
         await _settle(pilot)
 
         (foot,) = _foots(view)
-        assert foot.renderable.plain == "✓ 3 actions · 3s", foot.renderable.plain
+        # The tool row's own grammar (`format_clock`): three seconds reads
+        # `3.0s`, the same trailing clock a member row shows.
+        assert foot.renderable.plain == "✓ 3 actions · 3.0s", foot.renderable.plain
 
 
 @pytest.mark.asyncio

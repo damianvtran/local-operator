@@ -4878,14 +4878,14 @@ class FoldBarBlock(_SingleRowBarBlock):
         from local_operator.tui.widgets.tool_card import (
             DURATION_COL,
             ICON_PARTIAL,
-            format_duration,
+            format_clock,
             truncate_cells,
         )
 
         dim = bindings.style("fold.bar.time")
         if self._live_card is not None:
             elapsed = self._live_card.duration_s
-            clock = format_duration(elapsed) if elapsed is not None else ""
+            clock = format_clock(elapsed) if elapsed is not None else ""
             parts = (display_name(self._live_card.tool_name), self._live_summary)
             label = " ".join(part for part in parts if part)
             cap = 16 if width < 70 else 30
@@ -4895,7 +4895,7 @@ class FoldBarBlock(_SingleRowBarBlock):
             return live, bindings.style("fold.bar.live")
         facts = self._facts
         if facts is not None and facts.duration_s is not None:
-            return format_duration(facts.duration_s).rjust(DURATION_COL), dim
+            return format_clock(facts.duration_s).rjust(DURATION_COL), dim
         return "", dim
 
     def _build_row(self, width: int) -> Text:
@@ -5126,7 +5126,7 @@ class TurnFootBlock(TranscriptBlock):
         from local_operator.tui.widgets.tool_card import (
             ICON_ERROR,
             ICON_SUCCESS,
-            format_duration,
+            format_clock,
             truncate_cells,
         )
 
@@ -5159,7 +5159,7 @@ class TurnFootBlock(TranscriptBlock):
         if facts.duration_s is not None:
             text = _fold_t(
                 tui_transcript_fold.foot_actions(
-                    count=facts.count, label=label, time=format_duration(facts.duration_s)
+                    count=facts.count, label=label, time=format_clock(facts.duration_s)
                 )
             )
         else:

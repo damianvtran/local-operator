@@ -512,16 +512,26 @@ class ToolFoldLayer:
         self._row_order = [row.id for row in rows]
         self._id_of = {id(block): row_id for row_id, block in by_id.items()}
         depths: dict[str, int] = {}
-        turns_with_plans = set(bar_turn.values())
-        mode = self._view.display_mode
+        bars = {plan.key for plan in plans}
+        # Which rows a bar really sits over — its own children, including the
+        # pin it leaves visible (a pin is deliberately not in `covered`, so it
+        # needs this answer separately).
+        barred: set[str] = set()
         for turn in outline.turns:
-            # Ben's "tool rows one indent deeper than prose" applies to rows in
-            # a turn the fold DRAWS OVER — one that grew a bar, or (By response)
-            # one that closes with a foot, because the foot makes it a step.
-            # A standalone call in a turn with neither keeps the ledger spine it
-            # has always drawn: there is no step to belong to.
-            step = turn.key in turns_with_plans or (mode == "by-response" and turn.facts.count > 0)
-            if not step:
+            if turn.key in bars:
+                barred.update(_turn_row_ids(turn))
+            for node in turn.nodes:
+                if isinstance(node, Run) and node.key in bars:
+                    barred.update(node.tool_ids)
+            # Ben's "tool rows one indent deeper than prose" applies to every
+            # turn that holds a tool call, in BOTH modes. A turn that grew a bar
+            # has its rows under one; a By-response turn closes with a foot; and
+            # a turn with too few calls for a bar keeps the same column anyway,
+            # because the bar column is where a tool row lives — two insets for
+            # the same kind of row in one frame (col 3 here, col 4 beside a bar)
+            # read as two different kinds of row. A turn with NO call keeps the
+            # column it always drew: there is no step to belong to.
+            if turn.key not in bars and not turn.facts.count:
                 continue
             for row_id in _turn_row_ids(turn):
                 depths[row_id] = 1
@@ -531,10 +541,12 @@ class ToolFoldLayer:
             for row_id in plan.covered:
                 depths[row_id] = 2
         for row_id in pinned:
-            # A pin is the failure a collapsed bar leaves visible. With no bar
-            # over it there is nothing for it to sit under, so it keeps the
-            # standalone inset rather than claiming a level nothing gave it.
-            if depths.get(row_id):
+            # A pin is the failure a collapsed bar leaves visible, so it belongs
+            # to that bar's group and takes the revealed column — but only when a
+            # bar really covers its run. With no bar over it there is nothing for
+            # it to sit under, and it keeps the tool-row column rather than
+            # claiming a level nothing gave it.
+            if row_id in barred:
                 depths[row_id] = 2
         self._row_depth = depths
         self._reconcile(plans, feet)

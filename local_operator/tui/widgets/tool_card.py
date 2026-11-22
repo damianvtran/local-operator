@@ -677,8 +677,28 @@ def _interrupt_word(token: str) -> str:
 
 #: Minimum summary budget before we drop the expand hint (D8 floor).
 _SUMMARY_FLOOR = 16
-#: Indent of the expanded output block, aligned under the tool name column.
+#: Indent of the expanded output block, aligned under the tool name column at
+#: the plain ledger spine. The fold's steps add to it — see
+#: :func:`detail_indent`.
 OUTPUT_INDENT = 2
+
+
+def detail_indent(width: int, depth: int = 0) -> int:
+    """Cells of left inset a card's DETAIL rows draw at ``width``.
+
+    The drop from the summary row stays one cell at every fold level: the
+    details take :data:`OUTPUT_INDENT` at the plain spine and then follow
+    :func:`row_indent`'s own steps, so an expanded call's ``action:`` /
+    ``target:`` / error rows sit under the row they belong to wherever the
+    fold has put it. Leaving them on the fixed ``OUTPUT_INDENT`` painted a
+    revealed row at col 6 over its own details at col 4 — the row walking
+    right while its content stayed behind, which reads as a different row's.
+
+    Depth 0 is :data:`OUTPUT_INDENT` at EVERY width, including below
+    :data:`ROW_INDENT_MIN_WIDTH` where the spine is given up entirely: that
+    keeps every plain card's expansion byte-identical to before the fold.
+    """
+    return OUTPUT_INDENT + (row_indent(width, depth) - row_indent(width, 0))
 #: Expanded output is capped: a 20k-line bash dump would otherwise turn the
 #: transcript into a scroll trap. The head is kept (it carries the command's
 #: framing) and the remainder is announced on a dim marker row.
@@ -938,6 +958,38 @@ def format_duration(seconds: float) -> str:
         return "100d+"
     hours = remainder // 3600
     return f"{days}d{hours}h" if hours else f"{days}d"
+
+
+def format_clock(seconds: float) -> str:
+    """A tool call's elapsed time in the LEDGER's grammar: ``<0.1s``, ``4.2s``, ``13s``.
+
+    Sub-second precision where it distinguishes tools, whole seconds once the
+    number is big enough to be a wait rather than a measurement, and
+    :func:`format_duration`'s own grammar past a minute — a composing row says
+    ``1m57s``, and ``117s`` two seconds later on the same row is the app
+    disagreeing with itself about how it writes a duration.
+
+    THE ONE SPELLING OF A ROW-SIZED DURATION. A tool row's status column, a
+    fold bar's right-aligned clock and the By-response foot's ``· {time}`` all
+    end up in the same visual column, so a bar budgeted with
+    ``format_duration``'s floored whole seconds read ``0s`` beside its own
+    member rows' ``0.1s``, and a 12.95 s turn foot read ``12s`` where its bar
+    said ``13s``. Callers that align the value (``DURATION_COL``) round with
+    this, never with a second grammar beside it.
+    """
+    if seconds < 0.05:
+        # `<0.1s`, never `0.0s`. Rounding a genuinely fast tool to `0.0s`
+        # reprints the exact string the fabricated-duration bug produced, which
+        # is why the missing-duration report came back against a tool that had
+        # simply returned at once — the reader cannot tell a real sub-50 ms call
+        # from a row whose duration was lost. Reads as "too fast to measure",
+        # and is exactly DURATION_COL wide so the column still holds.
+        return "<0.1s"
+    if seconds < 10:
+        return f"{seconds:.1f}s"
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    return format_duration(seconds)
 
 
 def monotonic_from_epoch(epoch: float, *, clock: Callable[[], float] = time.monotonic) -> float:
@@ -4195,10 +4247,11 @@ class ToolCard(ExpandableActionBlock):
         Below the summary, every row is written by
         ``_append_input_body``/``_append_output_body``/``_append_search_body``/
         ``_append_diff_body``/``_append_live_body``, each of which opens with
-        ``"\\n" + " " * OUTPUT_INDENT``. That indent is the card's own layout,
-        and it is the thing standing between a copied stderr and a paste that
-        goes straight into a bug report — or, for a diff, between ``+ added``
-        and something ``git apply`` will not read.
+        ``"\\n" + " " * detail_indent(...)`` — :data:`OUTPUT_INDENT` at the plain
+        spine, plus the fold step the row itself took. That indent is the card's
+        own layout, and it is the thing standing between a copied stderr and a
+        paste that goes straight into a bug report — or, for a diff, between
+        ``+ added`` and something ``git apply`` will not read.
 
         The summary row's field also carries :data:`ROW_INDENT`, the cell that
         keeps the icon off the left wall of the card's own fill. It is layout
@@ -4210,8 +4263,18 @@ class ToolCard(ExpandableActionBlock):
         would eat the first character of the tool's name.
         """
         if index != 0:
-            return OUTPUT_INDENT
+            return detail_indent(self._built_width, self.fold_depth)
         return self._row_indent() + self.ICON_COLS
+
+    def _detail_layout(self, width: int) -> tuple[int, int]:
+        """The detail block's text measure and lead, at ``width``.
+
+        One derivation for every body below the summary row (see
+        :func:`detail_indent` for why the lead follows the row), so a new body
+        cannot pick the plain spine while the row has stepped in.
+        """
+        inset = detail_indent(width, self.fold_depth)
+        return max(1, width - 2 - inset), " " * inset
 
     def _row_indent(self) -> int:
         """Cells of left inset on the summary row AS BUILT.
@@ -4438,11 +4501,11 @@ class ToolCard(ExpandableActionBlock):
                 # summary and exact revert call are part of the result, not
                 # duplicate input. Keep them visible above the diff, wrapping
                 # each authored line so the backup id cannot be clipped away.
-                line_width = max(1, width - 2 - OUTPUT_INDENT)
+                line_width, indent = self._detail_layout(width)
                 receipt_style = bindings.style("tool.row.chip_settled")
                 for source in self._output:
                     for line in wrap_cells(source, line_width):
-                        row.append("\n" + " " * OUTPUT_INDENT + line, style=receipt_style)
+                        row.append("\n" + indent + line, style=receipt_style)
             self._append_diff_body(row, width)
         elif self._bridge_view is not None and self._state in ("success", "error"):
             self._append_bridge_body(row, width)
@@ -4500,8 +4563,7 @@ class ToolCard(ExpandableActionBlock):
         label_ink = bindings.style("tool.args.label")
         value_ink = bindings.style("tool.args.value")
         secondary = bindings.style("tool.bridge.detail_value")
-        line_width = max(1, width - 2 - OUTPUT_INDENT)
-        indent = " " * OUTPUT_INDENT
+        line_width, indent = self._detail_layout(width)
         headline = _strip_control_sequences(str(view.get("headline") or ""))
         for line in wrap_cells(headline, line_width) if headline else []:
             row.append("\n" + indent, style=dim)
@@ -4597,8 +4659,7 @@ class ToolCard(ExpandableActionBlock):
         dim = bindings.style("tool.live.dim")
         accent = bindings.style("tool.live.header")
         advisory_style = bindings.style("tool.live.advisory")
-        line_width = max(1, width - 2 - OUTPUT_INDENT)
-        indent = " " * OUTPUT_INDENT
+        line_width, indent = self._detail_layout(width)
         # State, then time, then the caveat — read left to right that is "it is
         # running / for this long / and has printed nothing", which is the
         # order the questions are asked in. The caveat last also means it
@@ -4683,8 +4744,7 @@ class ToolCard(ExpandableActionBlock):
         accent = bindings.style("tool.live.header")
         advisory_style = bindings.style("tool.live.advisory")
         danger = bindings.style("tool.output.error")
-        line_width = max(1, width - 2 - OUTPUT_INDENT)
-        indent = " " * OUTPUT_INDENT
+        line_width, indent = self._detail_layout(width)
         view = self._imagegen_live or imagegen_mod.ImagegenLive()
         word = imagegen_mod.imagegen_state_word(self._state, view.state)
         # The queued row already says `queued` in its status cell (`queued_label`),
@@ -4790,8 +4850,7 @@ class ToolCard(ExpandableActionBlock):
         # keeps its dim tier (the \u2298 receipt), so a carried sentence there
         # reads as the record it is, not as a fresh failure.
         ink = bindings.style("tool.output.error") if self._state == "error" else dim
-        line_width = max(1, width - 2 - OUTPUT_INDENT)
-        indent = " " * OUTPUT_INDENT
+        line_width, indent = self._detail_layout(width)
         note = imagegen_mod.provider_error_note(
             self._imagegen_error, self._imagegen_error_type, "\n".join(self._output)
         )
@@ -4817,8 +4876,8 @@ class ToolCard(ExpandableActionBlock):
         card is claiming failure anyway.)
         """
         dim = bindings.style("tool.output.dim")
-        line_width = max(1, width - 2 - OUTPUT_INDENT)
-        row.append("\n" + " " * OUTPUT_INDENT, style=dim)
+        line_width, indent = self._detail_layout(width)
+        row.append("\n" + indent, style=dim)
         row.append(truncate_cells(text, line_width), style=dim)
 
     def _append_input_body(self, row: Text, width: int) -> None:
@@ -4836,8 +4895,7 @@ class ToolCard(ExpandableActionBlock):
         dim = bindings.style("tool.args.dim")
         label = bindings.style("tool.args.label")
         body = bindings.style("tool.args.value")
-        line_width = max(1, width - 2 - OUTPUT_INDENT)
-        indent = " " * OUTPUT_INDENT
+        line_width, indent = self._detail_layout(width)
         for key, value in self._args.items():
             text = _strip_control_sequences(_argument_text(value))
             if not text:
@@ -5264,8 +5322,7 @@ class ToolCard(ExpandableActionBlock):
         """
         dim = bindings.style("tool.output.dim")
         ink = bindings.style("tool.output.error") if self._state == "error" else dim
-        line_width = max(1, width - 2 - OUTPUT_INDENT)
-        indent = " " * OUTPUT_INDENT
+        line_width, indent = self._detail_layout(width)
         glyph, lead_ink = self._promoted_paint(ink)
         self._append_reason_body(row, line_width, indent, dim, lead_ink, glyph=glyph)
         self._append_captured_rows(row, line_width, indent, dim, ink)
@@ -5352,8 +5409,7 @@ class ToolCard(ExpandableActionBlock):
         signal = bindings.style("tool.search.url")
         muted = bindings.style("tool.search.snippet")
         dim = bindings.style("tool.search.dim")
-        line_width = max(1, width - 2 - OUTPUT_INDENT)
-        indent = " " * OUTPUT_INDENT
+        line_width, indent = self._detail_layout(width)
         glyph, lead_ink = self._promoted_paint(muted)
         self._append_reason_body(row, line_width, indent, dim, lead_ink, glyph=glyph)
         captured = self._captured_output()
@@ -5415,8 +5471,7 @@ class ToolCard(ExpandableActionBlock):
         muted = bindings.style("tool.fetch.snippet")
         dim = bindings.style("tool.fetch.dim")
         danger = bindings.style("tool.fetch.error")
-        line_width = max(1, width - 2 - OUTPUT_INDENT)
-        indent = " " * OUTPUT_INDENT
+        line_width, indent = self._detail_layout(width)
         shown = self._output[:EXPAND_MAX_LINES]
         # ``_absorb_result`` joins the structured rows to the body with one blank
         # separator, so everything before it is header and everything after is
@@ -5609,8 +5664,7 @@ class ToolCard(ExpandableActionBlock):
         danger = bindings.style("tool.diff.removed")
         muted = bindings.style("tool.diff.hunk")
         dim = bindings.style("tool.diff.context")
-        line_width = max(1, width - 2 - OUTPUT_INDENT)
-        indent = " " * OUTPUT_INDENT
+        line_width, indent = self._detail_layout(width)
         # The `---`/`+++` file headers are dropped: the tool diffs one file's
         # before/after in memory, so difflib emits them NAMELESS (`--- ` /
         # `+++ `) and the path already heads the summary row. Two blank-label
@@ -6244,28 +6298,10 @@ class ToolCard(ExpandableActionBlock):
             # keeps the column aligned and says nothing, which is the truth.
             duration = " " * DURATION_COL
         else:
-            elapsed = self._duration
-            # Sub-second precision where it distinguishes tools, and the SAME
-            # grammar as everything else past a minute: the composing row above
-            # this one says `1m57s`, and `117s` two seconds later on the same
-            # row is the app disagreeing with itself about how it writes a
-            # duration.
-            if elapsed < 0.05:
-                # `<0.1s`, never `0.0s`. Rounding a genuinely fast tool to
-                # `0.0s` reprints the exact string the fabricated-duration bug
-                # produced, which is why the missing-duration report came back
-                # against a tool that had simply returned at once — the reader
-                # cannot tell a real sub-50 ms call from a row whose duration
-                # was lost. Reads as "too fast to measure", and is exactly
-                # DURATION_COL wide so the column still holds.
-                duration = "<0.1s"
-            elif elapsed < 10:
-                duration = f"{elapsed:.1f}s"
-            elif elapsed < 60:
-                duration = f"{elapsed:.0f}s"
-            else:
-                duration = format_duration(elapsed)
-            duration = duration.rjust(DURATION_COL)
+            # The row's own clock is the ledger's one duration grammar — see
+            # :func:`format_clock`, which the fold bar and the By-response foot
+            # also draw, so the three cannot disagree in the same column.
+            duration = format_clock(self._duration).rjust(DURATION_COL)
         if (
             self._state == "success"
             and not self._partial

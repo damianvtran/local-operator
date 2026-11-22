@@ -14,13 +14,14 @@ painted row disagrees.
 
 from __future__ import annotations
 
+import re
 import time
 
 import pytest
 
 from local_operator.tui.tool_fold import TURN_BAR_MIN_ROWS, ToolFoldLayer
 from local_operator.tui.widgets.assistant import AssistantBlock
-from local_operator.tui.widgets.tool_card import DURATION_COL, ToolCard
+from local_operator.tui.widgets.tool_card import DURATION_COL, ToolCard, row_indent
 from local_operator.tui.widgets.transcript import (
     FoldBarBlock,
     PeerMessageBlock,
@@ -364,8 +365,9 @@ async def test_the_summary_names_actions_kinds_failures_and_a_right_aligned_cloc
         assert "shell" in row
         assert "1 failed" in row
         # The clock takes the LAST cells of the row, right-aligned to the same
-        # column a tool card's duration occupies.
-        assert row.endswith("6s".rjust(DURATION_COL)), row
+        # column a tool card's duration occupies — and in the tool row's own
+        # grammar (`format_clock`): six seconds reads `6.0s`, not `6s`.
+        assert row.endswith("6.0s".rjust(DURATION_COL)), row
 
 
 @pytest.mark.asyncio
@@ -413,7 +415,10 @@ async def test_the_live_run_bar_names_the_call_in_flight() -> None:
         (bar,) = _bars(view)
         row = bar._build_row(120).plain
         assert "◐ bash" in row
-        assert "7s" in row, "the bar reports the running call's own clock"
+        # The running call's own clock, in the tool row's grammar: sub-10 s
+        # keeps one decimal (`7.3s`), so the assertion holds against the
+        # fraction of a second the settle pumped past 7.0.
+        assert re.search(r"◐ bash ls t2 7\.\ds$", row), row
 
 
 @pytest.mark.asyncio
@@ -525,3 +530,72 @@ async def test_the_bar_offers_expand_and_collapse_only_while_it_has_focus() -> N
         bar.activate()
         await _settle(pilot)
         assert "collapse" in bar._build_row(120).plain
+
+
+@pytest.mark.asyncio
+async def test_a_wide_script_bar_drops_kinds_rather_than_the_failure_tally() -> None:
+    """The bar's budget is measured in CELLS, so the kinds go before the tally.
+
+    The wide text here is a tool's own name: a name is not guaranteed ASCII
+    (MCP servers name their own tools), and the summary clause is built from it
+    verbatim. The arithmetic is the one the zh-CN count clause will meet the day
+    it is longer than English's — ``_cells`` summed ``len``, so a bar believed
+    the wide kinds cost half of what they paint and left the row to be cut by
+    the ellipsis, with the failure tally at the tail where the cut lands. A
+    bar's degradation order is kinds first, the tally never.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(60, 30)) as pilot:
+        view = app.query_one(TranscriptView)
+        view.set_display_mode("by-response")
+        _user(view, "anchor:u1")
+        for index, name in enumerate(("读文件", "搜索", "网页")):
+            card = _tool(view, f"c{index}", name)
+            if index == 2:
+                card.restore(state="error", error="boom", duration_s=1.0)
+        await _settle(pilot)
+
+        (bar,) = _bars(view)
+        row = bar._build_row(60).plain
+        assert "…" not in row, "the bar ellipsized its summary instead of shedding kinds"
+        assert "读文件 +2" in row, row
+        assert "✗ 1 failed" in row, "the failure tally is never the clause to drop"
+
+
+@pytest.mark.asyncio
+async def test_a_plain_tool_row_sits_in_the_bar_column_in_by_turn() -> None:
+    """One tool-row column per frame: a turn too small for a bar is a step too.
+
+    The rendered frame that found this painted an unfolded call at col 3 of a
+    100-column frame while a row revealed under a bar sat at col 6 and the bar
+    itself at col 4 — three insets for one kind of row, in one mode. A tool row
+    belongs in the bar's column whether or not its turn grew a bar; a covered
+    row is one level below it; a turn with no call keeps the prose column.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = app.query_one(TranscriptView)
+        _user(view, "anchor:u1")
+        small = [_tool(view, f"s{index}") for index in range(2)]  # under the bar minimum
+        _answer(view)
+        _user(view, "anchor:u2")
+        big = [_tool(view, f"b{index}") for index in range(TURN_BAR_MIN_ROWS)]
+        _answer(view)
+        await _settle(pilot)
+
+        (bar,) = _bars(view)
+        assert bar.kind == "turn"
+        lead = lambda row: len(row) - len(row.lstrip(" "))  # noqa: E731
+        assert [card.fold_depth for card in small] == [1, 1]
+        assert [lead(card._build_row(120).plain) for card in small] == [
+            row_indent(120, 1)
+        ] * 2
+        assert lead(bar._build_row(120).plain) == row_indent(120, 1), "bar and tool row share a column"
+
+        # A covered row is one level below the bar it sits under.
+        assert [card.fold_depth for card in big] == [2, 2, 2]
+        bar.activate()
+        await _settle(pilot)
+        assert [lead(card._build_row(120).plain) for card in big] == [
+            row_indent(120, 2)
+        ] * 3

@@ -79,6 +79,8 @@ from local_operator.tui.widgets.tool_card import (
     ToolCard,
     _category_element,
     compact_path,
+    detail_indent,
+    row_indent,
 )
 from local_operator.tui.widgets.transcript import (
     NoticeBlock,
@@ -4920,3 +4922,35 @@ def test_pending_stop_does_not_paint_as_a_completed_stop() -> None:
     # so the fix ambers the attention glyph and nothing else.
     refused.toggle_expanded()
     assert _triplet(_style_at(refused._build_content(80), "✗ stop accepted").color) == danger
+
+
+def test_detail_rows_follow_the_row_into_the_fold() -> None:
+    """An expanded call's body steps with its row, at every fold level.
+
+    The rows below the summary used the fixed ``OUTPUT_INDENT`` while the row
+    itself took ``row_indent(width, fold_depth)``, so a row revealed at col 6
+    of a 100-column frame sat above ``action:``/``target:``/``error:`` rows at
+    col 4 — the row walked right and left its own content behind, which reads
+    as another row's expansion. The body follows the row by the DELTA the row
+    took, so depth 0 is byte-identical to before the fold existed and every
+    deeper level keeps the one-cell drop the reader already knows.
+    """
+    card = ToolCard("t1", "bash", {"command": "pytest -q"})
+    card.restore(state="error", error="assert 1 == 2", duration_s=0.4)
+    assert card.toggle_expanded() is True
+
+    for depth in (0, 1, 2):
+        card.fold_depth = depth
+        card._built_width = 80
+        lines = card._build_content(80).plain.split("\n")
+        assert len(lines) > 2, "the expansion really has detail rows"
+        assert len(lines[0]) - len(lines[0].lstrip(" ")) == row_indent(80, depth)
+        for line in lines[1:]:
+            lead = len(line) - len(line.lstrip(" "))
+            assert lead == detail_indent(80, depth), (depth, line)
+        # One cell right of the row, exactly as the plain ledger had it, and
+        # the copy gutter reads the same cell the body drew at.
+        assert detail_indent(80, depth) - row_indent(80, depth) == OUTPUT_INDENT - ROW_INDENT
+        assert card.copy_gutter(1) == detail_indent(80, depth)
+
+    assert detail_indent(80, 0) == OUTPUT_INDENT

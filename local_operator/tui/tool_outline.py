@@ -55,6 +55,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal, NamedTuple
 
+from rich.cells import cell_len
+
 #: One row's visible role in a transcript. ``other_visible`` is the catch-all
 #: for a row a reader must see that the outline has no rule about (an ask, a
 #: generated image, an approval prompt): it splits a run exactly like prose.
@@ -338,7 +340,16 @@ def summary_clauses(
 
 
 def _cells(clauses: Sequence[Clause]) -> int:
-    return sum(len(clause.text) for clause in clauses)
+    """The clauses' painted width, in TERMINAL CELLS.
+
+    ``cell_len``, never ``len``: a clause can be a translated count ("十六项
+    操作" is 10 cells in 5 characters) or a tool's own name, so counting code
+    points under-reports the row's length. The under-count is not cosmetic — it
+    lets :func:`summary_clauses` believe a set of kinds fits when it does not,
+    and the row then reaches the bar's ellipsis cut with kinds still in front of
+    the failure tally, which is the one clause the design never drops.
+    """
+    return sum(cell_len(clause.text) for clause in clauses)
 
 
 def _english_actions(count: int) -> str:

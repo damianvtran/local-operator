@@ -7,6 +7,7 @@ budget's degradation order.
 """
 
 import pytest
+from rich.cells import cell_len
 
 from local_operator.tui.tool_outline import (
     LooseRow,
@@ -456,3 +457,31 @@ def test_summary_flags_failure_ink_only_when_the_turn_died() -> None:
         clause.role in {"muted", "failed_muted", "dim", "danger"}
         for clause in summary_clauses(facts, 40, True)
     )
+
+
+def test_a_wide_script_summary_drops_kinds_instead_of_ellipsizing() -> None:
+    """The budget is in CELLS: a CJK count clause is twice its character count.
+
+    ``_cells`` summed ``len``, so a zh-CN bar believed ``16项操作`` cost five
+    cells and kept three kinds on a budget of 34; the row then fell through to
+    the bar's ellipsis cut with the kinds still in front of the failure tally,
+    which is the one clause the design never drops. Counted with ``cell_len``,
+    the kinds give way first — the design's degradation order — and the tally
+    survives at the same budget.
+    """
+    facts = ToolFacts(16, (("bash", 10), ("read", 3), ("grep", 3)), 3, None, None)
+    wide = {
+        "plural": lambda n: f"{n}项操作",
+        "failed": lambda n: f"✗ {n}项失败",
+    }
+
+    everything = cells(facts, 10_000, **wide)
+    assert "read" in everything and "grep" in everything
+    # The under-count, stated exactly: the all-kinds summary FITS a 34-cell
+    # budget by character count and overruns it by six cells on screen.
+    assert len(everything) <= 34 < cell_len(everything)
+
+    rendered = cells(facts, 34, **wide)
+    assert cell_len(rendered) <= 34, rendered
+    assert "read" not in rendered and "grep" not in rendered, rendered
+    assert rendered.endswith("✗ 3项失败"), rendered

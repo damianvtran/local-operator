@@ -87,9 +87,18 @@ that press continues the ladder rather than restarting from the bar's first row.
 - Time is right-aligned in the ledger's duration column. It is the SUM of the
   calls' known durations (`ToolCard.duration_s`), not a wall clock; a call with
   no recorded duration contributes nothing, and a span with none shows no time.
+- That clock speaks the tool row's OWN grammar (`format_clock`): `<0.1s` under
+  50 ms, one decimal under ten seconds, whole seconds under a minute, then
+  `format_duration` (`1m57s`). `format_duration` alone floored a 0.5 s run to
+  `0s` beside its own member rows reading `0.1s`, and a 12.95 s foot to `12s`
+  where the calls said `13s` — the app disagreeing with itself in one column.
 - Narrow widths drop kinds first, then the kinds clause; the failure count and
   the time are never dropped. A live bar replaces the clock with `◐ <tool>
   <summary> <elapsed>` and repaints at 1 Hz.
+- Every width in that ladder is counted in CELLS (`rich.cells.cell_len`), never
+  code points: a bar's clause can be a translated count, a count word or a
+  tool's own name. Counting characters let a wide-script summary believe it fit
+  and reach the ellipsis cut with the kinds still in front of the tally.
 
 ## 5. Why a separate layer (and not one more `QuietGroupBlock`)
 
@@ -164,17 +173,28 @@ Two columns, not a ruler:
 
 - prose (user, narration, answer, foot) draws at the transcript's own padding;
 - fold bars and the call rows of a step draw **two cells deeper** (the ledger's
-  one-cell spine plus one);
+  one-cell spine plus one). A STEP is the turn, not the bar: a turn that holds
+  any tool call puts its rows in that column in BOTH modes, whether or not it
+  grew a bar (By response closes such a turn with its foot; By turn may simply
+  have too few calls for a bar). Two insets for one kind of row in one frame —
+  an unfolded call at col 3 beside a row revealed at col 6 — read as two kinds
+  of row;
 - a row REVEALED under an open bar, and a pinned failure below a collapsed one,
-  draws **two cells deeper again** (four total).
+  draws **two cells deeper again** (four total);
+- a call's own DETAIL rows (`action:`/`target:`/`error:`, output, args) stay one
+  cell RIGHT of the row at every level, as they always did at the plain spine
+  (`detail_indent`). They used to sit on the fixed `OUTPUT_INDENT`, so a row
+  revealed at col 6 painted its own body at col 4 — the row walked right and
+  left its content behind.
 
-Rows outside any turn the fold draws over (a standalone call, a receipt card)
-keep the ledger spine they have always drawn. The inset is NOT CSS padding: it
-is threaded through `row_indent(width, depth)` and read by the row builder AND
-the copy gutter, so a selection of a fold-covered row cannot eat a character of
-its tool name. A bar does not nest further when it is inside an open bar: the
-grid has two columns, and a run bar stepping in beside its turn bar read as a
-second kind of row.
+A receipt card (scheduled wake, inbound peer message) keeps the ledger spine it
+has always drawn: it is not a step of a turn the fold condenses. The inset is NOT
+CSS padding: it is threaded through `row_indent(width, depth)` and read by the row
+builder AND the copy gutter, so a selection of a fold-covered row cannot eat a
+character of its tool name; `detail_indent` does the same for the body rows and
+`copy_gutter` reads it back. A bar does not nest further when it is inside an
+open bar: the grid has two columns, and a run bar stepping in beside its turn
+bar read as a second kind of row.
 
 ## 9. Colour
 
