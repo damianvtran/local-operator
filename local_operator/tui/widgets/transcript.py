@@ -115,6 +115,7 @@ from local_operator.tui.tool_outline import (
     RowKind,
     ToolFacts,
     ToolState,
+    clauses_cells,
     summary_clauses,
 )
 
@@ -4812,11 +4813,16 @@ class FoldBarBlock(_SingleRowBarBlock):
     def on_mount(self) -> None:
         """Start the clock for a bar mounted already reporting a live call.
 
-        The common path is a bar the layer created during a live turn — it is
-        restated and then mounted, and ``__init__`` had no pump to schedule
-        against. Same shape as the tool card's own ``on_mount``.
+        The common path is a bar the layer created during a live turn: it is
+        restated and THEN mounted, so `restate`'s sync found `is_mounted` False
+        and started nothing — and Textual marks a widget mounted only after the
+        Mount event has been dispatched, so this callback runs with
+        `is_mounted` still False. Syncing here therefore ALSO starts nothing.
+        One deferred refresh is what actually arms the 1 Hz repaint; without it
+        a live bar's elapsed reading froze at the value it mounted with while
+        the call's own row under it advanced (R2-4).
         """
-        self._sync_clock()
+        self.call_after_refresh(self._sync_clock)
 
     def on_unmount(self) -> None:
         self._stop_clock()
@@ -4837,28 +4843,31 @@ class FoldBarBlock(_SingleRowBarBlock):
         A same-tool sub-group does NOT use the turn/run grammar: its name column
         already says WHICH tool, so the count clause is ``×N`` and the tally
         follows. Every other bar delegates to ``tool_outline.summary_clauses``,
-        which is the ONE implementation of "drop kinds before the tally, never
-        the clock".
+        which is the ONE implementation of "drop kinds before the tally, then
+        shed the tally's word, never the tally".
         """
         facts = self._facts
         if facts is None:
             return ()
         if self._kind == "sub":
-            clauses = [
-                Clause(
-                    _fold_t(tui_transcript_fold.times(label=self._count_label(facts.count))),
-                    "muted",
-                )
-            ]
-            if facts.failed:
-                clauses.append(Clause(" · ", "dim"))
-                clauses.append(
+            for compact in (False, True):
+                clauses = [
                     Clause(
-                        self._failed_text(facts.failed),
-                        "danger" if self._noanswer else "failed_muted",
+                        _fold_t(tui_transcript_fold.times(label=self._count_label(facts.count))),
+                        "muted",
                     )
-                )
-            return tuple(clauses)
+                ]
+                if facts.failed:
+                    tally = (
+                        self._failed_text_compact(facts.failed)
+                        if compact
+                        else self._failed_text(facts.failed)
+                    )
+                    clauses.append(Clause(" · ", "dim"))
+                    clauses.append(Clause(tally, "danger" if self._noanswer else "failed_muted"))
+                if clauses_cells(clauses) <= budget:
+                    return tuple(clauses)
+            return self._floor_clauses()
 
         def plural(count: int) -> str:
             return _raw_t(tui_transcript.group_actions(count=count, label=self._count_label(count)))
@@ -4869,8 +4878,37 @@ class FoldBarBlock(_SingleRowBarBlock):
             self._noanswer,
             plural=plural,
             failed=self._failed_text,
+            failed_compact=self._failed_text_compact,
             kind_word=self._kind_word,
         )
+
+    def _floor_clauses(self) -> tuple[Clause, ...]:
+        """The least a bar's summary may say: its count and a COMPACT tally.
+
+        Read by ``_build_row`` to decide how much the name column may claim
+        before it starts costing the failure count (U10's ladder: the name goes,
+        then the kinds, then the tally's word). It is NOT
+        ``summary_clauses(facts, 0)``: that answers "what fits in nothing", which
+        is the tally alone, and a floor of two cells would let the name column
+        claim cells the action count needs.
+        """
+        facts = self._facts
+        if facts is None:
+            return ()
+        role = "danger" if self._noanswer else "failed_muted"
+        if self._kind == "sub":
+            lead = _fold_t(tui_transcript_fold.times(label=self._count_label(facts.count)))
+        else:
+            lead = _raw_t(
+                tui_transcript.group_actions(
+                    count=facts.count, label=self._count_label(facts.count)
+                )
+            )
+        clauses = [Clause(lead, "muted")]
+        if facts.failed:
+            clauses.append(Clause(" · ", "dim"))
+            clauses.append(Clause(self._failed_text_compact(facts.failed), role))
+        return tuple(clauses)
 
     def _kind_word(self, tool_name: str) -> str:
         """A tool's short noun on the summary: localized, never a raw MCP name.
@@ -4893,6 +4931,19 @@ class FoldBarBlock(_SingleRowBarBlock):
 
     def _failed_text(self, failed: int) -> str:
         return _fold_t(tui_transcript_fold.failed(label=self._count_label(failed)))
+
+    def _failed_text_compact(self, failed: int) -> str:
+        """The tally with its noun shed: ``✗3``.
+
+        The last rung before the count goes (U10). No catalogue entry: the glyph
+        and the number are the whole clause, and a translated noun is exactly
+        what this form exists to spend on the count instead. The glyph comes
+        from :data:`ToolCard.ICON_ERROR`, the one mark the ledger already uses
+        for a failure.
+        """
+        from local_operator.tui.widgets.tool_card import ICON_ERROR
+
+        return f"{ICON_ERROR}{self._count_label(failed)}"
 
     def _append_clauses(self, row: Text, budget: int, clauses: tuple[Clause, ...]) -> None:
         """Append ``clauses`` cut to ``budget`` cells, keeping each role's ink.
@@ -4928,8 +4979,17 @@ class FoldBarBlock(_SingleRowBarBlock):
             row.append(localized_display(truncate_cells(text, remaining)).plain, style=style)
             return
 
-    def _right_segment(self, width: int) -> tuple[str, Style]:
-        """The right-aligned cell: the live reading, else the summed clock."""
+    def _right_segment(self, width: int, max_cells: int) -> tuple[str, Style]:
+        """The right-aligned cell: the live reading, else the summed clock.
+
+        ``max_cells`` is what the row has left once the count and the tally are
+        paid for, and the live reading is CLAMPED to it rather than carrying a
+        fixed cap: at 40 columns `◐ bash <summary> <clock>` was wider than the
+        whole row and pushed both the count and the tally over the edge, where
+        the card wrapped to two rows (U10's secondary arm). The reading gives up
+        its parts in order — the summary, then the tool's name — and if even the
+        bare clock will not fit the cells go to the tally.
+        """
         from local_operator.tui import bindings
         from local_operator.tui.glyphs import display_name
         from local_operator.tui.widgets.tool_card import (
@@ -4943,13 +5003,22 @@ class FoldBarBlock(_SingleRowBarBlock):
         if self._live_card is not None:
             elapsed = self._live_card.duration_s
             clock = format_clock(elapsed) if elapsed is not None else ""
-            parts = (display_name(self._live_card.tool_name), self._live_summary)
-            label = " ".join(part for part in parts if part)
-            cap = 16 if width < 70 else 30
-            live = f"{ICON_PARTIAL} {truncate_cells(label, cap)}"
-            if clock:
-                live = f"{live} {clock}"
-            return live, bindings.style("fold.bar.live")
+            tool = display_name(self._live_card.tool_name)
+            label = " ".join(part for part in (tool, self._live_summary) if part)
+            if width >= 70:
+                # A wide frame has room for the summary; the clamp below is what
+                # decides, this only keeps a long one from claiming the row.
+                label = truncate_cells(label, 30)
+            live_style = bindings.style("fold.bar.live")
+            for live in (
+                f"{ICON_PARTIAL} {label} {clock}".strip(),
+                f"{ICON_PARTIAL} {tool} {clock}".strip(),
+                f"{ICON_PARTIAL} {clock}".strip(),
+                clock,
+            ):
+                if live and cell_len(live) <= max_cells:
+                    return live, live_style
+            return "", dim
         facts = self._facts
         if facts is not None and facts.duration_s is not None:
             return format_clock(facts.duration_s).rjust(DURATION_COL), dim
@@ -4958,12 +5027,18 @@ class FoldBarBlock(_SingleRowBarBlock):
     def _build_row(self, width: int) -> Text:
         """The single summary row — the one-row guarantee lives here.
 
-        TWO RIGHT EDGES, ONE ROW. The left columns (indent, glyph, name) are
-        read at this bar's own fold level; the right-aligned clock is placed at
-        the level the rows it covers paint at, because that is the column the
-        reader aligns it with. Padding is computed against that edge, never
-        against the leftover, so focusing a bar (which paints the expand offer)
-        cannot shift the clock a cell sideways.
+        ONE LEDGER, TWO COLUMNS. The left columns (indent, glyph, name) are read
+        at this bar's own fold level; the right-aligned clock sits on the
+        ledger's one duration column, the same cell every row right-aligns at
+        whatever depth the fold has put it (D12). Padding is computed against
+        that edge, never against the leftover, so focusing a bar (which paints
+        the expand offer) cannot shift the clock a cell sideways.
+
+        THE NARROW LADDER (U10/D9), in the order things are given up: the bar's
+        NAME, then the kinds clause, then the tally's word (`✗ 3 failed` ->
+        `✗3`). The failure count is never dropped and the row never wraps: the
+        live reading is clamped to what is left (see `_right_segment`) rather
+        than spending cells the count needs.
         """
         from local_operator.tui import bindings
         from local_operator.tui.glyphs import FOLD_CLOSED_GLYPH, FOLD_OPEN_GLYPH
@@ -4980,38 +5055,47 @@ class FoldBarBlock(_SingleRowBarBlock):
         muted = bindings.style("fold.bar.name")
 
         indent = row_indent(width, self.fold_depth)
-        # The clock's column: a bar covers rows one level deeper, and those rows
-        # right-align their duration at this body width.
-        edge = row_body_width(width, self.fold_depth + 1)
+        # The clock's column: the LEDGER's right edge (D12). It is not the rows'
+        # own body width: a bar covering rows one level deeper used to aim at
+        # THEIR edge and a sub bar at a third, so one column of clocks painted
+        # three cells apart.
+        edge = row_body_width(width, 0)
+        avail = max(0, edge - indent)
         glyph = FOLD_OPEN_GLYPH if self._expanded else FOLD_CLOSED_GLYPH
         label = self._row_name()
-        right_text, right_style = self._right_segment(width)
+        # The summary's floor — the count and a COMPACT tally — is what the name
+        # may never squeeze out, so it is priced before either is placed.
+        floor = clauses_cells(self._floor_clauses())
+        # The live reading is clamped against the name being DROPPED: that is the
+        # worst case it may not push the count past.
+        right_text, right_style = self._right_segment(width, max(0, avail - 3 - floor - 1))
         right_cells = cell_len(right_text) + 1 if right_text else 0
 
-        # The name column, the clock's cells and one cell of summary are spent
-        # before the summary is measured (the D8 floor's arithmetic, borrowed
-        # from the row this bar sits in).
-        name_budget = width - 4 - right_cells
-        if name_budget < 2:
-            # Too narrow even for a shrunken name: the mark and the disclosure
-            # are all this row can honestly carry.
-            row = Text(no_wrap=True, overflow="ellipsis")
-            if indent:
-                row.append(" " * indent, style=dim)
-            row.append(glyph + " ", style=dim)
-            return row
-
-        name_col = min(self._name_col(width), name_budget) if label else 0
+        # THE NAME GOES FIRST (U10). It is the only column here that names
+        # nothing a reader cannot get from the row's own position — the ledger
+        # already says which turn this is — so a name column that would leave
+        # the count and the tally unfunded is dropped rather than truncated into
+        # a syllable that reads as a different word (`wo…` for `work`).
+        name_budget = avail - 2 - 1 - right_cells - 1 - floor
+        if label and name_budget < cell_len(label):
+            # A SUB bar's name is the only statement of WHICH tool its calls ran,
+            # so there it keeps the old truncation instead of going whole.
+            name_budget = max(0, name_budget) if self._kind == "sub" else 0
+        name_col = min(self._name_col(width), max(0, name_budget)) if label else 0
+        if name_col < 2:
+            # Too narrow even for the mark: the count and the tally are all this
+            # row can honestly carry, and they are what it must carry.
+            name_col = 0
         name = truncate_cells(label, name_col) if name_col else ""
         if name_col:
             name = name + " " * max(0, name_col - cell_len(name))
         prefix_cells = 2 + name_col + (1 if name_col else 0)
 
-        remaining = max(0, edge - indent - prefix_cells)
+        remaining = max(0, avail - prefix_cells)
         slot = ""
         if self._hovered or self._focused:
             offer = COLLAPSE_HINT if self._expanded else EXPAND_HINT
-            if remaining - (cell_len(offer) + 1) - right_cells >= _SUMMARY_FLOOR:
+            if remaining - (cell_len(offer) + 1) - right_cells >= max(_SUMMARY_FLOOR, floor):
                 slot = offer
         slot_cells = cell_len(slot) + 1 if slot else 0
         # One pad cell is spent out of the budget, so a fitted summary can
@@ -5074,6 +5158,11 @@ _TURN_FAILURE_HEAD = re.compile(r"\[session incident[^\]]*\]\s*")
 _TURN_FAILURE_TRAILERS = (
     "This is why the previous turn ended.",
     "Take it into account before repeating",
+    # The incident record's advice line, addressed to the model like the trailer
+    # above. The harness's own error row states the provider's sentence with no
+    # such line, so a replayed reason and a live one disagreed about what the
+    # failure said (Q14).
+    "suggested action:",
 )
 
 
@@ -5090,7 +5179,10 @@ def clean_turn_failure(text: str) -> str:
     flat = " ".join(line.strip() for line in text.splitlines() if line.strip())
     flat = _TURN_FAILURE_HEAD.sub("", flat)
     for marker in _TURN_FAILURE_TRAILERS:
-        index = flat.find(marker)
+        # Case-insensitive: the stored spellings are the incident renderer's, but
+        # this also runs over the harness's own error rows, whose capitalisation
+        # the layout does not control.
+        index = flat.lower().find(marker.lower())
         if index >= 0:
             flat = flat[:index]
     lowered = flat.lower()
@@ -8403,14 +8495,31 @@ class TranscriptView(ScrollableContainer):
         A toast: it must not append a transcript row (pressing ``f`` five times
         on a clean turn appended five notices — and each one reshaped the runs
         around it as an ``other_visible`` splitter), and it must stay out of the
-        rows the fold derives over. A detached view has no notifier and does
-        nothing, the same honest answer as :meth:`notice`.
+        rows the fold derives over.
+
+        THE APP'S OWN SLOT, not Textual's notification rack. `App.notify` writes
+        to a SECOND toast system beside this app's: an unstyled rack whose
+        wrapping, width and dismissal the sheet does not place, and which every
+        test harness runs with the rack OFF (`run_test(notifications=...)`
+        defaults to False) — so the sentence was unseeable by the whole suite
+        and by any headless frame. The app paints its own `Toast` at
+        `#toast-host`, and every other gesture receipt in `app.py` goes through
+        `query_one(Toast).show`. A miss must land where the rest of the app's
+        one-off sentences appear, and where a test can see it (Q12).
+
+        A courtesy card: the reader did the thing, so `yield_to_actionable`
+        stands it down while an unread failure holds the slot. A detached view —
+        or a harness with no toast — does nothing, the same honest answer as
+        :meth:`notice`.
         """
-        notify = getattr(self.app, "notify", None)
-        if not callable(notify):
+        from local_operator.tui.widgets.toast import TOAST_RECEIPT_MS, Toast
+
+        try:
+            toast = self.app.query_one(Toast)
+        except Exception:  # noqa: BLE001 — no app, or a harness with no toast slot
             return
         try:
-            notify(text, severity="information")
+            toast.show(text, duration_ms=TOAST_RECEIPT_MS, yield_to_actionable=True)
         except Exception:  # noqa: BLE001 — a toast must never break the keypress
             pass
 

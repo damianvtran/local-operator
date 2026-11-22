@@ -423,6 +423,17 @@ MonitorDeltaBlock.monitor-expanded, TeamBridgeBlock.bridge-expanded {
     height: auto;
 }
 
+/* The fold bar's one-row guarantee, PINNED for the same reason a ToolCard's is
+ * (see the collapsed rule above): a bar is built before it is laid out, so its
+ * first measurement can be a cell or two wide and `auto` resolves that to two
+ * rows — which is what a 40-column frame showed (U10). Pinned, the worst case
+ * is a clipped cell for one frame, and the row builder already spends its
+ * cells in the order that keeps the failure count (see
+ * `FoldBarBlock._build_row`). */
+FoldBarBlock {
+    height: 1;
+}
+
 /* COMFORTABLE DENSITY (`display.comfortable_rows`, default ON changed to OFF by maintainer). One padding
  * row above and below an action's summary.
  *

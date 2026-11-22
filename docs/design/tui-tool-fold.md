@@ -89,9 +89,12 @@ by-turn|by-response`.
 
 `f`/`F` land the keyboard on the CALL (that is where the reader acts). The
 ladder is SCOPED to the turn the reader is standing in and circular inside it: a
-clean turn reports `No failed calls in this turn` as a toast — never a transcript
-row, which the reader's own keystrokes would otherwise append — and pressing `f`
-twice from the same card keeps stepping instead of typing an `f` into the draft.
+clean turn reports `No failed calls in this turn` in the APP'S OWN toast slot
+(`#toast-host`'s `Toast` — the surface every other gesture receipt uses, and the
+one a headless test can read), never `App.notify`, whose separate rack this app
+does not place and every test harness disables; and never a transcript row, which
+the reader's own keystrokes would otherwise append. Pressing `f` twice from the
+same card keeps stepping instead of typing an `f` into the draft.
 
 ## 4. Summary grammar
 
@@ -110,9 +113,12 @@ twice from the same card keeps stepping instead of typing an `f` into the draft.
   column already names the tool.
 - `✗ K failed` is muted on a turn that ANSWERED (failures are history) and
   danger+bold only when the turn DIED.
-- Time is right-aligned in the ledger's duration column — the same column as
-  the rows the bar covers (a bar's clock two cells right of its own members' was
-  the D4 defect), and focusing a bar does not move it.
+- Time is right-aligned in the ledger's ONE duration column, at every depth: the
+  cell is derived from the ledger's own right edge (`row_body_width(width, 0)`),
+  never from the row's depth-reduced body width, so a sub-group's members, a
+  sibling call in the same run and the bar over them all end their clock on the
+  same cell (D12 — measuring per depth painted one column of durations as
+  three). Focusing a bar does not move it.
 - Time is right-aligned in the ledger's duration column. It is the SUM of the
   calls' known durations (`ToolCard.duration_s`), not a wall clock; a call with
   no recorded duration contributes nothing, and a span with none shows no time.
@@ -121,9 +127,13 @@ twice from the same card keeps stepping instead of typing an `f` into the draft.
   `format_duration` (`1m57s`). `format_duration` alone floored a 0.5 s run to
   `0s` beside its own member rows reading `0.1s`, and a 12.95 s foot to `12s`
   where the calls said `13s` — the app disagreeing with itself in one column.
-- Narrow widths drop kinds first, then the kinds clause; the failure count and
-  the time are never dropped. A live bar replaces the clock with `◐ <tool>
-  <summary> <elapsed>` and repaints at 1 Hz.
+- **Narrow widths degrade in this order:** the bar's NAME (dropped whole — a
+  truncated `wo…` names nothing), then the kinds clause, then the tally's WORD
+  (`✗ 3 failed` → `✗3`). The failure count and the time are never dropped, the
+  row never wraps, and past the count's cells the tally stands alone. A live bar
+  replaces the clock with `◐ <tool> <summary> <elapsed>`, CLAMPED to the cells
+  left after the count and a compact tally (it sheds the summary, then the tool
+  name, then becomes the bare clock), and repaints at 1 Hz from mount.
 - Every width in that ladder is counted in CELLS (`rich.cells.cell_len`), never
   code points: a bar's clause can be a translated count, a count word or a
   tool's own name. Counting characters let a wide-script summary believe it fit
@@ -175,9 +185,18 @@ receipt bar (they fold with the receipt, not with their neighbours).
 - On a turn that answered, the tally is muted — history, not alarm (desktop
   issue #6's ruling, kept).
 - A turn-failed notice keeps its stored text; the By-response FOOT renders the
-  reason cleaned (no `[session incident …]` head, no "Take it into account
-  before repeating…" trailer) and withholds the notice row's paint so the reason
-  is stated once. Stored rows are never rewritten for a layout.
+  reason cleaned (no `[session incident …]` head, no `suggested action:` advice
+  line addressed to the model, no "Take it into account…" trailer) and withholds
+  the notice row's paint so the reason is stated once. Stored rows are never
+  rewritten for a layout.
+- **A turn's death is read from its TAIL, not its last row.** The harness says a
+  turn failed at its close, and a transcript keeps appending afterwards (a slash
+  command's receipt, a system notice, a peer message that arrived while the
+  agent was idle). Those rows cannot unsay it: the failure is the non-neutral
+  error notice anywhere after the turn's last WORK row — a call, a remark or the
+  answer — so a receipt below it neither withdraws the foot nor repaints the raw
+  failure row it withheld (Q13). A failure the turn recovered from and worked
+  past is not in the tail and does not count.
 
 ## 7. By turn vs By response
 
@@ -224,7 +243,10 @@ Two columns, not a ruler:
   draws **two cells deeper again** (four total); a sub bar nests **two cells
   deeper than the run it belongs to** (its own level 2), and the calls revealed
   under it take the level below that (six total), because the prototype's
-  `browser ×16` bar must read as owned by the run, not as its sibling;
+  `browser ×16` bar must read as owned by the run, not as its sibling. A pinned
+  failure that is a MEMBER of such a sub-group takes the group's own column, not
+  the run's: the calls above it are revealed at six, and a failure one step out
+  of its own group read as a different kind of row (D11);
 - a call's own DETAIL rows (`action:`/`target:`/`error:`, output, args) stay one
   cell RIGHT of the row at every level, as they always did at the plain spine
   (`detail_indent`). They used to sit on the fixed `OUTPUT_INDENT`, so a row

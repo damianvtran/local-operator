@@ -70,6 +70,7 @@ from local_operator.tui.tool_outline import (
     Run,
     ToolFacts,
     Turn,
+    failure_restatements,
     outline_of,
 )
 from local_operator.tui.widgets.transcript import (
@@ -654,16 +655,30 @@ class ToolFoldLayer:
         self._id_of = {id(block): row_id for row_id, block in by_id.items()}
         depths: dict[str, int] = {}
         bars = {plan.key for plan in plans}
+        # The revealed column under each bar: one level below the bar's own.
+        revealed_of = {plan.key: (3 if plan.kind == "sub" else 2) for plan in plans}
         # Which rows a bar really sits over — its own children, including the
         # pin it leaves visible (a pin is deliberately not in `covered`, so it
         # needs this answer separately).
         barred: set[str] = set()
+        # A pinned failure that is a MEMBER of a same-tool sub-group belongs to
+        # that group's column, not to the run's: the calls above it are revealed
+        # one level lower, and a failure one step out of its own group reads as
+        # a different kind of row (D11).
+        sub_pin: dict[str, int] = {}
         for turn in outline.turns:
             if turn.key in bars:
                 barred.update(_turn_row_ids(turn))
             for node in turn.nodes:
                 if isinstance(node, Run) and node.key in bars:
                     barred.update(node.tool_ids)
+                if isinstance(node, Run):
+                    for sub in node.subgroups:
+                        if sub.key not in bars:
+                            continue
+                        for row_id in sub.tool_ids:
+                            if row_id in pinned:
+                                sub_pin[row_id] = revealed_of[sub.key]
             # Ben's "tool rows one indent deeper than prose" applies to every
             # turn that holds a tool call, in BOTH modes. A turn that grew a bar
             # has its rows under one; a By-response turn closes with a foot; and
@@ -687,12 +702,13 @@ class ToolFoldLayer:
                 depths[row_id] = fold_depth + 1
         for row_id in pinned:
             # A pin is the failure a collapsed bar leaves visible, so it belongs
-            # to that bar's group and takes the revealed column — but only when a
-            # bar really covers its run. With no bar over it there is nothing for
+            # to that bar's group and takes the revealed column — the SUB-group's
+            # when the call is one of its members (D11) — but only when a bar
+            # really covers its run. With no bar over it there is nothing for
             # it to sit under, and it keeps the tool-row column rather than
             # claiming a level nothing gave it.
             if row_id in barred:
-                depths[row_id] = 2
+                depths[row_id] = sub_pin.get(row_id, 2)
         self._row_depth = depths
         self._reconcile(plans, feet)
 
@@ -949,22 +965,21 @@ class ToolFoldLayer:
         reason painted three times on a resumed window. The reason is the
         RICHEST cleaned text, not the first: the stop notice often carries the
         bare word, and the incident carries the provider's own sentence.
+
+        WHICH rows those are is decided by ``failure_restatements``: the stored
+        spellings plus the error notice that closed the turn, wherever the
+        turn's tail put it. A receipt appended after the failure used to move
+        the closing notice out of the last-row slot, so the foot stopped hiding
+        it and the raw sentence repainted beside the foot's clean one (Q13).
         """
         hides: list[str] = []
         reason = ""
-        for index, row in enumerate(rows):
+        for row in failure_restatements(rows):
             block = by_id.get(row.id)
             if not isinstance(block, NoticeBlock):
                 continue
-            text = block.text()
-            head = " ".join(text.split()).lower()
-            restates = head.startswith(("turn failed", "[session incident"))
-            # The live arm's other spelling, `Stopped with an error — …`, has no
-            # special head; it is identified by being the turn's LAST row.
-            if not restates and not (block.notice_kind == "error" and index == len(rows) - 1):
-                continue
             hides.append(row.id)
-            cleaned = clean_turn_failure(text)
+            cleaned = clean_turn_failure(block.text())
             if len(cleaned) > len(reason):
                 reason = cleaned
         return tuple(hides), reason

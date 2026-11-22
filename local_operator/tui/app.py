@@ -49271,6 +49271,7 @@ class OperatorApp(App[None]):
 
     def _apply_transcript_display(self) -> None:
         """Hand a changed ``display.transcript_display`` to the transcript view.
+
         LIVE for the same reason ``display.dock`` is: the `/settings` row, the
         `/transcript` command and an edit from another process all repaint
         without a relaunch. The mode is read through ``tui.settings`` (which

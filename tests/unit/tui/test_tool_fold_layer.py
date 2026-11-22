@@ -571,8 +571,9 @@ async def test_a_wide_script_bar_drops_kinds_rather_than_the_failure_tally() -> 
         assert "✗ 1 failed" in wide, "the failure tally is never the clause to drop"
 
         # Narrower than the kinds fit: they go whole (never the tally), and the
-        # row is not left to the ellipsis.
-        narrow = bar._build_row(48).plain
+        # row is not left to the ellipsis. 44 is the measured rung where the
+        # three wide names no longer fit and the tally still does.
+        narrow = bar._build_row(44).plain
         assert "…" not in narrow, narrow
         assert "读文件" not in narrow, narrow
         assert "✗ 1 failed" in narrow, "the failure tally is never the clause to drop"

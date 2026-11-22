@@ -320,6 +320,45 @@ def test_a_turn_dies_only_when_a_failure_notice_says_so() -> None:
     assert not failed.has_turn_bar
 
 
+def test_a_failure_notice_survives_rows_appended_after_it() -> None:
+    """Q13: a receipt or a system notice after the failure is not WORK.
+
+    Running a command after a dead turn appends a notice below the harness's
+    error row; deciding the turn from its last row alone made the turn read as
+    merely unanswered, which dropped the By-response foot and repainted the raw
+    failure row the foot had withheld.
+    """
+    turn = outline_of(
+        [
+            user(),
+            tool("t1"),
+            tool("t2"),
+            OutlineRow("n", "notice_failed", notice_head="provider exploded: upstream 500"),
+            OutlineRow("r", "other_visible", notice_head="transcript: by response"),
+        ]
+    ).turns[0]
+
+    assert turn.died
+
+
+def test_an_error_notice_a_turn_went_on_from_is_not_a_death() -> None:
+    """The tail rule is about the CLOSING notice, not any error row.
+
+    A provider hiccup the turn recovered from and worked past does not kill it;
+    only a failure notice after the turn's last work row does.
+    """
+    turn = outline_of(
+        [
+            user(),
+            OutlineRow("n", "notice_failed", notice_head="provider error: retrying"),
+            tool("t1"),
+            tool("t2"),
+        ]
+    ).turns[0]
+
+    assert not turn.died
+
+
 def test_an_answered_settled_turn_has_a_turn_bar_and_has_not_died() -> None:
     turn = outline_of([user(), tool("t1"), prose("a", "prose_final")]).turns[0]
 
@@ -473,11 +512,22 @@ def test_summary_degrades_on_an_80_cell_budget_and_holds_the_failure_count() -> 
 
 
 def test_summary_never_drops_the_failure_count() -> None:
+    """The tally survives EVERY budget, and past its noun's cells it compacts.
+
+    The rule the design states is "the failure count is never dropped" — U10
+    added the rung that makes it true at 44 columns: the tally sheds its WORD
+    (`✗ 2 failed` -> `✗2`) before it sheds itself, and the count clause yields
+    to it when the two cannot both be paid for. What never happens is the row's
+    ellipsis standing where the tally was.
+    """
     facts = ToolFacts(9, (("bash", 3), ("read", 6)), 2, None, None)
 
-    for budget in (0, 10, 25, 40):
+    for budget in (25, 40):
         assert cells(facts, budget).endswith("✗ 2 failed")
-    assert cells(facts, 0) == "9 actions · ✗ 2 failed"
+    assert cells(facts, 0) == "✗2", "the tally compacted instead of going"
+    assert cells(facts, 10) == "✗2", "the count yields before the tally does"
+    for budget in (0, 10):
+        assert "…" not in cells(facts, budget)
 
 
 def test_summary_flags_failure_ink_only_when_the_turn_died() -> None:

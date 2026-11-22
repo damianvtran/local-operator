@@ -19,6 +19,8 @@ painted frame, not about a constructor.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from local_operator.tui import theme as theme_mod
@@ -38,6 +40,7 @@ from tests.unit.tui.test_tool_fold_layer import (
     _answer,
     _bars,
     _narration,
+    _running,
     _settle,
     _tool,
     _user,
@@ -77,6 +80,15 @@ def _gap_cells(previous: TranscriptBlock, block: TranscriptBlock) -> int:
 
 def _layer(view: TranscriptView) -> ToolFoldLayer:
     return view._tool_fold
+
+    def compose(self):  # type: ignore[no-untyped-def]
+        from textual.containers import Container
+
+        from local_operator.tui.widgets.toast import Toast
+
+        yield TranscriptView()
+        with Container(id="toast-host"):
+            yield Toast()
 
 
 @pytest.mark.asyncio
@@ -152,6 +164,60 @@ async def test_f_says_so_once_when_the_turn_has_no_failure() -> None:
 
         assert seen == ["No failed calls in this turn"]
         assert len(view.blocks()) == before, "a miss appended a transcript row"
+
+
+@pytest.mark.asyncio
+async def test_the_miss_is_painted_in_the_apps_own_toast_slot() -> None:
+    """Q12: the sentence reaches a PAINTED frame, with nothing stubbed.
+
+    The old path called Textual's `App.notify`, whose rack this app does not
+    run (`run_test` defaults it off, and the app paints its own `Toast`); the
+    message landed in `app._notifications` and no frame ever showed it, which
+    is why the stubbed test above could not see the miss. This one goes through
+    the real keypress and the real handler, and reads the compositor.
+    """
+    from local_operator.tui.widgets.toast import Toast
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    class _ToastTranscriptApp(StyledTranscriptApp):
+        """The transcript beside the app's ONE toast slot (`#toast-host`).
+
+        The shipped stylesheet positions the host, so this is the app's real
+        arrangement minus everything the fold does not read. The slot mounts
+        the way ``OperatorApp.compose`` mounts it: a container on the toast
+        layer holding a single, always-present ``Toast``.
+        """
+
+        def compose(self):  # type: ignore[no-untyped-def]
+            from textual.containers import Container
+
+            yield TranscriptView()
+            with Container(id="toast-host"):
+                yield Toast()
+
+    app = _ToastTranscriptApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = app.query_one(TranscriptView)
+        _user(view, "anchor:u1")
+        [_tool(view, f"t{index}", TOOLS[index]) for index in range(3)]
+        _answer(view)
+        await _settle(pilot)
+        (turn_bar,) = _bars(view)
+        turn_bar.focus()
+        await _settle(pilot)
+
+        toast = app.query_one(Toast)
+        assert not toast.display, "premise: the slot starts empty"
+
+        await pilot.press("f")
+        await _settle(pilot)
+
+        assert toast.display, "the miss never reached the app's toast slot"
+        assert toast.message == "No failed calls in this turn"
+        painted = [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
+        assert any(
+            "No failed calls in this turn" in line for line in painted
+        ), f"the toast is not on the frame: {painted}"
 
 
 @pytest.mark.asyncio
@@ -335,6 +401,179 @@ async def test_tool_rows_and_bars_sit_two_cells_deeper_than_prose() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_pinned_failure_takes_its_groups_depth() -> None:
+    """D11: the visible failure of a dead turn sits with the rows it belongs to.
+
+    A dead turn pins its LAST failed call below the collapsed fold so the reason
+    is reachable without unfolding sixteen calls. When that call is a member of
+    a same-tool sub-group it belongs to the group's column; painting it at the
+    run's column left it one step out from the three rows directly above it,
+    which reads as a different kind of row.
+    """
+    from tests.unit.tui.conftest import StyledTranscriptApp, open_all_folds
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = app.query_one(TranscriptView)
+        view.set_display_mode("by-response")
+        _user(view, "anchor:u1")
+        cards = [_tool(view, f"t{index}", "bash", failed=index == 4) for index in range(5)]
+        await _settle(pilot)
+        # No answer: the last settled turn is the one a pin belongs to.
+        await open_all_folds(view, pilot)
+
+        pinned, *members = cards[4], *cards[:4]
+        assert pinned.display and all(card.display for card in members)
+        painted = {len(_plain(card)) - len(_plain(card).lstrip(" ")) for card in cards}
+        assert len(painted) == 1, f"the pinned row is out of its group's column: {painted}"
+
+
+@pytest.mark.parametrize("width", [80, 100])
+@pytest.mark.asyncio
+async def test_the_duration_column_is_one_column_at_every_depth(width: int) -> None:
+    """D12: time is right-aligned in the LEDGER's column, not each row's own.
+
+    A row revealed two levels deep has a two-cell-wider inset than the sibling
+    call beside it in the same run; measuring the right edge off its own body
+    width walked its clock two cells left of that sibling's, so one column of
+    numbers came out in two columns.
+    """
+    from tests.unit.tui.conftest import StyledTranscriptApp, open_all_folds
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(width, 40)) as pilot:
+        view = app.query_one(TranscriptView)
+        view.set_display_mode("by-response")
+        _user(view, "anchor:u1")
+        members = [_tool(view, f"b{index}", "bash", seconds=1.0) for index in range(4)]
+        sibling = _tool(view, "r0", "read", seconds=1.0)
+        await _settle(pilot)
+        await open_all_folds(view, pilot)
+
+        member, sibling_row = members[0], sibling
+        assert member.display and sibling_row.display, "premise: both rows are painted"
+        member_cells = _plain(member)
+        sibling_cells = _plain(sibling_row)
+        assert "1.0s" in member_cells and "1.0s" in sibling_cells
+        assert member_cells.index("1.0s") == sibling_cells.index("1.0s"), (
+            "the clock column stepped between depths: "
+            f"{member_cells.index('1.0s')} vs {sibling_cells.index('1.0s')} at {width} cols"
+        )
+
+
+@pytest.mark.parametrize("width", [40, 44, 48, 60, 80])
+@pytest.mark.asyncio
+async def test_the_turn_bar_never_drops_its_failure_tally(width: int) -> None:
+    """U10/D9: at every width the tally survives, inside a ONE-ROW bar.
+
+    At 44 columns — the team's own practical minimum — the bar showed
+    `19 actions · …`: the kinds clause had been fitted into the budget and cut
+    at the ellipsis, which put the one clause the design never drops behind the
+    cut. The ladder is: the bar's name goes, then the kinds, then the tally
+    compacts to `✗3`; the ellipsis is never what states a failure.
+    """
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(width, 40)) as pilot:
+        view = app.query_one(TranscriptView)
+        _user(view, "anchor:u1")
+        [_tool(view, f"t{index}", TOOLS[index], failed=index < 3) for index in range(len(TOOLS))]
+        _answer(view)
+        await _settle(pilot)
+
+        (turn_bar,) = [bar for bar in _bars(view) if bar.kind == "turn"]
+        row = _plain(turn_bar)
+        assert "✗" in row, f"the failure tally is gone at {width} cols: {row!r}"
+        assert "…" not in row, f"an ellipsis stands where a clause should be: {row!r}"
+        assert "\n" not in row, row
+        assert turn_bar.region.height == 1, f"the bar wrapped at {width} cols"
+
+
+@pytest.mark.parametrize("width", [40, 44, 60, 80])
+@pytest.mark.asyncio
+async def test_a_live_bar_keeps_its_tally_and_stays_one_row(width: int) -> None:
+    """The live reading is clamped, not paid for with the failure tally.
+
+    At 40 columns the live bar wrapped to two rows and dropped the count
+    entirely (U10's secondary arm). The elapsed reading is the cell that may
+    shorten; the tally is the one that may not.
+    """
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(width, 40)) as pilot:
+        view = app.query_one(TranscriptView)
+        _user(view, "anchor:u1")
+        for index in range(2):
+            _tool(view, f"t{index}", TOOLS[index], failed=index == 1)
+        running = _running(view, "t2", "bash", age=7.0)
+        await _settle(pilot)
+
+        (bar,) = _bars(view)
+        assert bar._live_card is running, "premise: the bar reports the running call"
+        row = _plain(bar)
+        assert "✗" in row, f"the failure tally is gone at {width} cols: {row!r}"
+        assert "\n" not in row, row
+        assert bar.region.height == 1, f"the live bar wrapped at {width} cols"
+
+
+@pytest.mark.asyncio
+async def test_the_live_bar_repaints_its_elapsed_without_a_derive(monkeypatch) -> None:
+    """R2-4: the bar's 1 Hz clock is armed at mount, not left to the next derive.
+
+    The layer restates a new bar and THEN mounts it, so the restate's own sync
+    saw an unmounted widget and started nothing — and Textual marks a widget
+    mounted after its Mount event, so `on_mount`'s sync saw the same thing. The
+    bar then showed the elapsed it mounted with (7.0s) while the tool row under
+    it advanced; nothing else repaints the reading, because every other path
+    needs an append. This moves the card's start with NO append and reads the
+    painted frame: only the bar's own timer can have repainted it.
+    """
+    from local_operator.tui.widgets import transcript as transcript_mod
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    monkeypatch.setattr(transcript_mod, "LIVE_CLOCK_S", 0.05)
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = app.query_one(TranscriptView)
+        _user(view, "anchor:u1")
+        _tool(view, "t0", "read")
+        _tool(view, "t1", "bash")
+        card = _running(view, "t2", "bash", age=7.0)
+        await _settle(pilot)
+
+        (bar,) = _bars(view)
+        assert bar._live_card is card, "premise: the bar reports the running call"
+        assert bar._clock is not None, "the 1 Hz repaint was never armed"
+
+        def painted_bar() -> str:
+            return next(
+                label.text.rstrip()
+                for label in app.screen._compositor.render_strips()
+                if "▸" in label.text
+            )
+
+        def clock_cells(row: str) -> float:
+            """The elapsed the row paints, in seconds (the only `Ns` on it)."""
+            match = re.search(r"(\d+(?:\.\d+)?)s\b", row)
+            assert match is not None, row
+            return float(match.group(1))
+
+        before = painted_bar()
+        assert clock_cells(before) >= 6.5, before
+
+        card._started -= 2.0  # two seconds pass with no append and no re-derive
+        await pilot.pause(0.2)
+
+        row = painted_bar()
+        assert row != before, f"the bar's elapsed froze at its mount value: {row!r}"
+        # Two seconds were added; one is enough to prove the repaint happened,
+        # and the margin absorbs a tick landing on a rounding boundary.
+        assert clock_cells(row) >= clock_cells(before) + 1.0, row
+
+
+@pytest.mark.asyncio
 async def test_a_by_response_step_is_flush_inside_and_bracketed_outside() -> None:
     """No blank rows between steps; one after the prompt and before the answer."""
     from tests.unit.tui.conftest import StyledTranscriptApp
@@ -473,6 +712,41 @@ async def test_a_dead_turn_gets_a_wrapped_foot_and_its_notice_is_replaced() -> N
 
 
 @pytest.mark.asyncio
+async def test_a_replayed_reason_drops_the_providers_suggested_action() -> None:
+    """Q14: the incident's advice line is addressed to the MODEL, not the reader.
+
+    A stored provider failure replays as the incident record, which carries a
+    `suggested action:` sentence with its own framing ("The provider is failing
+    server-side: a retry may work"). The live foot never shows one: the harness's
+    error row states the provider's sentence and nothing else. The foot strips
+    it for the same reason it strips the incident head and the trailer — it is
+    talking to the model, and the step's closing row states WHY once, briefly.
+    """
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    incident = (
+        "[session incident (openai/gpt-5)] provider: provider exploded: upstream 500 "
+        "suggested action: The provider is failing server-side: a retry may work; "
+        "wait and retry. This is why the previous turn ended. Take it into account "
+        "before repeating the same request."
+    )
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = app.query_one(TranscriptView)
+        view.set_display_mode("by-response")
+        _user(view, "anchor:u1")
+        _tool(view, "t0", "bash", failed=True)
+        view.append_block(NoticeBlock(incident, "error"))
+        await _settle(pilot)
+
+        (foot,) = _foots(view)
+        plain = _plain(foot)
+        assert "upstream 500" in plain, plain
+        assert "suggested action" not in plain, plain
+        assert "retry may work" not in plain, plain
+
+
+@pytest.mark.asyncio
 async def test_a_turn_paused_on_approval_gets_no_foot() -> None:
     """Waiting is not dead: no failure total under a question nobody answered."""
     from tests.unit.tui.conftest import StyledTranscriptApp
@@ -596,6 +870,41 @@ async def test_a_replayed_dead_turn_states_its_reason_once() -> None:
         assert not failed_notice.display
         assert not incident_notice.display, "the raw incident row is a second copy"
         assert _plain(foot).count("provider error") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_dead_turns_foot_survives_a_later_notice() -> None:
+    """Q13: a command run afterwards must not resurrect the raw failure row.
+
+    The foot is the turn's one statement of why it died. Deciding the turn from
+    its last row meant any notice appended later (a slash receipt, a system
+    notice) withdrew the foot AND let the stored failure row repaint — the
+    reason shown twice, once raw.
+    """
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(100, 40)) as pilot:
+        view = app.query_one(TranscriptView)
+        view.set_display_mode("by-response")
+        _user(view, "anchor:u1")
+        for index in range(3):
+            _tool(view, f"t{index}", "bash", failed=index == 2)
+        failure = NoticeBlock("provider exploded: upstream 500", "error")
+        view.append_block(failure)
+        await _settle(pilot)
+
+        (foot,) = _foots(view)
+        assert not failure.display, "premise: the foot withholds the raw row"
+
+        receipt = NoticeBlock("Transcript: By response", "info")
+        view.append_block(receipt)
+        await _settle(pilot)
+
+        (after,) = _foots(view)
+        assert _plain(after) == _plain(foot), "the foot vanished with a later notice"
+        assert not failure.display, "the raw failure row repainted"
+        assert receipt.display
 
 
 @pytest.mark.asyncio

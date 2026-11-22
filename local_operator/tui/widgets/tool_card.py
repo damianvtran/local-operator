@@ -5873,12 +5873,19 @@ class ToolCard(ExpandableActionBlock):
         # (`_row_indent`), against the width being BUILT rather than the last
         # one built, because this runs before `_built_width` is updated.
         indent = row_indent(width, self.fold_depth)
-        # The content box this row is built in — the SAME derivation
+        # The content box the NAME COLUMN is gated on — the SAME derivation
         # `_refresh_row` records the name column against, so the guard's question
         # and the builder's answer cannot be asked of two different widths (R2).
-        width = row_body_width(width, self.fold_depth)
+        name_width = row_body_width(width, self.fold_depth)
+        # D12: the LEDGER's right edge, not this row's own. A fold row draws from
+        # `indent` and measures its content box off the depth-0 body width, so
+        # every row's right edge — and the status column right-aligned at it —
+        # lands on the same cell at every depth. Measuring the box against the
+        # row's own depth-reduced width walked a revealed row's clock two cells
+        # left per level, so one column of durations painted as three.
+        width = row_body_width(width, 0)
         # The row is painted FROM `indent` (the fold step) and its right edge is
-        # the body width, so the indent is not free space: every segment that
+        # the ledger's column, so the indent is not free space: every segment that
         # budgets the summary has to take it off first. It used to be taken off
         # only after the fact, and a row whose summary hit its cap ended one
         # cell right of a short row at the same level and two cells right at the
@@ -5934,7 +5941,7 @@ class ToolCard(ExpandableActionBlock):
                     row.append(text, style=style)
             return row
 
-        name_col = min(self._name_col(width), name_budget)
+        name_col = min(self._name_col(name_width), name_budget)
         name = truncate_cells(label, name_col)
         name = name + " " * max(0, name_col - cell_len(name))
         prefix_cells = 2 + name_col + 1

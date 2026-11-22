@@ -300,6 +300,7 @@ def summary_clauses(
     *,
     plural: Callable[[int], str] | None = None,
     failed: Callable[[int], str] | None = None,
+    failed_compact: Callable[[int], str] | None = None,
     kind_word: Callable[[str], str] | None = None,
 ) -> tuple[Clause, ...]:
     """The bar's left-hand summary, per the prototype's ``barSummaryST``.
@@ -309,18 +310,25 @@ def summary_clauses(
     a turn that sent two messages names ``messages`` once.
 
     ``budget_cells`` is the width left for this text after the row's own
-    columns -- indent, glyph, and the RIGHT-ALIGNED time (or the live
-    ``running`` label), which the bar draws itself. That is why shrinking
-    drops kinds and never the time: the time is not in this text at all, and
-    it has already been taken out of the budget. Nor is the failure count
-    dropped: past a budget too small even for the count, the count is still
-    what returns.
+    columns -- indent, glyph, the name column, and the RIGHT-ALIGNED time (or
+    the live ``running`` label), which the bar draws itself. That is why
+    shrinking drops kinds and never the time: the time is not in this text at
+    all, and it has already been taken out of the budget.
+
+    THE LADDER, in the order a narrow bar gives things up: the kinds go whole
+    (``shown`` counts down), then the tally sheds its WORD (``✗ K failed`` ->
+    ``✗K``), and only a bar too narrow for the count keeps the tally alone. The
+    failure count is never dropped and never handed to the row's ellipsis: a row
+    cut at ``19 actions · …`` states an action count and hides the failures it
+    covered, which is the one thing this clause exists to prevent (U10/D9).
 
     ``plural`` renders the count clause so the caller can plug the catalogue's
     ICU plural (``tui.transcript.group.actions``); without it the English
     singular/plural pair is used. ``failed`` renders the tally the same way
     (``✗ K failed``) and defaults to the English literal, so this module stays
     runnable without a catalogue while the widget paints keyed copy.
+    ``failed_compact`` is that tally with the noun shed -- the last rung before
+    the count goes, since the glyph and the number are what the reader needs.
     ``kind_word`` localizes a tool's short noun (``bash`` -> ``shell``) and
     folds an MCP name through the same display-name path a tool row uses;
     without it this module keeps its English fallback.
@@ -337,7 +345,14 @@ def summary_clauses(
         if word not in names:
             names.append(word)
 
-    def build(shown: int) -> list[Clause]:
+    def tally(compact: bool) -> str:
+        if not compact:
+            return failed(facts.failed) if failed is not None else f"✗ {facts.failed} failed"
+        if failed_compact is not None:
+            return failed_compact(facts.failed)
+        return f"✗{facts.failed}"
+
+    def build(shown: int, *, compact: bool = False) -> list[Clause]:
         clauses = [Clause(count_clause, "muted")]
         if shown > 0:
             more = len(names) - shown
@@ -346,18 +361,24 @@ def summary_clauses(
             clauses.append(Clause(kinds, "muted"))
         if facts.failed:
             clauses.append(Clause(" · ", "dim"))
-            tally = failed(facts.failed) if failed is not None else f"✗ {facts.failed} failed"
-            clauses.append(Clause(tally, "danger" if noanswer else "failed_muted"))
+            clauses.append(Clause(tally(compact), "danger" if noanswer else "failed_muted"))
         return clauses
 
-    for shown in range(min(MAX_SUMMARY_KINDS, len(names)), -1, -1):
-        clauses = build(shown)
-        if _cells(clauses) <= budget_cells:
-            return tuple(clauses)
+    kinds_shown = min(MAX_SUMMARY_KINDS, len(names))
+    for compact in (False, True):
+        for shown in range(kinds_shown, -1, -1):
+            clauses = build(shown, compact=compact)
+            if clauses_cells(clauses) <= budget_cells:
+                return tuple(clauses)
+    if facts.failed:
+        # No room for the count beside the tally: the tally is the clause that
+        # stays, and the reader can count calls off the bar's own body. This is
+        # the last rung — nothing below it may take the tally's cells.
+        return (Clause(tally(True), "danger" if noanswer else "failed_muted"),)
     return tuple(build(0))
 
 
-def _cells(clauses: Sequence[Clause]) -> int:
+def clauses_cells(clauses: Sequence[Clause]) -> int:
     """The clauses' painted width, in TERMINAL CELLS.
 
     ``cell_len``, never ``len``: a clause can be a translated count ("十六项
@@ -366,6 +387,10 @@ def _cells(clauses: Sequence[Clause]) -> int:
     lets :func:`summary_clauses` believe a set of kinds fits when it does not,
     and the row then reaches the bar's ellipsis cut with kinds still in front of
     the failure tally, which is the one clause the design never drops.
+
+    Shared with the widgets so the bar's own FLOOR (the count and a compact
+    tally, the part a name column may never squeeze out) is measured by the same
+    rule as the summary it makes room for (U10).
     """
     return sum(cell_len(clause.text) for clause in clauses)
 
@@ -445,6 +470,11 @@ def _turn_of(rows: Sequence[OutlineRow], start: int, end: int, live_index: int |
 #: error arm, in both its live and replay spellings).
 _FAILED_NOTICE_HEADS = ("turn failed", "stopped with an error")
 
+#: Heads a replayed window's stored failure rows carry: the stop notice and the
+#: raw incident record (see ``Incident.render``). Either restates the failure a
+#: By-response foot is about to state once, so both are withheld behind it.
+_INCIDENT_NOTICE_HEADS = ("turn failed", "[session incident")
+
 #: Heads that name a turn which stopped WITHOUT failing: the user interrupted
 #: it, the provider cut it off, or it spent its output budget. The design keeps
 #: these neutral — a danger tally and a "turn failed" foot would state an
@@ -454,6 +484,56 @@ _NEUTRAL_NOTICE_HEADS = (
     "interrupted",
     "no answer: the model spent",
 )
+
+#: The row kinds that are a turn's WORK: the calls it made and the prose it said
+#: (a remark, or the answer). Everything after the last of these is the turn's
+#: TAIL — notices and receipts that land once the work is over. An
+#: `other_visible` row is deliberately NOT work: a peer message arriving while
+#: the agent is idle does not restart the turn.
+_WORK_KINDS = frozenset({"tool", "prose_narration", "prose_final"})
+
+
+def rows_after_last_work(span: Sequence[OutlineRow]) -> tuple[OutlineRow, ...]:
+    """The rows after the turn's LAST work row — its closing notices.
+
+    WHY A TAIL AND NOT "the last row". A transcript keeps appending to a settled
+    turn: a slash command's receipt, a system notice, a peer message that
+    arrived while the agent was idle. Reading the last row alone meant a turn
+    whose harness failure was followed by `/transcript` stopped reading as dead
+    — its By-response foot withdrew and the raw failure row the foot had
+    withheld repainted (Q13). The harness says a turn failed at its CLOSE; a
+    receipt appended afterwards cannot unsay it.
+
+    Nor may a failure the turn RECOVERED from count: a provider hiccup the turn
+    worked past has work after it, so it is not in the tail.
+    """
+    last = -1
+    for index, row in enumerate(span):
+        if row.kind in _WORK_KINDS:
+            last = index
+    return tuple(span[last + 1 :])
+
+
+def failure_restatements(span: Sequence[OutlineRow]) -> tuple[OutlineRow, ...]:
+    """The notices that state this turn's failure, in reading order.
+
+    What a dead turn's By-response foot must REPLACE, so the reason is painted
+    once and not twice: every stored row that restates the failure (the
+    `turn failed` stop notice and the raw `[session incident …]` record, in
+    either order — the incident replays in WARNING ink, so a kind test would
+    miss it) plus the non-neutral error notice that closed the turn, whatever
+    spelling that arm used. The live arm writes the provider's own sentence with
+    no head at all, so it can only be recognised by where it sits — in the tail.
+    """
+    tail = rows_after_last_work(span)
+    restating = tuple(row for row in span if row.notice_head.startswith(_INCIDENT_NOTICE_HEADS))
+    return restating + tuple(
+        row
+        for row in tail
+        if row.kind == "notice_failed"
+        and row not in restating
+        and not row.notice_head.startswith(_NEUTRAL_NOTICE_HEADS)
+    )
 
 
 def _ended_in_failure(span: Sequence[OutlineRow]) -> bool:
@@ -466,21 +546,25 @@ def _ended_in_failure(span: Sequence[OutlineRow]) -> bool:
     Two arms, and the ANSWERED one is ordered on purpose. A turn that produced
     prose answered; a failure notice before that prose is history the turn went
     on from, and it cannot make the turn read as dead. For a turn with no answer
-    the failed head may sit before the closing incident row (a provider failure
-    replays as the raw `[session incident …]` record first and the stop notice
-    last), so there the head test is unordered; the last-row test catches the
-    other spelling, `Stopped with an error — …`, which has no such head.
+    the failure may be spelled with no head at all (the live arm writes the
+    provider's own sentence), so what decides it is WHERE the notice sits:
+    anywhere in the tail, after the turn's last work row, however many receipts
+    and system notices land below it afterwards. The head arm then catches the
+    replay spelling, which can sit before the closing incident row (a provider
+    failure replays as the raw `[session incident …]` record first and the stop
+    notice last).
     """
     if not span:
         return False
-    last = span[-1]
-    if last.kind == "notice_failed" and not last.notice_head.startswith(_NEUTRAL_NOTICE_HEADS):
+    if any(
+        row.kind == "notice_failed" and not row.notice_head.startswith(_NEUTRAL_NOTICE_HEADS)
+        for row in rows_after_last_work(span)
+    ):
         # The turn ENDED on an error: `turn failed`, `Stopped with an error`, or
         # a provider error that produced nothing. Cut-off/interrupted are
         # excluded by their neutral heads above.
         return True
-    answered = any(row.kind == "prose_final" for row in span)
-    if answered:
+    if any(row.kind == "prose_final" for row in span):
         return False
     return any(
         row.kind == "notice_failed" and row.notice_head.startswith(_FAILED_NOTICE_HEADS)
