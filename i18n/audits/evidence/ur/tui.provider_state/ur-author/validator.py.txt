@@ -1,0 +1,87 @@
+"""Scoped author mechanics, not an independent audit or native rendering proof.
+Uses the repository's official checker with namespace/locale discovery scoped
+in memory; negative fixtures never modify repository catalogues.
+"""
+import copy
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import unicodedata
+from unittest.mock import patch
+from rich.cells import cell_len
+from rich.text import Text
+from scripts.i18n import check
+from local_operator.i18n import catalogues, runtime, messages
+
+ROOT = Path.cwd().resolve()
+NS = 'tui.provider_state'
+assert Path(catalogues.__file__).resolve().is_relative_to(ROOT)
+assert Path(check.__file__).resolve().is_relative_to(ROOT)
+assert os.environ['HOME'] != '/Users/damian'
+assert not any(k.startswith('CMUX_') for k in os.environ)
+print('MODULE', catalogues.__file__)
+print('CHECKER', check.__file__)
+print('PYTHON', sys.executable)
+print('ISOLATION HOME/config redirected; CMUX absent')
+en = catalogues.load_catalogue('en', NS)
+ur = catalogues.load_catalogue('ur', NS)
+ctx = catalogues.context('en', NS)
+assert len(en) == len(ur) == 5 and list(en) == list(ur)
+assert set(ctx) == set(en)
+expected_hashes = {
+ 'en': '113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912',
+ 'context': '67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be',
+}
+for name, rel in [('en', f'en/{NS}.json'), ('context', f'en/{NS}.context.json'), ('ur', f'ur/{NS}.json')]:
+    digest = hashlib.sha256((catalogues.catalogue_root() / rel).read_bytes()).hexdigest()
+    if name in expected_hashes:
+        assert digest == expected_hashes[name]
+    print('SHA256', name, digest)
+
+# Use the actual catalogue loader and official parity/context/ICU/plural checker,
+# narrowing only discovery, not any validation rule or eligibility policy.
+with patch.object(catalogues, 'namespaces', return_value=[NS]), patch.object(catalogues, 'locales', return_value=['en', 'ur']):
+    problems = check.check_catalogues()
+    print('OFFICIAL_SCOPED check_catalogues()', problems)
+    assert not problems
+    original = catalogues.load_catalogue
+    def run_negative(label, mutate, expected):
+        altered = copy.deepcopy(ur)
+        mutate(altered)
+        def load(locale, namespace):
+            return altered if locale == 'ur' else original(locale, namespace)
+        with patch.object(catalogues, 'load_catalogue', side_effect=load):
+            errors = check.check_catalogues()
+        print('NEGATIVE', label, errors)
+        assert errors and any(expected in error for error in errors)
+    run_negative('missing-key', lambda x: x.pop(next(iter(x))), 'missing key')
+    run_negative('added-argument', lambda x: x.__setitem__(next(iter(x)), x[next(iter(x))] + ' {injected}'), 'arguments')
+
+protected = re.compile(r'`[^`]*`|</?[^>]+>|%[sd]|https?://\S+|--[\w-]+')
+bidi = set('\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069')
+for key, source in en.items():
+    target = ur[key]
+    assert runtime.message_arguments(source) == runtime.message_arguments(target) == ()
+    assert runtime.plural_selectors(source) == runtime.plural_selectors(target) == ()
+    assert unicodedata.normalize('NFC', target) == target
+    assert not (set(target) & bidi)
+    assert protected.findall(source) == protected.findall(target) == []
+    assert runtime.render_message(target, {}, 'ur') == target
+    record = messages.render_record(key, {}, locale='ur')
+    assert record.text == target and record.source_locale == 'ur'
+    plain = Text(target)
+    rich = Text.from_markup(target)
+    assert rich.plain == plain.plain and rich.cell_len == plain.cell_len
+    control = runtime.render_message(source, {}, 'en')
+    assert control == source
+    pseudo = '⟦' + source + ' · ' + source + '⟧'
+    assert runtime.render_message(pseudo, {}, 'en') == pseudo
+    assert Text.from_markup(pseudo).plain == pseudo
+    # openrouter uses ten cells, so pane=31 gives state=17. Illustrative
+    # diagnostics only: no invented universal cap and no font/bidi assertion.
+    print('ROW', key, json.dumps({'ur':target,'ur_cells':cell_len(target),'en_cells':cell_len(control),'pseudo_cells':cell_len(pseudo),'illustrative_state_budget':17,'ur_exceeds_illustration':cell_len(target)>17,'combining_codepoints':sum(bool(unicodedata.combining(c)) for c in target)}, ensure_ascii=False))
+print('PASS five keys: scoped official catalogue/context/ICU; two detected negatives; zero arguments/plural/select; NFC; protected tokens; no manual bidi; official raw render; plain/Rich widths; English/pseudo controls')
+print('LIMITATION no app startup, native font/shaping/RTL/style certification, independent audit, eligibility/generation or release proof')

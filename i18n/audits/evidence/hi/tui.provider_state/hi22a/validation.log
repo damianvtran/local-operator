@@ -1,0 +1,27 @@
+module: /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/__init__.py
+HOME: /Users/damian/.local-operator/sessions/520071768802/scratchpad/hi-iso
+config: /Users/damian/.local-operator/sessions/520071768802/scratchpad/hi-iso/config
+scope: en/hi tui.provider_state only; no eligibility patch or global checks
+primary interpreter: /Users/damian/local-operator/.venv/bin/python
+modules: /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/i18n/catalogues.py /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/i18n/messages.py /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/i18n/runtime.py /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/scripts/i18n/check.py
+official check.check_catalogues(): []
+tui.provider_state.logged_in | en: logged in | hi: लॉग इन है | args=0 plural/select=0 NFC=yes | cells en/hi/pseudo: 9 7 13
+  diagnostic pane=31 synthetic-id= openrouter budget= 17 en-fit= logged in hi-fit= लॉग इन है
+  diagnostic pane=31 synthetic-id= ollama budget= 21 en-fit= logged in hi-fit= लॉग इन है
+tui.provider_state.env_key | en: env key | hi: परिवेश चर से कुंजी | args=0 plural/select=0 NFC=yes | cells en/hi/pseudo: 7 12 18
+  diagnostic pane=31 synthetic-id= openrouter budget= 17 en-fit= env key hi-fit= परिवेश चर से कुंजी
+  diagnostic pane=31 synthetic-id= ollama budget= 21 en-fit= env key hi-fit= परिवेश चर से कुंजी
+tui.provider_state.needs_login | en: needs login | hi: लॉग इन ज़रूरी | args=0 plural/select=0 NFC=yes | cells en/hi/pseudo: 11 9 15
+  diagnostic pane=31 synthetic-id= openrouter budget= 17 en-fit= needs login hi-fit= लॉग इन ज़रूरी
+  diagnostic pane=31 synthetic-id= ollama budget= 21 en-fit= needs login hi-fit= लॉग इन ज़रूरी
+tui.provider_state.local_ready | en: configured server | hi: सर्वर कॉन्फ़िगर है | args=0 plural/select=0 NFC=yes | cells en/hi/pseudo: 17 12 18
+  diagnostic pane=31 synthetic-id= openrouter budget= 17 en-fit= configured server hi-fit= सर्वर कॉन्फ़िगर है
+  diagnostic pane=31 synthetic-id= ollama budget= 21 en-fit= configured server hi-fit= सर्वर कॉन्फ़िगर है
+tui.provider_state.local_unconfigured | en: configure server | hi: सर्वर कॉन्फ़िगर करें | args=0 plural/select=0 NFC=yes | cells en/hi/pseudo: 16 13 19
+  diagnostic pane=31 synthetic-id= openrouter budget= 17 en-fit= configure server hi-fit= सर्वर कॉन्फ़िगर करें
+  diagnostic pane=31 synthetic-id= ollama budget= 21 en-fit= configure server hi-fit= सर्वर कॉन्फ़िगर करें
+protected tokens: none in the five EN/hi values; key IDs retained exactly
+negative control rejected missing key: ["hi/tui.provider_state: missing key 'tui.provider_state.logged_in'"]
+negative control rejected added ICU argument: ["hi/tui.provider_state: tui.provider_state.logged_in: arguments (('unexpected', 'simple'),) != en's (): en has 0 argument(s), translation has 1"]
+RESULT: mechanical validation successful; status translated ONLY; independent A/B audit pending
+LIMITS: pure catalogue/ICU/render API and Rich width diagnostics; no settings/native/visual/network-isolation/release claim

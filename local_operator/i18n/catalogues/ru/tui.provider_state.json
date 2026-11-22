@@ -1,0 +1,7 @@
+{
+  "tui.provider_state.logged_in": "вход выполнен",
+  "tui.provider_state.env_key": "ключ из окружения",
+  "tui.provider_state.needs_login": "требуется вход",
+  "tui.provider_state.local_ready": "сервер настроен",
+  "tui.provider_state.local_unconfigured": "настроить сервер"
+}

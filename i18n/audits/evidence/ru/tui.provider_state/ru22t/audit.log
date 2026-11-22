@@ -1,0 +1,45 @@
+UTC: 2026-11-22T11:42:23.242382+00:00
+COMMAND: ['/Users/damian/local-operator/.venv/bin/python', '/Users/damian/local-operator/.worktrees/i18n-provider-state-labels/i18n/audits/evidence/ru/tui.provider_state/ru22t/validator.py.txt']
+ENV: HOME=/Users/damian/.local-operator/sessions/29d4fc18d1a7/scratchpad/ru22t-home LOCAL_OPERATOR_CONFIG_DIR=/Users/damian/.local-operator/sessions/29d4fc18d1a7/scratchpad/ru22t-home/.local-operator PYTHONPATH=/Users/damian/local-operator/.worktrees/i18n-provider-state-labels CMUX_*=removed PYTHONDONTWRITEBYTECODE=1
+module proof: /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/__init__.py
+isolation: HOME/config redirected; CMUX_* absent; no app startup
+ordered five-key/context parity: PASS
+OFFICIAL check_catalogues scoped en/ru tui.provider_state: []
+missing-key negative: ["ru/tui.provider_state: missing key 'tui.provider_state.logged_in'"]
+added-argument negative: ["ru/tui.provider_state: tui.provider_state.logged_in: arguments (('injected', 'simple'),) != en's (): en has 0 argument(s), translation has 1"]
+restored official scoped control: PASS
+render en tui.provider_state.logged_in 'logged in' cells= 9 args=0
+render ru tui.provider_state.logged_in 'вход выполнен' cells= 13 args=0
+pseudo diagnostic tui.provider_state.logged_in '⟦logged in · logged in⟧' cells= 23
+plain Rich illustrative 31-column row en line_cells= [21] lines= ['openrouter  logged in']
+plain Rich illustrative 31-column row ru line_cells= [25] lines= ['openrouter  вход выполнен']
+plain Rich illustrative 31-column row pseudo line_cells= [31, 3] lines= ['openrouter  ⟦logged in · logged', 'in⟧']
+render en tui.provider_state.env_key 'env key' cells= 7 args=0
+render ru tui.provider_state.env_key 'ключ из окружения' cells= 17 args=0
+pseudo diagnostic tui.provider_state.env_key '⟦env key · env key⟧' cells= 19
+plain Rich illustrative 31-column row en line_cells= [19] lines= ['openrouter  env key']
+plain Rich illustrative 31-column row ru line_cells= [29] lines= ['openrouter  ключ из окружения']
+plain Rich illustrative 31-column row pseudo line_cells= [31] lines= ['openrouter  ⟦env key · env key⟧']
+render en tui.provider_state.needs_login 'needs login' cells= 11 args=0
+render ru tui.provider_state.needs_login 'требуется вход' cells= 14 args=0
+pseudo diagnostic tui.provider_state.needs_login '⟦needs login · needs login⟧' cells= 27
+plain Rich illustrative 31-column row en line_cells= [23] lines= ['openrouter  needs login']
+plain Rich illustrative 31-column row ru line_cells= [26] lines= ['openrouter  требуется вход']
+plain Rich illustrative 31-column row pseudo line_cells= [27, 12] lines= ['openrouter  ⟦needs login · ', 'needs login⟧']
+render en tui.provider_state.local_ready 'configured server' cells= 17 args=0
+render ru tui.provider_state.local_ready 'сервер настроен' cells= 15 args=0
+pseudo diagnostic tui.provider_state.local_ready '⟦configured server · configured server⟧' cells= 39
+plain Rich illustrative 31-column row en line_cells= [29] lines= ['openrouter  configured server']
+plain Rich illustrative 31-column row ru line_cells= [27] lines= ['openrouter  сервер настроен']
+plain Rich illustrative 31-column row pseudo line_cells= [31, 20] lines= ['openrouter  ⟦configured server ', '· configured server⟧']
+render en tui.provider_state.local_unconfigured 'configure server' cells= 16 args=0
+render ru tui.provider_state.local_unconfigured 'настроить сервер' cells= 16 args=0
+pseudo diagnostic tui.provider_state.local_unconfigured '⟦configure server · configure server⟧' cells= 37
+plain Rich illustrative 31-column row en line_cells= [28] lines= ['openrouter  configure server']
+plain Rich illustrative 31-column row ru line_cells= [28] lines= ['openrouter  настроить сервер']
+plain Rich illustrative 31-column row pseudo line_cells= [31, 17] lines= ['openrouter  ⟦configure server ·', 'configure server⟧']
+NFC/protected-token/zero-argument/ICU/render checks: PASS
+WIDTH LIMITATION: illustrative plain Rich only; no universal maxCells, no real settings/native geometry, font, no-wrap, integration, eligibility or language audit certification.
+AUTHOR STATUS: translated; independent A/B audits remain required.
+
+EXIT: 0
