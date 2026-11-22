@@ -1300,6 +1300,28 @@ async def standalone_browser_write_gate(request: Request, call_next):
 async def desktop_validation_error(request: Request, error: RequestValidationError):
     # Pydantic includes the rejected INPUT in its default 422 response. SecretStr
     # protects model dumps, not failures before a model was constructed.
+    if request.url.path == "/v1/desktop/attention/seen" and request.method == "POST":
+        # A client needs to know which item blocked the whole receipt batch.
+        # Only include known schema locations: an extra key in `loc`, `input`,
+        # and JSON-decoder context can contain caller data.
+        issues = []
+        for issue in error.errors():
+            location: list[str | int] = []
+            for part in issue["loc"]:
+                if not isinstance(part, int) and part not in (
+                    "body",
+                    "items",
+                    "session_id",
+                    "completion_token",
+                ):
+                    break
+                location.append(part)
+            if issue["type"] == "json_invalid":
+                continue
+            issues.append({"loc": location, "msg": issue["msg"]})
+            break  # One diagnostic suffices; don't amplify a 500-item failure.
+        if issues:
+            return JSONResponse(status_code=422, content={"detail": issues})
     if request.url.path.startswith(
         ("/v1/auth/", "/v1/settings", "/v1/mcp", "/v1/desktop/", "/v1/notification-sounds")
     ) or (desktop_posture().enabled and _legacy_desktop_gated(request.url.path, request.method)):

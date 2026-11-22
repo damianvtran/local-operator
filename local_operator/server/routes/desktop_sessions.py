@@ -135,6 +135,7 @@ from local_operator.server.utils.store_failures import (
 from local_operator.session import open_trace, transcript_index
 from local_operator.session.attached import RuntimeUnresponsiveError
 from local_operator.session.attention import (
+    BULK_RECEIPT_SESSION_ID_PATTERN,
     SUPERSEDED_TOKEN_CODE,
     SupersededCompletionToken,
 )
@@ -5532,7 +5533,7 @@ class SeenItem(Input):
     later, unseen result.
     """
 
-    session_id: Annotated[str, Field(pattern=r"^[a-f0-9]{12}$")]
+    session_id: Annotated[str, Field(pattern=BULK_RECEIPT_SESSION_ID_PATTERN)]
     completion_token: RequestID
 
 
@@ -5540,7 +5541,7 @@ class SeenMany(Input):
     #: 1..500, and the bound is the CATALOGUE's own maximum page
     #: (``GET /v1/desktop/sessions?limit=``, ``le=500``), so a client can always
     #: send every row it holds in one call and never has to chunk a single user
-    #: gesture. The worst-case body is ~30 KB against the 900 KB control-frame
+    #: gesture. The worst-case body is under 60 KB against the 900 KB control-frame
     #: limit.
     items: Annotated[list[SeenItem], Field(min_length=1, max_length=500)]
 
