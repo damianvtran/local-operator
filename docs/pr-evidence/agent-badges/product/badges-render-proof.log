@@ -1,2 +1,0 @@
-operator authority: the anchor's private half is a 0600 FILE, so any process running as this user can sign for the operator — loosening is authorised but NOT presence-gated on this host
-Real OperatorApp captures: 48 frames; all locale pairs text-stable

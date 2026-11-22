@@ -1,1 +1,0 @@
-Post-capture ps observation: zero remaining processes naming the two session-owned App capture scripts. No browser, server or native window was launched. Bounded pytest/checker timeout wrappers retain their reported cleanup qualification (command-status does not certify escaped-descendant cleanup).

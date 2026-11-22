@@ -1,6 +1,0 @@
-Actual normal checker qualification (not a pass):
-- Initial chain: normal generation completed; generate.py --check completed with 201 artifacts byte-identical; subsequent check.py --audit-base e1435564433f23f53a50c6cc4d7ab07060a642f9 did not finish before the tool's combined 180-second bound.
-- Separate normal check.py --audit-base d8d81b6ea98095d982a213cb21513b1fa4742502 --allowance-base d8d81b6ea98095d982a213cb21513b1fa4742502: tool killed it at 120 seconds. Python faulthandler's 45-second observational stack is preserved in badges-product-i18n-qualified.log. It is waiting in subprocess.communicate for ledger.validate_base line 540: git ls-tree -rz <base> -- audit storage.
-- Safe direct control of that exact git ls-tree against the same worktree/base succeeded under a separate 15-second bound and returned 59,825 bytes. The cause of the enclosing Python checker stall is not established; it must not be reported as an unreadable Git base or an admission failure.
-- check.py --catalogues-only passed: 0 problems. This does not substitute for the unfinished base-aware check.
-- No checker/helper, baseline, audit bypass, timeout policy, dependency or system setting was changed. Root must obtain full checker qualification in its supported gate; this private coder did not waive it.

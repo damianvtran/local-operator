@@ -1,5 +1,0 @@
-[run_bounded] memory budget 4042 MiB (auto); sampled owned child group and escaped descendants
-local stall report: ON (900s of no completed test), reporting only. Silence the report with LOCAL_OPERATOR_LOCAL_STALL_SECONDS=0 (a per-test bound survives that).
-..................                                                       [100%]
-18 passed in 12.37s
-[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=5d2a0c7da3a64e31a6791f1245cc0d44 completion=/Users/damian/.local-operator/sessions/b94afe0ff711/scratchpad/run-bounded-runs/5d2a0c7da3a64e31a6791f1245cc0d44.completion.json

@@ -1,4 +1,0 @@
-1:  741a45d8465c = 1:  741a45d8465c feat(i18n): freeze packaged agent badge source copy
-2:  7d03eb5874dd = 2:  7d03eb5874dd feat(i18n): freeze agent badge translation inputs
-3:  e1435564433f = 3:  e1435564433f feat(i18n): admit copy-only agent badge audits
-4:  6561e6241461 = 4:  6561e6241461 fix(i18n): preserve semantic agent facts through locale repaint
