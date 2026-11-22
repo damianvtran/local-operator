@@ -1,0 +1,689 @@
+{
+  "kind": "translation-author-repair-not-independent-audit",
+  "locale": "ru",
+  "namespace": "wire.settings",
+  "session": "c1a5d7b1fa3c",
+  "agent": "translator/settings-major-repair-ru",
+  "model": "openai/gpt-6.1-sol",
+  "model_provenance": "Host model-switch event: temporary fallback from anthropic/claude-opus-5-5 due to provider quota; translation authored after that event. No model change requested by author.",
+  "head": "90009effa833836ce4471e99d90d3b6438de7f60",
+  "scope": "33 accepted major union keys plus 14 direct help neighbors",
+  "key_count": 895,
+  "changed_key_count": 47,
+  "english_sha256_before": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+  "english_sha256_after": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+  "context_sha256_before": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+  "context_sha256_after": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+  "target_sha256_before": "87ac6464c94f359c7ba6a045fe0e8d0ed1297c653d036d47da0aaedf3b90f4f8",
+  "target_sha256_after": "5c50edd1aa20e5755f5704f95835117852dd9e0e39b222ce421bf6c47f003651",
+  "approved_english_envelope_sha256": "c17b1262dc76d312cfa21313bd0d1414e2b4132d9900265119d4c1d8d9c237f6",
+  "approved_russian_envelope_sha256": "5456f858a3d0e6313a94516363026f64bea9275ab84f8ff0337fa2e2c77a0efc",
+  "source_records": [
+    "approval-full-root-adjudication.json",
+    "approval-full-deduplicated-ledger.json",
+    "approval-full-inputs/manifest.json"
+  ],
+  "changes": [
+    {
+      "key": "wire.settings.bash_memory_mode.choice.auto.label",
+      "new_value": "автоматически",
+      "backtranslation": "automatically",
+      "accepted_id": "I18N-WS-E6C2188A81F3",
+      "original_auditor_ids": [
+        "RU-A-M1.01",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 4,
+      "russian_cells": 13,
+      "relative_expansion": 3.25
+    },
+    {
+      "key": "wire.settings.bash_memory_mode.choice.manual.label",
+      "new_value": "вручную",
+      "backtranslation": "manually",
+      "accepted_id": "I18N-WS-802B8268724D",
+      "original_auditor_ids": [
+        "RU-A-M1.02",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 6,
+      "russian_cells": 7,
+      "relative_expansion": 1.167
+    },
+    {
+      "key": "wire.settings.bash_memory_mode.help",
+      "new_value": "В режиме «автоматически» предел рассчитывается по текущему объёму свободной памяти устройства и снижается, когда машина занята. В режиме «вручную» используется число ниже.",
+      "backtranslation": "Automatic mode derives the ceiling from current free memory and lowers it when the machine is busy; manual uses the number below.",
+      "accepted_id": null,
+      "original_auditor_ids": [],
+      "reason": "direct paired help reference consistency",
+      "english_cells": 164,
+      "russian_cells": 171,
+      "relative_expansion": 1.043
+    },
+    {
+      "key": "wire.settings.classification_vendor.choice.auto.label",
+      "new_value": "автоматически",
+      "backtranslation": "automatically",
+      "accepted_id": "I18N-WS-803C522C3F62",
+      "original_auditor_ids": [
+        "RU-A-M1.03",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 4,
+      "russian_cells": 13,
+      "relative_expansion": 3.25
+    },
+    {
+      "key": "wire.settings.classification_vendor.help",
+      "new_value": "Требует включённых рекомендаций. Выберите одно звено каскада; в режиме «автоматически» предпочтение отдаётся Radient.",
+      "backtranslation": "Requires recommendations enabled; choose one cascade leg, with Radient preferred in automatic mode.",
+      "accepted_id": null,
+      "original_auditor_ids": [],
+      "reason": "direct paired help reference consistency",
+      "english_cells": 60,
+      "russian_cells": 117,
+      "relative_expansion": 1.95
+    },
+    {
+      "key": "wire.settings.compaction_strategy.choice.auto.label",
+      "new_value": "автоматически",
+      "backtranslation": "automatically",
+      "accepted_id": "I18N-WS-240C498CA1C1",
+      "original_auditor_ids": [
+        "RU-A-M1.04",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 4,
+      "russian_cells": 13,
+      "relative_expansion": 3.25
+    },
+    {
+      "key": "wire.settings.compaction_strategy.help",
+      "new_value": "Какой механизм выполняет сжатие. В режиме «автоматически» выбор зависит от модели.",
+      "backtranslation": "Compaction mechanism; automatic selection depends on the model.",
+      "accepted_id": null,
+      "original_auditor_ids": [],
+      "reason": "direct paired help reference consistency",
+      "english_cells": 47,
+      "russian_cells": 82,
+      "relative_expansion": 1.745
+    },
+    {
+      "key": "wire.settings.display_nerd_icons.choice.none.label",
+      "new_value": "автоматически",
+      "backtranslation": "automatically",
+      "accepted_id": "I18N-WS-CDE402D4ABB5",
+      "original_auditor_ids": [
+        "RU-A-M1.05",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 4,
+      "russian_cells": 13,
+      "relative_expansion": 3.25
+    },
+    {
+      "key": "wire.settings.display_nerd_icons.help",
+      "new_value": "Расширенные значки в строках инструментов. В режиме «автоматически» используются маркеры терминального эмулятора.",
+      "backtranslation": "Expanded tool-row icons; automatic mode uses terminal-emulator markers.",
+      "accepted_id": null,
+      "original_auditor_ids": [],
+      "reason": "direct paired help reference consistency",
+      "english_cells": 68,
+      "russian_cells": 113,
+      "relative_expansion": 1.662
+    },
+    {
+      "key": "wire.settings.model_effort.choice.unset.label",
+      "new_value": "автоматически",
+      "backtranslation": "automatically",
+      "accepted_id": "I18N-WS-C4D3DE320B13",
+      "original_auditor_ids": [
+        "RU-A-M1.06",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 4,
+      "russian_cells": 13,
+      "relative_expansion": 3.25
+    },
+    {
+      "key": "wire.settings.network_rollout_on_update.choice.auto.label",
+      "new_value": "автоматически",
+      "backtranslation": "automatically",
+      "accepted_id": "I18N-WS-66D2D9CC6848",
+      "original_auditor_ids": [
+        "RU-A-M1.07",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 4,
+      "russian_cells": 13,
+      "relative_expansion": 3.25
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+      "new_value": "нет",
+      "backtranslation": "no",
+      "accepted_id": "I18N-WS-513A71CB406C",
+      "original_auditor_ids": [
+        "RU-A-M1.08",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 5,
+      "russian_cells": 3,
+      "relative_expansion": 0.6
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+      "new_value": "по умолчанию",
+      "backtranslation": "default",
+      "accepted_id": "I18N-WS-32DB6C298E5C",
+      "original_auditor_ids": [
+        "RU-A-M1.09",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 7,
+      "russian_cells": 12,
+      "relative_expansion": 1.714
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.help",
+      "new_value": "«По умолчанию»: предпочтение не отправляется (OpenRouter переходит на другой хост при сбое предпочитаемого). «Нет»: ошибка вместо перехода на хост вне ваших предпочтений.",
+      "backtranslation": "Default sends no preference; OpenRouter falls back when preferred host fails. No means error instead of leaving your host preferences.",
+      "accepted_id": null,
+      "original_auditor_ids": [],
+      "reason": "direct paired help reference consistency",
+      "english_cells": 171,
+      "russian_cells": 170,
+      "relative_expansion": 0.994
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "new_value": "разрешить",
+      "backtranslation": "allow",
+      "accepted_id": "I18N-WS-DD21D2852FC7",
+      "original_auditor_ids": [
+        "RU-A-M1.10",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 5,
+      "russian_cells": 9,
+      "relative_expansion": 1.8
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "new_value": "запретить",
+      "backtranslation": "deny",
+      "accepted_id": "I18N-WS-961F6FF2DA51",
+      "original_auditor_ids": [
+        "RU-A-M1.11",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 4,
+      "russian_cells": 9,
+      "relative_expansion": 2.25
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+      "new_value": "по умолчанию",
+      "backtranslation": "default",
+      "accepted_id": "I18N-WS-EAD73985D2C9",
+      "original_auditor_ids": [
+        "RU-A-M1.12",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 7,
+      "russian_cells": 12,
+      "relative_expansion": 1.714
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.help",
+      "new_value": "«Запретить»: исключить хосты, которые могут обучаться на ваших промптах или хранить их. «По умолчанию»: предпочтение не отправляется (OpenRouter разрешает сбор данных по умолчанию).",
+      "backtranslation": "Deny excludes hosts that train on or retain prompts; default sends no preference, and OpenRouter permits collection by default.",
+      "accepted_id": null,
+      "original_auditor_ids": [],
+      "reason": "direct paired help reference consistency",
+      "english_cells": 124,
+      "russian_cells": 181,
+      "relative_expansion": 1.46
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+      "new_value": "да",
+      "backtranslation": "yes",
+      "accepted_id": "I18N-WS-378BA7328B99",
+      "original_auditor_ids": [
+        "RU-A-M1.13",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 4,
+      "russian_cells": 2,
+      "relative_expansion": 0.5
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+      "new_value": "по умолчанию",
+      "backtranslation": "default",
+      "accepted_id": "I18N-WS-CD06C73F8E78",
+      "original_auditor_ids": [
+        "RU-A-M1.14",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 7,
+      "russian_cells": 12,
+      "relative_expansion": 1.714
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.help",
+      "new_value": "«Да»: использовать только endpoint, текстовый вывод которых разрешено дистиллировать. «По умолчанию»: предпочтение не отправляется.",
+      "backtranslation": "Yes restricts to endpoints whose text output may be distilled; default sends no preference.",
+      "accepted_id": null,
+      "original_auditor_ids": [],
+      "reason": "direct paired help reference consistency",
+      "english_cells": 90,
+      "russian_cells": 131,
+      "relative_expansion": 1.456
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+      "new_value": "да",
+      "backtranslation": "yes",
+      "accepted_id": "I18N-WS-2B7797E9A40D",
+      "original_auditor_ids": [
+        "RU-A-M1.15",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 4,
+      "russian_cells": 2,
+      "relative_expansion": 0.5
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+      "new_value": "по умолчанию",
+      "backtranslation": "default",
+      "accepted_id": "I18N-WS-653D8954B431",
+      "original_auditor_ids": [
+        "RU-A-M1.16",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 7,
+      "russian_cells": 12,
+      "relative_expansion": 1.714
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.help",
+      "new_value": "«Да»: использовать только хосты, которые поддерживают все отправляемые вами параметры (инструменты, структурированный вывод). «По умолчанию»: OpenRouter может молча отбрасывать неподдерживаемые параметры.",
+      "backtranslation": "Yes uses only hosts supporting all sent parameters, including tools and structured output; default allows OpenRouter to silently drop unsupported parameters.",
+      "accepted_id": null,
+      "original_auditor_ids": [],
+      "reason": "direct paired help reference consistency",
+      "english_cells": 149,
+      "russian_cells": 204,
+      "relative_expansion": 1.369
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+      "new_value": "по умолчанию",
+      "backtranslation": "default",
+      "accepted_id": "I18N-WS-8DDA7C4D87CB",
+      "original_auditor_ids": [
+        "RU-A-M1.17",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 7,
+      "russian_cells": 12,
+      "relative_expansion": 1.714
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.help",
+      "new_value": "Как OpenRouter ранжирует хосты для этого вызова. Запрос может уйти не на тот хост, где уже есть кэш ваших промптов (холодный старт в длинных беседах). «По умолчанию»: предпочтение не отправляется.",
+      "backtranslation": "How OpenRouter ranks hosts; routing may leave the warm prompt cache and cold-start long conversations; default sends no preference.",
+      "accepted_id": null,
+      "original_auditor_ids": [],
+      "reason": "direct paired help reference consistency",
+      "english_cells": 177,
+      "russian_cells": 196,
+      "relative_expansion": 1.107
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+      "new_value": "да",
+      "backtranslation": "yes",
+      "accepted_id": "I18N-WS-3DE117B6A717",
+      "original_auditor_ids": [
+        "RU-A-M1.18",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 4,
+      "russian_cells": 2,
+      "relative_expansion": 0.5
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+      "new_value": "по умолчанию",
+      "backtranslation": "default",
+      "accepted_id": "I18N-WS-A73734B5D1A9",
+      "original_auditor_ids": [
+        "RU-A-M1.19",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 7,
+      "russian_cells": 12,
+      "relative_expansion": 1.714
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.help",
+      "new_value": "«Да»: использовать только endpoint, которые не сохраняют данные. «По умолчанию»: предпочтение не отправляется.",
+      "backtranslation": "Yes uses only endpoints that do not retain data; default sends no preference.",
+      "accepted_id": null,
+      "original_auditor_ids": [],
+      "reason": "direct paired help reference consistency",
+      "english_cells": 75,
+      "russian_cells": 110,
+      "relative_expansion": 1.467
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "new_value": "список разрешений",
+      "backtranslation": "allowlist",
+      "accepted_id": "I18N-WS-B7F88E3953BA",
+      "original_auditor_ids": [
+        "RU-A-M1.20",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 9,
+      "russian_cells": 17,
+      "relative_expansion": 1.889
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+      "new_value": "наследовать",
+      "backtranslation": "inherit",
+      "accepted_id": "I18N-WS-3CD94E41B2B7",
+      "original_auditor_ids": [
+        "RU-A-M1.21",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 7,
+      "russian_cells": 11,
+      "relative_expansion": 1.571
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.help",
+      "new_value": "«Наследовать»: командам, запускаемым агентом, доступно ваше окружение (gh, aws, npm сохраняют свои токены). «Список разрешений»: передаются только PATH/HOME/SHELL/TERM/USER/LOGNAME и два списка рядом с этой настройкой, поэтому ключ провайдера, с которым запущена сессия, не попадает в команду, написанную моделью. Настройка читается один раз за сессию: изменение вступит в силу при следующем запуске.",
+      "backtranslation": "Inherit exposes your environment to agent commands, preserving gh/aws/npm tokens. Allowlist passes only the named variables plus the two adjacent lists, protecting the provider key. Read once per session, changes apply next launch.",
+      "accepted_id": null,
+      "original_auditor_ids": [],
+      "reason": "direct paired help reference consistency",
+      "english_cells": 344,
+      "russian_cells": 400,
+      "relative_expansion": 1.163
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+      "new_value": "автоматически",
+      "backtranslation": "automatically",
+      "accepted_id": "I18N-WS-2E0C22F21B6C",
+      "original_auditor_ids": [
+        "RU-A-M1.22",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 4,
+      "russian_cells": 13,
+      "relative_expansion": 3.25
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+      "new_value": "на устройстве",
+      "backtranslation": "on the device",
+      "accepted_id": "I18N-WS-F8A25CCB46D7",
+      "original_auditor_ids": [
+        "RU-A-M1.23",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 6,
+      "russian_cells": 13,
+      "relative_expansion": 2.167
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+      "new_value": "выключено",
+      "backtranslation": "off",
+      "accepted_id": "I18N-WS-B66F879551DE",
+      "original_auditor_ids": [
+        "RU-A-M1.24",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 3,
+      "russian_cells": 9,
+      "relative_expansion": 3.0
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+      "new_value": "у провайдера",
+      "backtranslation": "at the provider",
+      "accepted_id": "I18N-WS-9F37CDCBD6ED",
+      "original_auditor_ids": [
+        "RU-A-M1.25",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 8,
+      "russian_cells": 12,
+      "relative_expansion": 1.5
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.help",
+      "new_value": "Как из диктовки удаляются слова-паразиты и неречевые сигналы. В режиме «автоматически» используется встроенная очистка провайдера, если она доступна, иначе — консервативные правила клиента. Режимы «у провайдера» и «на устройстве» используют только соответствующий механизм; режим «выключено» сохраняет транскрипт дословно. Поле `cleanup` в запросе по-прежнему имеет приоритет.",
+      "backtranslation": "Removes filler words and non-speech cues. Automatic uses provider-native cleanup if available, otherwise conservative client rules. Provider/device modes use their respective mechanisms; off retains verbatim transcript; request cleanup field overrides.",
+      "accepted_id": null,
+      "original_auditor_ids": [],
+      "reason": "direct paired help reference consistency",
+      "english_cells": 293,
+      "russian_cells": 376,
+      "relative_expansion": 1.283
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+      "new_value": "Обычная манера речи.",
+      "backtranslation": "Standard manner of speech.",
+      "accepted_id": "I18N-WS-86C0F950D222",
+      "original_auditor_ids": [
+        "RU-A-M2",
+        "RU-B-M02"
+      ],
+      "reason": "accepted major",
+      "english_cells": 24,
+      "russian_cells": 20,
+      "relative_expansion": 0.833
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.auto.label",
+      "new_value": "автоматически",
+      "backtranslation": "automatically",
+      "accepted_id": "I18N-WS-FA7340FF8D3C",
+      "original_auditor_ids": [
+        "RU-A-M1.26",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 4,
+      "russian_cells": 13,
+      "relative_expansion": 3.25
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.female.label",
+      "new_value": "женский",
+      "backtranslation": "female",
+      "accepted_id": "I18N-WS-C3F93F5552D5",
+      "original_auditor_ids": [
+        "RU-A-M1.27",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 6,
+      "russian_cells": 7,
+      "relative_expansion": 1.167
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.male.label",
+      "new_value": "мужской",
+      "backtranslation": "male",
+      "accepted_id": "I18N-WS-6E07BEFC2F49",
+      "original_auditor_ids": [
+        "RU-A-M1.28",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 4,
+      "russian_cells": 7,
+      "relative_expansion": 1.75
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.help",
+      "new_value": "В режиме «автоматически» голос выбирается для каждого агента; фиксированное значение имеет приоритет над классификатором.",
+      "backtranslation": "Automatic selects the voice per agent; a fixed value overrides the classifier.",
+      "accepted_id": null,
+      "original_auditor_ids": [],
+      "reason": "direct paired help reference consistency",
+      "english_cells": 61,
+      "russian_cells": 121,
+      "relative_expansion": 1.984
+    },
+    {
+      "key": "wire.settings.team_bridge_session.label",
+      "new_value": "Сессия главы аппарата",
+      "backtranslation": "Chief-of-staff session",
+      "accepted_id": "I18N-WS-EED64BE5C06E",
+      "original_auditor_ids": [
+        "RU-A-M3",
+        "RU-B-M03"
+      ],
+      "reason": "accepted major",
+      "english_cells": 11,
+      "russian_cells": 21,
+      "relative_expansion": 1.909
+    },
+    {
+      "key": "wire.settings.web_fetch_render_backend.choice.auto.label",
+      "new_value": "автоматически",
+      "backtranslation": "automatically",
+      "accepted_id": "I18N-WS-7AB27EDC4AA9",
+      "original_auditor_ids": [
+        "RU-A-M1.29",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 4,
+      "russian_cells": 13,
+      "relative_expansion": 3.25
+    },
+    {
+      "key": "wire.settings.web_fetch_render_backend.help",
+      "new_value": "В режиме «автоматически» используется markdownify, если установлен extra [fetch].",
+      "backtranslation": "Automatic uses markdownify if the extra [fetch] is installed.",
+      "accepted_id": null,
+      "original_auditor_ids": [],
+      "reason": "direct paired help reference consistency",
+      "english_cells": 58,
+      "russian_cells": 81,
+      "relative_expansion": 1.397
+    },
+    {
+      "key": "wire.settings.web_search_strategy.choice.ordered.label",
+      "new_value": "по порядку",
+      "backtranslation": "in order",
+      "accepted_id": "I18N-WS-21B6A15BD737",
+      "original_auditor_ids": [
+        "RU-A-M1.30",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 7,
+      "russian_cells": 10,
+      "relative_expansion": 1.429
+    },
+    {
+      "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+      "new_value": "по кругу",
+      "backtranslation": "round robin",
+      "accepted_id": "I18N-WS-3886CD8B7B42",
+      "original_auditor_ids": [
+        "RU-A-M1.31",
+        "RU-B-M01"
+      ],
+      "reason": "accepted major",
+      "english_cells": 11,
+      "russian_cells": 8,
+      "relative_expansion": 0.727
+    }
+  ],
+  "accepted_major_fixed": 33,
+  "remaining_major": [],
+  "rejected": [],
+  "deferred_minor_width": [
+    "Static width risk only, not observed clipping: автоматически=13 cells versus auto=4 and a previously mentioned 10-cell budget. No fixed cap in medium-description context.",
+    "по умолчанию=12 cells; список разрешений=17; Сессия главы аппарата=21. Integration must check actual row layout. Other per-key expansions are recorded; no prose-wide rewrite."
+  ],
+  "terminology": {
+    "automatic": "автоматически, retaining the established approved Automatic approval label register",
+    "boolean_display": "да/нет, not serialized true/false",
+    "default": "по умолчанию",
+    "allowlist": "список разрешений",
+    "client_cleanup": "на устройстве",
+    "provider_cleanup": "у провайдера",
+    "CoS": "глава аппарата, already established in aida description/label; Aida unchanged",
+    "medium_delivery": "Обычная манера речи., ordinary delivery, not a mathematical constant or price",
+    "technical_exceptions": "endpoint and extra kept under ru style-guide Wave-2 kept-Latin list, only in endpoint filtering and installed-extra technical usages. markdownify is a package name; OpenRouter/Radient proper provider names; gh/aws/npm commands and literal environment variables unchanged; cleanup remains the request-field code token."
+  },
+  "mechanical": {
+    "json_key_order_and_count": "PASS 895; no additions/removals",
+    "untouched_bytes": "PASS exact inverse value spans reconstruct original manifest SHA",
+    "icu": "PASS existing pure parser for all 895 values; no application-package import",
+    "placeholders": "PASS message_arguments unchanged for all 895",
+    "cldr_plural_selectors": "PASS unchanged for all 895; no changed key has a plural structure",
+    "negative_controls": "PASS unmatched opening brace and unclosed plural outer brace rejected by existing parser. An initial missing-other probe was accepted: runtime.py:225-251 checks nonempty branches but does not require other at parse time; that probe was not a malformed-brace control and is not claimed rejected.",
+    "verification_setup": "Initial system python lacked rich; switched to existing primary repo .venv/bin/python with no installs. No pytest or full application import.",
+    "nfc": "PASS every changed value",
+    "bidi": "PASS no bidi controls introduced; ru is LTR, Urdu unchanged by this author",
+    "code_marked_tokens": "PASS unchanged exact backtick spans and explicit protocol/command/provider tokens",
+    "pseudo": "NOT RUN: author forbidden generated/native/render work; text expansion recorded as static evidence only"
+  },
+  "invariants": {
+    "head_frozen": "verified current HEAD 90009effa833836ce4471e99d90d3b6438de7f60",
+    "write_footprint": "This author writes only assigned ru catalogue plus this dedicated receipt; own scripts are session scratch. No staging, commits, generated files, code, English, context, audit histories or other locale writes. Other concurrent authors may change their own locale files.",
+    "other_locale_global_byte_stability": "Not claimed: six concurrent disjoint authors expected; own write footprint is confined.",
+    "approval_labels": "Existing спрашивать/автоматически approval labels untouched; only listed 47 exact value spans replaced."
+  },
+  "not_claimed": [
+    "independent semantic audit",
+    "native-speaker clearance",
+    "rendered fit",
+    "browser/native QA",
+    "whole-interface no-English clearance",
+    "shipping approval"
+  ]
+}
