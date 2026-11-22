@@ -878,6 +878,12 @@ _DETAILS_CASES: dict[str, tuple[dict[str, Any] | None, bool]] = {
         {"ok": True, "state": "created", "conversation_id": "bcv_new", "content": "{}"},
         False,
     ),
+    # Renaming is an owner mutation, but its canonical name comes back from
+    # the hub. Do not mistake that inbound text for a content-free receipt.
+    "channel_rename": (
+        {"ok": True, "state": "renamed", "conversation_id": "bcv_new", "content": '{"name":"x"}'},
+        True,
+    ),
     "refusal_owner_changed": (_OWNER_CHANGED, False),
     "refusal_channel_exists": (
         {"ok": False, "code": "channel_exists", "conversation_id": "bcv_1", "error": "exists"},
@@ -1007,6 +1013,7 @@ OP_LATCHES: dict[str, bool] = {
     "directory": False,
     "channels": True,
     "channel_create": False,
+    "channel_rename": True,  # Owner mutation returning hub-controlled canonical text.
     "channel_post": False,
     "channel_history": True,
     "react": True,

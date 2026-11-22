@@ -4899,7 +4899,7 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
         description=(
             "Agent bridge: directory teammates/chiefs; dm person/agent direct/relay, "
             "not 'forward this'; channel_post rooms; send/reply bmsg_ answers only; "
-            "shared_* owner-shared conversations. channel_rename owner-typed only. "
+            "shared_* owner-shared chats. channel_rename owner-typed only. "
             "No approve/deny. "
             "Reply where received. "
             # "teammates use bridge" was dropped (PR #4239, to pay for the
