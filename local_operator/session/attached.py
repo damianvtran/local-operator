@@ -12155,7 +12155,8 @@ class AttachedSession:
 
         def unsubscribe() -> None:
             if handler in self._event_observers:
-                self._event_observers.remove(handler)
+                # Delete an in-memory callback by index, not a filesystem entry.
+                del self._event_observers[self._event_observers.index(handler)]
 
         return unsubscribe
 
