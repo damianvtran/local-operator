@@ -5127,6 +5127,7 @@ class TurnFootBlock(TranscriptBlock):
             ICON_ERROR,
             ICON_SUCCESS,
             format_duration,
+            truncate_cells,
         )
 
         facts = self._facts
@@ -5165,7 +5166,7 @@ class TurnFootBlock(TranscriptBlock):
             text = _fold_t(tui_transcript_fold.foot_actions_no_time(count=facts.count, label=label))
         row = Text(no_wrap=True, overflow="ellipsis")
         row.append(ICON_SUCCESS + " ", style=bindings.style("fold.foot.success_glyph"))
-        row.append(text, style=bindings.style("fold.foot.text"))
+        row.append(truncate_cells(text, max(1, width - 2)), style=bindings.style("fold.foot.text"))
         return row
 
     # -- block contract -------------------------------------------------------
