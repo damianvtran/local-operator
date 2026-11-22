@@ -2888,10 +2888,14 @@ async def browser_owner_status(request: Request, body: BrowserOwnerQuery):
     )
 
 
+_SESSION_PAGE_LIMIT = 500
+_WorkspaceRestID = Annotated[str, Field(pattern=BULK_RECEIPT_SESSION_ID_PATTERN)]
+
+
 @router.get("/v1/desktop/sessions", response_model=CRUDResponse[SessionList])
 async def list_sessions(
     request: Request,
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=100, ge=1, le=_SESSION_PAGE_LIMIT),
     include_archived: bool = Query(default=False),
     # Temporary chats (``features.temporary_chats``): off by default, so an
     # older client never sees one; the UI asks and partitions them into its
@@ -2923,6 +2927,9 @@ async def list_sessions(
     # request's ``include_archived`` still governs which ROWS come back; a client
     # that asks for archived rows gets them and the counts do not move.
     with_counts: bool = Query(default=False),
+    # Only names a subset of the already authorized local page, never expands
+    # membership or starts a feed. Share the page's existing cardinality bound.
+    workspace_rest_id: list[_WorkspaceRestID] = Query(default=[], max_length=_SESSION_PAGE_LIMIT),
 ):
     # REFUSED BEFORE THE STORE IS TOUCHED, so a malformed scope costs no scan and
     # cannot be answered by anything the store says.
@@ -2947,6 +2954,12 @@ async def list_sessions(
         page = await host(request).list(
             limit,
             status_stamps=stamps,
+            workspace_rest_ids=frozenset(workspace_rest_id),
+            workspace_rest_epoch=(
+                engine.epoch
+                if workspace_rest_id and engine is not None and engine.subscribers
+                else None
+            ),
             include_archived=include_archived,
             include_temporary=include_temporary,
             include_peers=include_peers,
