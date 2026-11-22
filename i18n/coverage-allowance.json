@@ -99,6 +99,272 @@
         "tui.transcript_display.unknown",
         "tui.transcript_display.usage"
       ]
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.transcript_fold",
+      "reason": "new English copy in this PR (multi-level tool fold: turn/run/same-tool bars, the By-response foot line, the failed-call jump notice and the fold's keys-card rows); translations are dispatched as the PR's translator pass",
+      "owner": "Ben Tran",
+      "payoff": "2026-11-25",
+      "missing": [
+        "tui.transcript_fold.failed",
+        "tui.transcript_fold.foot_actions",
+        "tui.transcript_fold.foot_actions_no_time",
+        "tui.transcript_fold.foot_failed",
+        "tui.transcript_fold.foot_failed_no_reason",
+        "tui.transcript_fold.legend_all",
+        "tui.transcript_fold.legend_enter",
+        "tui.transcript_fold.legend_failed",
+        "tui.transcript_fold.legend_heading",
+        "tui.transcript_fold.legend_left_right",
+        "tui.transcript_fold.no_failed",
+        "tui.transcript_fold.times",
+        "tui.transcript_fold.turn",
+        "tui.transcript_fold.work"
+      ]
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings.transcript_display",
+      "reason": "new English copy in this PR (transcript layout switch and its /transcript command); translations are dispatched as the PR's translator pass",
+      "owner": "Ben Tran",
+      "payoff": "2026-11-25",
+      "missing": [
+        "wire.settings.transcript_display.choice.by_response.description",
+        "wire.settings.transcript_display.choice.by_response.label",
+        "wire.settings.transcript_display.choice.by_turn.description",
+        "wire.settings.transcript_display.choice.by_turn.label",
+        "wire.settings.transcript_display.help",
+        "wire.settings.transcript_display.label"
+      ]
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.transcript_fold",
+      "reason": "new English copy in this PR (multi-level tool fold: turn/run/same-tool bars, the By-response foot line, the failed-call jump notice and the fold's keys-card rows); translations are dispatched as the PR's translator pass",
+      "owner": "Ben Tran",
+      "payoff": "2026-11-25",
+      "missing": [
+        "tui.transcript_fold.failed",
+        "tui.transcript_fold.foot_actions",
+        "tui.transcript_fold.foot_actions_no_time",
+        "tui.transcript_fold.foot_failed",
+        "tui.transcript_fold.foot_failed_no_reason",
+        "tui.transcript_fold.legend_all",
+        "tui.transcript_fold.legend_enter",
+        "tui.transcript_fold.legend_failed",
+        "tui.transcript_fold.legend_heading",
+        "tui.transcript_fold.legend_left_right",
+        "tui.transcript_fold.no_failed",
+        "tui.transcript_fold.times",
+        "tui.transcript_fold.turn",
+        "tui.transcript_fold.work"
+      ]
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings.transcript_display",
+      "reason": "new English copy in this PR (transcript layout switch and its /transcript command); translations are dispatched as the PR's translator pass",
+      "owner": "Ben Tran",
+      "payoff": "2026-11-25",
+      "missing": [
+        "wire.settings.transcript_display.choice.by_response.description",
+        "wire.settings.transcript_display.choice.by_response.label",
+        "wire.settings.transcript_display.choice.by_turn.description",
+        "wire.settings.transcript_display.choice.by_turn.label",
+        "wire.settings.transcript_display.help",
+        "wire.settings.transcript_display.label"
+      ]
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.transcript_fold",
+      "reason": "new English copy in this PR (multi-level tool fold: turn/run/same-tool bars, the By-response foot line, the failed-call jump notice and the fold's keys-card rows); translations are dispatched as the PR's translator pass",
+      "owner": "Ben Tran",
+      "payoff": "2026-11-25",
+      "missing": [
+        "tui.transcript_fold.failed",
+        "tui.transcript_fold.foot_actions",
+        "tui.transcript_fold.foot_actions_no_time",
+        "tui.transcript_fold.foot_failed",
+        "tui.transcript_fold.foot_failed_no_reason",
+        "tui.transcript_fold.legend_all",
+        "tui.transcript_fold.legend_enter",
+        "tui.transcript_fold.legend_failed",
+        "tui.transcript_fold.legend_heading",
+        "tui.transcript_fold.legend_left_right",
+        "tui.transcript_fold.no_failed",
+        "tui.transcript_fold.times",
+        "tui.transcript_fold.turn",
+        "tui.transcript_fold.work"
+      ]
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings.transcript_display",
+      "reason": "new English copy in this PR (transcript layout switch and its /transcript command); translations are dispatched as the PR's translator pass",
+      "owner": "Ben Tran",
+      "payoff": "2026-11-25",
+      "missing": [
+        "wire.settings.transcript_display.choice.by_response.description",
+        "wire.settings.transcript_display.choice.by_response.label",
+        "wire.settings.transcript_display.choice.by_turn.description",
+        "wire.settings.transcript_display.choice.by_turn.label",
+        "wire.settings.transcript_display.help",
+        "wire.settings.transcript_display.label"
+      ]
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.transcript_fold",
+      "reason": "new English copy in this PR (multi-level tool fold: turn/run/same-tool bars, the By-response foot line, the failed-call jump notice and the fold's keys-card rows); translations are dispatched as the PR's translator pass",
+      "owner": "Ben Tran",
+      "payoff": "2026-11-25",
+      "missing": [
+        "tui.transcript_fold.failed",
+        "tui.transcript_fold.foot_actions",
+        "tui.transcript_fold.foot_actions_no_time",
+        "tui.transcript_fold.foot_failed",
+        "tui.transcript_fold.foot_failed_no_reason",
+        "tui.transcript_fold.legend_all",
+        "tui.transcript_fold.legend_enter",
+        "tui.transcript_fold.legend_failed",
+        "tui.transcript_fold.legend_heading",
+        "tui.transcript_fold.legend_left_right",
+        "tui.transcript_fold.no_failed",
+        "tui.transcript_fold.times",
+        "tui.transcript_fold.turn",
+        "tui.transcript_fold.work"
+      ]
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings.transcript_display",
+      "reason": "new English copy in this PR (transcript layout switch and its /transcript command); translations are dispatched as the PR's translator pass",
+      "owner": "Ben Tran",
+      "payoff": "2026-11-25",
+      "missing": [
+        "wire.settings.transcript_display.choice.by_response.description",
+        "wire.settings.transcript_display.choice.by_response.label",
+        "wire.settings.transcript_display.choice.by_turn.description",
+        "wire.settings.transcript_display.choice.by_turn.label",
+        "wire.settings.transcript_display.help",
+        "wire.settings.transcript_display.label"
+      ]
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.transcript_fold",
+      "reason": "new English copy in this PR (multi-level tool fold: turn/run/same-tool bars, the By-response foot line, the failed-call jump notice and the fold's keys-card rows); translations are dispatched as the PR's translator pass",
+      "owner": "Ben Tran",
+      "payoff": "2026-11-25",
+      "missing": [
+        "tui.transcript_fold.failed",
+        "tui.transcript_fold.foot_actions",
+        "tui.transcript_fold.foot_actions_no_time",
+        "tui.transcript_fold.foot_failed",
+        "tui.transcript_fold.foot_failed_no_reason",
+        "tui.transcript_fold.legend_all",
+        "tui.transcript_fold.legend_enter",
+        "tui.transcript_fold.legend_failed",
+        "tui.transcript_fold.legend_heading",
+        "tui.transcript_fold.legend_left_right",
+        "tui.transcript_fold.no_failed",
+        "tui.transcript_fold.times",
+        "tui.transcript_fold.turn",
+        "tui.transcript_fold.work"
+      ]
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings.transcript_display",
+      "reason": "new English copy in this PR (transcript layout switch and its /transcript command); translations are dispatched as the PR's translator pass",
+      "owner": "Ben Tran",
+      "payoff": "2026-11-25",
+      "missing": [
+        "wire.settings.transcript_display.choice.by_response.description",
+        "wire.settings.transcript_display.choice.by_response.label",
+        "wire.settings.transcript_display.choice.by_turn.description",
+        "wire.settings.transcript_display.choice.by_turn.label",
+        "wire.settings.transcript_display.help",
+        "wire.settings.transcript_display.label"
+      ]
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.transcript_fold",
+      "reason": "new English copy in this PR (multi-level tool fold: turn/run/same-tool bars, the By-response foot line, the failed-call jump notice and the fold's keys-card rows); translations are dispatched as the PR's translator pass",
+      "owner": "Ben Tran",
+      "payoff": "2026-11-25",
+      "missing": [
+        "tui.transcript_fold.failed",
+        "tui.transcript_fold.foot_actions",
+        "tui.transcript_fold.foot_actions_no_time",
+        "tui.transcript_fold.foot_failed",
+        "tui.transcript_fold.foot_failed_no_reason",
+        "tui.transcript_fold.legend_all",
+        "tui.transcript_fold.legend_enter",
+        "tui.transcript_fold.legend_failed",
+        "tui.transcript_fold.legend_heading",
+        "tui.transcript_fold.legend_left_right",
+        "tui.transcript_fold.no_failed",
+        "tui.transcript_fold.times",
+        "tui.transcript_fold.turn",
+        "tui.transcript_fold.work"
+      ]
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings.transcript_display",
+      "reason": "new English copy in this PR (transcript layout switch and its /transcript command); translations are dispatched as the PR's translator pass",
+      "owner": "Ben Tran",
+      "payoff": "2026-11-25",
+      "missing": [
+        "wire.settings.transcript_display.choice.by_response.description",
+        "wire.settings.transcript_display.choice.by_response.label",
+        "wire.settings.transcript_display.choice.by_turn.description",
+        "wire.settings.transcript_display.choice.by_turn.label",
+        "wire.settings.transcript_display.help",
+        "wire.settings.transcript_display.label"
+      ]
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.transcript_fold",
+      "reason": "new English copy in this PR (multi-level tool fold: turn/run/same-tool bars, the By-response foot line, the failed-call jump notice and the fold's keys-card rows); translations are dispatched as the PR's translator pass",
+      "owner": "Ben Tran",
+      "payoff": "2026-11-25",
+      "missing": [
+        "tui.transcript_fold.failed",
+        "tui.transcript_fold.foot_actions",
+        "tui.transcript_fold.foot_actions_no_time",
+        "tui.transcript_fold.foot_failed",
+        "tui.transcript_fold.foot_failed_no_reason",
+        "tui.transcript_fold.legend_all",
+        "tui.transcript_fold.legend_enter",
+        "tui.transcript_fold.legend_failed",
+        "tui.transcript_fold.legend_heading",
+        "tui.transcript_fold.legend_left_right",
+        "tui.transcript_fold.no_failed",
+        "tui.transcript_fold.times",
+        "tui.transcript_fold.turn",
+        "tui.transcript_fold.work"
+      ]
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings.transcript_display",
+      "reason": "new English copy in this PR (transcript layout switch and its /transcript command); translations are dispatched as the PR's translator pass",
+      "owner": "Ben Tran",
+      "payoff": "2026-11-25",
+      "missing": [
+        "wire.settings.transcript_display.choice.by_response.description",
+        "wire.settings.transcript_display.choice.by_response.label",
+        "wire.settings.transcript_display.choice.by_turn.description",
+        "wire.settings.transcript_display.choice.by_turn.label",
+        "wire.settings.transcript_display.help",
+        "wire.settings.transcript_display.label"
+      ]
     }
   ]
 }

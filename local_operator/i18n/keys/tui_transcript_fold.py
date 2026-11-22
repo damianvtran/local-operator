@@ -13,6 +13,46 @@ def failed(*, label: str) -> Msg:
     return Msg("tui.transcript_fold.failed", {"label": label})
 
 
+def foot_actions(*, count: int | float, label: str, time: str) -> Msg:
+    return Msg("tui.transcript_fold.foot_actions", {"count": count, "label": label, "time": time})
+
+
+def foot_actions_no_time(*, count: int | float, label: str) -> Msg:
+    return Msg("tui.transcript_fold.foot_actions_no_time", {"count": count, "label": label})
+
+
+def foot_failed(*, reason: str) -> Msg:
+    return Msg("tui.transcript_fold.foot_failed", {"reason": reason})
+
+
+def foot_failed_no_reason() -> Msg:
+    return Msg("tui.transcript_fold.foot_failed_no_reason", {})
+
+
+def legend_all() -> Msg:
+    return Msg("tui.transcript_fold.legend_all", {})
+
+
+def legend_enter() -> Msg:
+    return Msg("tui.transcript_fold.legend_enter", {})
+
+
+def legend_failed() -> Msg:
+    return Msg("tui.transcript_fold.legend_failed", {})
+
+
+def legend_heading() -> Msg:
+    return Msg("tui.transcript_fold.legend_heading", {})
+
+
+def legend_left_right() -> Msg:
+    return Msg("tui.transcript_fold.legend_left_right", {})
+
+
+def no_failed() -> Msg:
+    return Msg("tui.transcript_fold.no_failed", {})
+
+
 def times(*, label: str) -> Msg:
     return Msg("tui.transcript_fold.times", {"label": label})
 

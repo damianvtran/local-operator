@@ -29,6 +29,7 @@ reads from the SHAPE of each mark, a spanning bar against a single glyph.
 from __future__ import annotations
 
 import os
+import re
 import time
 import unicodedata
 from contextlib import contextmanager
@@ -1112,6 +1113,11 @@ class ExpandableActionBlock(TranscriptBlock):
     SPACING_AIRY = True
     EXPANDED_CLASS: ClassVar[str]
 
+    #: The tool fold's DISPLAY level for this row's left inset; see
+    #: :meth:`set_fold_depth`. Class default 0 = the ledger spine every row drew
+    #: before the fold existed.
+    fold_depth: int = 0
+
     BINDINGS = [
         Binding("enter", "activate", "Expand/collapse", show=False),
         Binding("space", "activate", "Expand/collapse", show=False),
@@ -1244,7 +1250,7 @@ class ExpandableActionBlock(TranscriptBlock):
             # as "the column moved" would rebuild rows no reader can see, on
             # every height-only resize.
             return False
-        return self._name_col(row_body_width(width)) != self._built_name_col
+        return self._name_col(row_body_width(width, self.fold_depth)) != self._built_name_col
 
     def _row_indent(self) -> int:
         """Cells of left inset on this row's summary line AS BUILT.
@@ -1266,7 +1272,22 @@ class ExpandableActionBlock(TranscriptBlock):
         """
         from local_operator.tui.widgets.tool_card import row_indent
 
-        return row_indent(self._built_width)
+        return row_indent(self._built_width, self.fold_depth)
+
+    def set_fold_depth(self, depth: int) -> None:
+        """Take the tool fold's display level, rebuilding only when it moved.
+
+        Owned by :class:`~local_operator.tui.tool_fold.ToolFoldLayer` and set
+        on the WIDGET rather than passed down the build call, because two
+        readers need it — the row builder and the copy gutter — and a value
+        threaded through one of them is a gutter that can disagree with the
+        row it measures. See :func:`~local_operator.tui.widgets.tool_card.
+        row_indent` for what the levels mean.
+        """
+        if depth == self.fold_depth:
+            return
+        self.fold_depth = depth
+        self._refresh_row()
 
     @property
     def expanded(self) -> bool:
@@ -2524,7 +2545,7 @@ class WakeBlock(ExpandableActionBlock):
         # the one a parentless build cannot read, so it bakes the floor. Recorded
         # beside the width because :meth:`_layout_moved` reads the pair to decide
         # whether this row still fits the ledger it just landed in.
-        self._built_name_col = self._name_col(row_body_width(width))
+        self._built_name_col = self._name_col(row_body_width(width, self.fold_depth))
         moved = self._row_count != self._applied_rows
         self._applied_rows = self._row_count
         was_finalized = self._finalized
@@ -3278,7 +3299,7 @@ class PeerMessageBlock(ExpandableActionBlock):
         # the one a parentless build cannot read, so it bakes the floor. Recorded
         # beside the width because :meth:`_layout_moved` reads the pair to decide
         # whether this row still fits the ledger it just landed in.
-        self._built_name_col = self._name_col(row_body_width(width))
+        self._built_name_col = self._name_col(row_body_width(width, self.fold_depth))
         moved = self._row_count != self._applied_rows
         self._applied_rows = self._row_count
         was_finalized = self._finalized
@@ -4214,7 +4235,7 @@ class _SingleRowBarBlock(ExpandableActionBlock):
         if detached:
             return
         self._built_width = width
-        self._built_name_col = self._name_col(row_body_width(width))
+        self._built_name_col = self._name_col(row_body_width(width, self.fold_depth))
         moved = self._row_count != self._applied_rows
         self._applied_rows = self._row_count
         was_finalized = self._finalized
@@ -4493,8 +4514,8 @@ class QuietGroupBlock(_SingleRowBarBlock):
 
         dim = Style(color=theme_mod.semantic_color("dim"))
         muted = Style(color=theme_mod.semantic_color("muted"))
-        indent = row_indent(width)
-        width = row_body_width(width)
+        indent = row_indent(width, self.fold_depth)
+        width = row_body_width(width, self.fold_depth)
 
         icon = tool_icon(self.tool_name)
         label = display_name(self.tool_name)
@@ -4588,10 +4609,21 @@ class FoldBarBlock(_SingleRowBarBlock):
     KEYS. ``enter``/``space`` toggle (inherited), ``up``/``down`` walk the
     visible ledger (inherited, and the view asks this layer for the order),
     ``left`` closes or steps OUT to the parent bar, ``right`` opens or steps INTO
-    the first child. The printable ``f``/``F``/``+``/``-`` keys are deliberately
-    NOT bound here or anywhere else yet (slice 5): a printable binding on a
-    focused row is excluded from the composer passthrough, which would swallow
-    the first letter of a sentence typed while a bar had focus.
+    the first child, ``f``/``F`` jump to the next/previous failed call (opening
+    every bar over it and focusing the call), and ``+``/``-`` open every level
+    of the focused turn or put it back to its defaults.
+
+    THE PRINTABLE KEYS ARE CLAIMED HERE AND NOWHERE ELSE. A printable binding on
+    a focused row is excluded from the composer passthrough
+    (:meth:`ExpandableActionBlock.on_key`), so while a FOLD BAR holds focus the
+    characters ``f``, ``F``, ``+`` and ``-`` run these actions instead of typing.
+    That is the design's deliberate exception — a reader standing on a bar is
+    navigating the ledger, not writing — and it is scoped to this class: a
+    ToolCard binds none of them, so typing a sentence that starts with ``f`` or
+    ``+`` on a focused TOOL row still lands in the composer. A future printable
+    binding anywhere in this hierarchy must make the same choice consciously.
+    Escape never closes a fold (there is no binding for it): it still stops the
+    agent or leaves a mode, which is the one meaning it has everywhere else.
     """
 
     EXPANDED_CLASS = "fold-bar-expanded"
@@ -4599,6 +4631,10 @@ class FoldBarBlock(_SingleRowBarBlock):
     BINDINGS = [
         Binding("left", "fold_out", "Close, or out to the parent", show=False),
         Binding("right", "fold_in", "Open, or into the first child", show=False),
+        Binding("f", "jump_failed", "Next failed call", show=False),
+        Binding("F", "jump_failed_previous", "Previous failed call", show=False),
+        Binding("plus", "expand_turn", "Open this turn", show=False),
+        Binding("minus", "collapse_turn", "Back to defaults", show=False),
     ]
 
     def __init__(self, key: str, layer: "ToolFoldLayer", *, fold_width: int = 0) -> None:
@@ -4608,6 +4644,12 @@ class FoldBarBlock(_SingleRowBarBlock):
         #: it through ``row_indent``; today it only orders sibling bars mounted
         #: at one anchor (a turn bar before the run bar inside it).
         self.depth = 0
+        #: Every fold bar draws at the fold's one bar column: two cells deeper
+        #: than prose, the same inset a plain tool row takes. A bar inside an
+        #: open bar does NOT nest further — the design's grid has two columns
+        #: (bars and steps; rows revealed under a bar), not a ruler, and a run
+        #: bar stepping in beside its turn bar read as a second kind of row.
+        self.fold_depth = 1
         self._layer = layer
         #: ``turn`` | ``run`` | ``sub`` — the only thing that changes the row's
         #: grammar. The name is resolved per BUILD from this token, so a live
@@ -4712,6 +4754,22 @@ class FoldBarBlock(_SingleRowBarBlock):
         if child is not None:
             child.focus()
 
+    def action_jump_failed(self) -> None:
+        """``f``: the next failed call after this bar, opening the levels over it."""
+        self._layer.jump_failed(1)
+
+    def action_jump_failed_previous(self) -> None:
+        """``F``: the previous failed call, opening the levels over it."""
+        self._layer.jump_failed(-1)
+
+    def action_expand_turn(self) -> None:
+        """``+``: open every bar of the turn this bar belongs to."""
+        self._layer.set_turn_open(self, True)
+
+    def action_collapse_turn(self) -> None:
+        """``-``: drop this turn's explicit choices — its defaults come back."""
+        self._layer.set_turn_open(self, False)
+
     def on_mount(self) -> None:
         """Start the clock for a bar mounted already reporting a live call.
 
@@ -4762,7 +4820,10 @@ class FoldBarBlock(_SingleRowBarBlock):
             if facts.failed:
                 clauses.append(Clause(" · ", "dim"))
                 clauses.append(
-                    Clause(self._failed_text(facts.failed), "danger" if self._noanswer else "muted")
+                    Clause(
+                        self._failed_text(facts.failed),
+                        "danger" if self._noanswer else "failed_muted",
+                    )
                 )
             return tuple(clauses)
 
@@ -4784,13 +4845,22 @@ class FoldBarBlock(_SingleRowBarBlock):
         ``localized_display`` projects against, which is the same treatment the
         settings registry gives copy with no per-value provenance.
         """
+        from local_operator.tui import bindings
         from local_operator.tui.widgets.tool_card import truncate_cells
 
+        # Clause role -> colour-table element. The tally has its own element in
+        # each of its two states; everything else maps by the ink it asks for.
+        elements = {
+            "muted": "fold.bar.summary",
+            "failed_muted": "fold.bar.failed_answered",
+            "dim": "fold.bar.time",
+            "danger": "fold.bar.failed_dead",
+        }
         remaining = budget
         for clause in clauses:
             if remaining <= 0:
                 return
-            style = Style(color=theme_mod.semantic_color(clause.role))
+            style = bindings.style(elements[clause.role])
             text = clause.text
             if cell_len(text) <= remaining:
                 row.append(localized_display(text).plain, style=style)
@@ -4803,6 +4873,7 @@ class FoldBarBlock(_SingleRowBarBlock):
 
     def _right_segment(self, width: int) -> tuple[str, Style]:
         """The right-aligned cell: the live reading, else the summed clock."""
+        from local_operator.tui import bindings
         from local_operator.tui.glyphs import display_name
         from local_operator.tui.widgets.tool_card import (
             DURATION_COL,
@@ -4811,7 +4882,7 @@ class FoldBarBlock(_SingleRowBarBlock):
             truncate_cells,
         )
 
-        dim = Style(color=theme_mod.semantic_color("dim"))
+        dim = bindings.style("fold.bar.time")
         if self._live_card is not None:
             elapsed = self._live_card.duration_s
             clock = format_duration(elapsed) if elapsed is not None else ""
@@ -4821,7 +4892,7 @@ class FoldBarBlock(_SingleRowBarBlock):
             live = f"{ICON_PARTIAL} {truncate_cells(label, cap)}"
             if clock:
                 live = f"{live} {clock}"
-            return live, Style(color=theme_mod.semantic_color("accent"))
+            return live, bindings.style("fold.bar.live")
         facts = self._facts
         if facts is not None and facts.duration_s is not None:
             return format_duration(facts.duration_s).rjust(DURATION_COL), dim
@@ -4829,6 +4900,7 @@ class FoldBarBlock(_SingleRowBarBlock):
 
     def _build_row(self, width: int) -> Text:
         """The single summary row — the one-row guarantee lives here."""
+        from local_operator.tui import bindings
         from local_operator.tui.glyphs import FOLD_CLOSED_GLYPH, FOLD_OPEN_GLYPH
         from local_operator.tui.widgets.tool_card import (
             _SUMMARY_FLOOR,
@@ -4839,11 +4911,11 @@ class FoldBarBlock(_SingleRowBarBlock):
             truncate_cells,
         )
 
-        dim = Style(color=theme_mod.semantic_color("dim"))
-        muted = Style(color=theme_mod.semantic_color("muted"))
+        dim = bindings.style("fold.bar.glyph")
+        muted = bindings.style("fold.bar.name")
 
-        indent = row_indent(width)
-        width = row_body_width(width)
+        indent = row_indent(width, self.fold_depth)
+        width = row_body_width(width, self.fold_depth)
         glyph = FOLD_OPEN_GLYPH if self._expanded else FOLD_CLOSED_GLYPH
         label = self._row_name()
         right_text, right_style = self._right_segment(width)
@@ -4921,6 +4993,194 @@ class FoldBarBlock(_SingleRowBarBlock):
         if self._clock is not None:
             self._clock.stop()
             self._clock = None
+
+
+#: The notice head a failure reason arrives behind (``Incident.render``) and the
+#: trailer addressed to the MODEL, not the reader. The foot line strips both in
+#: its own rendering; the stored notice row keeps them verbatim (it is also the
+#: row the model is shown, and rewriting history for a layout is not a layout's
+#: job).
+_TURN_FAILURE_HEAD = re.compile(r"\[session incident[^\]]*\]\s*")
+_TURN_FAILURE_TRAILERS = (
+    "This is why the previous turn ended.",
+    "Take it into account before repeating",
+)
+
+
+def clean_turn_failure(text: str) -> str:
+    """The reason a dead turn gives, as the By-response foot shows it.
+
+    One line, no incident head, no model-facing trailer. The notice is a
+    multi-line block written for a reader who has room for it; the foot is one
+    step's closing row, so it states WHY in the shortest honest form and lets
+    the wrap do the rest. Returns ``""`` when the notice carried nothing beyond
+    its own head — the foot then says just ``turn failed`` rather than a
+    dangling separator.
+    """
+    flat = " ".join(line.strip() for line in text.splitlines() if line.strip())
+    flat = _TURN_FAILURE_HEAD.sub("", flat)
+    for marker in _TURN_FAILURE_TRAILERS:
+        index = flat.find(marker)
+        if index >= 0:
+            flat = flat[:index]
+    lowered = flat.lower()
+    if lowered.startswith("turn failed"):
+        flat = flat[len("turn failed") :].lstrip(" \u00b7:-\u2014")
+    return flat.strip()
+
+
+class TurnFootBlock(TranscriptBlock):
+    """The By-response foot line: what one settled turn's work amounted to.
+
+    BY RESPONSE ONLY, and that is a layout fact rather than a setting of its
+    own: in By turn the turn bar already closes the turn with its count and
+    clock, and a second summary under the answer would say the same thing in a
+    second place. The layer mounts this block only for ``by-response`` turns
+    that had actions and have SETTLED — a live turn's foot would report a
+    number still moving under a reader who is watching it grow.
+
+    TWO STATES, one grammar: ``✓ <N actions> · <clock>`` in the success ink,
+    or ``✗ turn failed · <reason>`` in danger. The failure form WRAPS (a
+    provider error is a sentence, not a label) with a four-cell hanging indent;
+    it never truncates, because the reason is the whole value of the row. The
+    reason is cleaned for display only (see :func:`clean_turn_failure`): the
+    stored notice keeps its incident head and its model-facing trailer.
+
+    CHROME, like a bar: a drag over it copies nothing, and it is not focusable —
+    there is nothing to act on. Its facts are the WHOLE turn's
+    (:attr:`tool_outline.Turn.facts`), so it agrees with the turn bar's tally in
+    By turn rather than recounting only what the fold happened to cover.
+    """
+
+    SPACING_KIND = "foot"
+
+    #: Cells a wrapped failure's continuation rows hang in by, matching the
+    #: prototype's ``wrap(txt, W - 4)`` + four-space continuation indent.
+    WRAP_INDENT = 4
+
+    def __init__(self, key: str) -> None:
+        super().__init__()
+        self.foot_key = key
+        self._facts: ToolFacts | None = None
+        self._died = False
+        self._reason = ""
+        self._row_count = 1
+        self._applied_rows = -1
+        self._built_width = -1
+
+    # -- the layer's vocabulary ------------------------------------------------
+
+    def restate(self, *, facts: ToolFacts, died: bool, reason: str) -> None:
+        """Take the layer's latest derivation; rebuild only what moved."""
+        if self._facts == facts and self._died == died and self._reason == reason:
+            return
+        self._facts = facts
+        self._died = died
+        self._reason = reason
+        self._refresh_row()
+
+    def on_resize(self, event: object) -> None:
+        """Re-fit at the new width — the wrap baked the old one in."""
+        self._refresh_row()
+
+    def retheme(self) -> None:
+        """Repaint in the new ramp: the ink is resolved at build time."""
+        self._refresh_row()
+
+    def _refresh_row(self, width: int | None = None) -> None:
+        """Rebuild and apply the foot at its own width (the bar's ladder)."""
+        from local_operator.tui.widgets.tool_card import FALLBACK_WIDTH
+
+        if width is not None and width > 0 and width == self._built_width:
+            return
+        width = self.fit_width(width)
+        detached = False
+        if width <= 0:
+            try:
+                width = self.app.console.width
+            except Exception:
+                width = FALLBACK_WIDTH
+                detached = True
+        content = self._build_content(width)
+        self._row_count = max(1, len(content.plain.splitlines()))
+        if detached:
+            return
+        self._built_width = width
+        moved = self._row_count != self._applied_rows
+        self._applied_rows = self._row_count
+        was_finalized = self._finalized
+        self._finalized = False
+        try:
+            self.set_content(content, layout=moved)
+            # Pinned, for the reason `AssistantBlock._apply_rows` records: a
+            # block that authors its own rows must not be MEASURED, because the
+            # measurement is cached on width alone and the first one is taken of
+            # the fallback build.
+            self.styles.height = self._row_count
+        finally:
+            self._finalized = was_finalized
+
+    def _build_content(self, width: int) -> Text:
+        """The foot: one success row, or the wrapped failure sentence."""
+        from local_operator.tui import bindings
+        from local_operator.tui.widgets.tool_card import (
+            ICON_ERROR,
+            ICON_SUCCESS,
+            format_duration,
+        )
+
+        facts = self._facts
+        if facts is None:
+            return Text("")
+
+        if self._died:
+            reason = clean_turn_failure(self._reason)
+            if reason:
+                line = _fold_t(tui_transcript_fold.foot_failed(reason=reason))
+            else:
+                line = _fold_t(tui_transcript_fold.foot_failed_no_reason())
+            # The glyph is glued to the first row only; the wrap measures the
+            # sentence without it, then the hanging indent carries every
+            # continuation — a one-cell-first-column difference would read as a
+            # second row of the step rather than the same sentence continuing.
+            body = f"{ICON_ERROR} {line}"
+            rows = wrap_cells(body, max(1, width))
+            out = Text(no_wrap=True, overflow="ellipsis")
+            for index, row_text in enumerate(rows):
+                if index:
+                    out.append("\n")
+                    out.append(" " * self.WRAP_INDENT, style=bindings.style("fold.foot.failure"))
+                    row_text = row_text.lstrip()
+                out.append(row_text, style=bindings.style("fold.foot.failure"))
+            return out
+
+        label = format_number(facts.count, active_locale())
+        if facts.duration_s is not None:
+            text = _fold_t(
+                tui_transcript_fold.foot_actions(
+                    count=facts.count, label=label, time=format_duration(facts.duration_s)
+                )
+            )
+        else:
+            text = _fold_t(tui_transcript_fold.foot_actions_no_time(count=facts.count, label=label))
+        row = Text(no_wrap=True, overflow="ellipsis")
+        row.append(ICON_SUCCESS + " ", style=bindings.style("fold.foot.success_glyph"))
+        row.append(text, style=bindings.style("fold.foot.text"))
+        return row
+
+    # -- block contract -------------------------------------------------------
+
+    def copy_row_is_chrome(self, index: int) -> bool:
+        """The foot is app furniture; the rows it counts carry their own copy."""
+        return True
+
+    def copy_gutter(self, index: int) -> int:
+        """Nothing to strip: a chrome row is never copied."""
+        return 0
+
+    def spans_multiple_rows(self) -> bool:
+        """True only for a wrapped failure, which the gap rule must treat as tall."""
+        return self._row_count > 1
 
 
 #: The predecessor families an owned auxiliary chain may pass through: the
@@ -7477,8 +7737,46 @@ class WorkingBlock(TranscriptBlock):
             self._timer = None
 
 
+def _is_step_row(block: "TranscriptBlock") -> bool:
+    """Is this row part of a By-response STEP — folded work, or the remark that led to it?
+
+    The step is the unit the layout draws flush: a remark, the bars over the
+    calls it announced, the rows revealed under them, and the foot line that
+    closes the turn. Every member is flush to the one above it — the blank rows
+    live BETWEEN steps, after the prompt and before the answer. A row is a
+    member by what it IS, not by where it sits:
+
+    * a fold bar (:class:`FoldBarBlock`) or the foot (:class:`TurnFootBlock`);
+    * any ledger row the fold indented (``fold_depth > 0``) — a covered tool
+      row, or one revealed under an open bar;
+    * mid-turn narration, read through the block's own classification
+      (``is_narration``) so the answer five lines down can never be caught by
+      position. ``AssistantBlock`` is imported lazily in this module (it is a
+      cycle), so the question is duck-typed rather than an isinstance.
+    """
+    if isinstance(block, (FoldBarBlock, TurnFootBlock)):
+        return True
+    if getattr(block, "fold_depth", 0) > 0:
+        return True
+    narration = getattr(block, "is_narration", None)
+    return bool(narration()) if callable(narration) else False
+
+
+def _is_final_answer(block: "TranscriptBlock") -> bool:
+    """The settled non-narration assistant row: the turn's one answer."""
+    return (
+        block.SPACING_KIND == "assistant"
+        and bool(getattr(block, "_settled", False))
+        and not bool(getattr(block, "is_narration", lambda: False)())
+    )
+
+
 def needs_gap_above(
-    previous: "TranscriptBlock | None", block: "TranscriptBlock", *, splash_above: bool = False
+    previous: "TranscriptBlock | None",
+    block: "TranscriptBlock",
+    *,
+    splash_above: bool = False,
+    by_response: bool = False,
 ) -> bool:
     """Whether ``block`` opens with one blank row given what preceded it.
 
@@ -7504,15 +7802,40 @@ def needs_gap_above(
       is a list, not a stack of paragraphs
     - same kind, previous was taller → a gap; multi-row output needs air or
       the next block reads as its continuation
+
+    ``by_response`` switches the By-response grammar ON, and it runs FIRST
+    because it inverts the default rather than refining it: the layout is
+    STEPS, and every step is flush inside itself (see :func:`_is_step_row`).
+    Two gaps survive, and only two: one blank row after the prompt that opens
+    a turn, and one before the answer that closes it. That is Ben's "no blank
+    rows between steps" — the adaptive air between two tool rows is exactly
+    the space the compact layout exists to reclaim.
     """
     if previous is None:
         return splash_above
+    if by_response:
+        if block.SPACING_LEAD:
+            return True  # the prompt brackets its turn on both sides
+        if _is_final_answer(block):
+            return True  # the answer is the outcome, not another step
+        if previous.SPACING_KIND == "user":
+            return True  # one blank row after the prompt
+        if _is_step_row(block) or _is_step_row(previous):
+            return False
     if previous.SPACING_TRANSIENT:
         return False
     if block.SPACING_TRANSIENT:
         return True
     if block.SPACING_LEAD:
         return True
+    # A BAR HUGS WHAT IT REVEALS. Opening a fold puts the bar immediately above
+    # its first row, and that row is the bar's own body rather than a new
+    # action: the airy rule's "each row is a separate action" does not apply
+    # across the bar/row seam, and a blank row there would make every opened
+    # fold start with a gap the closed state never showed. The rows BELOW it
+    # keep their own pitch — the seam the spacing test pins.
+    if isinstance(previous, (FoldBarBlock, TurnFootBlock)):
+        return False
     if previous.SPACING_KIND != block.SPACING_KIND:
         return True
     if block.SPACING_AIRY:
@@ -7975,6 +8298,21 @@ class TranscriptView(ScrollableContainer):
     def display_mode(self) -> str:
         """The layout mode in force: ``by-turn`` (default) or ``by-response``."""
         return self._display_mode
+
+    def notice(self, text: str, kind: str = "info") -> None:
+        """One transient notice row, via the app's one notice mechanism.
+
+        The tool fold needs a sentence when a key finds nothing to jump to
+        (``No failed calls in this turn``), and a notice belongs to the APP's
+        ledger policy — it is the same row every other notice paints. The layer
+        is TUI-local and has no app import of its own, so the seam is here; a
+        detached view (a unit-built transcript with no OperatorApp) has nowhere
+        to put a notice and does nothing, which is the honest answer rather than
+        a second notice stack.
+        """
+        show = getattr(self.app, "_notice", None)
+        if callable(show):
+            show(text, kind)
 
     def prepare_owned_head_page(
         self, blocks: list[TranscriptBlock], index: int, *, head_cut: bool
@@ -9161,8 +9499,42 @@ class TranscriptView(ScrollableContainer):
 
     def _apply_gap(self, previous: TranscriptBlock | None, block: TranscriptBlock) -> None:
         block.set_class(
-            needs_gap_above(previous, block, splash_above=self._empty_state_visible()), GAP_CLASS
+            needs_gap_above(
+                previous,
+                block,
+                splash_above=self._empty_state_visible(),
+                by_response=self._display_mode == "by-response",
+            ),
+            GAP_CLASS,
         )
+
+    def reapply_gaps(self) -> None:
+        """Re-decide every visible block's gap, in the order the reader sees.
+
+        The append-time rule decides a block against the block above it when it
+        arrives, which is right while the order (and the mode) never changes.
+        Two changes move that ground under mounted rows: a LAYOUT SWITCH turns
+        the By-response step grammar on or off for a whole transcript, and a
+        fold BAR mounts (or unmounts) a row the ledger's ``_blocks`` never held.
+        Both make a one-shot decision stale for rows nobody re-appended, so both
+        call here once instead of trying to reach the affected rows one at a
+        time — the walk is O(children) on an operation the reader triggered, not
+        a per-frame cost.
+
+        The order is the CHILD order, bars included, because that is what the
+        compositor paints: asking ``_blocks`` (which holds source rows only)
+        would apply the gap for a bar's neighbour to the row the bar stands
+        OVER, and the reader would see a blank line under a bar that the
+        transcript believes it did not draw.
+        """
+        previous: TranscriptBlock | None = None
+        for child in self.children:
+            if not isinstance(child, TranscriptBlock):
+                continue
+            if not child.display:
+                continue
+            self._apply_gap(previous, child)
+            previous = child
 
     def _resolve_empty_state(self) -> Widget | None:
         """The empty-state view above the blocks, or None. Cached.

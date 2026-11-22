@@ -1,4 +1,71 @@
 {
+  "tui.transcript_fold.failed": {
+    "note": "The failure tally on a fold bar: how many of the calls the bar hides failed. `{label}` is the rendered count (raw decimal in English, format_number elsewhere); the cross is part of the value and must stay, because colour is never the only carrier. Reads at a glance on one row.",
+    "maxCells": 16,
+    "role": "fold bar failure tally",
+    "tone": "terse advisory"
+  },
+  "tui.transcript_fold.foot_actions": {
+    "note": "The By-response foot line that closes a turn which succeeded: how many tool actions it ran and how long the calls took in total. `{count}` is the plural selector; `{label}` is the rendered count as a string (use it, not {count}, in the text); `{time}` is already formatted (`12s`, `1m05s`) and must stay verbatim. Never a sentence — one closing line under the answer.",
+    "role": "turn foot line",
+    "tone": "terse receipt"
+  },
+  "tui.transcript_fold.foot_actions_no_time": {
+    "note": "The By-response foot line for a successful turn whose call durations were not recorded. Same shape as the timed variant minus the clock; never invent a time.",
+    "role": "turn foot line",
+    "tone": "terse receipt"
+  },
+  "tui.transcript_fold.foot_failed": {
+    "note": "The By-response foot line that closes a turn which FAILED. `{reason}` is the failure sentence with the `[session incident]` head and the model-facing instruction already stripped; it may be long and the row wraps, so do not shorten it. The cross glyph is drawn before this text by the widget and is not part of the value.",
+    "role": "turn foot line (failure)",
+    "tone": "plain diagnosis"
+  },
+  "tui.transcript_fold.foot_failed_no_reason": {
+    "note": "The By-response failure foot when the failure notice carried no reason beyond its own head. States that the turn failed and stops — never a dangling separator.",
+    "role": "turn foot line (failure, no detail)",
+    "tone": "terse"
+  },
+  "tui.transcript_fold.legend_all": {
+    "note": "Keys-card row for the +/- keys on a focused fold bar: plus opens every fold level of the turn the bar belongs to, minus returns that turn to its default open/closed states. ASCII + and - are the key names; keep them.",
+    "maxCells": 48,
+    "role": "legend description",
+    "tone": "terse instruction"
+  },
+  "tui.transcript_fold.legend_enter": {
+    "note": "Keys-card row: enter or space toggles the fold bar the keyboard is on. Never a sentence with a period.",
+    "maxCells": 40,
+    "role": "legend description",
+    "tone": "terse instruction"
+  },
+  "tui.transcript_fold.legend_failed": {
+    "note": "Keys-card row: f jumps to the next failed tool call, F to the previous one; both open the bars hiding it. `f/F` are literal key names.",
+    "maxCells": 48,
+    "role": "legend description",
+    "tone": "terse instruction"
+  },
+  "tui.transcript_fold.legend_heading": {
+    "note": "Section heading in the keys card for keys that only work while a fold bar in the transcript has focus. Lower case, like the other section headings.",
+    "maxCells": 24,
+    "role": "legend section heading",
+    "tone": "terse label"
+  },
+  "tui.transcript_fold.legend_left_right": {
+    "note": "Keys-card row: left closes the focused fold bar or steps out to its parent when already closed; right opens it or steps into its first child when already open. Keep both directions in one row.",
+    "maxCells": 52,
+    "role": "legend description",
+    "tone": "terse instruction"
+  },
+  "tui.transcript_fold.no_failed": {
+    "note": "A transient notice shown when the reader presses f/F on a fold bar and NO tool call in the transcript failed. Sentence case, no period needed; it is a status line, not an error.",
+    "role": "notice",
+    "tone": "plain"
+  },
+  "tui.transcript_fold.times": {
+    "note": "How many consecutive calls of ONE tool a same-tool sub-bar covers, e.g. `×16`. `{label}` is the rendered count; the multiplication sign is part of the value and must stay. Never a sentence.",
+    "maxCells": 8,
+    "role": "fold bar sub-group count",
+    "tone": "terse count"
+  },
   "tui.transcript_fold.turn": {
     "note": "The name column of the bar that folds a whole settled turn down to its answer (By turn). Lower case, one word: it sits in the ledger's shared name column beside rows like `bash`.",
     "role": "fold bar name",
@@ -8,17 +75,5 @@
     "note": "The name column of the bar that folds a run of three or more back-to-back tool calls. Lower case, one word; it names the WORK, not any one tool, because the summary beside it lists the tools.",
     "role": "fold bar name",
     "tone": "terse ledger label"
-  },
-  "tui.transcript_fold.failed": {
-    "note": "The failure tally on a fold bar: how many of the calls the bar hides failed. `{label}` is the rendered count (raw decimal in English, format_number elsewhere); the cross is part of the value and must stay, because colour is never the only carrier. Reads at a glance on one row.",
-    "maxCells": 16,
-    "role": "fold bar failure tally",
-    "tone": "terse advisory"
-  },
-  "tui.transcript_fold.times": {
-    "note": "How many consecutive calls of ONE tool a same-tool sub-bar covers, e.g. `×16`. `{label}` is the rendered count; the multiplication sign is part of the value and must stay. Never a sentence.",
-    "maxCells": 8,
-    "role": "fold bar sub-group count",
-    "tone": "terse count"
   }
 }

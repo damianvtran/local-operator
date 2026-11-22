@@ -99,8 +99,11 @@ KIND_WORDS: dict[str, str] = {
 }
 
 #: The ink a summary clause asks for. ``danger`` marks a failure count only on
-#: a turn that died; on a turn that answered, failures are history, not alarm.
-SegmentRole = Literal["muted", "dim", "danger"]
+#: a turn that died; on a turn that answered, failures are history, not alarm —
+#: ``failed_muted`` is that quieter role, kept distinct from ``muted`` so the
+#: colour table can name the tally's own element (and a theme can ink it
+#: differently from the kinds it sits beside).
+SegmentRole = Literal["muted", "failed_muted", "dim", "danger"]
 
 
 class Clause(NamedTuple):
@@ -324,7 +327,7 @@ def summary_clauses(
         if facts.failed:
             clauses.append(Clause(" · ", "dim"))
             tally = failed(facts.failed) if failed is not None else f"✗ {facts.failed} failed"
-            clauses.append(Clause(tally, "danger" if noanswer else "muted"))
+            clauses.append(Clause(tally, "danger" if noanswer else "failed_muted"))
         return clauses
 
     for shown in range(min(MAX_SUMMARY_KINDS, len(names)), -1, -1):

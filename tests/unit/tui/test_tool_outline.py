@@ -450,8 +450,9 @@ def test_summary_flags_failure_ink_only_when_the_turn_died() -> None:
     roles = {clause.text: clause.role for clause in summary_clauses(facts, 40, False)}
     dead = {clause.text: clause.role for clause in summary_clauses(facts, 40, True)}
 
-    assert roles["✗ 1 failed"] == "muted"
+    assert roles["✗ 1 failed"] == "failed_muted"
     assert dead["✗ 1 failed"] == "danger"
     assert all(
-        clause.role in {"muted", "dim", "danger"} for clause in summary_clauses(facts, 40, True)
+        clause.role in {"muted", "failed_muted", "dim", "danger"}
+        for clause in summary_clauses(facts, 40, True)
     )

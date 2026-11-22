@@ -543,7 +543,7 @@ ROW_INDENT = 1
 ROW_INDENT_MIN_WIDTH = 30
 
 
-def row_indent(width: int) -> int:
+def row_indent(width: int, depth: int = 0) -> int:
     """Cells of left inset a ledger row draws at ``width`` — the ONE derivation.
 
     Called by every ledger row builder (`ToolCard`, and the wake and peer rows
@@ -568,11 +568,33 @@ def row_indent(width: int) -> int:
     Those are the same number on every applied row — `_refresh_row` sets
     `_built_width` from the width it hands `_build_row` — and the only detached
     path returns before either.
+
+    ``depth`` is the tool fold's DISPLAY level, owned by
+    :class:`~local_operator.tui.tool_fold.ToolFoldLayer` and set on the row
+    before it is rebuilt: ``0`` is the plain ledger spine (a row no fold
+    covers, or a receipt row — unchanged from before the fold existed), ``1``
+    is a fold bar or a tool row inside a turn the fold condenses (two cells
+    deeper than prose, Ben's "tool rows one indent deeper"), and ``2`` is a row
+    revealed UNDER an open bar or pinned below a collapsed one (the design's
+    failed-call column, two cells deeper again). ""Deeper" here is measured from
+    the transcript's prose column, which draws at its padding with no inset of
+    its own; one cell of that is the ledger spine every row has always spent,
+    which is why the first fold step adds one more rather than two.
+
+    The GUTTER must receive the same depth as the builder, or the two derive
+    the inset separately and a covered row copies with a character of its tool
+    name eaten — the failure this docstring's first paragraph is about, now
+    reachable on the fold path too. The layer therefore sets depth on the
+    widget, never at a call site.
     """
-    return ROW_INDENT if width >= ROW_INDENT_MIN_WIDTH else 0
+    if width < ROW_INDENT_MIN_WIDTH:
+        return 0
+    if depth <= 0:
+        return ROW_INDENT
+    return ROW_INDENT + 2 * depth - 1
 
 
-def row_body_width(width: int) -> int:
+def row_body_width(width: int, depth: int = 0) -> int:
     """Cells a ledger row's CONTENT is built in, given the width it is given.
 
     The card's own 1-cell inner padding each side and the ledger inset come off
@@ -591,7 +613,7 @@ def row_body_width(width: int) -> int:
     ``max(..., 10)`` is the builder's own floor, kept here so the two callers
     cannot drift apart on the degenerate widths either.
     """
-    return max(width - 2 - row_indent(width), 10)
+    return max(width - 2 - row_indent(width, depth), 10)
 
 
 NAME_COL = TOOL_NAME_COL
@@ -2033,6 +2055,12 @@ class ToolCard(ExpandableActionBlock):
         started_at: float | None | _UnknownStart = None,
     ) -> None:
         super().__init__()
+        #: The tool fold's DISPLAY level (see `row_indent`): 0 while no fold
+        #: covers this row, 1 inside a condensed turn, 2 revealed under an open
+        #: bar or pinned below a collapsed one. The collect layer sets it; the
+        #: builder and the copy gutter both read it, which is what keeps a
+        #: copied row from losing a character of its tool name.
+        self.fold_depth = 0
         #: Injected so elapsed time is testable without sleeping, exactly as
         #: ``StatusLine`` takes one. Monotonic, not wall clock: a duration that
         #: jumps when the system clock is adjusted is worse than no duration,
@@ -4196,7 +4224,7 @@ class ToolCard(ExpandableActionBlock):
         over-count eats the first character of the tool's name, an under-count
         pastes a leading space into a bug report.
         """
-        return row_indent(self._built_width)
+        return row_indent(self._built_width, self.fold_depth)
 
     # -- rendering ----------------------------------------------------------
     def refresh_row(self, width: int | None = None) -> None:
@@ -4353,7 +4381,7 @@ class ToolCard(ExpandableActionBlock):
         # the one a parentless build cannot read, so it bakes the floor. Recorded
         # beside the width because `ExpandableActionBlock._layout_moved` reads the
         # pair to decide whether this row still fits the ledger it landed in.
-        self._built_name_col = self._name_col(row_body_width(width))
+        self._built_name_col = self._name_col(row_body_width(width, self.fold_depth))
         moved = self._row_count != self._applied_rows
         self._applied_rows = self._row_count
         was_finalized = self._finalized
@@ -5780,11 +5808,11 @@ class ToolCard(ExpandableActionBlock):
         # Same threshold and same derivation the copy gutter reads
         # (`_row_indent`), against the width being BUILT rather than the last
         # one built, because this runs before `_built_width` is updated.
-        indent = row_indent(width)
+        indent = row_indent(width, self.fold_depth)
         # The content box this row is built in — the SAME derivation
         # `_refresh_row` records the name column against, so the guard's question
         # and the builder's answer cannot be asked of two different widths (R2).
-        width = row_body_width(width)
+        width = row_body_width(width, self.fold_depth)
 
         # Status segment (right-aligned), capped at width // 3 (D8) and then
         # hard-clamped so no state can ever push the row past its card.
