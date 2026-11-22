@@ -1,0 +1,22 @@
+from pathlib import Path
+import json,re,hashlib,unicodedata
+from rich.text import Text
+from rich.console import Console
+from local_operator.i18n import catalogues,runtime,messages
+NS='tui.model_persistence'
+en=catalogues.load_catalogue('en',NS); zh=catalogues.load_catalogue('zh-CN',NS)
+for key,value in zh.items():
+    assert unicodedata.normalize('NFC',value)==value
+    assert not re.search(r'[\u202a-\u202e\u2066-\u2069]',value)
+    assert re.findall(r'`[^`]*`|</?[^>]+>',value)==re.findall(r'`[^`]*`|</?[^>]+>',en[key])
+    args={'label':'p/m','routes':'已本地化的完整子句'} if key.endswith('with_model') else {}
+    result=messages.render_record(key,args,locale='zh-CN')
+    assert result.text==runtime.render_message(value,args,'zh-CN')
+    print('PUBLIC_RENDER_PASS',key,result)
+for label in ('p/m','provider-name/opaque-model-2026-11-22-long-identifier-abcdefghijklmnopqrstuvwxyz'):
+    routes=' · '.join(en[NS+'.'+x] for x in ('persist','saved','settings'))
+    text=runtime.render_message(en[NS+'.with_model'],{'label':label,'routes':routes},'en')
+    for width in (80,100,120):
+        lines=[x.plain for x in Text(text).wrap(Console(width=width),width)]
+        print('EN_SAME_CODE_CONTROL',len(label),width,repr(lines))
+print('PASS: public renderer all4; NFC; no bidi controls/added markup. EN same-code wrapping controls recorded. No native integration assertion.')

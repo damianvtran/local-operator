@@ -1,0 +1,6 @@
+{
+  "tui.model_persistence.persist": "/model default اس ماڈل کو نئے سیشنز کے لیے محفوظ کرتا ہے",
+  "tui.model_persistence.settings": "/settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے",
+  "tui.model_persistence.saved": "اس سیشن میں محفوظ ابتدائی ماڈل پر آنے کے لیے /model saved استعمال کریں",
+  "tui.model_persistence.with_model": "ماڈل: {label} — {routes}"
+}

@@ -1,0 +1,9 @@
+{
+  "locale": "zh-CN",
+  "namespace": "tui.model_persistence",
+  "source_sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff",
+  "translator": {"agent": "i18n-translator", "session": "58dee179aac0", "model": null, "provenance_note": "Translator session supplied by delegator; model not independently supplied. Root must preserve actual translator model when appending; do not infer it."},
+  "auditor": {"agent": "i18n-auditor-B", "session": "fbdc1a799cf0", "model": "openai/gpt-6.1-sol", "date": "2026-11-22", "result": "passed", "findings": 0, "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol (provider quota failure before assessment)"},
+  "status": "passed",
+  "note": "Independent B; 4/4 keys. Record: i18n/audits/evidence/zh-CN/tui.model_persistence/b-fbdc1/record.json. String-level wrapping only; styled NoticeBlock integration pending. Translator model unknown here; preserve root provenance."
+}

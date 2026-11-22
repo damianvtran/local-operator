@@ -1,0 +1,32 @@
+module_provenance: /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/catalogues.py /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/runtime.py /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/scripts/i18n/check.py
+before_sha256: {"context": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc", "en": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff", "ru": "9d08bddeee59461ae1a9f27de2839c39dc7b0cad17b6171e26fd7cde82946940"}
+official_check_catalogues_scoped: []
+keys=4; order=source; plural_arms=0; select_arms=0; simple_args=label/routes once each; literal_commands=exact; manual_bidi=0
+render[ordinary, provider/model]: модель: provider/model — /model default сохраняет эту модель по умолчанию для новых сессий · перейти в этой сессии на сохранённую модель по умолчанию — /model saved · /settings тоже меняет модель по умолчанию
+plain_rich_only width=80 rows=3 cells=[78, 80, 49] last='saved · /settings тоже меняет модель по умолчанию'
+plain_rich_only width=100 rows=3 cells=[100, 98, 9] last='умолчанию'
+plain_rich_only width=120 rows=2 cells=[118, 90] last='сохранённую модель по умолчанию — /model saved · /settings тоже меняет модель по умолчанию'
+render[ordinary, provider/opaque-model-2026-11-22-long-identity-v1]: модель: provider/opaque-model-2026-11-22-long-identity-v1 — /model default сохраняет эту модель по умолчанию для новых сессий · перейти в этой сессии на сохранённую модель по умолчанию — /model saved · /settings тоже меняет модель по умолчанию
+plain_rich_only width=80 rows=4 cells=[75, 78, 80, 9] last='умолчанию'
+plain_rich_only width=100 rows=3 cells=[99, 100, 43] last='· /settings тоже меняет модель по умолчанию'
+plain_rich_only width=120 rows=3 cells=[119, 115, 9] last='умолчанию'
+render[missing_model_setup, provider/model]: модель: provider/model — /model default сохраняет эту модель по умолчанию для новых сессий · /settings тоже меняет модель по умолчанию
+plain_rich_only width=80 rows=2 cells=[78, 56] last='новых сессий · /settings тоже меняет модель по умолчанию'
+plain_rich_only width=100 rows=2 cells=[93, 41] last='/settings тоже меняет модель по умолчанию'
+plain_rich_only width=120 rows=2 cells=[115, 19] last='модель по умолчанию'
+render[missing_model_setup, provider/opaque-model-2026-11-22-long-identity-v1]: модель: provider/opaque-model-2026-11-22-long-identity-v1 — /model default сохраняет эту модель по умолчанию для новых сессий · /settings тоже меняет модель по умолчанию
+plain_rich_only width=80 rows=3 cells=[75, 75, 19] last='модель по умолчанию'
+plain_rich_only width=100 rows=2 cells=[99, 70] last='умолчанию для новых сессий · /settings тоже меняет модель по умолчанию'
+plain_rich_only width=120 rows=2 cells=[119, 50] last='сессий · /settings тоже меняет модель по умолчанию'
+render[absent_or_unknown_hosting, provider/model]: модель: provider/model — /settings тоже меняет модель по умолчанию
+plain_rich_only width=80 rows=1 cells=[66] last='модель: provider/model — /settings тоже меняет модель по умолчанию'
+plain_rich_only width=100 rows=1 cells=[66] last='модель: provider/model — /settings тоже меняет модель по умолчанию'
+plain_rich_only width=120 rows=1 cells=[66] last='модель: provider/model — /settings тоже меняет модель по умолчанию'
+render[absent_or_unknown_hosting, provider/opaque-model-2026-11-22-long-identity-v1]: модель: provider/opaque-model-2026-11-22-long-identity-v1 — /settings тоже меняет модель по умолчанию
+plain_rich_only width=80 rows=2 cells=[75, 26] last='меняет модель по умолчанию'
+plain_rich_only width=100 rows=2 cells=[92, 9] last='умолчанию'
+plain_rich_only width=120 rows=1 cells=[101] last='модель: provider/opaque-model-2026-11-22-long-identity-v1 — /settings тоже меняет модель по умолчанию'
+after_sha256: {"context": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc", "en": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff", "ru": "9d08bddeee59461ae1a9f27de2839c39dc7b0cad17b6171e26fd7cde82946940"}
+SCOPED MECHANICAL VALIDATION OK; status remains translated; no independent audit, global check, styled/native UI or eligibility claim
+
+exit_code=0

@@ -1,0 +1,87 @@
+{
+  "locale": "zh-CN",
+  "namespace": "tui.model_persistence",
+  "audit_date": "2026-11-22T10:21:33.921186+00:00",
+  "key_count": 4,
+  "auditor": {
+    "agent": "i18n-auditor / model-notice-zhCN-audit-A",
+    "session": "26adce0a0cfa",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": "58dee179aac0",
+    "actual_model_source": "Current resumed session host Model declaration",
+    "fallback_used": false,
+    "prior_admission_attempt_model_report": "openai/gpt-6.1-sol; earlier attempt reported quota fallback; retained separately, not current host model",
+    "date": "2026-11-22"
+  },
+  "source_audit_revision": "87d87ec8b02ef3c279fda673302ce775f4a0329e",
+  "english_author_revision": "c40586cd0ae23ca25a6c82c26c4f867271c4e01f",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.json",
+      "sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.context.json",
+      "sha256": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc"
+    },
+    "zh-CN": {
+      "path": "local_operator/i18n/catalogues/zh-CN/tui.model_persistence.json",
+      "sha256": "c9fb6447f1e19037cf40808089111d4980f5fd96d3e905d843f797230b9329b0"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.model_persistence/zhA26c/audit.log",
+      "sha256": "5a5878ba5811a3f7a32eff8aad116ed68f09e3c21acd062aff6709365cfffa51"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.model_persistence/zhA26c/control.log",
+      "sha256": "23ece3819f8a3f82f36dcba55900e79db27d233afa03152e20b851bdf2746235"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.model_persistence/zhA26c/control.py.txt",
+      "sha256": "03001666915d946a5a9e12d594f91e7712526abc44eb20becac0fe6ab6a67c8f"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.model_persistence/zhA26c/receipt.json",
+      "sha256": "11f0494cc9447d281cfd13813db4d1cae6ece05ae3c92b6fd80a5bc9547aca2b"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.model_persistence/zhA26c/report.md",
+      "sha256": "0fd66a2336bdff3d96cb5cca65001c7a10b74178de7d332488ef4024543757d5"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.model_persistence/zhA26c/validate.py.txt",
+      "sha256": "0d2e5adeae0e4727efb2916c3a3b24b211c8da3f1e9617828a369938ab383a95"
+    }
+  ],
+  "artifact_roles": {
+    "report.md": "audit_notes_not_execution_log",
+    "audit.log": "actual_execution_log",
+    "control.log": "actual_execution_log",
+    "validate.py.txt": "executed_scoped_validation_script",
+    "control.py.txt": "executed_render_and_control_script",
+    "receipt.json": "append_ready_ledger_receipt"
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "prior_admission_attempt": {
+    "record": "i18n/audits/evidence/zh-CN/tui.model_persistence/zhA26/record.json",
+    "status": "resolved_by_committed_copy_admission",
+    "native_copy_finding": false
+  },
+  "validation": {
+    "scoped_official_catalogue_exit": 0,
+    "control_exit": 0,
+    "public_render_all4": true,
+    "native_noticeblock_integration": false,
+    "second_independent_pass": false,
+    "global_checker_run": false,
+    "receipt_schema_validated": true
+  },
+  "current_bytes_match_audited_hashes": true,
+  "backdated": false
+}

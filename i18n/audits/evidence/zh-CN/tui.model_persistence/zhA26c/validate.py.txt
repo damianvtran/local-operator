@@ -1,0 +1,44 @@
+# Independent audit A scoped validation; execute ONLY after approved public-copy admission.
+from pathlib import Path
+from unittest.mock import patch
+import hashlib, json, re
+import local_operator
+from local_operator.i18n import catalogues, runtime
+from scripts.i18n import check
+from rich.console import Console
+from rich.text import Text
+ROOT=Path('/Users/damian/local-operator/.worktrees/i18n-model-persist-notice')
+NS='tui.model_persistence'
+assert Path(local_operator.__file__).resolve()==ROOT/'local_operator/__init__.py'
+print('MODULE',local_operator.__file__)
+with patch.object(catalogues,'namespaces',return_value=(NS,)), patch.object(catalogues,'locales',return_value=('en','zh-CN')):
+    problems=check.check_catalogues()
+print('OFFICIAL_SCOPED_CATALOGUE',problems)
+assert not problems
+source=catalogues.load_catalogue('en',NS); target=catalogues.load_catalogue('zh-CN',NS)
+assert list(source)==list(target) and len(source)==4
+for key in source:
+    args=runtime.message_arguments(target[key]); assert args==runtime.message_arguments(source[key])
+    assert not runtime.plural_selectors(target[key])
+    assert not re.search(r',\s*(plural|select|selectordinal)\s*,',target[key])
+    assert re.findall(r'/model (?:default|saved)|/settings',source[key])==re.findall(r'/model (?:default|saved)|/settings',target[key])
+    if key.endswith('with_model'):
+        assert target[key].count('{label}')==target[key].count('{routes}')==1
+    print('KEY_PASS',key,'arguments',args,'cells',Text(target[key]).cell_len)
+clauses=[runtime.render_message(target[NS+'.'+suffix],{},'zh-CN') for suffix in ('persist','saved','settings')]
+for label in ('p/m','provider-name/opaque-model-2026-11-22-long-identifier-abcdefghijklmnopqrstuvwxyz'):
+    for family,routes in [('ordinary',' · '.join(clauses)),('missing-model',' · '.join((clauses[0],clauses[2]))),('settings-only',clauses[2])]:
+        text=runtime.render_message(target[NS+'.with_model'],{'label':label,'routes':routes},'zh-CN')
+        assert label in text and routes in text
+        for width in (80,100,120):
+            wrapped=Text(text).wrap(Console(width=width),width)
+            print('PLAIN_RICH_WRAP',family,'label',len(label),'width',width,'rows',len(wrapped),'cells',[x.cell_len for x in wrapped])
+            for line in wrapped: print('  '+line.plain)
+# Pseudo control expands human copy only, retaining exact command bytes and ICU arguments.
+for key,value in source.items():
+    tokens=re.split(r'(/model default|/model saved|/settings|\{label\}|\{routes\})',value)
+    pseudo=''.join(x if re.fullmatch(r'/model default|/model saved|/settings|\{label\}|\{routes\}',x) else '['+x+x+']' for x in tokens if x)
+    assert runtime.message_arguments(pseudo)==runtime.message_arguments(value)
+    assert re.findall(r'/model (?:default|saved)|/settings',pseudo)==re.findall(r'/model (?:default|saved)|/settings',value)
+    print('PSEUDO_CONTROL',key,Text(pseudo).cell_len)
+print('PASS: four keys; scoped official catalogue/ICU; exact command bytes; short/long opaque labels; 80/100/120 plain Rich wrapping; human-only pseudo control. NOT native NoticeBlock/transcript-family integration proof.')
