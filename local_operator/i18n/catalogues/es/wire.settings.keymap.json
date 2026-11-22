@@ -8,5 +8,13 @@
   "wire.settings.keymap.push_to_talk.label": "Pulsar para hablar",
   "wire.settings.keymap.push_to_talk.help": "Mantén pulsada la tecla para dictar (escritorio); suelta para detener.",
   "wire.settings.keymap.start_recording.label": "Iniciar grabación",
-  "wire.settings.keymap.start_recording.help": "Inicia la grabación de voz a texto en la ventana de escritorio."
+  "wire.settings.keymap.start_recording.help": "Inicia la grabación de voz a texto en la ventana de escritorio.",
+  "wire.settings.keymap.transcript_up.label": "Desplazar hacia arriba",
+  "wire.settings.keymap.transcript_up.help": "Desplaza la conversación dos líneas hacia arriba; el cursor no se mueve.",
+  "wire.settings.keymap.transcript_down.label": "Desplazar hacia abajo",
+  "wire.settings.keymap.transcript_down.help": "Desplaza la conversación dos líneas hacia abajo; el cursor no se mueve.",
+  "wire.settings.keymap.transcript_half_up.label": "Media página arriba",
+  "wire.settings.keymap.transcript_half_up.help": "Desplaza la conversación media pantalla hacia arriba; el cursor no se mueve.",
+  "wire.settings.keymap.transcript_half_down.label": "Media página abajo",
+  "wire.settings.keymap.transcript_half_down.help": "Desplaza la conversación media pantalla hacia abajo; el cursor no se mueve."
 }

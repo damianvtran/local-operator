@@ -28,5 +28,6 @@
   "tui.welcome.tip.setup": "新用户？{login}只需一次浏览器登录，无需粘贴密钥",
   "tui.welcome.tip.shell": "!在空输入框运行shell命令",
   "tui.welcome.tip.subagents": "要求并行工作，智能体就会派出子智能体",
-  "tui.welcome.tip.team": "/team <name> <message>把工作发给manager"
+  "tui.welcome.tip.team": "/team <name> <message>把工作发给manager",
+  "tui.welcome.tip.transcript_scroll": "⌥J/K 可在输入时滚动对话"
 }

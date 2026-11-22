@@ -28,5 +28,6 @@
   "tui.welcome.tip.setup": "Nouveau ici ? {login} : connexion web ; rien à coller",
   "tui.welcome.tip.shell": "! dans une zone de saisie vide exécute une commande shell",
   "tui.welcome.tip.subagents": "Travail en parallèle : l’agent déploie des sous-agents",
-  "tui.welcome.tip.team": "/team <name> <message> envoie du travail au manager"
+  "tui.welcome.tip.team": "/team <name> <message> envoie du travail au manager",
+  "tui.welcome.tip.transcript_scroll": "⌥J/K fait défiler la conversation pendant que vous écrivez"
 }

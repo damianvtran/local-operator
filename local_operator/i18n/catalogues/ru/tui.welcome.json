@@ -28,5 +28,6 @@
   "tui.welcome.tip.setup": "Впервые здесь? {login} — вход через браузер, без ключа",
   "tui.welcome.tip.shell": "! в пустом поле ввода выполняет команду shell",
   "tui.welcome.tip.subagents": "Попросите параллельную работу — агент запустит субагентов",
-  "tui.welcome.tip.team": "/team <name> <message> отправляет работу менеджеру"
+  "tui.welcome.tip.team": "/team <name> <message> отправляет работу менеджеру",
+  "tui.welcome.tip.transcript_scroll": "⌥J/K прокручивает разговор, пока вы печатаете"
 }

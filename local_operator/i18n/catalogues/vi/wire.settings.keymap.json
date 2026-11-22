@@ -8,5 +8,13 @@
   "wire.settings.keymap.push_to_talk.label": "Nhấn để nói",
   "wire.settings.keymap.push_to_talk.help": "Giữ để nhập bằng giọng nói (desktop); thả ra để dừng.",
   "wire.settings.keymap.start_recording.label": "Bắt đầu ghi âm",
-  "wire.settings.keymap.start_recording.help": "Bắt đầu ghi âm chuyển giọng nói thành văn bản trong cửa sổ desktop."
+  "wire.settings.keymap.start_recording.help": "Bắt đầu ghi âm chuyển giọng nói thành văn bản trong cửa sổ desktop.",
+  "wire.settings.keymap.transcript_up.label": "Cuộn lên",
+  "wire.settings.keymap.transcript_up.help": "Cuộn cuộc trò chuyện lên hai dòng; con trỏ giữ nguyên.",
+  "wire.settings.keymap.transcript_down.label": "Cuộn xuống",
+  "wire.settings.keymap.transcript_down.help": "Cuộn cuộc trò chuyện xuống hai dòng; con trỏ giữ nguyên.",
+  "wire.settings.keymap.transcript_half_up.label": "Nửa trang lên",
+  "wire.settings.keymap.transcript_half_up.help": "Cuộn cuộc trò chuyện lên nửa màn hình; con trỏ giữ nguyên.",
+  "wire.settings.keymap.transcript_half_down.label": "Nửa trang xuống",
+  "wire.settings.keymap.transcript_half_down.help": "Cuộn cuộc trò chuyện xuống nửa màn hình; con trỏ giữ nguyên."
 }

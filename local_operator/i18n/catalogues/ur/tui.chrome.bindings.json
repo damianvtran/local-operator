@@ -3,7 +3,7 @@
   "tui.chrome.bindings.legend_app_ctrl_b": "سیشنز کی فہرست دکھائیں یا چھپائیں",
   "tui.chrome.bindings.legend_app_ctrl_c": "ٹرن روکیں؛ دو بار پر باہر نکلیں",
   "tui.chrome.bindings.legend_app_ctrl_g": "ذیلی ایجنٹ پینل بدلیں",
-  "tui.chrome.bindings.legend_app_ctrl_home_end": "ٹرانسکرپٹ کے شروع یا آخر پر جائیں",
+  "tui.chrome.bindings.legend_app_ctrl_home_end": "ٹرانسکرپٹ کے شروع یا آخر پر جائیں (alt+g/G)",
   "tui.chrome.bindings.legend_app_ctrl_l": "ٹرانسکرپٹ صاف کریں (تاریخچہ محفوظ)",
   "tui.chrome.bindings.legend_app_ctrl_n_ctrl_s": "نیا سیشن شروع کریں / ایک جاری رکھیں",
   "tui.chrome.bindings.legend_app_ctrl_t": "کرنے کے کام پھیلائیں یا سمیٹیں",

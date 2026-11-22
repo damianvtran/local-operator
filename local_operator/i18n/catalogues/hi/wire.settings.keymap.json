@@ -8,5 +8,13 @@
   "wire.settings.keymap.push_to_talk.label": "दबाकर बोलें",
   "wire.settings.keymap.push_to_talk.help": "बोलकर लिखने के लिए दबाए रखें (डेस्कटॉप); छोड़ने पर रुक जाता है।",
   "wire.settings.keymap.start_recording.label": "रिकॉर्डिंग शुरू करें",
-  "wire.settings.keymap.start_recording.help": "डेस्कटॉप विंडो में स्पीच-टू-टेक्स्ट रिकॉर्डिंग शुरू करता है।"
+  "wire.settings.keymap.start_recording.help": "डेस्कटॉप विंडो में स्पीच-टू-टेक्स्ट रिकॉर्डिंग शुरू करता है।",
+  "wire.settings.keymap.transcript_up.label": "ऊपर स्क्रॉल करें",
+  "wire.settings.keymap.transcript_up.help": "बातचीत को दो पंक्तियाँ ऊपर स्क्रॉल करता है; कर्सर अपनी जगह रहता है।",
+  "wire.settings.keymap.transcript_down.label": "नीचे स्क्रॉल करें",
+  "wire.settings.keymap.transcript_down.help": "बातचीत को दो पंक्तियाँ नीचे स्क्रॉल करता है; कर्सर अपनी जगह रहता है।",
+  "wire.settings.keymap.transcript_half_up.label": "आधा पृष्ठ ऊपर",
+  "wire.settings.keymap.transcript_half_up.help": "बातचीत को आधा पृष्ठ ऊपर स्क्रॉल करता है; कर्सर अपनी जगह रहता है।",
+  "wire.settings.keymap.transcript_half_down.label": "आधा पृष्ठ नीचे",
+  "wire.settings.keymap.transcript_half_down.help": "बातचीत को आधा पृष्ठ नीचे स्क्रॉल करता है; कर्सर अपनी जगह रहता है।"
 }

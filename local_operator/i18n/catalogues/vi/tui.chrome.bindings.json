@@ -3,7 +3,7 @@
   "tui.chrome.bindings.legend_app_ctrl_b": "hiện hoặc ẩn danh sách phiên",
   "tui.chrome.bindings.legend_app_ctrl_c": "ngắt lượt; hai lần sẽ thoát",
   "tui.chrome.bindings.legend_app_ctrl_g": "xoay khay tác nhân con",
-  "tui.chrome.bindings.legend_app_ctrl_home_end": "nhảy đến đầu hoặc cuối bản ghi",
+  "tui.chrome.bindings.legend_app_ctrl_home_end": "nhảy tới đầu hoặc cuối bản ghi (alt+g/G)",
   "tui.chrome.bindings.legend_app_ctrl_l": "xóa bản ghi (lịch sử vẫn còn)",
   "tui.chrome.bindings.legend_app_ctrl_n_ctrl_s": "bắt đầu phiên mới / tiếp tục phiên",
   "tui.chrome.bindings.legend_app_ctrl_t": "mở hoặc thu gọn bảng việc cần làm",

@@ -3,7 +3,7 @@
   "tui.chrome.bindings.legend_app_ctrl_b": "afficher ou masquer les sessions",
   "tui.chrome.bindings.legend_app_ctrl_c": "interrompre le tour ; 2× quitte",
   "tui.chrome.bindings.legend_app_ctrl_g": "alterner entre sous-agents",
-  "tui.chrome.bindings.legend_app_ctrl_home_end": "début ou fin de la transcription",
+  "tui.chrome.bindings.legend_app_ctrl_home_end": "aller au début ou à la fin de la transcription (alt+g/G)",
   "tui.chrome.bindings.legend_app_ctrl_l": "vider la transcription, historique gardé",
   "tui.chrome.bindings.legend_app_ctrl_n_ctrl_s": "créer une session / en reprendre une",
   "tui.chrome.bindings.legend_app_ctrl_t": "déplier ou replier les tâches",
