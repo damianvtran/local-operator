@@ -1,16 +1,7 @@
-"""``execute_ask`` + the gate door — the orchestration the design pins (§2.2).
-
-The gate is composed AROUND the unchanged enqueue: one awaited clearance
-check whose only diverting outcome is a Mapping, and every other outcome —
-``None`` from any fail-open path, a gate that raises, no gate at all — falls
-through to the existing enqueue call byte-for-byte. The ordering is pinned
-here: an invalid argument never reaches the gate, a divert never reaches the
-enqueue, and a broken gate never costs the ask.
-"""
+"""Queued ask admission, validation, and the unchanged blocking arm."""
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import pytest
@@ -87,11 +78,8 @@ def _recording_enqueue():
     return enqueue, calls
 
 
-# --- the divert path ---------------------------------------------------------
-
-
 @pytest.mark.asyncio
-async def test_a_divert_returns_the_note_with_the_hidden_marker_and_never_enqueues():
+async def test_an_obsolete_host_gate_cannot_intercept_a_queued_ask():
     enqueue, enqueue_calls = _recording_enqueue()
     gate = RecordingGate(DIVERT)
 
@@ -101,52 +89,12 @@ async def test_a_divert_returns_the_note_with_the_hidden_marker_and_never_enqueu
     )
 
     assert result.is_error is False
-    assert result.text.startswith("[Ask clearance]")
-    assert result.details == DIVERT["details"]  # the marker rides the result
-    assert enqueue_calls == []
-    # The gate saw the VALIDATED questions and the model's own timeout + call id.
-    assert gate.calls and gate.calls[0][2] == "call-1"
-    assert gate.calls[0][1] == "30m"
-
-
-@pytest.mark.asyncio
-async def test_a_none_verdict_still_enqueues():
-    enqueue, enqueue_calls = _recording_enqueue()
-
-    result = await _call(
-        _context(enqueue=enqueue, gate=RecordingGate(None)),
-        {"questions": _questions()},
-    )
-
-    assert result.is_error is False
-    assert "queued" in result.text
+    assert result.details == {"ask_id": "a-1", "status": "queued"}
+    assert gate.calls == []
     assert len(enqueue_calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_a_gate_that_raises_still_enqueues():
-    """THE LAST LINE: even a contract breach cannot cost the ask."""
-    enqueue, enqueue_calls = _recording_enqueue()
-
-    result = await _call(
-        _context(enqueue=enqueue, gate=RecordingGate(RuntimeError("broken gate"))),
-        {"questions": _questions()},
-    )
-
-    assert result.is_error is False
-    assert len(enqueue_calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_cancelled_error_from_the_gate_propagates():
-    """An aborted turn must abort — the tool-level guard catches Exception only."""
-    enqueue, enqueue_calls = _recording_enqueue()
-    gate = RecordingGate(asyncio.CancelledError())
-
-    with pytest.raises(asyncio.CancelledError):
-        await _call(_context(enqueue=enqueue, gate=gate), {"questions": _questions()})
-
-    assert enqueue_calls == []
+    questions, timeout, call_id = enqueue_calls[0]
+    assert isinstance(questions[0], AskQuestion)
+    assert (timeout, call_id) == ("30m", "call-1")
 
 
 @pytest.mark.asyncio
@@ -183,12 +131,7 @@ async def test_bounds_error_never_calls_the_gate():
 
 @pytest.mark.asyncio
 async def test_blocking_arm_is_byte_for_byte_today():
-    """No ``enqueue_ask`` — and therefore no gate — means the hook is awaited.
-
-    The gate door is bound under the SAME two conditions as the enqueue door,
-    so a context without one is a context without the other; this pins that a
-    blocking host never sees a gate call even if a stray one were attached.
-    """
+    """Without a queue, the original blocking hook is still awaited."""
     hook_called: list[bool] = []
 
     async def hook(questions: list[AskQuestion]) -> dict[str, list[str]] | None:
@@ -196,7 +139,7 @@ async def test_blocking_arm_is_byte_for_byte_today():
         return {questions[0].id: ["staging"]}
 
     gate = RecordingGate(DIVERT)
-    result = await _call(_context(enqueue=None, gate=None, hook=hook), {"questions": _questions()})
+    result = await _call(_context(enqueue=None, gate=gate, hook=hook), {"questions": _questions()})
 
     assert hook_called == [True]
     assert "staging" in result.text
