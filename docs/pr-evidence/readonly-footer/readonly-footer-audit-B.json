@@ -1,0 +1,1333 @@
+{
+  "schema": 1,
+  "kind": "independent-seven-locale-native-llm-copy-audit-B-not-rendered-app-approval",
+  "date": "2026-11-22T05:57:36.532887+00:00",
+  "round": 1,
+  "namespace": "tui.editor_readonly",
+  "scope": "tui.editor_readonly.hint only; all seven target contributions",
+  "allocation": "hotfix/audit <=15 minutes",
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer",
+  "head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+  "manifest_sha256": "8b77fa48911e788cba6dd8b271297f53e4484b442d4f677abc682bc2af768cb0",
+  "english_proof": {
+    "locale": "en",
+    "envelope": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/docs/pr-evidence/readonly-footer/readonly-footer-inputs/en-approved.json",
+    "envelope_sha256": "85c75ba6e6531d39c980bfcc6a864063561d9fe34a59cbdcdfdf4f823f336cc0",
+    "target_path": "local_operator/i18n/catalogues/en/tui.editor_readonly.json",
+    "target_raw_sha256": "a2a8bfb8a250b38e3a950bb2b02d885ec76cc726d77521086801099b6e99b5f2",
+    "canonical_map_sha256": "7b75636967456bcf77c28c1bf5913b245445660be9d773d4a12760fa59452003",
+    "tool_sha256": "137f679301489fa98caa9ba206f11a6fb1cd5257145684254175230476aafbd2",
+    "checkout_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+    "repository": "damianvtran/local-operator",
+    "key_count": 1,
+    "arguments": [
+      "key"
+    ],
+    "raw_byte_hash_verified": true,
+    "canonical_approved_map_verified": true,
+    "official_origin_verified": true
+  },
+  "identity": {
+    "agent": "translation-auditor B",
+    "session": "1be17b0ed9f1",
+    "actual_model": "openai/gpt-6.1-sol",
+    "fallback": "Host model-switch message: quota failure from anthropic/claude-opus-5-5; initial guide read preceded switch."
+  },
+  "independence": {
+    "authored_target_files": false,
+    "read_partner_A_verdict": false,
+    "excluded_author_session": "9309411c87eb",
+    "excluded_integrator_session": "61203766acfe",
+    "relationship": "Separate fresh B session, not author/integrator/English-code source actor/root manager; no claim to know partner model identity.",
+    "same_model_as_translator": true,
+    "same_model_does_not_mean_same_actor": "Translator 9309411c87eb versus independent auditor B 1be17b0ed9f1; partner A verdict not read and its actual model unverified here."
+  },
+  "mechanical_controls": {
+    "renamed": {
+      "contract_rejected": true,
+      "actual_arguments": [
+        [
+          "button",
+          "simple"
+        ]
+      ]
+    },
+    "lost": {
+      "contract_rejected": true,
+      "actual_arguments": []
+    },
+    "wrong_ICU_kind": {
+      "contract_rejected": true,
+      "actual_arguments": [
+        [
+          "key",
+          "number"
+        ]
+      ]
+    },
+    "malformed_ICU": {
+      "rejected": true,
+      "exception": "MessageSyntaxError",
+      "message": "expected ',' or '}' after argument name 'key' (at offset 16 of 'Read-only · {key')"
+    },
+    "missing_argument": {
+      "rejected": true,
+      "exception": "MessageFormatError",
+      "message": "message argument 'key' was not supplied (have: none)"
+    },
+    "wrong_runtime_type": {
+      "rejected": true,
+      "exception": "ValueError",
+      "message": "technical display parameter 'key' must be a non-empty string"
+    },
+    "runtime_simple_arg_note": "ICU simple interpolation accepts general values via str(); runtime technical_parameter_spans rejects a non-string. Generated hint annotation is str, not a runtime validator."
+  },
+  "probe_setup_note": "Initial synthetic projection attempted every locale and stopped at zh-CN: existing technical status helper rejects esc adjacent to 返回 as a partial suffix. Narrowed to Urdu, the only RTL target; composer is not claimed to use this helper. No product files changed.",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "tui.editor_readonly",
+      "key": "tui.editor_readonly.hint",
+      "keys_read": 1,
+      "fresh": 1,
+      "retained": 0,
+      "native_llm_semantic_audit": true,
+      "verdict": "PASS",
+      "issues": [],
+      "english": "Read-only · {key} back",
+      "target": "Lecture seule · {key} retour",
+      "rendered_with_esc": "Lecture seule · esc retour",
+      "backtranslation": "Read-only · {key} return",
+      "semantic_idiom_register_assessment": "Lecture seule is the standard state label; retour is a compact navigation label, not an editing promise. Neutral, pronoun-free French matches vous style. Key-first legend ordering is natural for a terminal footer.",
+      "glossary": "Shared glossary/style guide reviewed; no explicit read-only/back entry requiring a different synonym. Exactly one namespace key; no within-namespace drift. No claim of whole-UI consistency.",
+      "placeholders": {
+        "exact_literal_once": true,
+        "icu_arguments": [
+          [
+            "key",
+            "simple"
+          ]
+        ],
+        "generated_argument_type": "str",
+        "technical_argument": "esc",
+        "technical_token_exact_once": true
+      },
+      "width": {
+        "english_cells": 20,
+        "rich_cells": 26,
+        "budget_cells": 40,
+        "within_budget": true,
+        "pseudo_expanded_cells": 36,
+        "pseudo_within_budget": true,
+        "overbudget_negative_detected": true,
+        "rendered_check": "DEFERRED: pure Rich cell measures do not establish actual app clipping, font/shaping or native fit."
+      },
+      "controls": {
+        "NFC": true,
+        "stored_bidi_or_control_count": 0,
+        "projection": "Lecture seule · esc retour",
+        "projection_roundtrip_raw_exact": true,
+        "injected_RLO_rejected": {
+          "rejected": true,
+          "exception": "ValueError",
+          "message": "status display requires plain text without control sequences"
+        }
+      },
+      "CLDR": {
+        "actual_key": "N/A: one simple string argument; no count, plural, select, date/number skeleton, or markup",
+        "synthetic_categories": [
+          "many",
+          "one",
+          "other"
+        ],
+        "synthetic_sample_results": [
+          {
+            "n": 0,
+            "category": "one",
+            "actual": "0 one"
+          },
+          {
+            "n": 1,
+            "category": "one",
+            "actual": "1 one"
+          },
+          {
+            "n": 2,
+            "category": "other",
+            "actual": "2 other"
+          },
+          {
+            "n": 3,
+            "category": "other",
+            "actual": "3 other"
+          },
+          {
+            "n": 4,
+            "category": "other",
+            "actual": "4 other"
+          },
+          {
+            "n": 5,
+            "category": "other",
+            "actual": "5 other"
+          },
+          {
+            "n": 11,
+            "category": "other",
+            "actual": "11 other"
+          },
+          {
+            "n": 21,
+            "category": "other",
+            "actual": "21 other"
+          },
+          {
+            "n": 100,
+            "category": "other",
+            "actual": "100 other"
+          },
+          {
+            "n": 1000000,
+            "category": "many",
+            "actual": "1 000 000 many"
+          },
+          {
+            "n": 1.5,
+            "category": "one",
+            "actual": "1,5 one"
+          }
+        ],
+        "missing_other_parser_result": {
+          "rejected": false
+        },
+        "missing_other_explicit_selector_validation_rejects": true,
+        "invalid_selector_explicit_validation_rejects": true,
+        "limit": "Synthetic locale probes are not actual-hint plural coverage."
+      },
+      "RTL": {
+        "applicable": false,
+        "technical_esc_recovered_exact": true,
+        "limitation": "LTR locale; projection remains byte-identical"
+      },
+      "exceptions": [
+        "esc is the only technical argument exception; ordinary read-only/back prose is localized"
+      ],
+      "source_sha256": "a2a8bfb8a250b38e3a950bb2b02d885ec76cc726d77521086801099b6e99b5f2",
+      "target_sha256": "98e716bcdc26c724f9e556e3ed366349cf0a596a8dc81bb350fc95a9f39d0ad5",
+      "context_sha256": "46c48a659223ad5e4861a1407c2c7a685183b9c7caecf6e19f53adb8131389ee",
+      "origin": "ssh://git@github.com/damianvtran/local-operator.git",
+      "current_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+      "canonical_proof": {
+        "locale": "fr",
+        "envelope": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/docs/pr-evidence/readonly-footer/readonly-footer-inputs/fr-approved.json",
+        "envelope_sha256": "72e168b6412717b5fa40a0d91f60a09c54e1eb2e459b6950c4cf8fa55a3182af",
+        "target_path": "local_operator/i18n/catalogues/fr/tui.editor_readonly.json",
+        "target_raw_sha256": "98e716bcdc26c724f9e556e3ed366349cf0a596a8dc81bb350fc95a9f39d0ad5",
+        "canonical_map_sha256": "26fb16974301080b3da6088beb7fac1b51fe7e9582e1009bb97d8e9e51ab908e",
+        "tool_sha256": "3b2875a26533320336019bac95a6f6f67b8677f1edf0b3f0f67a1a685552c5af",
+        "checkout_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+        "repository": "damianvtran/local-operator",
+        "key_count": 1,
+        "arguments": [
+          "key"
+        ],
+        "raw_byte_hash_verified": true,
+        "canonical_approved_map_verified": true,
+        "official_origin_verified": true
+      },
+      "identity": {
+        "agent": "translation-auditor B",
+        "session": "1be17b0ed9f1",
+        "actual_model": "openai/gpt-6.1-sol",
+        "fallback": "Host model-switch message: quota failure from anthropic/claude-opus-5-5; initial guide read preceded switch."
+      }
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.editor_readonly",
+      "key": "tui.editor_readonly.hint",
+      "keys_read": 1,
+      "fresh": 1,
+      "retained": 0,
+      "native_llm_semantic_audit": true,
+      "verdict": "PASS",
+      "issues": [],
+      "english": "Read-only · {key} back",
+      "target": "只读 · {key}返回",
+      "rendered_with_esc": "只读 · esc返回",
+      "backtranslation": "Read-only · {key} return",
+      "semantic_idiom_register_assessment": "只读 is the standard read-only state; 返回 means returning to the preceding chat. Compact key+action ordering and omitted sentence-final punctuation suit this non-dialog footer; no 请 is needed.",
+      "glossary": "Shared glossary/style guide reviewed; no explicit read-only/back entry requiring a different synonym. Exactly one namespace key; no within-namespace drift. No claim of whole-UI consistency.",
+      "placeholders": {
+        "exact_literal_once": true,
+        "icu_arguments": [
+          [
+            "key",
+            "simple"
+          ]
+        ],
+        "generated_argument_type": "str",
+        "technical_argument": "esc",
+        "technical_token_exact_once": true
+      },
+      "width": {
+        "english_cells": 20,
+        "rich_cells": 14,
+        "budget_cells": 40,
+        "within_budget": true,
+        "pseudo_expanded_cells": 21,
+        "pseudo_within_budget": true,
+        "overbudget_negative_detected": true,
+        "rendered_check": "DEFERRED: pure Rich cell measures do not establish actual app clipping, font/shaping or native fit."
+      },
+      "controls": {
+        "NFC": true,
+        "stored_bidi_or_control_count": 0,
+        "projection": "只读 · esc返回",
+        "projection_roundtrip_raw_exact": true,
+        "injected_RLO_rejected": {
+          "rejected": true,
+          "exception": "ValueError",
+          "message": "status display requires plain text without control sequences"
+        }
+      },
+      "CLDR": {
+        "actual_key": "N/A: one simple string argument; no count, plural, select, date/number skeleton, or markup",
+        "synthetic_categories": [
+          "other"
+        ],
+        "synthetic_sample_results": [
+          {
+            "n": 0,
+            "category": "other",
+            "actual": "0 other"
+          },
+          {
+            "n": 1,
+            "category": "other",
+            "actual": "1 other"
+          },
+          {
+            "n": 2,
+            "category": "other",
+            "actual": "2 other"
+          },
+          {
+            "n": 3,
+            "category": "other",
+            "actual": "3 other"
+          },
+          {
+            "n": 4,
+            "category": "other",
+            "actual": "4 other"
+          },
+          {
+            "n": 5,
+            "category": "other",
+            "actual": "5 other"
+          },
+          {
+            "n": 11,
+            "category": "other",
+            "actual": "11 other"
+          },
+          {
+            "n": 21,
+            "category": "other",
+            "actual": "21 other"
+          },
+          {
+            "n": 100,
+            "category": "other",
+            "actual": "100 other"
+          },
+          {
+            "n": 1000000,
+            "category": "other",
+            "actual": "1,000,000 other"
+          },
+          {
+            "n": 1.5,
+            "category": "other",
+            "actual": "1.5 other"
+          }
+        ],
+        "missing_other_parser_result": {
+          "rejected": false
+        },
+        "missing_other_explicit_selector_validation_rejects": true,
+        "invalid_selector_explicit_validation_rejects": true,
+        "limit": "Synthetic locale probes are not actual-hint plural coverage."
+      },
+      "RTL": {
+        "applicable": false,
+        "technical_esc_recovered_exact": true,
+        "limitation": "LTR locale; projection remains byte-identical"
+      },
+      "exceptions": [
+        "esc is the only technical argument exception; ordinary read-only/back prose is localized"
+      ],
+      "source_sha256": "a2a8bfb8a250b38e3a950bb2b02d885ec76cc726d77521086801099b6e99b5f2",
+      "target_sha256": "de698b3c4f9a184351bd627147bfe086da057890e287e01a78d87539471fa65f",
+      "context_sha256": "46c48a659223ad5e4861a1407c2c7a685183b9c7caecf6e19f53adb8131389ee",
+      "origin": "ssh://git@github.com/damianvtran/local-operator.git",
+      "current_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+      "canonical_proof": {
+        "locale": "zh-CN",
+        "envelope": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/docs/pr-evidence/readonly-footer/readonly-footer-inputs/zh-CN-approved.json",
+        "envelope_sha256": "cc7480401a450fc0199ed5d991589d0b758be1b1367ed880e50e45cad0497623",
+        "target_path": "local_operator/i18n/catalogues/zh-CN/tui.editor_readonly.json",
+        "target_raw_sha256": "de698b3c4f9a184351bd627147bfe086da057890e287e01a78d87539471fa65f",
+        "canonical_map_sha256": "48f44363629d04eb0577268730ae02937ae6f93a9a42b939e7832a5136542d56",
+        "tool_sha256": "c897b4774e1f1af0553ff40e704151ee49304f667a29253d908957a706d726e6",
+        "checkout_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+        "repository": "damianvtran/local-operator",
+        "key_count": 1,
+        "arguments": [
+          "key"
+        ],
+        "raw_byte_hash_verified": true,
+        "canonical_approved_map_verified": true,
+        "official_origin_verified": true
+      },
+      "identity": {
+        "agent": "translation-auditor B",
+        "session": "1be17b0ed9f1",
+        "actual_model": "openai/gpt-6.1-sol",
+        "fallback": "Host model-switch message: quota failure from anthropic/claude-opus-5-5; initial guide read preceded switch."
+      }
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.editor_readonly",
+      "key": "tui.editor_readonly.hint",
+      "keys_read": 1,
+      "fresh": 1,
+      "retained": 0,
+      "native_llm_semantic_audit": true,
+      "verdict": "PASS",
+      "issues": [],
+      "english": "Read-only · {key} back",
+      "target": "Solo lectura · {key} volver",
+      "rendered_with_esc": "Solo lectura · esc volver",
+      "backtranslation": "Read-only · {key} go back",
+      "semantic_idiom_register_assessment": "Solo lectura is a conventional state label; volver is the natural infinitive for the return action. No tú/usted conflict, no promise to enable editing.",
+      "glossary": "Shared glossary/style guide reviewed; no explicit read-only/back entry requiring a different synonym. Exactly one namespace key; no within-namespace drift. No claim of whole-UI consistency.",
+      "placeholders": {
+        "exact_literal_once": true,
+        "icu_arguments": [
+          [
+            "key",
+            "simple"
+          ]
+        ],
+        "generated_argument_type": "str",
+        "technical_argument": "esc",
+        "technical_token_exact_once": true
+      },
+      "width": {
+        "english_cells": 20,
+        "rich_cells": 25,
+        "budget_cells": 40,
+        "within_budget": true,
+        "pseudo_expanded_cells": 35,
+        "pseudo_within_budget": true,
+        "overbudget_negative_detected": true,
+        "rendered_check": "DEFERRED: pure Rich cell measures do not establish actual app clipping, font/shaping or native fit."
+      },
+      "controls": {
+        "NFC": true,
+        "stored_bidi_or_control_count": 0,
+        "projection": "Solo lectura · esc volver",
+        "projection_roundtrip_raw_exact": true,
+        "injected_RLO_rejected": {
+          "rejected": true,
+          "exception": "ValueError",
+          "message": "status display requires plain text without control sequences"
+        }
+      },
+      "CLDR": {
+        "actual_key": "N/A: one simple string argument; no count, plural, select, date/number skeleton, or markup",
+        "synthetic_categories": [
+          "many",
+          "one",
+          "other"
+        ],
+        "synthetic_sample_results": [
+          {
+            "n": 0,
+            "category": "other",
+            "actual": "0 other"
+          },
+          {
+            "n": 1,
+            "category": "one",
+            "actual": "1 one"
+          },
+          {
+            "n": 2,
+            "category": "other",
+            "actual": "2 other"
+          },
+          {
+            "n": 3,
+            "category": "other",
+            "actual": "3 other"
+          },
+          {
+            "n": 4,
+            "category": "other",
+            "actual": "4 other"
+          },
+          {
+            "n": 5,
+            "category": "other",
+            "actual": "5 other"
+          },
+          {
+            "n": 11,
+            "category": "other",
+            "actual": "11 other"
+          },
+          {
+            "n": 21,
+            "category": "other",
+            "actual": "21 other"
+          },
+          {
+            "n": 100,
+            "category": "other",
+            "actual": "100 other"
+          },
+          {
+            "n": 1000000,
+            "category": "many",
+            "actual": "1.000.000 many"
+          },
+          {
+            "n": 1.5,
+            "category": "other",
+            "actual": "1,5 other"
+          }
+        ],
+        "missing_other_parser_result": {
+          "rejected": false
+        },
+        "missing_other_explicit_selector_validation_rejects": true,
+        "invalid_selector_explicit_validation_rejects": true,
+        "limit": "Synthetic locale probes are not actual-hint plural coverage."
+      },
+      "RTL": {
+        "applicable": false,
+        "technical_esc_recovered_exact": true,
+        "limitation": "LTR locale; projection remains byte-identical"
+      },
+      "exceptions": [
+        "esc is the only technical argument exception; ordinary read-only/back prose is localized"
+      ],
+      "source_sha256": "a2a8bfb8a250b38e3a950bb2b02d885ec76cc726d77521086801099b6e99b5f2",
+      "target_sha256": "d92fbdd397bbf7dd424c51c79b302c3b1b35b155a97a30cd5fd0973dbe1d950b",
+      "context_sha256": "46c48a659223ad5e4861a1407c2c7a685183b9c7caecf6e19f53adb8131389ee",
+      "origin": "ssh://git@github.com/damianvtran/local-operator.git",
+      "current_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+      "canonical_proof": {
+        "locale": "es",
+        "envelope": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/docs/pr-evidence/readonly-footer/readonly-footer-inputs/es-approved.json",
+        "envelope_sha256": "73771856905d96fdde3bb386ea2105d152066bfc3de49098ab8b29977e968cd1",
+        "target_path": "local_operator/i18n/catalogues/es/tui.editor_readonly.json",
+        "target_raw_sha256": "d92fbdd397bbf7dd424c51c79b302c3b1b35b155a97a30cd5fd0973dbe1d950b",
+        "canonical_map_sha256": "54ea7faed1b2f54979550e21751d26fe2304090bac4f9b329b2c7e726b034e4c",
+        "tool_sha256": "2c7c4f51b63192dacfe61350bcdc1caf451b2c5dc3feb3436caa3813691dac21",
+        "checkout_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+        "repository": "damianvtran/local-operator",
+        "key_count": 1,
+        "arguments": [
+          "key"
+        ],
+        "raw_byte_hash_verified": true,
+        "canonical_approved_map_verified": true,
+        "official_origin_verified": true
+      },
+      "identity": {
+        "agent": "translation-auditor B",
+        "session": "1be17b0ed9f1",
+        "actual_model": "openai/gpt-6.1-sol",
+        "fallback": "Host model-switch message: quota failure from anthropic/claude-opus-5-5; initial guide read preceded switch."
+      }
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.editor_readonly",
+      "key": "tui.editor_readonly.hint",
+      "keys_read": 1,
+      "fresh": 1,
+      "retained": 0,
+      "native_llm_semantic_audit": true,
+      "verdict": "PASS",
+      "issues": [],
+      "english": "Read-only · {key} back",
+      "target": "Только чтение · {key} назад",
+      "rendered_with_esc": "Только чтение · esc назад",
+      "backtranslation": "Read-only · {key} back",
+      "semantic_idiom_register_assessment": "Только чтение is the established mode label, not a demand to read. Назад is the standard navigation legend; placing it after the key is idiomatic in a key/action footer. No вы/ты mismatch.",
+      "glossary": "Shared glossary/style guide reviewed; no explicit read-only/back entry requiring a different synonym. Exactly one namespace key; no within-namespace drift. No claim of whole-UI consistency.",
+      "placeholders": {
+        "exact_literal_once": true,
+        "icu_arguments": [
+          [
+            "key",
+            "simple"
+          ]
+        ],
+        "generated_argument_type": "str",
+        "technical_argument": "esc",
+        "technical_token_exact_once": true
+      },
+      "width": {
+        "english_cells": 20,
+        "rich_cells": 25,
+        "budget_cells": 40,
+        "within_budget": true,
+        "pseudo_expanded_cells": 35,
+        "pseudo_within_budget": true,
+        "overbudget_negative_detected": true,
+        "rendered_check": "DEFERRED: pure Rich cell measures do not establish actual app clipping, font/shaping or native fit."
+      },
+      "controls": {
+        "NFC": true,
+        "stored_bidi_or_control_count": 0,
+        "projection": "Только чтение · esc назад",
+        "projection_roundtrip_raw_exact": true,
+        "injected_RLO_rejected": {
+          "rejected": true,
+          "exception": "ValueError",
+          "message": "status display requires plain text without control sequences"
+        }
+      },
+      "CLDR": {
+        "actual_key": "N/A: one simple string argument; no count, plural, select, date/number skeleton, or markup",
+        "synthetic_categories": [
+          "few",
+          "many",
+          "one",
+          "other"
+        ],
+        "synthetic_sample_results": [
+          {
+            "n": 0,
+            "category": "many",
+            "actual": "0 many"
+          },
+          {
+            "n": 1,
+            "category": "one",
+            "actual": "1 one"
+          },
+          {
+            "n": 2,
+            "category": "few",
+            "actual": "2 few"
+          },
+          {
+            "n": 3,
+            "category": "few",
+            "actual": "3 few"
+          },
+          {
+            "n": 4,
+            "category": "few",
+            "actual": "4 few"
+          },
+          {
+            "n": 5,
+            "category": "many",
+            "actual": "5 many"
+          },
+          {
+            "n": 11,
+            "category": "many",
+            "actual": "11 many"
+          },
+          {
+            "n": 21,
+            "category": "one",
+            "actual": "21 one"
+          },
+          {
+            "n": 100,
+            "category": "many",
+            "actual": "100 many"
+          },
+          {
+            "n": 1000000,
+            "category": "many",
+            "actual": "1 000 000 many"
+          },
+          {
+            "n": 1.5,
+            "category": "other",
+            "actual": "1,5 other"
+          }
+        ],
+        "missing_other_parser_result": {
+          "rejected": false
+        },
+        "missing_other_explicit_selector_validation_rejects": true,
+        "invalid_selector_explicit_validation_rejects": true,
+        "limit": "Synthetic locale probes are not actual-hint plural coverage."
+      },
+      "RTL": {
+        "applicable": false,
+        "technical_esc_recovered_exact": true,
+        "limitation": "LTR locale; projection remains byte-identical"
+      },
+      "exceptions": [
+        "esc is the only technical argument exception; ordinary read-only/back prose is localized"
+      ],
+      "source_sha256": "a2a8bfb8a250b38e3a950bb2b02d885ec76cc726d77521086801099b6e99b5f2",
+      "target_sha256": "07740014857374da1b9bec31999f65955e6a6069faf97fa753e109e28f88d1e0",
+      "context_sha256": "46c48a659223ad5e4861a1407c2c7a685183b9c7caecf6e19f53adb8131389ee",
+      "origin": "ssh://git@github.com/damianvtran/local-operator.git",
+      "current_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+      "canonical_proof": {
+        "locale": "ru",
+        "envelope": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/docs/pr-evidence/readonly-footer/readonly-footer-inputs/ru-approved.json",
+        "envelope_sha256": "d32529ca7b42417865366f9e625fde110dfcabc95073d565732d42d55e73f03b",
+        "target_path": "local_operator/i18n/catalogues/ru/tui.editor_readonly.json",
+        "target_raw_sha256": "07740014857374da1b9bec31999f65955e6a6069faf97fa753e109e28f88d1e0",
+        "canonical_map_sha256": "e60f924b70dcdd7219a7f8f916422b82b3c825126b5b6da4d9976c640de38f30",
+        "tool_sha256": "d7891bfdd66a3056b15b4f26d8a7b9806240beb380c0cd783dce042db573fa51",
+        "checkout_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+        "repository": "damianvtran/local-operator",
+        "key_count": 1,
+        "arguments": [
+          "key"
+        ],
+        "raw_byte_hash_verified": true,
+        "canonical_approved_map_verified": true,
+        "official_origin_verified": true
+      },
+      "identity": {
+        "agent": "translation-auditor B",
+        "session": "1be17b0ed9f1",
+        "actual_model": "openai/gpt-6.1-sol",
+        "fallback": "Host model-switch message: quota failure from anthropic/claude-opus-5-5; initial guide read preceded switch."
+      }
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.editor_readonly",
+      "key": "tui.editor_readonly.hint",
+      "keys_read": 1,
+      "fresh": 1,
+      "retained": 0,
+      "native_llm_semantic_audit": true,
+      "verdict": "PASS",
+      "issues": [],
+      "english": "Read-only · {key} back",
+      "target": "Chỉ đọc · {key} quay lại",
+      "rendered_with_esc": "Chỉ đọc · esc quay lại",
+      "backtranslation": "Read-only · {key} return/go back",
+      "semantic_idiom_register_assessment": "Chỉ đọc denotes the non-editable state and quay lại denotes returning, not restoring permissions. Short neutral labels naturally omit bạn and fit the keyboard legend register.",
+      "glossary": "Shared glossary/style guide reviewed; no explicit read-only/back entry requiring a different synonym. Exactly one namespace key; no within-namespace drift. No claim of whole-UI consistency.",
+      "placeholders": {
+        "exact_literal_once": true,
+        "icu_arguments": [
+          [
+            "key",
+            "simple"
+          ]
+        ],
+        "generated_argument_type": "str",
+        "technical_argument": "esc",
+        "technical_token_exact_once": true
+      },
+      "width": {
+        "english_cells": 20,
+        "rich_cells": 22,
+        "budget_cells": 40,
+        "within_budget": true,
+        "pseudo_expanded_cells": 31,
+        "pseudo_within_budget": true,
+        "overbudget_negative_detected": true,
+        "rendered_check": "DEFERRED: pure Rich cell measures do not establish actual app clipping, font/shaping or native fit."
+      },
+      "controls": {
+        "NFC": true,
+        "stored_bidi_or_control_count": 0,
+        "projection": "Chỉ đọc · esc quay lại",
+        "projection_roundtrip_raw_exact": true,
+        "injected_RLO_rejected": {
+          "rejected": true,
+          "exception": "ValueError",
+          "message": "status display requires plain text without control sequences"
+        }
+      },
+      "CLDR": {
+        "actual_key": "N/A: one simple string argument; no count, plural, select, date/number skeleton, or markup",
+        "synthetic_categories": [
+          "other"
+        ],
+        "synthetic_sample_results": [
+          {
+            "n": 0,
+            "category": "other",
+            "actual": "0 other"
+          },
+          {
+            "n": 1,
+            "category": "other",
+            "actual": "1 other"
+          },
+          {
+            "n": 2,
+            "category": "other",
+            "actual": "2 other"
+          },
+          {
+            "n": 3,
+            "category": "other",
+            "actual": "3 other"
+          },
+          {
+            "n": 4,
+            "category": "other",
+            "actual": "4 other"
+          },
+          {
+            "n": 5,
+            "category": "other",
+            "actual": "5 other"
+          },
+          {
+            "n": 11,
+            "category": "other",
+            "actual": "11 other"
+          },
+          {
+            "n": 21,
+            "category": "other",
+            "actual": "21 other"
+          },
+          {
+            "n": 100,
+            "category": "other",
+            "actual": "100 other"
+          },
+          {
+            "n": 1000000,
+            "category": "other",
+            "actual": "1.000.000 other"
+          },
+          {
+            "n": 1.5,
+            "category": "other",
+            "actual": "1,5 other"
+          }
+        ],
+        "missing_other_parser_result": {
+          "rejected": false
+        },
+        "missing_other_explicit_selector_validation_rejects": true,
+        "invalid_selector_explicit_validation_rejects": true,
+        "limit": "Synthetic locale probes are not actual-hint plural coverage."
+      },
+      "RTL": {
+        "applicable": false,
+        "technical_esc_recovered_exact": true,
+        "limitation": "LTR locale; projection remains byte-identical"
+      },
+      "exceptions": [
+        "esc is the only technical argument exception; ordinary read-only/back prose is localized"
+      ],
+      "source_sha256": "a2a8bfb8a250b38e3a950bb2b02d885ec76cc726d77521086801099b6e99b5f2",
+      "target_sha256": "86c9aa76cd934591e291b4140ef3cc1b391662fe8f94d8db6646b7bc89366198",
+      "context_sha256": "46c48a659223ad5e4861a1407c2c7a685183b9c7caecf6e19f53adb8131389ee",
+      "origin": "ssh://git@github.com/damianvtran/local-operator.git",
+      "current_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+      "canonical_proof": {
+        "locale": "vi",
+        "envelope": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/docs/pr-evidence/readonly-footer/readonly-footer-inputs/vi-approved.json",
+        "envelope_sha256": "780feb55304cfaa7a3cedbc7a6cd8cee5617050c5e0bd5606d1c1087e296a7b9",
+        "target_path": "local_operator/i18n/catalogues/vi/tui.editor_readonly.json",
+        "target_raw_sha256": "86c9aa76cd934591e291b4140ef3cc1b391662fe8f94d8db6646b7bc89366198",
+        "canonical_map_sha256": "917051d8def3d93700c0844f056743b554f41d0a12836cb1640d9d5930561d71",
+        "tool_sha256": "786f6c632cc957d975b2a07a14e8e2b8738eb5ee664d68a74231d87e60f184ba",
+        "checkout_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+        "repository": "damianvtran/local-operator",
+        "key_count": 1,
+        "arguments": [
+          "key"
+        ],
+        "raw_byte_hash_verified": true,
+        "canonical_approved_map_verified": true,
+        "official_origin_verified": true
+      },
+      "identity": {
+        "agent": "translation-auditor B",
+        "session": "1be17b0ed9f1",
+        "actual_model": "openai/gpt-6.1-sol",
+        "fallback": "Host model-switch message: quota failure from anthropic/claude-opus-5-5; initial guide read preceded switch."
+      }
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.editor_readonly",
+      "key": "tui.editor_readonly.hint",
+      "keys_read": 1,
+      "fresh": 1,
+      "retained": 0,
+      "native_llm_semantic_audit": true,
+      "verdict": "PASS",
+      "issues": [],
+      "english": "Read-only · {key} back",
+      "target": "केवल पढ़ने के लिए · {key} लौटें",
+      "rendered_with_esc": "केवल पढ़ने के लिए · esc लौटें",
+      "backtranslation": "For reading only · {key} return",
+      "semantic_idiom_register_assessment": "केवल पढ़ने के लिए is a conventional read-only state description; लौटें is the polite imperative return, agreeing with आप register. Key preceding the verb is natural in a terse shortcut legend; not an editing toggle.",
+      "glossary": "Shared glossary/style guide reviewed; no explicit read-only/back entry requiring a different synonym. Exactly one namespace key; no within-namespace drift. No claim of whole-UI consistency.",
+      "placeholders": {
+        "exact_literal_once": true,
+        "icu_arguments": [
+          [
+            "key",
+            "simple"
+          ]
+        ],
+        "generated_argument_type": "str",
+        "technical_argument": "esc",
+        "technical_token_exact_once": true
+      },
+      "width": {
+        "english_cells": 20,
+        "rich_cells": 21,
+        "budget_cells": 40,
+        "within_budget": true,
+        "pseudo_expanded_cells": 30,
+        "pseudo_within_budget": true,
+        "overbudget_negative_detected": true,
+        "rendered_check": "DEFERRED: pure Rich cell measures do not establish actual app clipping, font/shaping or native fit."
+      },
+      "controls": {
+        "NFC": true,
+        "stored_bidi_or_control_count": 0,
+        "projection": "केवल पढ़ने के लिए · esc लौटें",
+        "projection_roundtrip_raw_exact": true,
+        "injected_RLO_rejected": {
+          "rejected": true,
+          "exception": "ValueError",
+          "message": "status display requires plain text without control sequences"
+        }
+      },
+      "CLDR": {
+        "actual_key": "N/A: one simple string argument; no count, plural, select, date/number skeleton, or markup",
+        "synthetic_categories": [
+          "one",
+          "other"
+        ],
+        "synthetic_sample_results": [
+          {
+            "n": 0,
+            "category": "one",
+            "actual": "0 one"
+          },
+          {
+            "n": 1,
+            "category": "one",
+            "actual": "1 one"
+          },
+          {
+            "n": 2,
+            "category": "other",
+            "actual": "2 other"
+          },
+          {
+            "n": 3,
+            "category": "other",
+            "actual": "3 other"
+          },
+          {
+            "n": 4,
+            "category": "other",
+            "actual": "4 other"
+          },
+          {
+            "n": 5,
+            "category": "other",
+            "actual": "5 other"
+          },
+          {
+            "n": 11,
+            "category": "other",
+            "actual": "11 other"
+          },
+          {
+            "n": 21,
+            "category": "other",
+            "actual": "21 other"
+          },
+          {
+            "n": 100,
+            "category": "other",
+            "actual": "100 other"
+          },
+          {
+            "n": 1000000,
+            "category": "other",
+            "actual": "10,00,000 other"
+          },
+          {
+            "n": 1.5,
+            "category": "other",
+            "actual": "1.5 other"
+          }
+        ],
+        "missing_other_parser_result": {
+          "rejected": false
+        },
+        "missing_other_explicit_selector_validation_rejects": true,
+        "invalid_selector_explicit_validation_rejects": true,
+        "limit": "Synthetic locale probes are not actual-hint plural coverage."
+      },
+      "RTL": {
+        "applicable": false,
+        "technical_esc_recovered_exact": true,
+        "limitation": "LTR locale; projection remains byte-identical"
+      },
+      "exceptions": [
+        "esc is the only technical argument exception; ordinary read-only/back prose is localized"
+      ],
+      "source_sha256": "a2a8bfb8a250b38e3a950bb2b02d885ec76cc726d77521086801099b6e99b5f2",
+      "target_sha256": "6a682bddc90feaa5627dd033b11a30c6fa4e6bb53c623e0c09fa500d30bbae7f",
+      "context_sha256": "46c48a659223ad5e4861a1407c2c7a685183b9c7caecf6e19f53adb8131389ee",
+      "origin": "ssh://git@github.com/damianvtran/local-operator.git",
+      "current_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+      "canonical_proof": {
+        "locale": "hi",
+        "envelope": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/docs/pr-evidence/readonly-footer/readonly-footer-inputs/hi-approved.json",
+        "envelope_sha256": "89429d964f6cb1aacc5f272c35c3ce1789f537b84e6e8021f859b905977dc402",
+        "target_path": "local_operator/i18n/catalogues/hi/tui.editor_readonly.json",
+        "target_raw_sha256": "6a682bddc90feaa5627dd033b11a30c6fa4e6bb53c623e0c09fa500d30bbae7f",
+        "canonical_map_sha256": "13b669eb0d421ca462f1e2d000d16be7a8b32d56f35e44d6146235a596d34b23",
+        "tool_sha256": "eed451f224aec89332799d8c8985ad6175f2ded129e0e2969b5b123200bfc39e",
+        "checkout_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+        "repository": "damianvtran/local-operator",
+        "key_count": 1,
+        "arguments": [
+          "key"
+        ],
+        "raw_byte_hash_verified": true,
+        "canonical_approved_map_verified": true,
+        "official_origin_verified": true
+      },
+      "identity": {
+        "agent": "translation-auditor B",
+        "session": "1be17b0ed9f1",
+        "actual_model": "openai/gpt-6.1-sol",
+        "fallback": "Host model-switch message: quota failure from anthropic/claude-opus-5-5; initial guide read preceded switch."
+      }
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.editor_readonly",
+      "key": "tui.editor_readonly.hint",
+      "keys_read": 1,
+      "fresh": 1,
+      "retained": 0,
+      "native_llm_semantic_audit": true,
+      "verdict": "PASS",
+      "issues": [],
+      "english": "Read-only · {key} back",
+      "target": "صرف پڑھنے کے لیے · {key} واپس",
+      "rendered_with_esc": "صرف پڑھنے کے لیے · esc واپس",
+      "backtranslation": "For reading only · {key} back",
+      "semantic_idiom_register_assessment": "صرف پڑھنے کے لیے naturally names the non-editable state; واپس is an idiomatic compact back label. No intimate imperative conflicts with آپ register. Latin esc is a technical key island, not untranslated ordinary prose.",
+      "glossary": "Shared glossary/style guide reviewed; no explicit read-only/back entry requiring a different synonym. Exactly one namespace key; no within-namespace drift. No claim of whole-UI consistency.",
+      "placeholders": {
+        "exact_literal_once": true,
+        "icu_arguments": [
+          [
+            "key",
+            "simple"
+          ]
+        ],
+        "generated_argument_type": "str",
+        "technical_argument": "esc",
+        "technical_token_exact_once": true
+      },
+      "width": {
+        "english_cells": 20,
+        "rich_cells": 27,
+        "budget_cells": 40,
+        "within_budget": true,
+        "pseudo_expanded_cells": 38,
+        "pseudo_within_budget": true,
+        "overbudget_negative_detected": true,
+        "rendered_check": "DEFERRED: pure Rich cell measures do not establish actual app clipping, font/shaping or native fit."
+      },
+      "controls": {
+        "NFC": true,
+        "stored_bidi_or_control_count": 0,
+        "projection": "⁧صرف پڑھنے کے لیے · ⁦esc⁩ واپس⁩",
+        "projection_roundtrip_raw_exact": true,
+        "injected_RLO_rejected": {
+          "rejected": true,
+          "exception": "ValueError",
+          "message": "status display requires plain text without control sequences"
+        }
+      },
+      "CLDR": {
+        "actual_key": "N/A: one simple string argument; no count, plural, select, date/number skeleton, or markup",
+        "synthetic_categories": [
+          "one",
+          "other"
+        ],
+        "synthetic_sample_results": [
+          {
+            "n": 0,
+            "category": "other",
+            "actual": "0 other"
+          },
+          {
+            "n": 1,
+            "category": "one",
+            "actual": "1 one"
+          },
+          {
+            "n": 2,
+            "category": "other",
+            "actual": "2 other"
+          },
+          {
+            "n": 3,
+            "category": "other",
+            "actual": "3 other"
+          },
+          {
+            "n": 4,
+            "category": "other",
+            "actual": "4 other"
+          },
+          {
+            "n": 5,
+            "category": "other",
+            "actual": "5 other"
+          },
+          {
+            "n": 11,
+            "category": "other",
+            "actual": "11 other"
+          },
+          {
+            "n": 21,
+            "category": "other",
+            "actual": "21 other"
+          },
+          {
+            "n": 100,
+            "category": "other",
+            "actual": "100 other"
+          },
+          {
+            "n": 1000000,
+            "category": "other",
+            "actual": "1,000,000 other"
+          },
+          {
+            "n": 1.5,
+            "category": "other",
+            "actual": "1.5 other"
+          }
+        ],
+        "missing_other_parser_result": {
+          "rejected": false
+        },
+        "missing_other_explicit_selector_validation_rejects": true,
+        "invalid_selector_explicit_validation_rejects": true,
+        "limit": "Synthetic locale probes are not actual-hint plural coverage."
+      },
+      "RTL": {
+        "applicable": true,
+        "technical_esc_recovered_exact": true,
+        "limitation": "Existing pure display projection only; actual composer function currently returns raw tr(); no claim that this caller applies isolation, reorders, shapes or was viewed natively."
+      },
+      "exceptions": [
+        "esc is the only technical argument exception; ordinary read-only/back prose is localized"
+      ],
+      "source_sha256": "a2a8bfb8a250b38e3a950bb2b02d885ec76cc726d77521086801099b6e99b5f2",
+      "target_sha256": "c423782b7450e73a070fa4f774a8c2324f89629909698d2a27175ced2e717817",
+      "context_sha256": "46c48a659223ad5e4861a1407c2c7a685183b9c7caecf6e19f53adb8131389ee",
+      "origin": "ssh://git@github.com/damianvtran/local-operator.git",
+      "current_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+      "canonical_proof": {
+        "locale": "ur",
+        "envelope": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/docs/pr-evidence/readonly-footer/readonly-footer-inputs/ur-approved.json",
+        "envelope_sha256": "ef0e3e31445ac886ecf7d64d65c0640e0260a44be1c24486c7aa4eda559cf18d",
+        "target_path": "local_operator/i18n/catalogues/ur/tui.editor_readonly.json",
+        "target_raw_sha256": "c423782b7450e73a070fa4f774a8c2324f89629909698d2a27175ced2e717817",
+        "canonical_map_sha256": "8f6223efb6683b12ae2ef98cfefcef6462dd5a7df47c313d873e99857ae71543",
+        "tool_sha256": "5d52bb74e5ac14df50c2932755936a94b85ca692bbdfc97eaf5e8fde3c2f3360",
+        "checkout_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+        "repository": "damianvtran/local-operator",
+        "key_count": 1,
+        "arguments": [
+          "key"
+        ],
+        "raw_byte_hash_verified": true,
+        "canonical_approved_map_verified": true,
+        "official_origin_verified": true
+      },
+      "identity": {
+        "agent": "translation-auditor B",
+        "session": "1be17b0ed9f1",
+        "actual_model": "openai/gpt-6.1-sol",
+        "fallback": "Host model-switch message: quota failure from anthropic/claude-opus-5-5; initial guide read preceded switch."
+      }
+    }
+  ],
+  "summary": {
+    "target_keys_read": 7,
+    "english_keys_read": 1,
+    "locale_namespace_pairs": 7,
+    "fresh": 7,
+    "retained": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0,
+    "overall_verdict": "PASS — terminal for scoped native-LLM copy audit; rendered/native fit remains unverified"
+  },
+  "limits": [
+    "Not a whole-UI audit, CI result, PR approval, eligibility/ledger update or release authorization.",
+    "No repo edits, fixes, installs, builds, browser/native app or test matrix run.",
+    "Pure width and synthetic expansion are risk checks only; actual after-frames deferred to app QA.",
+    "CLDR selectors explicitly validated separately from parser; actual hint has no plural/select.",
+    "Urdu projection uses existing pure helpers; actual composer isolation adoption/native glyph shaping not certified."
+  ],
+  "provenance_artifacts": [
+    {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/docs/pr-evidence/readonly-footer/readonly-footer-author.json",
+      "sha256": "61604b5a8ae9f29f96cfc114e47eb5cd64bf2d6e2a8b2ae46f4546b1909a7313",
+      "authority": "Original file hashed unchanged; author claims not substituted for independent content assessment."
+    },
+    {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/docs/pr-evidence/readonly-footer/readonly-footer-source-binding.json",
+      "sha256": "1193a373ff091333c9a71495aee255561e2dc50cc153713bd00a67a127b49749",
+      "authority": "Original file hashed unchanged; author claims not substituted for independent content assessment."
+    }
+  ],
+  "original_author_identity_exact_copy": {
+    "agent": "translator",
+    "session": "9309411c87eb",
+    "model": "openai/gpt-6.1-sol",
+    "provenance": "Host model-switch notice: temporary fallback from anthropic/claude-opus-5-5 due provider quota; authorship occurred after switch. No independent provider telemetry."
+  },
+  "source_binding_exact_copy": {
+    "schema": 1,
+    "kind": "private-source-binding-not-audit",
+    "source_head": "1ad0b8c8547243f8257ee8838fbb35ed795b13f3",
+    "worktree": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer",
+    "origin": "ssh://git@github.com/damianvtran/local-operator.git",
+    "source_title": "Private source handoff: read-only composer footer",
+    "source_document": "docs/i18n-readonly-footer-source.md",
+    "source_document_sha256": "f4fe2d80baf4de7e8951a77efb4965f0f529ad93eb2e1a245dd6969930a432f4",
+    "source_inputs_sha256": {
+      "local_operator/i18n/catalogues/en/tui.editor_readonly.json": "a2a8bfb8a250b38e3a950bb2b02d885ec76cc726d77521086801099b6e99b5f2",
+      "local_operator/i18n/catalogues/en/tui.editor_readonly.context.json": "46c48a659223ad5e4861a1407c2c7a685183b9c7caecf6e19f53adb8131389ee"
+    },
+    "author_receipt": "docs/pr-evidence/readonly-footer/readonly-footer-author.json",
+    "author_receipt_sha256": "61604b5a8ae9f29f96cfc114e47eb5cd64bf2d6e2a8b2ae46f4546b1909a7313",
+    "targets": [
+      {
+        "locale": "fr",
+        "path": "local_operator/i18n/catalogues/fr/tui.editor_readonly.json",
+        "raw_sha256": "98e716bcdc26c724f9e556e3ed366349cf0a596a8dc81bb350fc95a9f39d0ad5",
+        "canonical_map_sha256": "26fb16974301080b3da6088beb7fac1b51fe7e9582e1009bb97d8e9e51ab908e",
+        "key_count": 1,
+        "arguments": [
+          "key"
+        ],
+        "author_session": "9309411c87eb"
+      },
+      {
+        "locale": "zh-CN",
+        "path": "local_operator/i18n/catalogues/zh-CN/tui.editor_readonly.json",
+        "raw_sha256": "de698b3c4f9a184351bd627147bfe086da057890e287e01a78d87539471fa65f",
+        "canonical_map_sha256": "48f44363629d04eb0577268730ae02937ae6f93a9a42b939e7832a5136542d56",
+        "key_count": 1,
+        "arguments": [
+          "key"
+        ],
+        "author_session": "9309411c87eb"
+      },
+      {
+        "locale": "es",
+        "path": "local_operator/i18n/catalogues/es/tui.editor_readonly.json",
+        "raw_sha256": "d92fbdd397bbf7dd424c51c79b302c3b1b35b155a97a30cd5fd0973dbe1d950b",
+        "canonical_map_sha256": "54ea7faed1b2f54979550e21751d26fe2304090bac4f9b329b2c7e726b034e4c",
+        "key_count": 1,
+        "arguments": [
+          "key"
+        ],
+        "author_session": "9309411c87eb"
+      },
+      {
+        "locale": "ru",
+        "path": "local_operator/i18n/catalogues/ru/tui.editor_readonly.json",
+        "raw_sha256": "07740014857374da1b9bec31999f65955e6a6069faf97fa753e109e28f88d1e0",
+        "canonical_map_sha256": "e60f924b70dcdd7219a7f8f916422b82b3c825126b5b6da4d9976c640de38f30",
+        "key_count": 1,
+        "arguments": [
+          "key"
+        ],
+        "author_session": "9309411c87eb"
+      },
+      {
+        "locale": "vi",
+        "path": "local_operator/i18n/catalogues/vi/tui.editor_readonly.json",
+        "raw_sha256": "86c9aa76cd934591e291b4140ef3cc1b391662fe8f94d8db6646b7bc89366198",
+        "canonical_map_sha256": "917051d8def3d93700c0844f056743b554f41d0a12836cb1640d9d5930561d71",
+        "key_count": 1,
+        "arguments": [
+          "key"
+        ],
+        "author_session": "9309411c87eb"
+      },
+      {
+        "locale": "hi",
+        "path": "local_operator/i18n/catalogues/hi/tui.editor_readonly.json",
+        "raw_sha256": "6a682bddc90feaa5627dd033b11a30c6fa4e6bb53c623e0c09fa500d30bbae7f",
+        "canonical_map_sha256": "13b669eb0d421ca462f1e2d000d16be7a8b32d56f35e44d6146235a596d34b23",
+        "key_count": 1,
+        "arguments": [
+          "key"
+        ],
+        "author_session": "9309411c87eb"
+      },
+      {
+        "locale": "ur",
+        "path": "local_operator/i18n/catalogues/ur/tui.editor_readonly.json",
+        "raw_sha256": "c423782b7450e73a070fa4f774a8c2324f89629909698d2a27175ced2e717817",
+        "canonical_map_sha256": "8f6223efb6683b12ae2ef98cfefcef6462dd5a7df47c313d873e99857ae71543",
+        "key_count": 1,
+        "arguments": [
+          "key"
+        ],
+        "author_session": "9309411c87eb"
+      }
+    ],
+    "integrator": {
+      "session": "61203766acfe",
+      "model": "openai/gpt-6.1-sol",
+      "provenance": "Host fallback notice; no independent provider telemetry"
+    },
+    "status": "private candidate; no audit or eligibility approval",
+    "excluded_auditors": [
+      "9309411c87eb (all seven target author)",
+      "61203766acfe (integrator; no self-audit)",
+      "English/code implementer and Root source author (manager to resolve exact IDs)"
+    ],
+    "validation": "Seven one-key maps; one key argument; NFC; no Unicode format controls; target raw hashes match author; English/context unchanged. No rendering or language audit."
+  }
+}

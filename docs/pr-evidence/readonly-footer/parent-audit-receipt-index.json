@@ -1,0 +1,20 @@
+{
+  "head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+  "rows": [
+    {
+      "side": "A",
+      "path": "/Users/damian/.local-operator/sessions/1282ebc28f39/scratchpad/readonly-footer-audit-A.json",
+      "sha256": "98794868a94b3907098b6ab819af3766223eee11a5eac9a08fa18fafeba39b2f",
+      "auditor_session": "1282ebc28f39"
+    },
+    {
+      "side": "B",
+      "path": "/Users/damian/.local-operator/sessions/1be17b0ed9f1/scratchpad/readonly-footer-audit-B.json",
+      "sha256": "2a5874898d9c0019de903305ca44dd5c220b8e0f705f4927b65f7d5a45495a29",
+      "auditor_session": "1be17b0ed9f1"
+    }
+  ],
+  "resolvable": 2,
+  "unresolvable": 0,
+  "absent": 0
+}

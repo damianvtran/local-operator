@@ -439,7 +439,6 @@ from local_operator.tui.widgets.command_picker import (
 from local_operator.tui.widgets.copy_picker import CopyPickerScreen
 from local_operator.tui.widgets.editor import (
     ASIDE_PLACEHOLDER,
-    READ_ONLY_PLACEHOLDER,
     SHELL_PLACEHOLDER,
     ArgumentHighlightChanged,
     ArgumentQueryOpened,
@@ -466,6 +465,7 @@ from local_operator.tui.widgets.editor import (
     StopRequested,
     credential_payloads,
     expand_pastes,
+    read_only_placeholder,
     resolve_markers,
     substitute_credentials,
 )
@@ -29813,7 +29813,7 @@ class OperatorApp(App[None]):
         state that genuinely changes what Enter does has one place to go.
         """
         if editor.read_only:
-            return READ_ONLY_PLACEHOLDER
+            return read_only_placeholder()
         if self._aside_is_open():
             return ASIDE_PLACEHOLDER
         if editor.shell_mode:
@@ -48820,16 +48820,17 @@ class OperatorApp(App[None]):
         # The composer's PAINTED placeholder is a property on the widget, not a
         # render-time lookup, so a locale move leaves it in the old language. It
         # is a SHARED channel (bang-mode, the aside, read-only, the credential
-        # prompt and the setup cue all write it), so only a composer still
-        # showing the RESTING invitation is repainted: comparing against the
-        # pre-switch resting text keeps another mode's placeholder untouched.
+        # prompt and the setup cue all write it). Repaint the read-only hint as
+        # well as the RESTING invitation: its keyed prose must follow a locale
+        # move even while the page owns focus. Other modes retain their copy;
+        # comparing the resting text avoids overwriting a credential prompt.
         try:
             composer = self.query_one(Editor)
         except Exception:  # noqa: BLE001 — not mounted yet (boot, teardown)
             composer = None
         resting_before = composer.resting_placeholder if composer is not None else ""
         i18n_text.set_active_locale(locale)
-        if composer is not None and composer.placeholder == resting_before:
+        if composer is not None and (composer.read_only or composer.placeholder == resting_before):
             composer.placeholder = self._composer_placeholder_for(composer)
         # The slash registry re-materialises its own descriptions in place (its
         # ``register_refresh`` hook), which reaches ``/help`` because that block

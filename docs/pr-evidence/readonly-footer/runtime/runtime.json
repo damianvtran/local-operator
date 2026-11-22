@@ -1,0 +1,479 @@
+{
+  "head": "3fca695e29bafbf0ea8539dd7a147f2f87183c6d",
+  "module": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/local_operator/__init__.py",
+  "css": [
+    "l",
+    "o",
+    "c",
+    "a",
+    "l",
+    "_",
+    "o",
+    "p",
+    "e",
+    "r",
+    "a",
+    "t",
+    "o",
+    "r",
+    ".",
+    "t",
+    "c",
+    "s",
+    "s"
+  ],
+  "font": {
+    "requested": "Menlo, DejaVu Sans Mono, monospace",
+    "scope": "fontconfig/librsvg",
+    "status": "resolved",
+    "faces": [
+      {
+        "requested_style": "Regular",
+        "family": "Menlo",
+        "style": "Regular",
+        "file": "/System/Library/Fonts/Menlo.ttc",
+        "index": "0",
+        "ascii_advances": {
+          "i": 8.0,
+          "W": 8.0,
+          "0": 8.0,
+          "1": 8.0
+        },
+        "ascent_descent": [
+          13,
+          4
+        ],
+        "monospace_ascii": true,
+        "measurement": "Pillow/FreeType; rasterizer hinting may differ"
+      },
+      {
+        "requested_style": "Bold",
+        "family": "Menlo",
+        "style": "Bold",
+        "file": "/System/Library/Fonts/Menlo.ttc",
+        "index": "1",
+        "ascii_advances": {
+          "i": 8.0,
+          "W": 8.0,
+          "0": 8.0,
+          "1": 8.0
+        },
+        "ascent_descent": [
+          13,
+          4
+        ],
+        "monospace_ascii": true,
+        "measurement": "Pillow/FreeType; rasterizer hinting may differ"
+      },
+      {
+        "requested_style": "Italic",
+        "family": "Menlo",
+        "style": "Italic",
+        "file": "/System/Library/Fonts/Menlo.ttc",
+        "index": "2",
+        "ascii_advances": {
+          "i": 8.0,
+          "W": 8.0,
+          "0": 8.0,
+          "1": 8.0
+        },
+        "ascent_descent": [
+          13,
+          4
+        ],
+        "monospace_ascii": true,
+        "measurement": "Pillow/FreeType; rasterizer hinting may differ"
+      }
+    ]
+  },
+  "rows": [
+    {
+      "locale": "en",
+      "placeholder": "Read-only · esc back",
+      "cells": 20,
+      "painted_lines": [
+        "Read-only · esc back"
+      ],
+      "geometry": {
+        "screen": [
+          38,
+          22
+        ],
+        "screen_virtual": [
+          38,
+          22
+        ],
+        "screen_scrollbar": [
+          false,
+          false
+        ],
+        "editor_size": [
+          32,
+          1
+        ],
+        "editor_content": [
+          32,
+          1
+        ],
+        "editor_virtual": [
+          0,
+          1
+        ],
+        "editor_scrollbar": [
+          false,
+          false
+        ],
+        "editor_region": [
+          4,
+          19,
+          34,
+          1
+        ],
+        "focused": "SettingsView"
+      },
+      "stable": true,
+      "input_refused": true,
+      "source_sha256": "a2a8bfb8a250b38e3a950bb2b02d885ec76cc726d77521086801099b6e99b5f2"
+    },
+    {
+      "locale": "zh-CN",
+      "placeholder": "只读 · esc返回",
+      "cells": 14,
+      "painted_lines": [
+        "只读 · esc返回"
+      ],
+      "geometry": {
+        "screen": [
+          38,
+          22
+        ],
+        "screen_virtual": [
+          38,
+          22
+        ],
+        "screen_scrollbar": [
+          false,
+          false
+        ],
+        "editor_size": [
+          32,
+          1
+        ],
+        "editor_content": [
+          32,
+          1
+        ],
+        "editor_virtual": [
+          0,
+          1
+        ],
+        "editor_scrollbar": [
+          false,
+          false
+        ],
+        "editor_region": [
+          4,
+          19,
+          34,
+          1
+        ],
+        "focused": "SettingsView"
+      },
+      "stable": true,
+      "input_refused": true,
+      "source_sha256": "de698b3c4f9a184351bd627147bfe086da057890e287e01a78d87539471fa65f"
+    },
+    {
+      "locale": "fr",
+      "placeholder": "Lecture seule · esc retour",
+      "cells": 26,
+      "painted_lines": [
+        "Lecture seule · esc retour"
+      ],
+      "geometry": {
+        "screen": [
+          38,
+          22
+        ],
+        "screen_virtual": [
+          38,
+          22
+        ],
+        "screen_scrollbar": [
+          false,
+          false
+        ],
+        "editor_size": [
+          32,
+          1
+        ],
+        "editor_content": [
+          32,
+          1
+        ],
+        "editor_virtual": [
+          0,
+          1
+        ],
+        "editor_scrollbar": [
+          false,
+          false
+        ],
+        "editor_region": [
+          4,
+          19,
+          34,
+          1
+        ],
+        "focused": "SettingsView"
+      },
+      "stable": true,
+      "input_refused": true,
+      "source_sha256": "98e716bcdc26c724f9e556e3ed366349cf0a596a8dc81bb350fc95a9f39d0ad5"
+    },
+    {
+      "locale": "es",
+      "placeholder": "Solo lectura · esc volver",
+      "cells": 25,
+      "painted_lines": [
+        "Solo lectura · esc volver"
+      ],
+      "geometry": {
+        "screen": [
+          38,
+          22
+        ],
+        "screen_virtual": [
+          38,
+          22
+        ],
+        "screen_scrollbar": [
+          false,
+          false
+        ],
+        "editor_size": [
+          32,
+          1
+        ],
+        "editor_content": [
+          32,
+          1
+        ],
+        "editor_virtual": [
+          0,
+          1
+        ],
+        "editor_scrollbar": [
+          false,
+          false
+        ],
+        "editor_region": [
+          4,
+          19,
+          34,
+          1
+        ],
+        "focused": "SettingsView"
+      },
+      "stable": true,
+      "input_refused": true,
+      "source_sha256": "d92fbdd397bbf7dd424c51c79b302c3b1b35b155a97a30cd5fd0973dbe1d950b"
+    },
+    {
+      "locale": "ru",
+      "placeholder": "Только чтение · esc назад",
+      "cells": 25,
+      "painted_lines": [
+        "Только чтение · esc назад"
+      ],
+      "geometry": {
+        "screen": [
+          38,
+          22
+        ],
+        "screen_virtual": [
+          38,
+          22
+        ],
+        "screen_scrollbar": [
+          false,
+          false
+        ],
+        "editor_size": [
+          32,
+          1
+        ],
+        "editor_content": [
+          32,
+          1
+        ],
+        "editor_virtual": [
+          0,
+          1
+        ],
+        "editor_scrollbar": [
+          false,
+          false
+        ],
+        "editor_region": [
+          4,
+          19,
+          34,
+          1
+        ],
+        "focused": "SettingsView"
+      },
+      "stable": true,
+      "input_refused": true,
+      "source_sha256": "07740014857374da1b9bec31999f65955e6a6069faf97fa753e109e28f88d1e0"
+    },
+    {
+      "locale": "vi",
+      "placeholder": "Chỉ đọc · esc quay lại",
+      "cells": 22,
+      "painted_lines": [
+        "Chỉ đọc · esc quay lại"
+      ],
+      "geometry": {
+        "screen": [
+          38,
+          22
+        ],
+        "screen_virtual": [
+          38,
+          22
+        ],
+        "screen_scrollbar": [
+          false,
+          false
+        ],
+        "editor_size": [
+          32,
+          1
+        ],
+        "editor_content": [
+          32,
+          1
+        ],
+        "editor_virtual": [
+          0,
+          1
+        ],
+        "editor_scrollbar": [
+          false,
+          false
+        ],
+        "editor_region": [
+          4,
+          19,
+          34,
+          1
+        ],
+        "focused": "SettingsView"
+      },
+      "stable": true,
+      "input_refused": true,
+      "source_sha256": "86c9aa76cd934591e291b4140ef3cc1b391662fe8f94d8db6646b7bc89366198"
+    },
+    {
+      "locale": "hi",
+      "placeholder": "केवल पढ़ने के लिए · esc लौटें",
+      "cells": 21,
+      "painted_lines": [
+        "केवल पढ़ने के लिए · esc लौटें"
+      ],
+      "geometry": {
+        "screen": [
+          38,
+          22
+        ],
+        "screen_virtual": [
+          38,
+          22
+        ],
+        "screen_scrollbar": [
+          false,
+          false
+        ],
+        "editor_size": [
+          32,
+          1
+        ],
+        "editor_content": [
+          32,
+          1
+        ],
+        "editor_virtual": [
+          0,
+          1
+        ],
+        "editor_scrollbar": [
+          false,
+          false
+        ],
+        "editor_region": [
+          4,
+          19,
+          34,
+          1
+        ],
+        "focused": "SettingsView"
+      },
+      "stable": true,
+      "input_refused": true,
+      "source_sha256": "6a682bddc90feaa5627dd033b11a30c6fa4e6bb53c623e0c09fa500d30bbae7f"
+    },
+    {
+      "locale": "ur",
+      "placeholder": "صرف پڑھنے کے لیے · esc واپس",
+      "cells": 27,
+      "painted_lines": [
+        "صرف پڑھنے کے لیے · esc واپس"
+      ],
+      "geometry": {
+        "screen": [
+          38,
+          22
+        ],
+        "screen_virtual": [
+          38,
+          22
+        ],
+        "screen_scrollbar": [
+          false,
+          false
+        ],
+        "editor_size": [
+          32,
+          1
+        ],
+        "editor_content": [
+          32,
+          1
+        ],
+        "editor_virtual": [
+          0,
+          1
+        ],
+        "editor_scrollbar": [
+          false,
+          false
+        ],
+        "editor_region": [
+          4,
+          19,
+          34,
+          1
+        ],
+        "focused": "SettingsView"
+      },
+      "stable": true,
+      "input_refused": true,
+      "source_sha256": "c423782b7450e73a070fa4f774a8c2324f89629909698d2a27175ced2e717817"
+    }
+  ],
+  "escape": "PASS",
+  "custom_placeholder": "PASS",
+  "native_shaping": "UNVERIFIED: SVG/librsvg is not a native terminal renderer",
+  "model": "openai/gpt-6.1-sol fallback after anthropic/claude-opus-5-5 quota failure"
+}
