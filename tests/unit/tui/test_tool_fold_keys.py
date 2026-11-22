@@ -563,6 +563,7 @@ async def test_the_live_bar_repaints_its_elapsed_without_a_derive(monkeypatch) -
         before = painted_bar()
         assert clock_cells(before) >= 6.5, before
 
+        assert card._started is not None  # the live bar is running, so it has a start
         card._started -= 2.0  # two seconds pass with no append and no re-derive
         await pilot.pause(0.2)
 
