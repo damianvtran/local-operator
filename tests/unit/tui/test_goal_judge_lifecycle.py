@@ -163,6 +163,11 @@ async def test_a_follower_terminal_never_judges(monkeypatch: pytest.MonkeyPatch)
     """
     session = _armed()
     session.runtime_locality = "this-machine"  # type: ignore[misc]
+
+    def owner_only(_session: GoalSession) -> bool:
+        pytest.fail("the viewer must not even look up owner-side recovery eligibility")
+
+    monkeypatch.setattr(GoalSession, "goal_recovery_due", property(owner_only), raising=False)
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
         await _boot_settled(pilot, app, session)

@@ -50844,9 +50844,9 @@ class OperatorApp(App[None]):
         """
         from local_operator.session.errors import TurnInFlight
 
-        fields: dict[str, Any] = dict(echo.prompt_kwargs())
-        if "owner_typed" in inspect.signature(session.prompt).parameters:
-            fields["owner_typed"] = False
+        # Session excludes harness-injected rows from owner authority. Passing
+        # owner_typed=False would also label this local turn as remote human input.
+        fields = echo.prompt_kwargs()
 
         deadline = time.monotonic() + _GOAL_CONTINUATION_ADMISSION_S
         while True:
@@ -51213,22 +51213,23 @@ class OperatorApp(App[None]):
 
     def _rearm_goal_judge_on_boot(self, session: SessionProtocol) -> None:
         """Recover a due local goal when no turn or loop owns the session."""
-        from local_operator.session.goal_judge import owns_the_session
-
         source = self._interactions.get(id(session))
         if source is None:
             return
-        due = getattr(session, "goal_recovery_due", None)
         if (
-            not owns_the_session(session)
-            or source.goal.judge_in_flight
+            source.goal.judge_in_flight
             or source.loop.running
             or getattr(session, "is_streaming", False)
             or (lock := getattr(session, "_turn_lock", None)) is not None
             and lock.locked()
-            or not callable(due)
-            or not due()
         ):
+            return
+        # Wake eligibility belongs to the goal's owner, not the attached viewer.
+        record = self._goal_record_for(session)
+        if record is None:
+            return
+        due = getattr(record, "goal_recovery_due", None)
+        if not callable(due) or not due():
             return
         source.goal.judge_in_flight = True
         try:
