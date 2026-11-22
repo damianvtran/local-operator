@@ -5,6 +5,7 @@ on a str-compatible value lets the existing row fitters measure ordinary cells,
 then reuse the shared bidi adapter without attributing English fallback to Urdu.
 No snapshot fields, protocol tokens or stored/exported bytes gain bidi controls.
 """
+
 from __future__ import annotations
 
 from collections.abc import Iterable
@@ -13,7 +14,8 @@ from typing import Any
 
 from rich.text import Text
 
-from local_operator.i18n.keys import tui_info as keys, wire_session_status as duration_keys
+from local_operator.i18n.keys import tui_info as keys
+from local_operator.i18n.keys import wire_session_status as duration_keys
 from local_operator.i18n.messages import Msg
 from local_operator.i18n.text import tr_record
 from local_operator.tui.i18n_status import localized_display
@@ -56,39 +58,61 @@ def join_info(separator: str, values: Iterable[str]) -> InfoText:
     return InfoText(tuple(parts))
 
 
-_resolve = {name: tr_record(name) for name in (
-    "tui.info", "tui.small", "tui.welcome", "wire.session_status",
-)}
+_resolve = {
+    name: tr_record(name)
+    for name in (
+        "tui.info",
+        "tui.small",
+        "tui.welcome",
+        "wire.session_status",
+    )
+}
 # Explicit ownership, not ASCII detection: these are IDs and versions,
 # key chords and paths. Human labels, free error prose and conversation names
 # are deliberately absent. Commands below are protected as whole instructions.
-_TECHNICAL_ARGS = frozenset({
-    "latest", "latest_known", "version",
-    "protocol", "variable", "kind", "stamp", "source_ref",
-    "info_copy_key", "copy_key", "INFO_COPY_KEY", "target", "time_strftime",
-})
+_TECHNICAL_ARGS = frozenset(
+    {
+        "latest",
+        "latest_known",
+        "version",
+        "protocol",
+        "variable",
+        "kind",
+        "stamp",
+        "source_ref",
+        "info_copy_key",
+        "copy_key",
+        "INFO_COPY_KEY",
+        "target",
+        "time_strftime",
+    }
+)
 _LITERAL_TOKENS = (
-                      '/info',
-                      '/reload',
-                      '/update',
-                      '`lop-update`',
-                      'lop-update',
-                      'sys.path',
-                      'PyPI',
-                      'MCP',
-                  )
+    "/info",
+    "/reload",
+    "/update",
+    "`lop-update`",
+    "lop-update",
+    "sys.path",
+    "PyPI",
+    "MCP",
+)
 
 
 def info_text(message: Msg) -> InfoText:
     namespace = next(name for name in _resolve if message.code.startswith(name + "."))
     record = _resolve[namespace](message)
-    literals = [str(value) for name, value in message.params.items()
-                if name in _TECHNICAL_ARGS and str(value)]
+    literals = [
+        str(value)
+        for name, value in message.params.items()
+        if name in _TECHNICAL_ARGS and str(value)
+    ]
     literals.extend(token for token in _LITERAL_TOKENS if token in record.text)
     if "pid" in message.params:
         pid = message.params["pid"]
-        literals.extend((f"'lop stop --pid {pid}'", f"'/stop {pid}'",
-                         f"'lop stop --pid {pid} --force'"))
+        literals.extend(
+            (f"'lop stop --pid {pid}'", f"'/stop {pid}'", f"'lop stop --pid {pid} --force'")
+        )
     literals.extend(("'lop stop --pid N'", "'/stop N'", "'lop stop --pid N --force'"))
     parts: list[_Part] = []
     pending: list[str] = []
@@ -122,12 +146,14 @@ def info_duration(seconds: float) -> InfoText:
         message = duration_keys.duration_minutes(count=total // 60)
     elif total < 86400:
         message = duration_keys.duration_hours_minutes(
-            hours=total // 3600, minutes=(total % 3600) // 60,
+            hours=total // 3600,
+            minutes=(total % 3600) // 60,
         )
     else:
         # Keep ungrouped 1000-day output, matching the legacy formatter.
         message = duration_keys.duration_days_hours(
-            days=str(total // 86400), hours=(total % 86400) // 3600,
+            days=str(total // 86400),
+            hours=(total % 86400) // 3600,
         )
     return info_text(message)
 
@@ -165,7 +191,7 @@ def copy_slice(value: str, start: int, end: int) -> InfoText:
             # A command wider than the viewport must fold, but each surviving
             # fragment still belongs to the same technical island.
             literals = tuple(
-                part.text[max(left, start):min(right, end)]
+                part.text[max(left, start) : min(right, end)]
                 for start, end in _literal_ranges(part)
                 if max(left, start) < min(right, end)
             )
@@ -221,8 +247,9 @@ def paint_info_row(row: Text) -> Text:
         if part.source == "ur":
             # The adapter validates actual whole tokens; a token shed/cropped by
             # fit is no longer a declared full literal on this painted segment.
-            projected = localized_display(segment.plain, source_locale=part.source,
-                                          technical_literals=part.literals)
+            projected = localized_display(
+                segment.plain, source_locale=part.source, technical_literals=part.literals
+            )
             if projected.plain != segment.plain:
                 # All semantic segment ink is homogeneous at Info's row boundary.
                 projected.stylize(segment.style)
@@ -253,12 +280,18 @@ def info_state(code: str) -> str:
     This fallback makes an older client honest about a newer registry record.
     """
     states = {
-        "running": keys.state_running, "starting": keys.state_starting,
-        "queued": keys.state_queued, "pausing": keys.state_pausing,
-        "paused": keys.state_paused, "completed": keys.state_completed,
-        "failed": keys.state_failed, "cancelled": keys.state_cancelled,
-        "gone": keys.state_gone, "live": keys.state_live,
-        "stale": keys.state_stale, "unknown": keys.state_unknown,
+        "running": keys.state_running,
+        "starting": keys.state_starting,
+        "queued": keys.state_queued,
+        "pausing": keys.state_pausing,
+        "paused": keys.state_paused,
+        "completed": keys.state_completed,
+        "failed": keys.state_failed,
+        "cancelled": keys.state_cancelled,
+        "gone": keys.state_gone,
+        "live": keys.state_live,
+        "stale": keys.state_stale,
+        "unknown": keys.state_unknown,
     }
     render = states.get(code or "unknown")
     return info_text(render()) if render else code
@@ -267,9 +300,14 @@ def info_state(code: str) -> str:
 def info_leaving(phrase: str) -> str:
     """Known record phrases are protocol discriminants, never stored translations."""
     from local_operator.session.runtime.types import (
-        BUILD_DRAIN_PROGRESS_S, LEAVING_FOR_BUILD, LEAVING_FOR_BUILD_OVERDUE,
-        LEAVING_ON_SIGNAL, SIGNAL_DRAIN_S, bound_text,
+        BUILD_DRAIN_PROGRESS_S,
+        LEAVING_FOR_BUILD,
+        LEAVING_FOR_BUILD_OVERDUE,
+        LEAVING_ON_SIGNAL,
+        SIGNAL_DRAIN_S,
+        bound_text,
     )
+
     if phrase == LEAVING_ON_SIGNAL:
         return info_text(keys.leaving_signal(bound=bound_text(SIGNAL_DRAIN_S)))
     if phrase == LEAVING_FOR_BUILD:
@@ -281,15 +319,19 @@ def info_leaving(phrase: str) -> str:
 
 def info_update(phase: str, pair: str) -> str:
     """Mirror update_short's facts without changing its machine/CLI callers."""
-    from local_operator.session.runtime.types import UPDATE_FAILED, UPDATING, UPDATING_DONE
+    from local_operator.session.runtime.types import (
+        UPDATE_FAILED,
+        UPDATING,
+        UPDATING_DONE,
+    )
 
     target = pair.split("→", 1)[1].strip() if "→" in pair else ""
     if phase == UPDATING:
         return info_text(keys.update_target(target=target) if target else keys.status_updating())
     if phase == UPDATING_DONE:
         return info_text(
-                   keys.update_done_target(target=target) if target else keys.status_updated(),
-               )
+            keys.update_done_target(target=target) if target else keys.status_updated(),
+        )
     if phase == UPDATE_FAILED:
         return info_text(keys.status_update_failed())
     return ""

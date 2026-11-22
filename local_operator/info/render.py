@@ -38,7 +38,8 @@ from pathlib import Path
 
 from local_operator.i18n.keys import tui_info as _ik
 from local_operator.i18n.keys import tui_small as _x
-from local_operator.info.copy import info_duration, info_state, info_text as _i
+from local_operator.info.copy import info_duration, info_state
+from local_operator.info.copy import info_text as _i
 from local_operator.info.model import (
     UNKNOWN,
     InfoSnapshot,
@@ -176,12 +177,12 @@ def _latest_line(snapshot: InfoSnapshot) -> str:
         return install.latest_known
     stale = _i(_ik.latest_stale()) if age > TTL_S else ""
     return _i(
-               _ik.latest_line_checked(
-                   latest_known=str(install.latest_known),
-                   age=info_duration(age),
-                   stale=str(stale),
-               ),
-           )
+        _ik.latest_line_checked(
+            latest_known=str(install.latest_known),
+            age=info_duration(age),
+            stale=str(stale),
+        ),
+    )
 
 
 #: Nouns whose plural is not ``+ "s"``. A map rather than a second helper so
@@ -250,9 +251,7 @@ def not_answering_clause(sessions: SessionsInfo | None) -> str:
         # these runtimes is as of a heartbeat that stopped — but the age, the
         # pid and the remedy are the parts that need a row, and inventing a pid
         # would be worse than the vaguer sentence.
-        return (
-            _i(_ik.not_answering_clause_no_rows(count=count))
-        )
+        return _i(_ik.not_answering_clause_no_rows(count=count))
     worst = max(rows, key=lambda line: line.heartbeat_age_s)
     listed = min(len(rows), _NOT_ANSWERING_PIDS)
     pids = ", ".join(str(line.pid) for line in rows[:listed])
@@ -266,15 +265,13 @@ def not_answering_clause(sessions: SessionsInfo | None) -> str:
         if one
         else _i(_ik.not_answering_clause_remedy_many())
     )
-    return (
-        _i(
-            _ik.not_answering_clause_full(
-                count=count,
-                age=info_duration(worst.heartbeat_age_s),
-                pids=str(pids),
-                remedy=remedy,
-            ),
-        )
+    return _i(
+        _ik.not_answering_clause_full(
+            count=count,
+            age=info_duration(worst.heartbeat_age_s),
+            pids=str(pids),
+            remedy=remedy,
+        ),
     )
 
 
@@ -328,39 +325,36 @@ def build_export(snapshot: InfoSnapshot) -> str:
         _i(
             _ik.export_running_code(
                 import_path=str(_value(relativise_home(install.import_path))),
-                has_is_shadowed_install=str('yes' if is_shadowed_install(install) else 'no'),
-                has_import_path_foreign=str('yes' if install.import_path_foreign else 'no'),
+                has_is_shadowed_install=str("yes" if is_shadowed_install(install) else "no"),
+                has_import_path_foreign=str("yes" if install.import_path_foreign else "no"),
             ),
         ),
         _i(
             _ik.export_source(
-                has_is_git_snapshot=str('yes' if install.is_git_snapshot else 'no'),
-                has_source_ref=str('yes' if install.source_ref else 'no'),
+                has_is_git_snapshot=str("yes" if install.is_git_snapshot else "no"),
+                has_source_ref=str("yes" if install.source_ref else "no"),
                 source_ref=str(install.source_ref[:12]),
             ),
         ),
-        _i(_ik.export_build_age(build_age_s=(info_duration(install.build_age_s)
-                         if install.build_age_s is not None else "unmeasured"))),
+        _i(
+            _ik.export_build_age(
+                build_age_s=(
+                    info_duration(install.build_age_s)
+                    if install.build_age_s is not None
+                    else "unmeasured"
+                )
+            )
+        ),
         _i(
             _ik.export_python(
                 has_install_python_version_and_install_python_implementation=str(
-                    (
-                        'yes'
-                        if (
-                            install.python_version and
-                            install.python_implementation
-                        )
-                        else 'no'
-                    ),
+                    ("yes" if (install.python_version and install.python_implementation) else "no"),
                 ),
                 python_version=str(install.python_version),
                 python_implementation=str(install.python_implementation),
                 install_python_version_or_install_python_implementation=str(
                     _value(
-                        (
-                            install.python_version or
-                            install.python_implementation
-                        ),
+                        (install.python_version or install.python_implementation),
                     ),
                 ),
             ),
@@ -381,40 +375,44 @@ def build_export(snapshot: InfoSnapshot) -> str:
             _ik.export_effective_model(
                 process_effective_model_or_process_model_label=str(
                     _value(
-                        (
-                            process.effective_model or
-                            process.model_label
-                        ),
+                        (process.effective_model or process.model_label),
                     ),
                 ),
             ),
         ),
-        _i(_ik.export_uptime(uptime_s=(info_duration(process.uptime_s)
-                      if process.uptime_s is not None else "unmeasured"))),
+        _i(
+            _ik.export_uptime(
+                uptime_s=(
+                    info_duration(process.uptime_s)
+                    if process.uptime_s is not None
+                    else "unmeasured"
+                )
+            )
+        ),
         _i(_ik.export_working_dir(cwd=str(_value(relativise_home(process.cwd))))),
         _i(
             _ik.export_config_dir(
                 config_dir=str(_value(relativise_home(process.config_dir))),
-                has_config_dir_redirected=str('yes' if process.config_dir_redirected else 'no'),
+                has_config_dir_redirected=str("yes" if process.config_dir_redirected else "no"),
             ),
         ),
         _i(_ik.export_cache_dir(cache_dir=str(_value(relativise_home(process.cache_dir))))),
         _i(
             _ik.export_agent_home(
                 agent_home=str(_value(relativise_home(process.agent_home))),
-                has_agent_home_redirected=str('yes' if process.agent_home_redirected else 'no'),
+                has_agent_home_redirected=str("yes" if process.agent_home_redirected else "no"),
             ),
         ),
         _i(_ik.export_log_dir(log_dir=str(_value(relativise_home(process.log_dir))))),
         _i(
             _ik.export_control_port(
-                has_control_port=str('yes' if process.control_port else 'no'),
+                has_control_port=str("yes" if process.control_port else "no"),
                 control_port=str(process.control_port),
             ),
         ),
         _i(
             _ik.export_protocol(
-                has_protocol=str('yes' if process.protocol else 'no'),
+                has_protocol=str("yes" if process.protocol else "no"),
                 protocol=str(process.protocol),
             ),
         ),
@@ -439,7 +437,7 @@ def build_export(snapshot: InfoSnapshot) -> str:
                     live=sessions.live,
                     wedged=str(sessions.wedged),
                     total=sessions.total,
-                    has_build_skew=str('yes' if sessions.build_skew else 'no'),
+                    has_build_skew=str("yes" if sessions.build_skew else "no"),
                 ),
             )
         )
@@ -453,10 +451,10 @@ def build_export(snapshot: InfoSnapshot) -> str:
             # the row exists to remove unqualified progress, so it must not end
             # by asserting activity. It ends on the facts it exists for.
             fields = [
-                         f'{mark} [{line.state}] {name}',
-                         line.kind,
-                         _i(_ik.export_pid_fallback(pid=str(line.pid))),
-                     ]
+                f"{mark} [{line.state}] {name}",
+                line.kind,
+                _i(_ik.export_pid_fallback(pid=str(line.pid))),
+            ]
             fields.append(info_duration(line.uptime_s))
             if line.state == "wedged":
                 # The measured half of "not answering", beside the state token
@@ -519,13 +517,11 @@ def build_export(snapshot: InfoSnapshot) -> str:
             # pasted verbatim into issues, and ``1 sessions + 1 subagents`` —
             # the state every fresh install passes through — reads as a
             # template nobody finished rather than as a measurement.
-            addends = (
-                _i(
-                    _ik.agents_addends(
-                        sessions=sessions.fleet_session_trajectories,
-                        subagents=sessions.fleet_subagents_running,
-                    ),
-                )
+            addends = _i(
+                _ik.agents_addends(
+                    sessions=sessions.fleet_session_trajectories,
+                    subagents=sessions.fleet_subagents_running,
+                ),
             )
             # Named beside the total, never added to it — see the panel's copy
             # of this rule. A queued child spends nothing, so it is not a
@@ -534,10 +530,10 @@ def build_export(snapshot: InfoSnapshot) -> str:
             # screen no longer makes.
             if sessions.fleet_subagents_queued:
                 addends += _i(
-                               _ik.export_queued_suffix(
-                                   fleet_subagents_queued=sessions.fleet_subagents_queued,
-                               ),
-                           )
+                    _ik.export_queued_suffix(
+                        fleet_subagents_queued=sessions.fleet_subagents_queued,
+                    ),
+                )
             lines.append(
                 _i(
                     _ik.export_trajectories(
@@ -569,7 +565,7 @@ def build_export(snapshot: InfoSnapshot) -> str:
             _i(
                 _ik.export_capacity(
                     max_running=agents.max_running,
-                    has_at_capacity=str('yes' if agents.at_capacity else 'no'),
+                    has_at_capacity=str("yes" if agents.at_capacity else "no"),
                 ),
             )
         )
@@ -599,9 +595,7 @@ def build_export(snapshot: InfoSnapshot) -> str:
         # Inflected, like the panel's copy: this text is pasted into an issue
         # verbatim, and "1 sessions run ... and do not report" reads as a
         # template nobody finished rather than as a measurement.
-        caveats.append(
-            _i(_ik.export_lower_bound(count=sessions.subagents_unreported))
-        )
+        caveats.append(_i(_ik.export_lower_bound(count=sessions.subagents_unreported)))
     if sessions.available and sessions.wedged:
         # PARITY with the panel, which has said this since the counts landed,
         # now through ONE shared sentence: the totals above deliberately include
@@ -625,11 +619,11 @@ def build_export(snapshot: InfoSnapshot) -> str:
         _i(_ik.export_heading_environment()),
         _i(
             _ik.export_terminal(
-                env_term_or=str(env.term or '—'),
-                has_terminal_size=str('yes' if env.terminal_size else 'no'),
-                terminal_size=str(env.terminal_size[0]) if env.terminal_size else '',
-                env_terminal_size=str(env.terminal_size[1]) if env.terminal_size else '',
-                has_colorterm=str('yes' if env.colorterm else 'no'),
+                env_term_or=str(env.term or "—"),
+                has_terminal_size=str("yes" if env.terminal_size else "no"),
+                terminal_size=str(env.terminal_size[0]) if env.terminal_size else "",
+                env_terminal_size=str(env.terminal_size[1]) if env.terminal_size else "",
+                has_colorterm=str("yes" if env.colorterm else "no"),
                 colorterm=str(env.colorterm),
             ),
         ),
@@ -638,29 +632,22 @@ def build_export(snapshot: InfoSnapshot) -> str:
                 env_multiplexer_or_none=str(env.multiplexer or _i(_ik.env_none())),
             ),
         ),
-        _i(_ik.export_tty(has_is_tty=str(('yes' if env.is_tty else 'no')))),
-        _i(_ik.export_theme(env_theme_or=str(env.theme or '—'))),
-        _i(_ik.export_approvals(env_approval_mode_or=str(env.approval_mode or '—'))),
+        _i(_ik.export_tty(has_is_tty=str(("yes" if env.is_tty else "no")))),
+        _i(_ik.export_theme(env_theme_or=str(env.theme or "—"))),
+        _i(_ik.export_approvals(env_approval_mode_or=str(env.approval_mode or "—"))),
         _i(
             _ik.export_browser(
                 env_browser_backend_or_none=str(env.browser_backend or _i(_ik.env_none())),
-                has_browser_name=str('yes' if env.browser_name else 'no'),
+                has_browser_name=str("yes" if env.browser_name else "no"),
                 browser_name=str(env.browser_name),
             ),
         ),
         _i(
             _ik.export_mobile(
-                has_mobile_installed=str('yes' if env.mobile_installed else 'no'),
-                has_mobile_healthy=str('yes' if env.mobile_healthy else 'no'),
+                has_mobile_installed=str("yes" if env.mobile_installed else "no"),
+                has_mobile_healthy=str("yes" if env.mobile_healthy else "no"),
                 has_env_mobile_installed_and_env_mobile_port=str(
-                    (
-                        'yes'
-                        if (
-                            env.mobile_installed and
-                            env.mobile_port
-                        )
-                        else 'no'
-                    ),
+                    ("yes" if (env.mobile_installed and env.mobile_port) else "no"),
                 ),
                 mobile_port=str(env.mobile_port),
             ),
@@ -669,16 +656,9 @@ def build_export(snapshot: InfoSnapshot) -> str:
             _ik.export_mcp(
                 mcp_connected=str(env.mcp_connected),
                 mcp_configured=str(env.mcp_configured),
-                has_mcp_settling=str('yes' if env.mcp_settling else 'no'),
+                has_mcp_settling=str("yes" if env.mcp_settling else "no"),
                 has_env_mcp_failed_and_not_env_mcp_settling=str(
-                    (
-                        'yes'
-                        if (
-                            env.mcp_failed and
-                            not env.mcp_settling
-                        )
-                        else 'no'
-                    ),
+                    ("yes" if (env.mcp_failed and not env.mcp_settling) else "no"),
                 ),
                 mcp_failed=env.mcp_failed,
             ),
@@ -697,8 +677,8 @@ def build_export(snapshot: InfoSnapshot) -> str:
         _i(
             _ik.export_credentials(
                 count=len(env.credential_keys),
-                has_credential_keys=str('yes' if env.credential_keys else 'no'),
-                join=str(', '.join(env.credential_keys)),
+                has_credential_keys=str("yes" if env.credential_keys else "no"),
+                join=str(", ".join(env.credential_keys)),
             ),
         )
     )

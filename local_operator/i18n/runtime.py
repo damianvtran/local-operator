@@ -519,11 +519,16 @@ def _render(
             out.append((node.value, None))
             continue
         if isinstance(node, _Hash):
-            out.append((
-                _format_value(
-                    plural_value, "plural number", lambda: fmt.format_number(plural_value, locale)
-                ), None
-            ))
+            out.append(
+                (
+                    _format_value(
+                        plural_value,
+                        "plural number",
+                        lambda: fmt.format_number(plural_value, locale),
+                    ),
+                    None,
+                )
+            )
             continue
         assert isinstance(node, _Arg)
         if node.name not in params:
@@ -536,31 +541,40 @@ def _render(
             out.append((_interpolate(value, locale, label=f"argument {node.name!r}"), node.name))
         elif node.kind == "number":
             skeleton = node.skeleton or None
-            out.append((
-                _format_value(
-                    value,
-                    f"number argument {node.name!r}",
-                    lambda: fmt.format_number(value, locale, skeleton=skeleton),
-                ), None
-            ))
+            out.append(
+                (
+                    _format_value(
+                        value,
+                        f"number argument {node.name!r}",
+                        lambda: fmt.format_number(value, locale, skeleton=skeleton),
+                    ),
+                    None,
+                )
+            )
         elif node.kind == "date":
             style = node.skeleton or "medium"
-            out.append((
-                _format_value(
-                    value,
-                    f"date argument {node.name!r}",
-                    lambda: fmt.format_date(value, locale, style=style),
-                ), None
-            ))
+            out.append(
+                (
+                    _format_value(
+                        value,
+                        f"date argument {node.name!r}",
+                        lambda: fmt.format_date(value, locale, style=style),
+                    ),
+                    None,
+                )
+            )
         elif node.kind == "time":
             style = node.skeleton or "short"
-            out.append((
-                _format_value(
-                    value,
-                    f"time argument {node.name!r}",
-                    lambda: fmt.format_time(value, locale, style=style),
-                ), None
-            ))
+            out.append(
+                (
+                    _format_value(
+                        value,
+                        f"time argument {node.name!r}",
+                        lambda: fmt.format_time(value, locale, style=style),
+                    ),
+                    None,
+                )
+            )
         elif node.kind == "plural":
             body = _select_plural(locale, value, node.parts)
             out.extend(_render(body, params, locale, plural_value=value))
@@ -596,7 +610,9 @@ def render_message(source: str, params: Mapping[str, Any], locale: str) -> str:
 
 
 def render_message_parts(
-    source: str, params: Mapping[str, Any], locale: str,
+    source: str,
+    params: Mapping[str, Any],
+    locale: str,
 ) -> tuple[tuple[str, str | None], ...]:
     """Render once, retaining the argument name of each simple interpolation.
 

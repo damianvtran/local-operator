@@ -370,7 +370,9 @@ def export_effective_model(*, process_effective_model_or_process_model_label: st
     return Msg(
         "tui.info.export.effective_model",
         {
-            "process_effective_model_or_process_model_label": process_effective_model_or_process_model_label,
+            "process_effective_model_or_process_model_label": (
+                process_effective_model_or_process_model_label
+            ),
         },
     )
 
@@ -445,7 +447,9 @@ def export_mcp(
             "mcp_connected": mcp_connected,
             "mcp_configured": mcp_configured,
             "has_mcp_settling": has_mcp_settling,
-            "has_env_mcp_failed_and_not_env_mcp_settling": has_env_mcp_failed_and_not_env_mcp_settling,
+            "has_env_mcp_failed_and_not_env_mcp_settling": (
+                has_env_mcp_failed_and_not_env_mcp_settling
+            ),
             "mcp_failed": mcp_failed,
         },
     )
@@ -463,7 +467,9 @@ def export_mobile(
         {
             "has_mobile_installed": has_mobile_installed,
             "has_mobile_healthy": has_mobile_healthy,
-            "has_env_mobile_installed_and_env_mobile_port": has_env_mobile_installed_and_env_mobile_port,
+            "has_env_mobile_installed_and_env_mobile_port": (
+                has_env_mobile_installed_and_env_mobile_port
+            ),
             "mobile_port": mobile_port,
         },
     )
@@ -507,10 +513,14 @@ def export_python(
     return Msg(
         "tui.info.export.python",
         {
-            "has_install_python_version_and_install_python_implementation": has_install_python_version_and_install_python_implementation,
+            "has_install_python_version_and_install_python_implementation": (
+                has_install_python_version_and_install_python_implementation
+            ),
             "python_version": python_version,
             "python_implementation": python_implementation,
-            "install_python_version_or_install_python_implementation": install_python_version_or_install_python_implementation,
+            "install_python_version_or_install_python_implementation": (
+                install_python_version_or_install_python_implementation
+            ),
         },
     )
 
