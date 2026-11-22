@@ -1556,9 +1556,7 @@ class SettingsView(Vertical):
             raise ValueError("providers and provider_states cannot be combined")
         self._teams = list(teams)
         self._agents = list(agents)
-        self._providers = (
-            list(provider_states) if provider_states is not None else list(providers)
-        )
+        self._providers = list(provider_states) if provider_states is not None else list(providers)
         self._provider_catalogue = list(provider_catalogue)
         self._model_catalogue = list(model_catalogue)
         self._repaint()

@@ -360,6 +360,7 @@ from local_operator.tui.notify import (
     remote_park_banner,
     remote_park_card,
 )
+from local_operator.tui.provider_state import ProviderStateRow, provider_state_label
 from local_operator.tui.quota_notice import await_prewarm, start_prewarm
 from local_operator.tui.session_catalog import CatalogEntry, SidebarSettings
 from local_operator.tui.session_drafts import SessionDraftStore
@@ -402,7 +403,6 @@ from local_operator.tui.terminal_title import (
     terminal_title_enabled,
 )
 from local_operator.tui.widgets import welcome as welcome_mod
-from local_operator.tui.provider_state import ProviderStateRow, provider_state_label
 from local_operator.tui.widgets.approval import (
     ApprovalBlock,
     ApprovalPolicy,

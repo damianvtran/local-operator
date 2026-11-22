@@ -24,6 +24,18 @@ def restore_locale():
     set_active_locale(before)
 
 
+@pytest.fixture
+def provider_app(monkeypatch: pytest.MonkeyPatch) -> OperatorApp:
+    # Exercise bound methods on the real host, but never start the constructor's
+    # quota-store prewarm or a session merely to inspect presentation state.
+    monkeypatch.setattr("local_operator.tui.app.start_prewarm", lambda: None)
+    return OperatorApp(
+        lambda: _factory(FakeSession()),
+        provider_controller=SimpleNamespace(view_rows=lambda: []),
+        warm_session_imports=False,
+    )
+
+
 @pytest.mark.parametrize("locale", LOCALES)
 @pytest.mark.parametrize("code", STATES)
 def test_resolver_uses_active_catalogue(locale, code):
@@ -40,18 +52,20 @@ def test_same_row_live_locale_and_unknown_code():
     with pytest.raises(KeyError):
         provider_state_label("future_unknown")
     with pytest.raises(FrozenInstanceError):
-        row.state_code = "needs_login"
+        setattr(row, "state_code", "needs_login")
 
 
 @pytest.mark.parametrize("locale", ("en", "fr"))
 @pytest.mark.parametrize("code", STATES)
-def test_model_access_semantics_do_not_depend_on_label(locale, code, monkeypatch):
+def test_model_access_semantics_do_not_depend_on_label(
+    locale, code, monkeypatch: pytest.MonkeyPatch, provider_app: OperatorApp
+):
     set_active_locale(locale)
     row = SimpleNamespace(definition=SimpleNamespace(id="needs_login"), state=code)
-    owner = SimpleNamespace(_providers=SimpleNamespace(view_rows=lambda: [row]))
+    monkeypatch.setattr(provider_app._providers, "view_rows", lambda: [row])
     # A success label deliberately collides with the old English predicate.
     monkeypatch.setattr("local_operator.tui.app.provider_state_label", lambda code: "needs login")
-    suffix, warning = OperatorApp._model_access_note(owner, "needs_login")
+    suffix, warning = provider_app._model_access_note("needs_login")
     if code == "needs_login":
         assert (suffix, warning) == ("", "needs_login needs login — /login needs_login")
     else:
@@ -59,15 +73,16 @@ def test_model_access_semantics_do_not_depend_on_label(locale, code, monkeypatch
 
 
 @pytest.mark.parametrize("locale", ("en", "fr"))
-def test_missing_unreadable_and_opaque_details(locale):
+def test_missing_unreadable_and_opaque_details(
+    locale, monkeypatch: pytest.MonkeyPatch, provider_app: OperatorApp
+):
     set_active_locale(locale)
-    owner = SimpleNamespace(_providers=SimpleNamespace(view_rows=lambda: []))
-    assert OperatorApp._model_access_note(owner, "opaque") == (
-        "", "opaque needs login — /login opaque"
-    )
-    owner._providers.view_rows = lambda: None
-    assert OperatorApp._model_access_note(owner, "opaque") == (
-        "", "cannot check opaque credentials: the credential store is unreadable"
+    monkeypatch.setattr(provider_app._providers, "view_rows", lambda: [])
+    assert provider_app._model_access_note("opaque") == ("", "opaque needs login — /login opaque")
+    monkeypatch.setattr(provider_app._providers, "view_rows", lambda: None)
+    assert provider_app._model_access_note("opaque") == (
+        "",
+        "cannot check opaque credentials: the credential store is unreadable",
     )
     assert OperatorApp._row_state_detail(None) == ""
     for detail in ("needs_login", "logged in", "connecté"):
@@ -156,11 +171,13 @@ async def test_mounted_coded_rows_repaint_reload_reopen_without_store_reads(monk
 
 @pytest.mark.parametrize("locale", ("en", "fr"))
 @pytest.mark.parametrize("code", STATES)
-def test_real_model_suffix_and_detail_labels(locale, code):
+def test_real_model_suffix_and_detail_labels(
+    locale, code, monkeypatch: pytest.MonkeyPatch, provider_app: OperatorApp
+):
     set_active_locale(locale)
     row = SimpleNamespace(definition=SimpleNamespace(id="opaque-id"), state=code)
-    owner = SimpleNamespace(_providers=SimpleNamespace(view_rows=lambda: [row]))
-    suffix, warning = OperatorApp._model_access_note(owner, "opaque-id")
+    monkeypatch.setattr(provider_app._providers, "view_rows", lambda: [row])
+    suffix, warning = provider_app._model_access_note("opaque-id")
     assert OperatorApp._row_state_detail(row) == provider_state_label(code)
     if code == "needs_login":
         assert suffix == ""
@@ -171,18 +188,28 @@ def test_real_model_suffix_and_detail_labels(locale, code):
 
 
 @pytest.mark.parametrize("view", (None, {}))
-def test_settings_missing_or_unreadable_view_keeps_empty_selection(view):
-    owner = SimpleNamespace(
-        _providers=SimpleNamespace(login_providers=lambda: [SimpleNamespace(id="opaque")]),
-        _provider_view=lambda: view,
+def test_settings_missing_or_unreadable_view_keeps_empty_selection(
+    view, monkeypatch: pytest.MonkeyPatch, provider_app: OperatorApp
+):
+    monkeypatch.setattr(
+        provider_app._providers,
+        "login_providers",
+        lambda: [SimpleNamespace(id="opaque")],
+        raising=False,
     )
-    assert OperatorApp._settings_provider_rows(owner) == []
+    monkeypatch.setattr(provider_app, "_provider_view", lambda: view)
+    assert provider_app._settings_provider_rows() == []
 
 
-def test_settings_zero_stored_count_is_not_widened():
+def test_settings_zero_stored_count_is_not_widened(
+    monkeypatch: pytest.MonkeyPatch, provider_app: OperatorApp
+):
     row = SimpleNamespace(state="env_key", stored_credentials=0)
-    owner = SimpleNamespace(
-        _providers=SimpleNamespace(login_providers=lambda: [SimpleNamespace(id="opaque")]),
-        _provider_view=lambda: {"opaque": row},
+    monkeypatch.setattr(
+        provider_app._providers,
+        "login_providers",
+        lambda: [SimpleNamespace(id="opaque")],
+        raising=False,
     )
-    assert OperatorApp._settings_provider_rows(owner) == []
+    monkeypatch.setattr(provider_app, "_provider_view", lambda: {"opaque": row})
+    assert provider_app._settings_provider_rows() == []
