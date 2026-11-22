@@ -1,0 +1,109 @@
+"""Capture the real styled OperatorApp; explicit env isolation precedes imports.
+
+Run from the feature worktree with env -i, an explicit scratch HOME/config,
+LOP_LANG=en and the primary interpreter plus PYTHONPATH=<worktree>. This
+headless Textual rig does not launch a browser, native window or model request.
+"""
+import asyncio
+import hashlib
+import json
+import os
+from pathlib import Path
+
+from rich.cells import cell_len
+from scripts.visual_capture import save_capture
+from local_operator.agent_profiles import AgentFact, agent_fact_record
+from local_operator.i18n.keys import tui_small
+from local_operator.i18n.text import tr
+from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.settings_view import _more, _paint_facts_lines
+from rich.style import Style
+from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+LOCALES = ('en', 'fr', 'zh-CN', 'es', 'ru', 'vi', 'ur', 'hi')
+OUT = Path(os.environ['BADGE_CAPTURE_DIR'])
+CONTROLS = dict.fromkeys(map(ord, '\u2066\u2067\u2068\u2069'))
+
+
+def size(value):
+    return {'width': value.width, 'height': value.height}
+
+
+def geometry(app, view, scenario, locale, frame):
+    pane = view._pane_view
+    text = view._pane_text.plain
+    rows = view._agents
+    visible = [name for name, _, _ in rows if name in text]
+    hidden = len(rows) - len(visible)
+    caption = tr('tui.small')(tui_small.settings_view_read_only_label())
+    assert caption in text
+    assert len(text.splitlines()) <= view._pane_height()
+    if scenario.startswith('priority'):
+        assert _more(hidden) in text, (locale, hidden, _more(hidden), text)
+        # Every marker and scope on the first two full entries must paint whole.
+        marker = agent_fact_record(AgentFact('action_class', 'proactive')).text
+        scope = agent_fact_record(AgentFact('scope', 'session')).text
+        raw = text.translate(CONTROLS)
+        assert visible and raw.count(marker) >= len(visible) and raw.count(scope) >= len(visible), (locale, visible, raw)
+    for _, facts, _ in rows[:2]:
+        lines = _paint_facts_lines(facts, 27, muted=Style(color='white'), faint=Style(color='grey50'))
+        assert all(cell_len(''.join(t for t, _ in line).translate(CONTROLS)) <= 31 for line in lines)
+    return {
+        'scenario': scenario, 'locale': locale, 'frame': frame,
+        'screen': size(app.screen.size), 'view': size(view.size),
+        'pane': size(pane.size), 'pane_virtual': size(pane.virtual_size),
+        'pane_content': {'width': pane.content_region.width, 'height': pane.content_region.height},
+        'pane_budget_rows': view._pane_height(), 'pane_payload_cells': view._pane_width() - 4,
+        'body': size(view._body.size), 'body_virtual': size(view._body.virtual_size),
+        'pane_vertical_scrollbar': getattr(pane, 'show_vertical_scrollbar', None),
+        'body_vertical_scrollbar': getattr(view._body, 'show_vertical_scrollbar', None),
+        'roster_total': len(rows), 'visible_names': visible, 'roster_hidden': hidden,
+        'caption_preserved': caption, 'pane_lines': len(text.splitlines()),
+        'pane_text': text, 'pane_text_sha256': hashlib.sha256(text.encode()).hexdigest(),
+    }
+
+
+async def scenario_capture(scenario, terminal_size):
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    results = []
+    async with app.run_test(size=terminal_size) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        app._open_settings_view()
+        await pilot.pause()
+        view = app._settings_view
+        view._pane = 'agents'
+        if scenario.startswith('priority'):
+            def facts(kind):
+                return (AgentFact('kind', kind), AgentFact('source', 'packaged'),
+                        AgentFact('action_class', 'proactive'), AgentFact('scope', 'session'),
+                        AgentFact('model', 'proactive · opaque-model'), AgentFact('effort', 'custom-tier'))
+            view._agents = [('Configured role', facts('role'), ''),
+                            ('Configured specialist', facts('specialist'), '')] + [
+                (f'Raw extra {n:02}', facts('role'), '') for n in range(38)
+            ]
+        for locale in LOCALES:
+            app._apply_language(locale)
+            view._repaint()
+            for frame in ('first', 'settled'):
+                await pilot.pause()
+                target = OUT / f'{scenario}-{locale}-{frame}.svg'
+                assert not target.exists(), target
+                save_capture(app, target)
+                results.append(geometry(app, view, scenario, locale, frame))
+            assert results[-2]['pane_text_sha256'] == results[-1]['pane_text_sha256']
+    return results
+
+
+async def main():
+    OUT.mkdir(parents=True, exist_ok=True)
+    results = await scenario_capture('production', (120, 40))
+    results += await scenario_capture('priority-tall', (100, 40))
+    results += await scenario_capture('priority-narrow', (100, 30))
+    (OUT / 'runtime-geometry.json').write_text(json.dumps(results, ensure_ascii=False, indent=2) + '\n')
+    print('Real OperatorApp captures:', len(results), 'frames; all locale pairs text-stable')
+
+
+asyncio.run(main())

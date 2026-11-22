@@ -1,0 +1,8 @@
+{
+  "snapshot_home_is_normal": true,
+  "snapshot_home_is_owned_scratch": false,
+  "checker_launch_home": "normal HOME inherited; the two checker bash calls did not use env -i or redirect HOME",
+  "active_matching_checker_or_git_roots": [],
+  "helper_presence_at_past_timeout": "UNKNOWN: no environment or process census was captured at the exact timeout; current snapshot follows",
+  "past_exact_git_child_pid": "UNKNOWN: tool timeout did not return PID; no PID fabricated"
+}

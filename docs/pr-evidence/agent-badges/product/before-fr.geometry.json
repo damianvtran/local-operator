@@ -1,0 +1,695 @@
+{
+  "grid": [
+    120,
+    40
+  ],
+  "native_pixels": [
+    960.0,
+    680.0
+  ],
+  "profile": {
+    "cell_width": 8.0,
+    "cell_height": 17.0,
+    "font_size": 13.0,
+    "font_family": "Menlo, DejaVu Sans Mono, monospace"
+  },
+  "font": {
+    "requested": "Menlo, DejaVu Sans Mono, monospace",
+    "scope": "fontconfig/librsvg",
+    "status": "resolved",
+    "faces": [
+      {
+        "requested_style": "Regular",
+        "family": "Menlo",
+        "style": "Regular",
+        "file": "/System/Library/Fonts/Menlo.ttc",
+        "index": "0",
+        "ascii_advances": {
+          "i": 8.0,
+          "W": 8.0,
+          "0": 8.0,
+          "1": 8.0
+        },
+        "ascent_descent": [
+          13,
+          4
+        ],
+        "monospace_ascii": true,
+        "measurement": "Pillow/FreeType; rasterizer hinting may differ"
+      },
+      {
+        "requested_style": "Bold",
+        "family": "Menlo",
+        "style": "Bold",
+        "file": "/System/Library/Fonts/Menlo.ttc",
+        "index": "1",
+        "ascii_advances": {
+          "i": 8.0,
+          "W": 8.0,
+          "0": 8.0,
+          "1": 8.0
+        },
+        "ascent_descent": [
+          13,
+          4
+        ],
+        "monospace_ascii": true,
+        "measurement": "Pillow/FreeType; rasterizer hinting may differ"
+      },
+      {
+        "requested_style": "Italic",
+        "family": "Menlo",
+        "style": "Italic",
+        "file": "/System/Library/Fonts/Menlo.ttc",
+        "index": "2",
+        "ascii_advances": {
+          "i": 8.0,
+          "W": 8.0,
+          "0": 8.0,
+          "1": 8.0
+        },
+        "ascent_descent": [
+          13,
+          4
+        ],
+        "monospace_ascii": true,
+        "measurement": "Pillow/FreeType; rasterizer hinting may differ"
+      }
+    ]
+  },
+  "font_note": "Local fallback; rasterizer/font versions affect glyphs, not cells",
+  "css_path": [
+    "local_operator.tcss"
+  ],
+  "screen": {
+    "class": "TranscriptScreen",
+    "size": [
+      118,
+      38
+    ],
+    "virtual_size": [
+      118,
+      38
+    ],
+    "region": [
+      0,
+      0,
+      120,
+      40
+    ],
+    "scrollbar": [
+      false,
+      false
+    ]
+  },
+  "widgets": [
+    {
+      "widget": "SessionWorkspace",
+      "id": "session-workspace",
+      "region": [
+        1,
+        1,
+        118,
+        38
+      ],
+      "content_region": [
+        1,
+        1,
+        118,
+        38
+      ],
+      "size": [
+        118,
+        38
+      ],
+      "virtual_size": [
+        118,
+        38
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Container",
+      "id": "session-conversation",
+      "region": [
+        1,
+        1,
+        118,
+        38
+      ],
+      "content_region": [
+        1,
+        1,
+        118,
+        38
+      ],
+      "size": [
+        118,
+        38
+      ],
+      "virtual_size": [
+        118,
+        38
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "SettingsView",
+      "id": null,
+      "region": [
+        1,
+        1,
+        118,
+        33
+      ],
+      "content_region": [
+        2,
+        2,
+        116,
+        31
+      ],
+      "size": [
+        116,
+        31
+      ],
+      "virtual_size": [
+        116,
+        31
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "_ChromeStatic",
+      "id": null,
+      "region": [
+        2,
+        2,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        2,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "_ChromeStatic",
+      "id": null,
+      "region": [
+        2,
+        3,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        3,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Horizontal",
+      "id": null,
+      "region": [
+        2,
+        4,
+        116,
+        25
+      ],
+      "content_region": [
+        2,
+        5,
+        116,
+        24
+      ],
+      "size": [
+        116,
+        24
+      ],
+      "virtual_size": [
+        116,
+        24
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ScrollableContainer",
+      "id": null,
+      "region": [
+        2,
+        5,
+        82,
+        24
+      ],
+      "content_region": [
+        2,
+        5,
+        82,
+        24
+      ],
+      "size": [
+        82,
+        24
+      ],
+      "virtual_size": [
+        81,
+        325
+      ],
+      "scrollbar": [
+        false,
+        true
+      ]
+    },
+    {
+      "widget": "_ListStatic",
+      "id": null,
+      "region": [
+        2,
+        5,
+        81,
+        325
+      ],
+      "content_region": [
+        2,
+        5,
+        81,
+        325
+      ],
+      "size": [
+        81,
+        325
+      ],
+      "virtual_size": [
+        81,
+        325
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "_ChromeStatic",
+      "id": null,
+      "region": [
+        84,
+        5,
+        34,
+        24
+      ],
+      "content_region": [
+        87,
+        5,
+        31,
+        24
+      ],
+      "size": [
+        31,
+        24
+      ],
+      "virtual_size": [
+        34,
+        24
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "_ChromeStatic",
+      "id": null,
+      "region": [
+        2,
+        29,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        30,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Horizontal",
+      "id": null,
+      "region": [
+        2,
+        31,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        32,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "HintButton",
+      "id": null,
+      "region": [
+        2,
+        32,
+        12,
+        1
+      ],
+      "content_region": [
+        2,
+        32,
+        12,
+        1
+      ],
+      "size": [
+        12,
+        1
+      ],
+      "virtual_size": [
+        12,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "HintButton",
+      "id": null,
+      "region": [
+        14,
+        32,
+        18,
+        1
+      ],
+      "content_region": [
+        14,
+        32,
+        18,
+        1
+      ],
+      "size": [
+        18,
+        1
+      ],
+      "virtual_size": [
+        18,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "HintButton",
+      "id": null,
+      "region": [
+        32,
+        32,
+        13,
+        1
+      ],
+      "content_region": [
+        32,
+        32,
+        13,
+        1
+      ],
+      "size": [
+        13,
+        1
+      ],
+      "virtual_size": [
+        13,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "HintButton",
+      "id": null,
+      "region": [
+        45,
+        32,
+        31,
+        1
+      ],
+      "content_region": [
+        45,
+        32,
+        31,
+        1
+      ],
+      "size": [
+        31,
+        1
+      ],
+      "virtual_size": [
+        31,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ComposerDock",
+      "id": "input-dock",
+      "region": [
+        1,
+        34,
+        118,
+        5
+      ],
+      "content_region": [
+        1,
+        34,
+        118,
+        5
+      ],
+      "size": [
+        118,
+        5
+      ],
+      "virtual_size": [
+        118,
+        5
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ComposerDock",
+      "id": "input-shell",
+      "region": [
+        1,
+        34,
+        118,
+        5
+      ],
+      "content_region": [
+        2,
+        35,
+        116,
+        3
+      ],
+      "size": [
+        116,
+        3
+      ],
+      "virtual_size": [
+        116,
+        3
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Band",
+      "id": "status-band",
+      "region": [
+        2,
+        36,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        37,
+        115,
+        1
+      ],
+      "size": [
+        115,
+        1
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Horizontal",
+      "id": "input-row",
+      "region": [
+        2,
+        35,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        35,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Chrome",
+      "id": "prompt-chevron",
+      "region": [
+        2,
+        35,
+        2,
+        1
+      ],
+      "content_region": [
+        2,
+        35,
+        2,
+        1
+      ],
+      "size": [
+        2,
+        1
+      ],
+      "virtual_size": [
+        2,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Editor",
+      "id": null,
+      "region": [
+        4,
+        35,
+        114,
+        1
+      ],
+      "content_region": [
+        5,
+        35,
+        112,
+        1
+      ],
+      "size": [
+        112,
+        1
+      ],
+      "virtual_size": [
+        0,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    }
+  ]
+}

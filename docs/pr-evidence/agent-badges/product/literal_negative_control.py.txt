@@ -1,0 +1,10 @@
+"""Test-only counterfactual: reintroduce a frozen English role label."""
+def pytest_sessionstart(session):
+    import local_operator.agent_profiles as profiles
+    from local_operator.i18n.messages import RenderedMessage
+    original = profiles.agent_fact_record
+    def literal(fact):
+        if (fact.code, fact.value) == ("kind", "role"):
+            return RenderedMessage("role", "en")
+        return original(fact)
+    profiles.agent_fact_record = literal

@@ -724,6 +724,7 @@ _te_projects = tr("tui.projects")
 if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from pathlib import Path
 
+    from local_operator.agent_profiles import AgentFacts
     from local_operator.herdr import HerdrReporter
     from local_operator.info.collect import LiveState
     from local_operator.multiplexer import SessionBroadcast
@@ -22712,8 +22713,9 @@ class OperatorApp(App[None]):
         routed ``/agent`` must send the same rows: a session with no TUI had
         only the ``noop`` the terminal's own resolver drew, so the phone's sheet
         offered ``/agent`` and the tap delivered nothing (review round 1,
-        R1-2/U2). This method stays as the app's seam — the settings pane and the
-        picker read it — and is a delegate rather than a copy.
+        R1-2/U2). This stays as the app's legacy string seam for listings and
+        the picker. Settings instead retains unrendered facts from that same
+        enumeration so a language repaint never needs to reread the registry.
         """
         session = self._session
         registry = getattr(session, "agent_registry", None) if session is not None else None
@@ -41462,21 +41464,26 @@ class OperatorApp(App[None]):
             logger.debug("settings: team rows unavailable", exc_info=True)
         return rows
 
-    def _settings_agent_rows(self) -> list[tuple[str, str, str]]:
+    def _settings_agent_rows(self) -> list[tuple[str, AgentFacts, str]]:
         """Agents as ``(display, facts, summary)`` for the settings pane.
 
-        The SAME shape ``_settings_team_rows`` returns, so the pane renders
-        both listings through one row renderer rather than carrying a second
-        layout for a second registry. The display form is UNBOUNDED here
+        Keep stable agent facts in this in-process snapshot: settings resolves
+        labels at paint time on language switches, without registry I/O. Teams
+        retain their legacy string adapter and the shared row layout.
+        The display form is UNBOUNDED here
         (mirroring the team pane): the pane truncates cells itself and the
         composed form is what a reader compares against the picker. Never
         raises: a broken registry renders as an empty list, and a settings
         page that crashed on a bad row would be unreachable exactly when it is
         needed.
         """
-        rows: list[tuple[str, str, str]] = []
+        from local_operator.agent_profiles import agent_listing_facts
+
+        rows: list[tuple[str, AgentFacts, str]] = []
         try:
-            for name, label, facts, summary in self._agent_profile_rows():
+            session = self._session
+            registry = getattr(session, "agent_registry", None) if session is not None else None
+            for name, label, facts, summary in agent_listing_facts(registry):
                 rows.append((self._agent_display_form(name, label), facts, summary))
         except Exception:  # noqa: BLE001 — a bad registry must not break the page
             logger.debug("settings: agent rows unavailable", exc_info=True)

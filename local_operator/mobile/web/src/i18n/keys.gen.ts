@@ -587,6 +587,7 @@ export type MessageParams = {
   "relay.usage_reset.outcome_nothing_to_reset": undefined;
   "relay.usage_reset.outcome_reset": { "count": number };
   "relay.usage_reset.refused": undefined;
+  "wire.agent_badges.packaged": undefined;
   "wire.aida_cadence.interval_hours.help": undefined;
   "wire.aida_cadence.interval_hours.label": undefined;
   "wire.bridge_taint.ack_refused": undefined;

@@ -1,0 +1,23 @@
+operator authority: the anchor's private half is a 0600 FILE, so any process running as this user can sign for the operator — loosening is authorised but NOT presence-gated on this host
+Traceback (most recent call last):
+  File "/Users/damian/.local-operator/sessions/05ab22c0ed05/scratchpad/badge_finish_capture.py", line 108, in <module>
+    asyncio.run(main())
+  File "/Users/damian/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/Users/damian/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/damian/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/Users/damian/.local-operator/sessions/05ab22c0ed05/scratchpad/badge_finish_capture.py", line 103, in main
+    results += await scenario_capture('priority', (100, 30))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/damian/.local-operator/sessions/05ab22c0ed05/scratchpad/badge_finish_capture.py", line 95, in scenario_capture
+    results.append(geometry(app, view, scenario, locale, frame))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/damian/.local-operator/sessions/05ab22c0ed05/scratchpad/badge_finish_capture.py", line 47, in geometry
+    assert raw.count(marker) >= 2 and raw.count(scope) >= 2
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError

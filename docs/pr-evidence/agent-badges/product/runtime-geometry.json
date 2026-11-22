@@ -1,0 +1,2362 @@
+[
+  {
+    "scenario": "production",
+    "locale": "en",
+    "frame": "first",
+    "screen": {
+      "width": 118,
+      "height": 38
+    },
+    "view": {
+      "width": 116,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 82,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 81,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 12,
+    "visible_names": [
+      "Aida",
+      "Architect",
+      "Coder",
+      "Copy Reviewer",
+      "Designer",
+      "Reviewer"
+    ],
+    "roster_hidden": 6,
+    "caption_preserved": "  read-only",
+    "pane_lines": 22,
+    "pane_text": "providers\n  none logged in — /login <pro…\n\nteams  agents  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  Designer\n    role · packaged\n    Checking how something LOO…\n  … 7 more\n\n  read-only",
+    "pane_text_sha256": "6de7bcebcb772f7d40c9c73ed9c711db857423e8fac51926af02d8d06ecafb45"
+  },
+  {
+    "scenario": "production",
+    "locale": "en",
+    "frame": "settled",
+    "screen": {
+      "width": 118,
+      "height": 38
+    },
+    "view": {
+      "width": 116,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 82,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 81,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 12,
+    "visible_names": [
+      "Aida",
+      "Architect",
+      "Coder",
+      "Copy Reviewer",
+      "Designer",
+      "Reviewer"
+    ],
+    "roster_hidden": 6,
+    "caption_preserved": "  read-only",
+    "pane_lines": 22,
+    "pane_text": "providers\n  none logged in — /login <pro…\n\nteams  agents  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  Designer\n    role · packaged\n    Checking how something LOO…\n  … 7 more\n\n  read-only",
+    "pane_text_sha256": "6de7bcebcb772f7d40c9c73ed9c711db857423e8fac51926af02d8d06ecafb45"
+  },
+  {
+    "scenario": "production",
+    "locale": "fr",
+    "frame": "first",
+    "screen": {
+      "width": 118,
+      "height": 38
+    },
+    "view": {
+      "width": 116,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 82,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 81,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 12,
+    "visible_names": [
+      "Aida",
+      "Architect",
+      "Coder",
+      "Copy Reviewer",
+      "Designer",
+      "Reviewer"
+    ],
+    "roster_hidden": 6,
+    "caption_preserved": "  lecture seule",
+    "pane_lines": 22,
+    "pane_text": "fournisseurs\n  aucun connecté — /login <pro…\n\néquipes  agents  (←→)\n  Aida\n    rôle · fourni · proactif\n    Handing a request to a tea…\n  Architect\n    rôle · fourni\n    Deciding HOW to build some…\n  Coder\n    rôle · fourni\n    Writing or changing code:…\n  Copy Reviewer\n    rôle · fourni\n    Reviewing written copy bef…\n  Designer\n    rôle · fourni\n    Checking how something LOO…\n  … 7 de plus\n\n  lecture seule",
+    "pane_text_sha256": "379c093f423e3eb7cf8c15afb08351e1e4d4e8c67536024ca1de8c5398137494"
+  },
+  {
+    "scenario": "production",
+    "locale": "fr",
+    "frame": "settled",
+    "screen": {
+      "width": 118,
+      "height": 38
+    },
+    "view": {
+      "width": 116,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 82,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 81,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 12,
+    "visible_names": [
+      "Aida",
+      "Architect",
+      "Coder",
+      "Copy Reviewer",
+      "Designer",
+      "Reviewer"
+    ],
+    "roster_hidden": 6,
+    "caption_preserved": "  lecture seule",
+    "pane_lines": 22,
+    "pane_text": "fournisseurs\n  aucun connecté — /login <pro…\n\néquipes  agents  (←→)\n  Aida\n    rôle · fourni · proactif\n    Handing a request to a tea…\n  Architect\n    rôle · fourni\n    Deciding HOW to build some…\n  Coder\n    rôle · fourni\n    Writing or changing code:…\n  Copy Reviewer\n    rôle · fourni\n    Reviewing written copy bef…\n  Designer\n    rôle · fourni\n    Checking how something LOO…\n  … 7 de plus\n\n  lecture seule",
+    "pane_text_sha256": "379c093f423e3eb7cf8c15afb08351e1e4d4e8c67536024ca1de8c5398137494"
+  },
+  {
+    "scenario": "production",
+    "locale": "zh-CN",
+    "frame": "first",
+    "screen": {
+      "width": 118,
+      "height": 38
+    },
+    "view": {
+      "width": 116,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 82,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 81,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 12,
+    "visible_names": [
+      "Aida",
+      "Architect",
+      "Coder",
+      "Copy Reviewer",
+      "Designer",
+      "Reviewer"
+    ],
+    "roster_hidden": 6,
+    "caption_preserved": "  只读",
+    "pane_lines": 22,
+    "pane_text": "提供商\n  未登录任何提供商 — /login <p…\n\n团队  智能体  (←→)\n  Aida\n    角色 · 内置 · 主动\n    Handing a request to a tea…\n  Architect\n    角色 · 内置\n    Deciding HOW to build some…\n  Coder\n    角色 · 内置\n    Writing or changing code:…\n  Copy Reviewer\n    角色 · 内置\n    Reviewing written copy bef…\n  Designer\n    角色 · 内置\n    Checking how something LOO…\n  ……另有7项\n\n  只读",
+    "pane_text_sha256": "80dbbf03eaa357f3242b6e3a9f4a90f02f897adc62e7157fe5eda04158f7cffe"
+  },
+  {
+    "scenario": "production",
+    "locale": "zh-CN",
+    "frame": "settled",
+    "screen": {
+      "width": 118,
+      "height": 38
+    },
+    "view": {
+      "width": 116,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 82,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 81,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 12,
+    "visible_names": [
+      "Aida",
+      "Architect",
+      "Coder",
+      "Copy Reviewer",
+      "Designer",
+      "Reviewer"
+    ],
+    "roster_hidden": 6,
+    "caption_preserved": "  只读",
+    "pane_lines": 22,
+    "pane_text": "提供商\n  未登录任何提供商 — /login <p…\n\n团队  智能体  (←→)\n  Aida\n    角色 · 内置 · 主动\n    Handing a request to a tea…\n  Architect\n    角色 · 内置\n    Deciding HOW to build some…\n  Coder\n    角色 · 内置\n    Writing or changing code:…\n  Copy Reviewer\n    角色 · 内置\n    Reviewing written copy bef…\n  Designer\n    角色 · 内置\n    Checking how something LOO…\n  ……另有7项\n\n  只读",
+    "pane_text_sha256": "80dbbf03eaa357f3242b6e3a9f4a90f02f897adc62e7157fe5eda04158f7cffe"
+  },
+  {
+    "scenario": "production",
+    "locale": "es",
+    "frame": "first",
+    "screen": {
+      "width": 118,
+      "height": 38
+    },
+    "view": {
+      "width": 116,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 82,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 81,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 12,
+    "visible_names": [
+      "Aida",
+      "Architect",
+      "Coder",
+      "Copy Reviewer",
+      "Designer",
+      "Reviewer"
+    ],
+    "roster_hidden": 6,
+    "caption_preserved": "  solo lectura",
+    "pane_lines": 22,
+    "pane_text": "proveedores\n  ninguno conectado — /login <…\n\nequipos  agentes  (←→)\n  Aida\n    rol · incluido · proactivo\n    Handing a request to a tea…\n  Architect\n    rol · incluido\n    Deciding HOW to build some…\n  Coder\n    rol · incluido\n    Writing or changing code:…\n  Copy Reviewer\n    rol · incluido\n    Reviewing written copy bef…\n  Designer\n    rol · incluido\n    Checking how something LOO…\n  … 7 más\n\n  solo lectura",
+    "pane_text_sha256": "b384852aad7552028ce0de95dc5dd916d8aca56e901a61a13c38c675602cf412"
+  },
+  {
+    "scenario": "production",
+    "locale": "es",
+    "frame": "settled",
+    "screen": {
+      "width": 118,
+      "height": 38
+    },
+    "view": {
+      "width": 116,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 82,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 81,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 12,
+    "visible_names": [
+      "Aida",
+      "Architect",
+      "Coder",
+      "Copy Reviewer",
+      "Designer",
+      "Reviewer"
+    ],
+    "roster_hidden": 6,
+    "caption_preserved": "  solo lectura",
+    "pane_lines": 22,
+    "pane_text": "proveedores\n  ninguno conectado — /login <…\n\nequipos  agentes  (←→)\n  Aida\n    rol · incluido · proactivo\n    Handing a request to a tea…\n  Architect\n    rol · incluido\n    Deciding HOW to build some…\n  Coder\n    rol · incluido\n    Writing or changing code:…\n  Copy Reviewer\n    rol · incluido\n    Reviewing written copy bef…\n  Designer\n    rol · incluido\n    Checking how something LOO…\n  … 7 más\n\n  solo lectura",
+    "pane_text_sha256": "b384852aad7552028ce0de95dc5dd916d8aca56e901a61a13c38c675602cf412"
+  },
+  {
+    "scenario": "production",
+    "locale": "ru",
+    "frame": "first",
+    "screen": {
+      "width": 118,
+      "height": 38
+    },
+    "view": {
+      "width": 116,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 82,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 81,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 12,
+    "visible_names": [
+      "Aida",
+      "Architect",
+      "Coder",
+      "Copy Reviewer",
+      "Designer",
+      "Reviewer"
+    ],
+    "roster_hidden": 6,
+    "caption_preserved": "  только чтение",
+    "pane_lines": 23,
+    "pane_text": "провайдеры\n  вход не выполнен — /login <p…\n\nкоманды  агенты  (←→)\n  Aida\n    роль · встроенный\n    проактивный\n    Handing a request to a tea…\n  Architect\n    роль · встроенный\n    Deciding HOW to build some…\n  Coder\n    роль · встроенный\n    Writing or changing code:…\n  Copy Reviewer\n    роль · встроенный\n    Reviewing written copy bef…\n  Designer\n    роль · встроенный\n    Checking how something LOO…\n  … ещё 7\n\n  только чтение",
+    "pane_text_sha256": "2030eea305022d919e03af1c2de197f024aa3aa9871b57286940c9f023b77605"
+  },
+  {
+    "scenario": "production",
+    "locale": "ru",
+    "frame": "settled",
+    "screen": {
+      "width": 118,
+      "height": 38
+    },
+    "view": {
+      "width": 116,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 82,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 81,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 12,
+    "visible_names": [
+      "Aida",
+      "Architect",
+      "Coder",
+      "Copy Reviewer",
+      "Designer",
+      "Reviewer"
+    ],
+    "roster_hidden": 6,
+    "caption_preserved": "  только чтение",
+    "pane_lines": 23,
+    "pane_text": "провайдеры\n  вход не выполнен — /login <p…\n\nкоманды  агенты  (←→)\n  Aida\n    роль · встроенный\n    проактивный\n    Handing a request to a tea…\n  Architect\n    роль · встроенный\n    Deciding HOW to build some…\n  Coder\n    роль · встроенный\n    Writing or changing code:…\n  Copy Reviewer\n    роль · встроенный\n    Reviewing written copy bef…\n  Designer\n    роль · встроенный\n    Checking how something LOO…\n  … ещё 7\n\n  только чтение",
+    "pane_text_sha256": "2030eea305022d919e03af1c2de197f024aa3aa9871b57286940c9f023b77605"
+  },
+  {
+    "scenario": "production",
+    "locale": "vi",
+    "frame": "first",
+    "screen": {
+      "width": 118,
+      "height": 38
+    },
+    "view": {
+      "width": 116,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 82,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 81,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 12,
+    "visible_names": [
+      "Aida",
+      "Architect",
+      "Coder",
+      "Copy Reviewer",
+      "Designer",
+      "Reviewer"
+    ],
+    "roster_hidden": 6,
+    "caption_preserved": "  chỉ đọc",
+    "pane_lines": 22,
+    "pane_text": "nhà cung cấp\n  chưa đăng nhập — /login <pro…\n\nnhóm  tác nhân  (←→)\n  Aida\n    vai trò · đi kèm · chủ động\n    Handing a request to a tea…\n  Architect\n    vai trò · đi kèm\n    Deciding HOW to build some…\n  Coder\n    vai trò · đi kèm\n    Writing or changing code:…\n  Copy Reviewer\n    vai trò · đi kèm\n    Reviewing written copy bef…\n  Designer\n    vai trò · đi kèm\n    Checking how something LOO…\n  … còn 7\n\n  chỉ đọc",
+    "pane_text_sha256": "1ee79b2c712761b3851e705e9aa748bf5bdaf42fb692dd202f924798a26bae8c"
+  },
+  {
+    "scenario": "production",
+    "locale": "vi",
+    "frame": "settled",
+    "screen": {
+      "width": 118,
+      "height": 38
+    },
+    "view": {
+      "width": 116,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 82,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 81,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 12,
+    "visible_names": [
+      "Aida",
+      "Architect",
+      "Coder",
+      "Copy Reviewer",
+      "Designer",
+      "Reviewer"
+    ],
+    "roster_hidden": 6,
+    "caption_preserved": "  chỉ đọc",
+    "pane_lines": 22,
+    "pane_text": "nhà cung cấp\n  chưa đăng nhập — /login <pro…\n\nnhóm  tác nhân  (←→)\n  Aida\n    vai trò · đi kèm · chủ động\n    Handing a request to a tea…\n  Architect\n    vai trò · đi kèm\n    Deciding HOW to build some…\n  Coder\n    vai trò · đi kèm\n    Writing or changing code:…\n  Copy Reviewer\n    vai trò · đi kèm\n    Reviewing written copy bef…\n  Designer\n    vai trò · đi kèm\n    Checking how something LOO…\n  … còn 7\n\n  chỉ đọc",
+    "pane_text_sha256": "1ee79b2c712761b3851e705e9aa748bf5bdaf42fb692dd202f924798a26bae8c"
+  },
+  {
+    "scenario": "production",
+    "locale": "ur",
+    "frame": "first",
+    "screen": {
+      "width": 118,
+      "height": 38
+    },
+    "view": {
+      "width": 116,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 82,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 81,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 12,
+    "visible_names": [
+      "Aida",
+      "Architect",
+      "Coder",
+      "Copy Reviewer",
+      "Designer",
+      "Reviewer"
+    ],
+    "roster_hidden": 6,
+    "caption_preserved": "  صرف پڑھنے کے لیے",
+    "pane_lines": 23,
+    "pane_text": "⁧پرووائیڈرز⁩\n  ⁧کوئی لاگ ان نہیں — ⁦/login <p⁩⁩…\n\n⁧ٹیمیں⁩  ⁧ایجنٹس⁩  (←→)\n  Aida\n    ⁧کردار⁩ · ⁧ساتھ فراہم کردہ⁩\n    ⁧پیش قدم⁩\n    Handing a request to a tea…\n  Architect\n    ⁧کردار⁩ · ⁧ساتھ فراہم کردہ⁩\n    Deciding HOW to build some…\n  Coder\n    ⁧کردار⁩ · ⁧ساتھ فراہم کردہ⁩\n    Writing or changing code:…\n  Copy Reviewer\n    ⁧کردار⁩ · ⁧ساتھ فراہم کردہ⁩\n    Reviewing written copy bef…\n  Designer\n    ⁧کردار⁩ · ⁧ساتھ فراہم کردہ⁩\n    Checking how something LOO…\n  ⁧… 7 مزید⁩\n\n⁧  صرف پڑھنے کے لیے⁩",
+    "pane_text_sha256": "0b8e1dba3b2ccf23991bda78c3ed362b18faf17a004f7c419d74737173eaad04"
+  },
+  {
+    "scenario": "production",
+    "locale": "ur",
+    "frame": "settled",
+    "screen": {
+      "width": 118,
+      "height": 38
+    },
+    "view": {
+      "width": 116,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 82,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 81,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 12,
+    "visible_names": [
+      "Aida",
+      "Architect",
+      "Coder",
+      "Copy Reviewer",
+      "Designer",
+      "Reviewer"
+    ],
+    "roster_hidden": 6,
+    "caption_preserved": "  صرف پڑھنے کے لیے",
+    "pane_lines": 23,
+    "pane_text": "⁧پرووائیڈرز⁩\n  ⁧کوئی لاگ ان نہیں — ⁦/login <p⁩⁩…\n\n⁧ٹیمیں⁩  ⁧ایجنٹس⁩  (←→)\n  Aida\n    ⁧کردار⁩ · ⁧ساتھ فراہم کردہ⁩\n    ⁧پیش قدم⁩\n    Handing a request to a tea…\n  Architect\n    ⁧کردار⁩ · ⁧ساتھ فراہم کردہ⁩\n    Deciding HOW to build some…\n  Coder\n    ⁧کردار⁩ · ⁧ساتھ فراہم کردہ⁩\n    Writing or changing code:…\n  Copy Reviewer\n    ⁧کردار⁩ · ⁧ساتھ فراہم کردہ⁩\n    Reviewing written copy bef…\n  Designer\n    ⁧کردار⁩ · ⁧ساتھ فراہم کردہ⁩\n    Checking how something LOO…\n  ⁧… 7 مزید⁩\n\n⁧  صرف پڑھنے کے لیے⁩",
+    "pane_text_sha256": "0b8e1dba3b2ccf23991bda78c3ed362b18faf17a004f7c419d74737173eaad04"
+  },
+  {
+    "scenario": "production",
+    "locale": "hi",
+    "frame": "first",
+    "screen": {
+      "width": 118,
+      "height": 38
+    },
+    "view": {
+      "width": 116,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 82,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 81,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 12,
+    "visible_names": [
+      "Aida",
+      "Architect",
+      "Coder",
+      "Copy Reviewer",
+      "Designer",
+      "Reviewer"
+    ],
+    "roster_hidden": 6,
+    "caption_preserved": "  केवल पढ़ने योग्य",
+    "pane_lines": 22,
+    "pane_text": "प्रोवाइडर\n  किसी में लॉग इन नहीं — /login <prov…\n\nटीमें  एजेंट  (←→)\n  Aida\n    भूमिका · साथ मिला · स्वप्रेरित\n    Handing a request to a tea…\n  Architect\n    भूमिका · साथ मिला\n    Deciding HOW to build some…\n  Coder\n    भूमिका · साथ मिला\n    Writing or changing code:…\n  Copy Reviewer\n    भूमिका · साथ मिला\n    Reviewing written copy bef…\n  Designer\n    भूमिका · साथ मिला\n    Checking how something LOO…\n  … 7 और\n\n  केवल पढ़ने योग्य",
+    "pane_text_sha256": "2b68097c3b6b1c3eae690d8ec47b33675f8961129ce1d09115b2ef0f0f56859f"
+  },
+  {
+    "scenario": "production",
+    "locale": "hi",
+    "frame": "settled",
+    "screen": {
+      "width": 118,
+      "height": 38
+    },
+    "view": {
+      "width": 116,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 82,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 81,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 12,
+    "visible_names": [
+      "Aida",
+      "Architect",
+      "Coder",
+      "Copy Reviewer",
+      "Designer",
+      "Reviewer"
+    ],
+    "roster_hidden": 6,
+    "caption_preserved": "  केवल पढ़ने योग्य",
+    "pane_lines": 22,
+    "pane_text": "प्रोवाइडर\n  किसी में लॉग इन नहीं — /login <prov…\n\nटीमें  एजेंट  (←→)\n  Aida\n    भूमिका · साथ मिला · स्वप्रेरित\n    Handing a request to a tea…\n  Architect\n    भूमिका · साथ मिला\n    Deciding HOW to build some…\n  Coder\n    भूमिका · साथ मिला\n    Writing or changing code:…\n  Copy Reviewer\n    भूमिका · साथ मिला\n    Reviewing written copy bef…\n  Designer\n    भूमिका · साथ मिला\n    Checking how something LOO…\n  … 7 और\n\n  केवल पढ़ने योग्य",
+    "pane_text_sha256": "2b68097c3b6b1c3eae690d8ec47b33675f8961129ce1d09115b2ef0f0f56859f"
+  },
+  {
+    "scenario": "priority-tall",
+    "locale": "en",
+    "frame": "first",
+    "screen": {
+      "width": 98,
+      "height": 38
+    },
+    "view": {
+      "width": 96,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist",
+      "Raw extra 00",
+      "Raw extra 01",
+      "Raw extra 02"
+    ],
+    "roster_hidden": 35,
+    "caption_preserved": "  read-only",
+    "pane_lines": 23,
+    "pane_text": "providers\n  none logged in — /login <pro…\n\nteams  agents  (←→)\n  Configured role\n    role · packaged · proactive\n    this conversation\n  Configured specialist\n    specialist · packaged · pr…\n    proactive\n    this conversation\n  Raw extra 00\n    role · packaged · proactive\n    this conversation\n  Raw extra 01\n    role · packaged · proactive\n    this conversation\n  Raw extra 02\n    role · packaged · proactive\n    this conversation\n  … 35 more\n\n  read-only",
+    "pane_text_sha256": "a09eca0e6925cf76e5a5b61c3f56f4c06b5564aee71a5bcbb105b5a4b2799668"
+  },
+  {
+    "scenario": "priority-tall",
+    "locale": "en",
+    "frame": "settled",
+    "screen": {
+      "width": 98,
+      "height": 38
+    },
+    "view": {
+      "width": 96,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist",
+      "Raw extra 00",
+      "Raw extra 01",
+      "Raw extra 02"
+    ],
+    "roster_hidden": 35,
+    "caption_preserved": "  read-only",
+    "pane_lines": 23,
+    "pane_text": "providers\n  none logged in — /login <pro…\n\nteams  agents  (←→)\n  Configured role\n    role · packaged · proactive\n    this conversation\n  Configured specialist\n    specialist · packaged · pr…\n    proactive\n    this conversation\n  Raw extra 00\n    role · packaged · proactive\n    this conversation\n  Raw extra 01\n    role · packaged · proactive\n    this conversation\n  Raw extra 02\n    role · packaged · proactive\n    this conversation\n  … 35 more\n\n  read-only",
+    "pane_text_sha256": "a09eca0e6925cf76e5a5b61c3f56f4c06b5564aee71a5bcbb105b5a4b2799668"
+  },
+  {
+    "scenario": "priority-tall",
+    "locale": "fr",
+    "frame": "first",
+    "screen": {
+      "width": 98,
+      "height": 38
+    },
+    "view": {
+      "width": 96,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist",
+      "Raw extra 00",
+      "Raw extra 01",
+      "Raw extra 02"
+    ],
+    "roster_hidden": 35,
+    "caption_preserved": "  lecture seule",
+    "pane_lines": 23,
+    "pane_text": "fournisseurs\n  aucun connecté — /login <pro…\n\néquipes  agents  (←→)\n  Configured role\n    rôle · fourni · proactif ·…\n    cette conversation\n  Configured specialist\n    spécialiste · fourni · pro…\n    proactif\n    cette conversation\n  Raw extra 00\n    rôle · fourni · proactif ·…\n    cette conversation\n  Raw extra 01\n    rôle · fourni · proactif ·…\n    cette conversation\n  Raw extra 02\n    rôle · fourni · proactif ·…\n    cette conversation\n  … 35 de plus\n\n  lecture seule",
+    "pane_text_sha256": "dd9a4a4cea2a23ee3042d2b95a5be4d2bfc2d30cbef88653c3700ef71bf8aea3"
+  },
+  {
+    "scenario": "priority-tall",
+    "locale": "fr",
+    "frame": "settled",
+    "screen": {
+      "width": 98,
+      "height": 38
+    },
+    "view": {
+      "width": 96,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist",
+      "Raw extra 00",
+      "Raw extra 01",
+      "Raw extra 02"
+    ],
+    "roster_hidden": 35,
+    "caption_preserved": "  lecture seule",
+    "pane_lines": 23,
+    "pane_text": "fournisseurs\n  aucun connecté — /login <pro…\n\néquipes  agents  (←→)\n  Configured role\n    rôle · fourni · proactif ·…\n    cette conversation\n  Configured specialist\n    spécialiste · fourni · pro…\n    proactif\n    cette conversation\n  Raw extra 00\n    rôle · fourni · proactif ·…\n    cette conversation\n  Raw extra 01\n    rôle · fourni · proactif ·…\n    cette conversation\n  Raw extra 02\n    rôle · fourni · proactif ·…\n    cette conversation\n  … 35 de plus\n\n  lecture seule",
+    "pane_text_sha256": "dd9a4a4cea2a23ee3042d2b95a5be4d2bfc2d30cbef88653c3700ef71bf8aea3"
+  },
+  {
+    "scenario": "priority-tall",
+    "locale": "zh-CN",
+    "frame": "first",
+    "screen": {
+      "width": 98,
+      "height": 38
+    },
+    "view": {
+      "width": 96,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist",
+      "Raw extra 00",
+      "Raw extra 01",
+      "Raw extra 02"
+    ],
+    "roster_hidden": 35,
+    "caption_preserved": "  只读",
+    "pane_lines": 22,
+    "pane_text": "提供商\n  未登录任何提供商 — /login <p…\n\n团队  智能体  (←→)\n  Configured role\n    角色 · 内置 · 主动 · proac…\n    本会话\n  Configured specialist\n    专家 · 内置 · 主动 · proac…\n    本会话\n  Raw extra 00\n    角色 · 内置 · 主动 · proac…\n    本会话\n  Raw extra 01\n    角色 · 内置 · 主动 · proac…\n    本会话\n  Raw extra 02\n    角色 · 内置 · 主动 · proac…\n    本会话\n  ……另有35项\n\n  只读",
+    "pane_text_sha256": "b1165d1a3924485921e71afeb6d0d9860178bf78c5b03eb8079f1bc8630e3843"
+  },
+  {
+    "scenario": "priority-tall",
+    "locale": "zh-CN",
+    "frame": "settled",
+    "screen": {
+      "width": 98,
+      "height": 38
+    },
+    "view": {
+      "width": 96,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist",
+      "Raw extra 00",
+      "Raw extra 01",
+      "Raw extra 02"
+    ],
+    "roster_hidden": 35,
+    "caption_preserved": "  只读",
+    "pane_lines": 22,
+    "pane_text": "提供商\n  未登录任何提供商 — /login <p…\n\n团队  智能体  (←→)\n  Configured role\n    角色 · 内置 · 主动 · proac…\n    本会话\n  Configured specialist\n    专家 · 内置 · 主动 · proac…\n    本会话\n  Raw extra 00\n    角色 · 内置 · 主动 · proac…\n    本会话\n  Raw extra 01\n    角色 · 内置 · 主动 · proac…\n    本会话\n  Raw extra 02\n    角色 · 内置 · 主动 · proac…\n    本会话\n  ……另有35项\n\n  只读",
+    "pane_text_sha256": "b1165d1a3924485921e71afeb6d0d9860178bf78c5b03eb8079f1bc8630e3843"
+  },
+  {
+    "scenario": "priority-tall",
+    "locale": "es",
+    "frame": "first",
+    "screen": {
+      "width": 98,
+      "height": 38
+    },
+    "view": {
+      "width": 96,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist",
+      "Raw extra 00",
+      "Raw extra 01",
+      "Raw extra 02"
+    ],
+    "roster_hidden": 35,
+    "caption_preserved": "  solo lectura",
+    "pane_lines": 23,
+    "pane_text": "proveedores\n  ninguno conectado — /login <…\n\nequipos  agentes  (←→)\n  Configured role\n    rol · incluido · proactivo…\n    esta conversación\n  Configured specialist\n    especialista · incluido ·…\n    proactivo\n    esta conversación\n  Raw extra 00\n    rol · incluido · proactivo…\n    esta conversación\n  Raw extra 01\n    rol · incluido · proactivo…\n    esta conversación\n  Raw extra 02\n    rol · incluido · proactivo…\n    esta conversación\n  … 35 más\n\n  solo lectura",
+    "pane_text_sha256": "f8362aea2096d333058f1386b280efecef2343ac7aaf6b038f3b6e6ec0234182"
+  },
+  {
+    "scenario": "priority-tall",
+    "locale": "es",
+    "frame": "settled",
+    "screen": {
+      "width": 98,
+      "height": 38
+    },
+    "view": {
+      "width": 96,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist",
+      "Raw extra 00",
+      "Raw extra 01",
+      "Raw extra 02"
+    ],
+    "roster_hidden": 35,
+    "caption_preserved": "  solo lectura",
+    "pane_lines": 23,
+    "pane_text": "proveedores\n  ninguno conectado — /login <…\n\nequipos  agentes  (←→)\n  Configured role\n    rol · incluido · proactivo…\n    esta conversación\n  Configured specialist\n    especialista · incluido ·…\n    proactivo\n    esta conversación\n  Raw extra 00\n    rol · incluido · proactivo…\n    esta conversación\n  Raw extra 01\n    rol · incluido · proactivo…\n    esta conversación\n  Raw extra 02\n    rol · incluido · proactivo…\n    esta conversación\n  … 35 más\n\n  solo lectura",
+    "pane_text_sha256": "f8362aea2096d333058f1386b280efecef2343ac7aaf6b038f3b6e6ec0234182"
+  },
+  {
+    "scenario": "priority-tall",
+    "locale": "ru",
+    "frame": "first",
+    "screen": {
+      "width": 98,
+      "height": 38
+    },
+    "view": {
+      "width": 96,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist",
+      "Raw extra 00",
+      "Raw extra 01"
+    ],
+    "roster_hidden": 36,
+    "caption_preserved": "  только чтение",
+    "pane_lines": 23,
+    "pane_text": "провайдеры\n  вход не выполнен — /login <p…\n\nкоманды  агенты  (←→)\n  Configured role\n    роль · встроенный · proact…\n    проактивный\n    эта беседа\n  Configured specialist\n    специалист · встроенный ·…\n    проактивный\n    эта беседа\n  Raw extra 00\n    роль · встроенный · proact…\n    проактивный\n    эта беседа\n  Raw extra 01\n    роль · встроенный · proact…\n    проактивный\n    эта беседа\n  … ещё 36\n\n  только чтение",
+    "pane_text_sha256": "d62ffd8d2d1dbfc69cde42699a5c7f6f6ade8f21454778981f0eed0a4fef7294"
+  },
+  {
+    "scenario": "priority-tall",
+    "locale": "ru",
+    "frame": "settled",
+    "screen": {
+      "width": 98,
+      "height": 38
+    },
+    "view": {
+      "width": 96,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist",
+      "Raw extra 00",
+      "Raw extra 01"
+    ],
+    "roster_hidden": 36,
+    "caption_preserved": "  только чтение",
+    "pane_lines": 23,
+    "pane_text": "провайдеры\n  вход не выполнен — /login <p…\n\nкоманды  агенты  (←→)\n  Configured role\n    роль · встроенный · proact…\n    проактивный\n    эта беседа\n  Configured specialist\n    специалист · встроенный ·…\n    проактивный\n    эта беседа\n  Raw extra 00\n    роль · встроенный · proact…\n    проактивный\n    эта беседа\n  Raw extra 01\n    роль · встроенный · proact…\n    проактивный\n    эта беседа\n  … ещё 36\n\n  только чтение",
+    "pane_text_sha256": "d62ffd8d2d1dbfc69cde42699a5c7f6f6ade8f21454778981f0eed0a4fef7294"
+  },
+  {
+    "scenario": "priority-tall",
+    "locale": "vi",
+    "frame": "first",
+    "screen": {
+      "width": 98,
+      "height": 38
+    },
+    "view": {
+      "width": 96,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist",
+      "Raw extra 00",
+      "Raw extra 01",
+      "Raw extra 02"
+    ],
+    "roster_hidden": 35,
+    "caption_preserved": "  chỉ đọc",
+    "pane_lines": 23,
+    "pane_text": "nhà cung cấp\n  chưa đăng nhập — /login <pro…\n\nnhóm  tác nhân  (←→)\n  Configured role\n    vai trò · đi kèm · chủ động\n    cuộc trò chuyện này\n  Configured specialist\n    chuyên gia · đi kèm · proa…\n    chủ động\n    cuộc trò chuyện này\n  Raw extra 00\n    vai trò · đi kèm · chủ động\n    cuộc trò chuyện này\n  Raw extra 01\n    vai trò · đi kèm · chủ động\n    cuộc trò chuyện này\n  Raw extra 02\n    vai trò · đi kèm · chủ động\n    cuộc trò chuyện này\n  … còn 35\n\n  chỉ đọc",
+    "pane_text_sha256": "e9a2abdd823ee182db4eee9ef01494d11aa0af94c6d21342c299d391fb748b99"
+  },
+  {
+    "scenario": "priority-tall",
+    "locale": "vi",
+    "frame": "settled",
+    "screen": {
+      "width": 98,
+      "height": 38
+    },
+    "view": {
+      "width": 96,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist",
+      "Raw extra 00",
+      "Raw extra 01",
+      "Raw extra 02"
+    ],
+    "roster_hidden": 35,
+    "caption_preserved": "  chỉ đọc",
+    "pane_lines": 23,
+    "pane_text": "nhà cung cấp\n  chưa đăng nhập — /login <pro…\n\nnhóm  tác nhân  (←→)\n  Configured role\n    vai trò · đi kèm · chủ động\n    cuộc trò chuyện này\n  Configured specialist\n    chuyên gia · đi kèm · proa…\n    chủ động\n    cuộc trò chuyện này\n  Raw extra 00\n    vai trò · đi kèm · chủ động\n    cuộc trò chuyện này\n  Raw extra 01\n    vai trò · đi kèm · chủ động\n    cuộc trò chuyện này\n  Raw extra 02\n    vai trò · đi kèm · chủ động\n    cuộc trò chuyện này\n  … còn 35\n\n  chỉ đọc",
+    "pane_text_sha256": "e9a2abdd823ee182db4eee9ef01494d11aa0af94c6d21342c299d391fb748b99"
+  },
+  {
+    "scenario": "priority-tall",
+    "locale": "ur",
+    "frame": "first",
+    "screen": {
+      "width": 98,
+      "height": 38
+    },
+    "view": {
+      "width": 96,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist",
+      "Raw extra 00",
+      "Raw extra 01"
+    ],
+    "roster_hidden": 36,
+    "caption_preserved": "  صرف پڑھنے کے لیے",
+    "pane_lines": 23,
+    "pane_text": "⁧پرووائیڈرز⁩\n  ⁧کوئی لاگ ان نہیں — ⁦/login <p⁩⁩…\n\n⁧ٹیمیں⁩  ⁧ایجنٹس⁩  (←→)\n  Configured role\n    ⁧کردار⁩ · ⁧ساتھ فراہم کردہ⁩⁦ ·…⁩\n    ⁧پیش قدم⁩\n    ⁧اس گفتگو میں⁩\n  Configured specialist\n    ⁧ماہر⁩ · ⁧ساتھ فراہم کردہ⁩ · ⁦p…⁩\n    ⁧پیش قدم⁩\n    ⁧اس گفتگو میں⁩\n  Raw extra 00\n    ⁧کردار⁩ · ⁧ساتھ فراہم کردہ⁩⁦ ·…⁩\n    ⁧پیش قدم⁩\n    ⁧اس گفتگو میں⁩\n  Raw extra 01\n    ⁧کردار⁩ · ⁧ساتھ فراہم کردہ⁩⁦ ·…⁩\n    ⁧پیش قدم⁩\n    ⁧اس گفتگو میں⁩\n  ⁧… 36 مزید⁩\n\n⁧  صرف پڑھنے کے لیے⁩",
+    "pane_text_sha256": "cc94e981d75585781bf09f9c38e5315887157986aff91c1a9799a45ff68b24d5"
+  },
+  {
+    "scenario": "priority-tall",
+    "locale": "ur",
+    "frame": "settled",
+    "screen": {
+      "width": 98,
+      "height": 38
+    },
+    "view": {
+      "width": 96,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist",
+      "Raw extra 00",
+      "Raw extra 01"
+    ],
+    "roster_hidden": 36,
+    "caption_preserved": "  صرف پڑھنے کے لیے",
+    "pane_lines": 23,
+    "pane_text": "⁧پرووائیڈرز⁩\n  ⁧کوئی لاگ ان نہیں — ⁦/login <p⁩⁩…\n\n⁧ٹیمیں⁩  ⁧ایجنٹس⁩  (←→)\n  Configured role\n    ⁧کردار⁩ · ⁧ساتھ فراہم کردہ⁩⁦ ·…⁩\n    ⁧پیش قدم⁩\n    ⁧اس گفتگو میں⁩\n  Configured specialist\n    ⁧ماہر⁩ · ⁧ساتھ فراہم کردہ⁩ · ⁦p…⁩\n    ⁧پیش قدم⁩\n    ⁧اس گفتگو میں⁩\n  Raw extra 00\n    ⁧کردار⁩ · ⁧ساتھ فراہم کردہ⁩⁦ ·…⁩\n    ⁧پیش قدم⁩\n    ⁧اس گفتگو میں⁩\n  Raw extra 01\n    ⁧کردار⁩ · ⁧ساتھ فراہم کردہ⁩⁦ ·…⁩\n    ⁧پیش قدم⁩\n    ⁧اس گفتگو میں⁩\n  ⁧… 36 مزید⁩\n\n⁧  صرف پڑھنے کے لیے⁩",
+    "pane_text_sha256": "cc94e981d75585781bf09f9c38e5315887157986aff91c1a9799a45ff68b24d5"
+  },
+  {
+    "scenario": "priority-tall",
+    "locale": "hi",
+    "frame": "first",
+    "screen": {
+      "width": 98,
+      "height": 38
+    },
+    "view": {
+      "width": 96,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist",
+      "Raw extra 00",
+      "Raw extra 01",
+      "Raw extra 02"
+    ],
+    "roster_hidden": 35,
+    "caption_preserved": "  केवल पढ़ने योग्य",
+    "pane_lines": 22,
+    "pane_text": "प्रोवाइडर\n  किसी में लॉग इन नहीं — /login <prov…\n\nटीमें  एजेंट  (←→)\n  Configured role\n    भूमिका · साथ मिला · स्वप्रेरित · pro…\n    यह बातचीत\n  Configured specialist\n    विशेषज्ञ · साथ मिला · स्वप्रेरित · p…\n    यह बातचीत\n  Raw extra 00\n    भूमिका · साथ मिला · स्वप्रेरित · pro…\n    यह बातचीत\n  Raw extra 01\n    भूमिका · साथ मिला · स्वप्रेरित · pro…\n    यह बातचीत\n  Raw extra 02\n    भूमिका · साथ मिला · स्वप्रेरित · pro…\n    यह बातचीत\n  … 35 और\n\n  केवल पढ़ने योग्य",
+    "pane_text_sha256": "a6a0a0e9d886058ae6c550632f4cd6e3dd0393e12f2de79a5c164ee83575d2d8"
+  },
+  {
+    "scenario": "priority-tall",
+    "locale": "hi",
+    "frame": "settled",
+    "screen": {
+      "width": 98,
+      "height": 38
+    },
+    "view": {
+      "width": 96,
+      "height": 31
+    },
+    "pane": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 24
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 24
+    },
+    "pane_budget_rows": 24,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 24
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist",
+      "Raw extra 00",
+      "Raw extra 01",
+      "Raw extra 02"
+    ],
+    "roster_hidden": 35,
+    "caption_preserved": "  केवल पढ़ने योग्य",
+    "pane_lines": 22,
+    "pane_text": "प्रोवाइडर\n  किसी में लॉग इन नहीं — /login <prov…\n\nटीमें  एजेंट  (←→)\n  Configured role\n    भूमिका · साथ मिला · स्वप्रेरित · pro…\n    यह बातचीत\n  Configured specialist\n    विशेषज्ञ · साथ मिला · स्वप्रेरित · p…\n    यह बातचीत\n  Raw extra 00\n    भूमिका · साथ मिला · स्वप्रेरित · pro…\n    यह बातचीत\n  Raw extra 01\n    भूमिका · साथ मिला · स्वप्रेरित · pro…\n    यह बातचीत\n  Raw extra 02\n    भूमिका · साथ मिला · स्वप्रेरित · pro…\n    यह बातचीत\n  … 35 और\n\n  केवल पढ़ने योग्य",
+    "pane_text_sha256": "a6a0a0e9d886058ae6c550632f4cd6e3dd0393e12f2de79a5c164ee83575d2d8"
+  },
+  {
+    "scenario": "priority-narrow",
+    "locale": "en",
+    "frame": "first",
+    "screen": {
+      "width": 98,
+      "height": 28
+    },
+    "view": {
+      "width": 96,
+      "height": 21
+    },
+    "pane": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 14
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_budget_rows": 14,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 14
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist"
+    ],
+    "roster_hidden": 38,
+    "caption_preserved": "  read-only",
+    "pane_lines": 14,
+    "pane_text": "providers\n  none logged in — /login <pro…\n\nteams  agents  (←→)\n  Configured role\n    role · packaged · proactive\n    this conversation\n  Configured specialist\n    specialist · packaged · pr…\n    proactive\n    this conversation\n  … 38 more\n\n  read-only",
+    "pane_text_sha256": "ba7929f08d22dc35cf811ea2836e6ad8205cf6e796b2b7399668cfeb4209fe6e"
+  },
+  {
+    "scenario": "priority-narrow",
+    "locale": "en",
+    "frame": "settled",
+    "screen": {
+      "width": 98,
+      "height": 28
+    },
+    "view": {
+      "width": 96,
+      "height": 21
+    },
+    "pane": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 14
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_budget_rows": 14,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 14
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist"
+    ],
+    "roster_hidden": 38,
+    "caption_preserved": "  read-only",
+    "pane_lines": 14,
+    "pane_text": "providers\n  none logged in — /login <pro…\n\nteams  agents  (←→)\n  Configured role\n    role · packaged · proactive\n    this conversation\n  Configured specialist\n    specialist · packaged · pr…\n    proactive\n    this conversation\n  … 38 more\n\n  read-only",
+    "pane_text_sha256": "ba7929f08d22dc35cf811ea2836e6ad8205cf6e796b2b7399668cfeb4209fe6e"
+  },
+  {
+    "scenario": "priority-narrow",
+    "locale": "fr",
+    "frame": "first",
+    "screen": {
+      "width": 98,
+      "height": 28
+    },
+    "view": {
+      "width": 96,
+      "height": 21
+    },
+    "pane": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 14
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_budget_rows": 14,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 14
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist"
+    ],
+    "roster_hidden": 38,
+    "caption_preserved": "  lecture seule",
+    "pane_lines": 14,
+    "pane_text": "fournisseurs\n  aucun connecté — /login <pro…\n\néquipes  agents  (←→)\n  Configured role\n    rôle · fourni · proactif ·…\n    cette conversation\n  Configured specialist\n    spécialiste · fourni · pro…\n    proactif\n    cette conversation\n  … 38 de plus\n\n  lecture seule",
+    "pane_text_sha256": "eeafbdf785779910245f1900bac7dc6821dda8626811479e2a45f4ded6afb934"
+  },
+  {
+    "scenario": "priority-narrow",
+    "locale": "fr",
+    "frame": "settled",
+    "screen": {
+      "width": 98,
+      "height": 28
+    },
+    "view": {
+      "width": 96,
+      "height": 21
+    },
+    "pane": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 14
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_budget_rows": 14,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 14
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist"
+    ],
+    "roster_hidden": 38,
+    "caption_preserved": "  lecture seule",
+    "pane_lines": 14,
+    "pane_text": "fournisseurs\n  aucun connecté — /login <pro…\n\néquipes  agents  (←→)\n  Configured role\n    rôle · fourni · proactif ·…\n    cette conversation\n  Configured specialist\n    spécialiste · fourni · pro…\n    proactif\n    cette conversation\n  … 38 de plus\n\n  lecture seule",
+    "pane_text_sha256": "eeafbdf785779910245f1900bac7dc6821dda8626811479e2a45f4ded6afb934"
+  },
+  {
+    "scenario": "priority-narrow",
+    "locale": "zh-CN",
+    "frame": "first",
+    "screen": {
+      "width": 98,
+      "height": 28
+    },
+    "view": {
+      "width": 96,
+      "height": 21
+    },
+    "pane": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 14
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_budget_rows": 14,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 14
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist"
+    ],
+    "roster_hidden": 38,
+    "caption_preserved": "  只读",
+    "pane_lines": 13,
+    "pane_text": "提供商\n  未登录任何提供商 — /login <p…\n\n团队  智能体  (←→)\n  Configured role\n    角色 · 内置 · 主动 · proac…\n    本会话\n  Configured specialist\n    专家 · 内置 · 主动 · proac…\n    本会话\n  ……另有38项\n\n  只读",
+    "pane_text_sha256": "ca17ed078fc98009c9cfedc7a4285d80908510e2525ea9e496bcb4a5848fc110"
+  },
+  {
+    "scenario": "priority-narrow",
+    "locale": "zh-CN",
+    "frame": "settled",
+    "screen": {
+      "width": 98,
+      "height": 28
+    },
+    "view": {
+      "width": 96,
+      "height": 21
+    },
+    "pane": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 14
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_budget_rows": 14,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 14
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist"
+    ],
+    "roster_hidden": 38,
+    "caption_preserved": "  只读",
+    "pane_lines": 13,
+    "pane_text": "提供商\n  未登录任何提供商 — /login <p…\n\n团队  智能体  (←→)\n  Configured role\n    角色 · 内置 · 主动 · proac…\n    本会话\n  Configured specialist\n    专家 · 内置 · 主动 · proac…\n    本会话\n  ……另有38项\n\n  只读",
+    "pane_text_sha256": "ca17ed078fc98009c9cfedc7a4285d80908510e2525ea9e496bcb4a5848fc110"
+  },
+  {
+    "scenario": "priority-narrow",
+    "locale": "es",
+    "frame": "first",
+    "screen": {
+      "width": 98,
+      "height": 28
+    },
+    "view": {
+      "width": 96,
+      "height": 21
+    },
+    "pane": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 14
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_budget_rows": 14,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 14
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist"
+    ],
+    "roster_hidden": 38,
+    "caption_preserved": "  solo lectura",
+    "pane_lines": 14,
+    "pane_text": "proveedores\n  ninguno conectado — /login <…\n\nequipos  agentes  (←→)\n  Configured role\n    rol · incluido · proactivo…\n    esta conversación\n  Configured specialist\n    especialista · incluido ·…\n    proactivo\n    esta conversación\n  … 38 más\n\n  solo lectura",
+    "pane_text_sha256": "b71e3fd96d6de30d7e7397532d5c547a9718493765eb886447658b2e60bbee29"
+  },
+  {
+    "scenario": "priority-narrow",
+    "locale": "es",
+    "frame": "settled",
+    "screen": {
+      "width": 98,
+      "height": 28
+    },
+    "view": {
+      "width": 96,
+      "height": 21
+    },
+    "pane": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 14
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_budget_rows": 14,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 14
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist"
+    ],
+    "roster_hidden": 38,
+    "caption_preserved": "  solo lectura",
+    "pane_lines": 14,
+    "pane_text": "proveedores\n  ninguno conectado — /login <…\n\nequipos  agentes  (←→)\n  Configured role\n    rol · incluido · proactivo…\n    esta conversación\n  Configured specialist\n    especialista · incluido ·…\n    proactivo\n    esta conversación\n  … 38 más\n\n  solo lectura",
+    "pane_text_sha256": "b71e3fd96d6de30d7e7397532d5c547a9718493765eb886447658b2e60bbee29"
+  },
+  {
+    "scenario": "priority-narrow",
+    "locale": "ru",
+    "frame": "first",
+    "screen": {
+      "width": 98,
+      "height": 28
+    },
+    "view": {
+      "width": 96,
+      "height": 21
+    },
+    "pane": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 14
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_budget_rows": 14,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 14
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role"
+    ],
+    "roster_hidden": 39,
+    "caption_preserved": "  только чтение",
+    "pane_lines": 11,
+    "pane_text": "провайдеры\n  вход не выполнен — /login <p…\n\nкоманды  агенты  (←→)\n  Configured role\n    роль · встроенный · proact…\n    проактивный\n    эта беседа\n  … ещё 39\n\n  только чтение",
+    "pane_text_sha256": "8643596c02e16c4055484577a8549683550c4dd737566852f2c87c4ba4a3c80d"
+  },
+  {
+    "scenario": "priority-narrow",
+    "locale": "ru",
+    "frame": "settled",
+    "screen": {
+      "width": 98,
+      "height": 28
+    },
+    "view": {
+      "width": 96,
+      "height": 21
+    },
+    "pane": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 14
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_budget_rows": 14,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 14
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role"
+    ],
+    "roster_hidden": 39,
+    "caption_preserved": "  только чтение",
+    "pane_lines": 11,
+    "pane_text": "провайдеры\n  вход не выполнен — /login <p…\n\nкоманды  агенты  (←→)\n  Configured role\n    роль · встроенный · proact…\n    проактивный\n    эта беседа\n  … ещё 39\n\n  только чтение",
+    "pane_text_sha256": "8643596c02e16c4055484577a8549683550c4dd737566852f2c87c4ba4a3c80d"
+  },
+  {
+    "scenario": "priority-narrow",
+    "locale": "vi",
+    "frame": "first",
+    "screen": {
+      "width": 98,
+      "height": 28
+    },
+    "view": {
+      "width": 96,
+      "height": 21
+    },
+    "pane": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 14
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_budget_rows": 14,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 14
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist"
+    ],
+    "roster_hidden": 38,
+    "caption_preserved": "  chỉ đọc",
+    "pane_lines": 14,
+    "pane_text": "nhà cung cấp\n  chưa đăng nhập — /login <pro…\n\nnhóm  tác nhân  (←→)\n  Configured role\n    vai trò · đi kèm · chủ động\n    cuộc trò chuyện này\n  Configured specialist\n    chuyên gia · đi kèm · proa…\n    chủ động\n    cuộc trò chuyện này\n  … còn 38\n\n  chỉ đọc",
+    "pane_text_sha256": "7041e57d22b6b18574d38a66e0a7a43cfa26113c58203073b5d5f065fc33e554"
+  },
+  {
+    "scenario": "priority-narrow",
+    "locale": "vi",
+    "frame": "settled",
+    "screen": {
+      "width": 98,
+      "height": 28
+    },
+    "view": {
+      "width": 96,
+      "height": 21
+    },
+    "pane": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 14
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_budget_rows": 14,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 14
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist"
+    ],
+    "roster_hidden": 38,
+    "caption_preserved": "  chỉ đọc",
+    "pane_lines": 14,
+    "pane_text": "nhà cung cấp\n  chưa đăng nhập — /login <pro…\n\nnhóm  tác nhân  (←→)\n  Configured role\n    vai trò · đi kèm · chủ động\n    cuộc trò chuyện này\n  Configured specialist\n    chuyên gia · đi kèm · proa…\n    chủ động\n    cuộc trò chuyện này\n  … còn 38\n\n  chỉ đọc",
+    "pane_text_sha256": "7041e57d22b6b18574d38a66e0a7a43cfa26113c58203073b5d5f065fc33e554"
+  },
+  {
+    "scenario": "priority-narrow",
+    "locale": "ur",
+    "frame": "first",
+    "screen": {
+      "width": 98,
+      "height": 28
+    },
+    "view": {
+      "width": 96,
+      "height": 21
+    },
+    "pane": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 14
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_budget_rows": 14,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 14
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role"
+    ],
+    "roster_hidden": 39,
+    "caption_preserved": "  صرف پڑھنے کے لیے",
+    "pane_lines": 11,
+    "pane_text": "⁧پرووائیڈرز⁩\n  ⁧کوئی لاگ ان نہیں — ⁦/login <p⁩⁩…\n\n⁧ٹیمیں⁩  ⁧ایجنٹس⁩  (←→)\n  Configured role\n    ⁧کردار⁩ · ⁧ساتھ فراہم کردہ⁩⁦ ·…⁩\n    ⁧پیش قدم⁩\n    ⁧اس گفتگو میں⁩\n  ⁧… 39 مزید⁩\n\n⁧  صرف پڑھنے کے لیے⁩",
+    "pane_text_sha256": "fb94beb783a5ad6ad24a3d52530aa691c1e60ac6ac3ce6a036a64a7d34755bdf"
+  },
+  {
+    "scenario": "priority-narrow",
+    "locale": "ur",
+    "frame": "settled",
+    "screen": {
+      "width": 98,
+      "height": 28
+    },
+    "view": {
+      "width": 96,
+      "height": 21
+    },
+    "pane": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 14
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_budget_rows": 14,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 14
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role"
+    ],
+    "roster_hidden": 39,
+    "caption_preserved": "  صرف پڑھنے کے لیے",
+    "pane_lines": 11,
+    "pane_text": "⁧پرووائیڈرز⁩\n  ⁧کوئی لاگ ان نہیں — ⁦/login <p⁩⁩…\n\n⁧ٹیمیں⁩  ⁧ایجنٹس⁩  (←→)\n  Configured role\n    ⁧کردار⁩ · ⁧ساتھ فراہم کردہ⁩⁦ ·…⁩\n    ⁧پیش قدم⁩\n    ⁧اس گفتگو میں⁩\n  ⁧… 39 مزید⁩\n\n⁧  صرف پڑھنے کے لیے⁩",
+    "pane_text_sha256": "fb94beb783a5ad6ad24a3d52530aa691c1e60ac6ac3ce6a036a64a7d34755bdf"
+  },
+  {
+    "scenario": "priority-narrow",
+    "locale": "hi",
+    "frame": "first",
+    "screen": {
+      "width": 98,
+      "height": 28
+    },
+    "view": {
+      "width": 96,
+      "height": 21
+    },
+    "pane": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 14
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_budget_rows": 14,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 14
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist"
+    ],
+    "roster_hidden": 38,
+    "caption_preserved": "  केवल पढ़ने योग्य",
+    "pane_lines": 13,
+    "pane_text": "प्रोवाइडर\n  किसी में लॉग इन नहीं — /login <prov…\n\nटीमें  एजेंट  (←→)\n  Configured role\n    भूमिका · साथ मिला · स्वप्रेरित · pro…\n    यह बातचीत\n  Configured specialist\n    विशेषज्ञ · साथ मिला · स्वप्रेरित · p…\n    यह बातचीत\n  … 38 और\n\n  केवल पढ़ने योग्य",
+    "pane_text_sha256": "ed3e85045336003c7fd22cd0e0724d7bb95ea7440bfe9661c8ad5d0a5d006e84"
+  },
+  {
+    "scenario": "priority-narrow",
+    "locale": "hi",
+    "frame": "settled",
+    "screen": {
+      "width": 98,
+      "height": 28
+    },
+    "view": {
+      "width": 96,
+      "height": 21
+    },
+    "pane": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_virtual": {
+      "width": 34,
+      "height": 14
+    },
+    "pane_content": {
+      "width": 31,
+      "height": 14
+    },
+    "pane_budget_rows": 14,
+    "pane_payload_cells": 27,
+    "body": {
+      "width": 62,
+      "height": 14
+    },
+    "body_virtual": {
+      "width": 61,
+      "height": 325
+    },
+    "pane_vertical_scrollbar": false,
+    "body_vertical_scrollbar": true,
+    "roster_total": 40,
+    "visible_names": [
+      "Configured role",
+      "Configured specialist"
+    ],
+    "roster_hidden": 38,
+    "caption_preserved": "  केवल पढ़ने योग्य",
+    "pane_lines": 13,
+    "pane_text": "प्रोवाइडर\n  किसी में लॉग इन नहीं — /login <prov…\n\nटीमें  एजेंट  (←→)\n  Configured role\n    भूमिका · साथ मिला · स्वप्रेरित · pro…\n    यह बातचीत\n  Configured specialist\n    विशेषज्ञ · साथ मिला · स्वप्रेरित · p…\n    यह बातचीत\n  … 38 और\n\n  केवल पढ़ने योग्य",
+    "pane_text_sha256": "ed3e85045336003c7fd22cd0e0724d7bb95ea7440bfe9661c8ad5d0a5d006e84"
+  }
+]

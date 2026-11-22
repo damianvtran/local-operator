@@ -1,0 +1,15 @@
+Timeout (0:00:45)!
+Thread 0x00000001f4cdd300 (most recent call first):
+  File "/Users/damian/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/selectors.py", line 415 in select
+  File "/Users/damian/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/subprocess.py", line 2115 in _communicate
+  File "/Users/damian/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/subprocess.py", line 1209 in communicate
+  File "/Users/damian/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/subprocess.py", line 550 in run
+  File "/Users/damian/local-operator/.worktrees/i18n-agent-facts/scripts/i18n/ledger.py", line 531 in git
+  File "/Users/damian/local-operator/.worktrees/i18n-agent-facts/scripts/i18n/ledger.py", line 540 in validate_base
+  File "scripts/i18n/check.py", line 1036 in check_audit_history
+  File "scripts/i18n/check.py", line 1356 in main
+  File "scripts/i18n/check.py", line 1382 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 98 in _run_module_code
+  File "<frozen runpy>", line 287 in run_path
+  File "<string>", line 1 in <module>
