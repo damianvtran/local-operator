@@ -1,0 +1,7 @@
+{
+  "tui.provider_state.logged_in": "logged in",
+  "tui.provider_state.env_key": "env key",
+  "tui.provider_state.needs_login": "needs login",
+  "tui.provider_state.local_ready": "configured server",
+  "tui.provider_state.local_unconfigured": "configure server"
+}

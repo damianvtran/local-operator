@@ -1,0 +1,28 @@
+COMMAND: env -i HOME=<session-scratch>/es22a-home LOCAL_OPERATOR_CONFIG_DIR=<session-scratch>/es22a-config PYTHONPATH=<assigned-worktree> PYTHONDONTWRITEBYTECODE=1 TERM=xterm-256color <primary-repo>/.venv/bin/python <bundle>/validator.py.txt
+module: /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/__init__.py
+HOME: /Users/damian/.local-operator/sessions/d37edc1334b7/scratchpad/es22a-home
+config: /Users/damian/.local-operator/sessions/d37edc1334b7/scratchpad/es22a-config
+scope: en/es tui.provider_state only; no eligibility patch or global checks
+primary interpreter: /Users/damian/local-operator/.venv/bin/python
+modules: /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/i18n/catalogues.py /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/i18n/messages.py /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/i18n/runtime.py /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/scripts/i18n/check.py
+official check.check_catalogues(): []
+tui.provider_state.logged_in | en: logged in | es: sesión iniciada | args=0 plural/select=0 NFC=yes | cells en/es/pseudo: 9 15 21
+  diagnostic pane=31 synthetic-id= openrouter budget= 17 en-fit= logged in es-fit= sesión iniciada
+  diagnostic pane=31 synthetic-id= ollama budget= 21 en-fit= logged in es-fit= sesión iniciada
+tui.provider_state.env_key | en: env key | es: clave del entorno | args=0 plural/select=0 NFC=yes | cells en/es/pseudo: 7 17 23
+  diagnostic pane=31 synthetic-id= openrouter budget= 17 en-fit= env key es-fit= clave del entorno
+  diagnostic pane=31 synthetic-id= ollama budget= 21 en-fit= env key es-fit= clave del entorno
+tui.provider_state.needs_login | en: needs login | es: requiere iniciar sesión | args=0 plural/select=0 NFC=yes | cells en/es/pseudo: 11 23 29
+  diagnostic pane=31 synthetic-id= openrouter budget= 17 en-fit= needs login es-fit= requiere iniciar…
+  diagnostic pane=31 synthetic-id= ollama budget= 21 en-fit= needs login es-fit= requiere iniciar ses…
+tui.provider_state.local_ready | en: configured server | es: servidor configurado | args=0 plural/select=0 NFC=yes | cells en/es/pseudo: 17 20 26
+  diagnostic pane=31 synthetic-id= openrouter budget= 17 en-fit= configured server es-fit= servidor configu…
+  diagnostic pane=31 synthetic-id= ollama budget= 21 en-fit= configured server es-fit= servidor configurado
+tui.provider_state.local_unconfigured | en: configure server | es: configurar servidor | args=0 plural/select=0 NFC=yes | cells en/es/pseudo: 16 19 25
+  diagnostic pane=31 synthetic-id= openrouter budget= 17 en-fit= configure server es-fit= configurar servi…
+  diagnostic pane=31 synthetic-id= ollama budget= 21 en-fit= configure server es-fit= configurar servidor
+negative control rejected missing key: ["es/tui.provider_state: missing key 'tui.provider_state.logged_in'"]
+negative control rejected added ICU argument: ["es/tui.provider_state: tui.provider_state.logged_in: arguments (('unexpected', 'simple'),) != en's (): en has 0 argument(s), translation has 1"]
+RESULT: mechanical validation successful; status translated ONLY; independent A/B audit pending
+LIMITS: pure catalogue/ICU/render API and Rich width diagnostics; no settings/native/visual/network-isolation/release claim
+EXIT_CODE=0

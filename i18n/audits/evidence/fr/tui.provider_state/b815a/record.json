@@ -1,0 +1,81 @@
+{
+  "locale": "fr",
+  "namespace": "tui.provider_state",
+  "audit_date": "2026-11-22",
+  "key_count": 5,
+  "audit_kind": "independent_B_translation_audit",
+  "source_audit_revision": "a54ec02de48a94b68d6c3dc92e1307c97ea776ad",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "815a20325d52",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "e0c1b7382197",
+    "actual_model_source": "Host model-switch notice: temporary fallback from anthropic/claude-opus-5-5 due to provider failure: quota, before substantive audit",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "e0c1b7382197",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host model-switch notice before authoring: temporary fallback from anthropic/claude-opus-5-5 due to provider failure: quota",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.json",
+      "sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.context.json",
+      "sha256": "67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be"
+    },
+    "fr": {
+      "path": "local_operator/i18n/catalogues/fr/tui.provider_state.json",
+      "sha256": "87cf1654daed989e12d9f431395f4f731c07de5d3204aeb3f0cb0705e92719f8"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/fr/tui.provider_state/b815a/audit.log",
+      "sha256": "15457209a779c8b51ed0638f261f2cccc571a180e3f3b49abc75f5a8f3e15e4d"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.provider_state/b815a/ledger-receipt.json",
+      "sha256": "8f0e33ade8c34a0884a499cca0cc8df95abf23f2a9605967ec1e4c7dd07292f1"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.provider_state/b815a/report.md",
+      "sha256": "6f2fb18463e0e0b706018b890266a61efd39457b7abbbb1efb0107028229decd"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.provider_state/b815a/script.py.txt",
+      "sha256": "d3d5973654fc675174277affe9ff0a019d3f1cf9ee99a9509785c632e36bddce"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "evidence_kind": {
+    "report.md": "audit_notes_not_execution_log",
+    "audit.log": "actual_execution_log",
+    "script.py.txt": "executed_reproduction_source",
+    "ledger-receipt.json": "direct_actual_CLI_receipt_row_not_applied"
+  },
+  "current_bytes_match_audited_hashes": true,
+  "ledger_contract_validation": "scripts.i18n.ledger._rows accepted direct row; no append or history mutation",
+  "limitations": [
+    "Plain Rich, not native settings or whole UI",
+    "No release or eligibility approval",
+    "Integration geometry deferred; 17-cell example is not global cap"
+  ]
+}

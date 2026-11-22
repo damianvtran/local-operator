@@ -1,0 +1,29 @@
+{
+  "record_reference": "i18n/audits/evidence/es/tui.provider_state/bf608/record.json",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.provider_state/bf608/audit.log",
+      "sha256": "ae6a7684f1c87d1011d36bad2ea6f85ae7ed79e05cdd703314a2e41d892123d8"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.provider_state/bf608/ledger-dry-run.log",
+      "sha256": "03f675a4ee90bc5f10ecb296c9c3553f1ea8cf75103536295c53373700c1f5cd"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.provider_state/bf608/ledger-receipt.json",
+      "sha256": "521c5e1dfce9747a11f4780ad7c84ed50c463d22a72ac30a700848e4b354b7f9"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.provider_state/bf608/record.json",
+      "sha256": "5e88f76eb967d2f28d73f111944bf1b88e7d5c33344730829b7fa316fa025120"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.provider_state/bf608/report.md",
+      "sha256": "8080a5bb15bfe006db0e978e8650b49bab2b3144c477e928a2474e4ef40a2bcc"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.provider_state/bf608/script.py.txt",
+      "sha256": "05882f70d4e35ff2031818113929d99584651357f99747ee6db688eb220622dc"
+    }
+  ]
+}

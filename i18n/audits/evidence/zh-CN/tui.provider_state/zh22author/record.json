@@ -1,0 +1,91 @@
+{
+  "record_kind": "translation_author_receipt_not_independent_audit",
+  "locale": "zh-CN",
+  "namespace": "tui.provider_state",
+  "audit_date": null,
+  "translation_date": "2026-11-22",
+  "key_count": 5,
+  "status": "translated",
+  "source_revision": "1b77e201977c7f252a1fd8bac4baed36fc46c83a",
+  "english_source_author_session": "93b7b02899af",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "298f6fe9722a",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host [model switch] message in this session; provider quota failure",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "auditor": {
+    "agent": null,
+    "session": null,
+    "model": null,
+    "independent_from_translator_session": null,
+    "actual_model_source": null,
+    "status": "not_performed; independent A/B required"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.json",
+      "sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.context.json",
+      "sha256": "67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/tui.provider_state.json",
+      "sha256": "ba73193e56b6b01a584418c0b8a392ee01af2c810789229f576895fbc978a5f1"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.provider_state/zh22author/notes.md",
+      "sha256": "c6b9bb4e76cf8ffed27a9c808a31f05643d48747b981bda04783acdfaa5512ee"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.provider_state/zh22author/validator.py.txt",
+      "sha256": "3716f922903d0b81c5c6abd35770fc7572fff7e4f30d1ffd73a6d5fe2b744e16"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.provider_state/zh22author/validation.log",
+      "sha256": "fcd44a7bd36e1f6f407acf7cac20243ca1071b0b7e981f5a696de93bf229aae4"
+    }
+  ],
+  "artifact_semantics": {
+    "notes.md": "audit_notes_not_execution_log; author choices only",
+    "validation.log": "actual stdout/stderr from executed validator",
+    "validator.py.txt": "exact executed validation program retained as non-executable evidence"
+  },
+  "validation": {
+    "exit_code": 0,
+    "official_scoped_catalogue_problems": [],
+    "scope": [
+      "en/tui.provider_state",
+      "zh-CN/tui.provider_state"
+    ],
+    "ordered_key_count": 5,
+    "icu_argument_count": 0,
+    "plural_select_count": 0,
+    "official_render_exact_and_provenance_cases": 10,
+    "rich_width_cases": 20,
+    "synthetic_pseudo_cases": 20,
+    "full_checker_run": false,
+    "native_or_consumer_integration_proven": false,
+    "network_isolation_proven": false
+  },
+  "current_report_verdict": {
+    "status": "translated",
+    "unresolved_blocker_major_count": null,
+    "finding_ids": [],
+    "independent_approval": false
+  },
+  "glossary_proposals": [
+    "env key (human credential-source label) -> 环境密钥",
+    "login/log in -> 登录; API key -> API密钥 (adjacent existing terminology)"
+  ],
+  "retention": "Repo-only author bundle; owner must privately commit before independent public-reader audits; no ledger changes authorized"
+}

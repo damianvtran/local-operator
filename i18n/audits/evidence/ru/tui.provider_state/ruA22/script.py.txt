@@ -1,0 +1,69 @@
+"""Independent RU A scoped mechanical audit; run with the primary repo venv.
+Discovery restriction is process-local: official checker logic is unmodified.
+Pseudo wrappers are diagnostic ICU/plain-Rich controls, not a styled app test.
+"""
+from pathlib import Path
+from unittest.mock import patch
+import hashlib, json, os, re, sys, unicodedata
+ROOT = Path(__file__).resolve().parents[6]
+sys.path.insert(0, str(ROOT))
+from local_operator.i18n import catalogues, runtime
+from scripts.i18n import check
+from rich.text import Text
+from rich.cells import cell_len
+NS = 'tui.provider_state'
+print('interpreter', sys.executable)
+for module in (catalogues, runtime, check):
+    print('module', module.__name__, module.__file__)
+    assert Path(module.__file__).resolve().is_relative_to(ROOT)
+print('isolated HOME', os.environ['HOME'])
+print('isolated XDG_CONFIG_HOME', os.environ['XDG_CONFIG_HOME'])
+assert not any(k.startswith('CMUX_') for k in os.environ)
+expected = {'en':'113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912', 'context':'67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be', 'ru':'8536b96d908eb3f80192801d4444b283bf6a024668247f14a2ed7cb0ecf8558b'}
+for name, sha in expected.items():
+    p = ROOT / 'local_operator/i18n/catalogues' / ('en' if name == 'context' else name) / (NS + ('.context.json' if name == 'context' else '.json'))
+    actual = hashlib.sha256(p.read_bytes()).hexdigest()
+    print('input', name, str(p.relative_to(ROOT)), actual)
+    assert actual == sha
+load = catalogues.load_catalogue
+with patch.object(catalogues, 'locales', return_value=('en','ru')), patch.object(catalogues, 'namespaces', return_value=(NS,)):
+    problems = check.check_catalogues()
+    print('OFFICIAL scoped check_catalogues', json.dumps(problems, ensure_ascii=False))
+    assert not problems
+    source, target = load('en', NS), load('ru', NS)
+    keys = list(source)
+    assert list(target) == keys and len(keys) == 5
+    def negative(kind):
+        changed = dict(target)
+        if kind == 'missing key': del changed[keys[0]]
+        else: changed[keys[0]] += ' {unexpected}'
+        def fake(locale, namespace):
+            return changed if (locale,namespace)==('ru',NS) else load(locale,namespace)
+        with patch.object(catalogues,'load_catalogue',side_effect=fake):
+            errors = check.check_catalogues()
+        print('NEGATIVE', kind, json.dumps(errors, ensure_ascii=False))
+        assert errors and any(('missing key' if kind=='missing key' else 'argument') in x for x in errors)
+    negative('missing key')
+    negative('added argument')
+context = catalogues.context('en', NS)
+assert list(context) == keys
+protected = re.compile(r'`[^`]*`|</?[^>]+>|--[A-Za-z][\w-]*|/[A-Za-z][\w/-]*|\b[A-Z][A-Z0-9_]{1,}\b')
+for key in keys:
+    for locale, messages in [('en',source),('ru',target)]:
+        text=messages[key]
+        assert runtime.message_arguments(text) == ()
+        assert runtime.plural_selectors(text) == ()
+        assert text == unicodedata.normalize('NFC',text)
+        assert not any(unicodedata.category(c) in ('Cc','Cf') for c in text)
+        assert protected.findall(text) == protected.findall(source[key]) == []
+        rendered=runtime.render_message(text,{},locale)
+        assert rendered == text
+        rich=Text.from_markup(rendered)
+        assert rich.plain == text and cell_len(text)==rich.cell_len
+        pseudo='⟦'+text+' · '+text+'⟧'
+        assert runtime.render_message(pseudo,{},locale)==pseudo
+        assert Text.from_markup(pseudo).plain==pseudo
+        print('KEY',key,locale,json.dumps(text,ensure_ascii=False),'args=0 plural=0 select=0 NFC=PASS protected=[] render=PASS pseudo=PASS', 'chars='+str(len(text)), 'plain_Rich_cells='+str(rich.cell_len))
+        for hint in ('maxChars','maxCells'):
+            if hint in context[key]: assert len(text) <= context[key][hint] if hint=='maxChars' else rich.cell_len <= context[key][hint]
+print('PASS all five keys; no explicit width caps. Plain-Rich widths are diagnostic only; no styled/native/runtime/eligibility claim.')

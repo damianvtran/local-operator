@@ -75,6 +75,7 @@ from local_operator.tui.i18n_status import (
     localized_display,
     technical_display,
 )
+from local_operator.tui.provider_state import ProviderStateRow, provider_state_label
 from local_operator.tui.widgets.command_picker import ghost_for
 from local_operator.tui.widgets.model_picker import ModelRow, rank_rows
 from local_operator.tui.widgets.subagent_view import HintButton
@@ -1428,7 +1429,7 @@ class SettingsView(Vertical):
         self._teams: list[tuple[str, str, str]] = []
         self._agents: list[tuple[str, AgentFacts | str, str]] = []
         #: Provider login state, injected the same way and for the same reason.
-        self._providers: list[tuple[str, str]] = []
+        self._providers: list[tuple[str, str] | ProviderStateRow] = []
         #: The provider and model catalogues that feed the `hosting`/`model_name`
         #: suggestion dropdowns, injected by the app for the same reason the
         #: pane content is: the page never reaches into a registry or the
@@ -1616,6 +1617,7 @@ class SettingsView(Vertical):
         teams: Sequence[tuple[str, str, str]] = (),
         agents: Sequence[tuple[str, AgentFacts | str, str]] = (),
         providers: Sequence[tuple[str, str]] = (),
+        provider_states: Sequence[ProviderStateRow] | None = None,
         provider_catalogue: Sequence[tuple[str, str]] = (),
         model_catalogue: Sequence[ModelRow] = (),
     ) -> None:
@@ -1636,9 +1638,14 @@ class SettingsView(Vertical):
         empty: a host that supplies neither simply gets the old bare free-text
         editor on those two rows, which still saves any value.
         """
+        # Legacy tuples are opaque display strings, even when their bytes look
+        # like state codes. Explicit coded input (including an empty sequence)
+        # owns the snapshot; mixing it with nonempty legacy input is ambiguous.
+        if provider_states is not None and providers:
+            raise ValueError("providers and provider_states cannot be combined")
         self._teams = list(teams)
         self._agents = list(agents)
-        self._providers = list(providers)
+        self._providers = list(provider_states) if provider_states is not None else list(providers)
         self._provider_catalogue = list(provider_catalogue)
         self._model_catalogue = list(model_catalogue)
         self._repaint()
@@ -5949,7 +5956,14 @@ class SettingsView(Vertical):
         header: _PaneLine = [(_t_sv(_sv.pane_providers_header()), head)]
         provider_lines: list[_PaneLine] = []
         if self._providers:
-            for name, state in self._providers:
+            for provider in self._providers:
+                # The row type is the tag, never the contents of either string.
+                # Resolve each paint so language changes need no credential I/O.
+                if isinstance(provider, ProviderStateRow):
+                    name = provider.provider_id
+                    state = provider_state_label(provider.state_code)
+                else:
+                    name, state = provider
                 # Truncated per SEGMENT so the id survives and the state gives
                 # way: "anthropic" is what the row is about, and a clipped id
                 # is unreadable where a clipped state is merely terse.

@@ -1,0 +1,55 @@
+"""Bounded independent Hindi A audit; scopes official catalogue discovery, never eligibility."""
+import json, os, sys, re, unicodedata
+from pathlib import Path
+from unittest.mock import patch
+from rich.text import Text
+from rich.console import Console
+from io import StringIO
+from local_operator.i18n import catalogues, runtime
+from scripts.i18n import check
+ROOT=Path.cwd(); NS='tui.provider_state'
+print('interpreter', sys.executable)
+for mod in (catalogues,runtime,check):
+ print('module',mod.__name__,mod.__file__)
+ assert Path(mod.__file__).resolve().is_relative_to(ROOT)
+assert not any(k.startswith('CMUX_') for k in os.environ)
+print('isolated_HOME',os.environ['HOME'],'config',os.environ['LOCAL_OPERATOR_CONFIG_DIR'])
+keys=[NS+'.'+k for k in ('logged_in','env_key','needs_login','local_ready','local_unconfigured')]
+en=catalogues.load_catalogue('en',NS); hi=catalogues.load_catalogue('hi',NS)
+assert list(en)==list(hi)==keys
+assert list(catalogues.context('en',NS))==keys
+# These are official check_catalogues mechanics on exactly one namespace/two locales.
+with patch.object(catalogues,'namespaces',return_value=(NS,)),patch.object(catalogues,'locales',return_value=('en','hi')):
+ problems=check.check_catalogues(); print('OFFICIAL_SCOPED_BASELINE',problems); assert not problems
+ original=catalogues.load_catalogue
+ missing=dict(hi); missing.pop(keys[0])
+ def loader(locale,namespace): return missing if locale=='hi' else original(locale,namespace)
+ with patch.object(catalogues,'load_catalogue',side_effect=loader):
+  p=check.check_catalogues(); print('MISSING_KEY_NEGATIVE',p); assert any('missing key' in x for x in p)
+ added=dict(hi); added[keys[0]]+=' {extra}'
+ def loader2(locale,namespace): return added if locale=='hi' else original(locale,namespace)
+ with patch.object(catalogues,'load_catalogue',side_effect=loader2):
+  p=check.check_catalogues(); print('ADDED_ARGUMENT_NEGATIVE',p); assert any('arguments' in x for x in p)
+print('CLDR Hindi',json.loads((ROOT/'local_operator/i18n/data/plural_rules.json').read_text())['locales']['hi']['categories'])
+# Every message is literal; therefore plural/select category coverage is vacuous,
+# independently checked rather than inventing branches.
+protected=re.compile(r'`[^`]*`|</?[^>]+>|\[[^\]]+\]|--[A-Za-z0-9_-]+|/[A-Za-z0-9_]+')
+for key in keys:
+ for locale,mapping in [('en',en),('hi',hi)]:
+  value=mapping[key]
+  assert runtime.message_arguments(value)==()
+  assert runtime.plural_selectors(value)==()
+  assert runtime.plural_arguments(value)==()
+  assert not re.search(r'\{[^}]*,\s*select',value)
+  assert unicodedata.normalize('NFC',value)==value
+  assert protected.findall(value)==protected.findall(en[key])==[]
+  assert not any(c in value for c in '\u200c\u200d\u202a\u202b\u202d\u202e\u2066\u2067\u2068\u2069')
+  rendered=runtime.render_message(value,{},locale); assert rendered==value
+  rich=Text.from_markup(rendered); assert rich.plain==rendered
+  out=StringIO(); console=Console(file=out,width=200,color_system=None,force_terminal=False)
+  console.print(rich,end=''); assert out.getvalue()==value
+  pseudo='⟦'+rendered+' ···⟧' # synthetic expansion, not an official pseudo-locale
+  assert Text.from_markup(pseudo).plain==pseudo
+  print('ROW',locale,key,json.dumps(value,ensure_ascii=False),'args=0 plural=0 select=0 NFC=PASS protected=0 plain/Rich=PASS synthetic_pseudo=PASS cell_len='+str(rich.cell_len))
+print('PASS: 5 ordered keys; official scoped catalogue/context/ICU checks; two discriminating negatives; 10 English/Hindi literal render controls')
+print('LIMIT: widths synthetic, not native glyph/geometry clearance; no producer wiring, whole UI, admission, second audit, release or seven-pair root validation')

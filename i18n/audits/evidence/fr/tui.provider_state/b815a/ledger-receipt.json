@@ -1,0 +1,34 @@
+{
+  "locale": "fr",
+  "namespace": "tui.provider_state",
+  "source_sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912",
+  "status": "passed",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "e0c1b7382197",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host model-switch notice before authoring: temporary fallback from anthropic/claude-opus-5-5 due to provider failure: quota",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "815a20325d52",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "e0c1b7382197",
+    "actual_model_source": "Host model-switch notice: temporary fallback from anthropic/claude-opus-5-5 due to provider failure: quota, before substantive audit",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "date": "2026-11-22",
+    "result": "passed"
+  },
+  "audit_date": "2026-11-22",
+  "unresolved_blocker_major_count": 0,
+  "note": "Independent B: passed 5/5; 0 blocker/major. Record: i18n/audits/evidence/fr/tui.provider_state/b815a/record.json. Plain Rich only; integration fit deferred."
+}
