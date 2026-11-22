@@ -311,6 +311,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``_REF_PREFIX`` ('r1') is the version tag of an opaque history-row ref "
         "(``row_ref``), a wire token, never a session-directory entry.",
     ),
+    "local_operator/tools/integrations_tool.py": (
+        1,
+        "``TOOL_NAME`` ('integrations') identifies the registered provisioning tool, "
+        "not a session-directory entry. Its consent records live in the existing "
+        "ask queue, which already travels; credentials stay in the device secret store.",
+    ),
     "local_operator/session/temporary.py": (
         3,
         "``TOMBSTONES_NAME`` ('.temporary-tombstones.json'), ``STATE_NAME`` "
@@ -569,6 +575,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "(<config>/cache/) holding a session's deferred-open metadata record. A derived "
         "cache file, rebuilt from the journal on the next open, never an entry of a "
         "session directory and never part of what a sync copy carries.",
+    ),
+    "local_operator/session/index_prewarm.py": (
+        1,
+        "``SETTLED_DIRNAME`` ('prewarm_settled'): the segment under the DEVICE cache "
+        "root (<config>/cache/) holding the boot prewarm's per-journal settlement "
+        "record. It pins an inode, so it is meaningless on another device; a derived "
+        "cache file, never an entry of a session directory or part of a sync copy.",
     ),
     "local_operator/role_provenance.py": (
         2,

@@ -1541,6 +1541,11 @@ class _CompactionPlan:
     #: this pass and not recorded as continuable, which is the horizon the raw
     #: floor has (its anchor is cut away on exactly this pass).
     dense_tail_closed: bool = False
+    # Economic snapcompact authorizes the actual prepared replay, then commits
+    # these same bytes. Never generate the archive twice or pay a fallback.
+    economic_summary: list[tuple[str, dict[str, Any] | None]] = dataclass_field(
+        default_factory=list, compare=False
+    )
     # Ephemeral task carrier, not durable state. Speculation may return data but
     # never persist it; only append_compaction's committed marker authorizes that.
     memory_capture: list[asyncio.Task[Any]] = dataclass_field(default_factory=list, compare=False)
@@ -2850,12 +2855,100 @@ def _idle_growth_baseline(transcript: Any) -> tuple[int | None, int | None, str]
                 tokens = usage.get("context_tokens")
                 if isinstance(tokens, int) and tokens > 0:
                     return tokens, declined, marker_id
-    receipt = transcript.latest_custom(COMPACTION_IDLE_PASS_TYPE)
-    if receipt is not None and str(receipt.get("marker_id") or "") == marker_id:
-        value = receipt.get("tokens_after")
-        if isinstance(value, int) and not isinstance(value, bool):
-            return value, declined, marker_id
+    # Either discretionary pass may own the newest marker; its receipt is the
+    # only after-size until the next request measures one.
+    from local_operator.compaction.economics import COMPACTION_ECONOMIC_PASS_TYPE
+
+    for receipt_type in (COMPACTION_IDLE_PASS_TYPE, COMPACTION_ECONOMIC_PASS_TYPE):
+        receipt = transcript.latest_custom(receipt_type)
+        if receipt is not None and str(receipt.get("marker_id") or "") == marker_id:
+            value = receipt.get("tokens_after")
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value, declined, marker_id
     return None, declined, marker_id
+
+
+def _economic_declined_at(transcript: Any, marker_id: str) -> int | None:
+    """Context size of the newest economic decline written for ``marker_id``.
+
+    Separate from the idle decline on purpose: the idle pass's "no" is a
+    parked ADVISOR's judgement about open work, the economic pass's is a
+    price/size verdict. Either must suppress only its own re-ask, or a
+    session whose advisor declined once would also lose the cost rule.
+    """
+    from local_operator.compaction.economics import COMPACTION_ECONOMIC_DECLINED_TYPE
+
+    if transcript is None:
+        return None
+    decline = transcript.latest_custom(COMPACTION_ECONOMIC_DECLINED_TYPE)
+    if decline is None or str(decline.get("marker_id") or "") != marker_id:
+        return None
+    value = decline.get("context_tokens")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+#: Bound on the entries one economic usage scan walks back over. The scan runs
+#: at turn ends above the economic floor; 50k entries comfortably covers the
+#: rate window plus the last few passes of the chief of staff's measured
+#: cadence (~250-400 requests between passes, a few entries per request)
+#: without making a pathological journal cost a full walk per turn.
+_ECONOMIC_SCAN_MAX_ENTRIES = 50_000
+
+
+def _economic_usage_scan(
+    transcript: Any, *, limit: int, max_yields: int = 4
+) -> tuple[list[dict[str, Any]], int | None, list[tuple[int, int]]]:
+    """One backward walk for the economic gate's measured inputs.
+
+    Returns ``(rows, since_marker, yields)``:
+
+    - ``rows``: the newest ``limit`` usage payloads, OLDEST first;
+    - ``since_marker``: how many of those were recorded after the newest
+      compaction marker (``None`` when no marker was reached);
+    - ``yields``: ``(before, after)`` provider context per pass, NEWEST
+      first — the last usage before each marker and the first after it, the
+      measured yield the low-yield backoff judges. Positional, like
+      ``usages_since_newest_shrink``: only append order knows "after".
+    """
+    if transcript is None:
+        return [], None, []
+    entries = transcript.recent_entries(_ECONOMIC_SCAN_MAX_ENTRIES)
+    rows: list[dict[str, Any]] = []
+    since_marker: int | None = None
+    yields: list[tuple[int, int]] = []
+    # Walking BACKWARD: ``newer`` is the context of the usage just visited
+    # (the first one after a marker, once the marker is reached), and
+    # ``awaiting`` holds a marker's after-size until its before-size appears.
+    newer: int | None = None
+    awaiting: int | None = None
+    for entry in reversed(entries):
+        if entry.type == "compaction":
+            if since_marker is None:
+                since_marker = len(rows)
+            if awaiting is not None:
+                # Two markers with no request between them: the older pass's
+                # yield is unmeasurable; (0, 0) stops the streak, never
+                # extends it on a guess.
+                yields.append((0, 0))
+            awaiting = newer if newer is not None else 0
+            newer = None
+        elif entry.type == "message":
+            usage = entry.payload.get("usage")
+            if not isinstance(usage, dict):
+                continue
+            tokens = usage.get("context_tokens")
+            if not isinstance(tokens, int) or tokens <= 0:
+                continue
+            if awaiting is not None:
+                yields.append((tokens, awaiting))
+                awaiting = None
+            newer = tokens
+            if len(rows) < limit:
+                rows.append(usage)
+        if len(rows) >= limit and len(yields) >= max_yields:
+            break
+    rows.reverse()
+    return rows, since_marker, yields
 
 
 def _newest_usage_at_ms(transcript: Transcript, *, now_ms: int | None = None) -> int:
@@ -5491,6 +5584,7 @@ class Session:
         #: The pending request start above survives route invalidation, but
         #: cannot establish a warm cache until that request reports usage.
         self._idle_cache_anchor_ms = 0
+        # --- Turn-end economic compaction (``compaction/economics.py``) -----
         # --- Asynchronous compaction pass (advisor-triggered path only) ------
         #
         # The advisor call was already off the turn, but the PASS it authorised
@@ -14007,6 +14101,27 @@ class Session:
         if self.ask_queue() is None:
             return None
         return self._enqueue_ask
+
+    def _integration_consent_seam(self) -> Any | None:
+        """The Team Integrations consent seam, or ``None`` where no person can grant.
+
+        Bound per turn beside the ask doors and ``None`` under the same queue
+        condition, plus for a delegated child: a child never files a consent
+        card on its parent's screen for work the person watching never asked
+        about (the ``_authorize_hub_pull`` rule), and a channel post that
+        reached a child must never reach an integration admin operation (RFC
+        §8.1, S-83). ``answered_ids`` is read LIVE, because the set is filled as
+        answer rows arrive during the run and reset when the next run starts.
+        """
+        if self._parent_session_id or self.ask_queue() is None:
+            return None
+        from local_operator.team_bridge.integration_consent import IntegrationConsent
+
+        return IntegrationConsent(
+            self.ask_queue,
+            lambda: set(self._run_answered_ask_ids),
+            session_id=str(self.session_id or ""),
+        )
 
     def _ask_withdraw_callable(self) -> Callable[..., Any] | None:
         """The tool's withdraw door, or ``None`` on the BLOCKING arm (design §12).
@@ -25273,6 +25388,9 @@ class Session:
             begin_site_request=(
                 self.begin_site_request if self._site_card_enqueue_callable() is not None else None
             ),
+            # Team Integrations: only a person's answer on a host-filed card
+            # can publish an app or mint a credential (RFC §8.2).
+            integration_consent=self._integration_consent_seam(),
             # THE ASK GATE'S DOOR (design docs/design/ask-gate.md §2.2): the
             # same two conditions as the two doors above, so its presence IS
             # "this ask would queue" — which is exactly the population the
@@ -29374,6 +29492,13 @@ class Session:
             # The automatic path has nobody to tell — a turn that did not need
             # compacting must not narrate that fact every time.
             #
+            # Below the size trigger is exactly where the turn-end ECONOMIC
+            # pass is considered (``_maybe_economic_compact``): every turn end
+            # reaches here, wakes and quiet ``no_reply`` turns included, which
+            # is what an always-on session needs, since its armed wakes keep
+            # the idle pass below from ever firing.
+            if planned.reason == "below_threshold" and await self._maybe_economic_compact():
+                return
             # This IS the turn end of a session that may now go idle on a large
             # context, so it is where the idle / pre-wake pass is considered.
             # Arming only schedules a timer; the predicate is re-run at fire.
@@ -29764,6 +29889,512 @@ class Session:
     # Cold start at session LOAD (a resumed session that is already idle) is
     # deliberately not armed: its cache age is unknown to this process and
     # the first turn's end arms it anyway.
+
+    # -- Turn-end economic compaction (compaction/economics.py) ----------------
+    #
+    # The idle pass above can never fire for an always-on session: its armed
+    # wakes keep the cache warm (gate ``wake_keeps_cache_warm``), and any turn
+    # start cancels the timer. This pass is the turn-end complement. It runs in
+    # ``_maybe_compact``'s below-threshold branch, i.e. at EVERY turn end that
+    # reaches the size gate (typed, wake, peer and quiet ``no_reply`` turns
+    # alike), asks the pure EOQ predicate on cheap measured inputs, and only
+    # when that says due pays for an exact cut plan and re-asks on the exact
+    # residual before committing. Both verdicts that cost something (a refused
+    # re-check, a failed pass) are journaled so the next consideration needs
+    # ``G_min`` more growth, surviving a restart like the idle rows do.
+
+    def _is_high_wake(self) -> bool:
+        """Whether this session's cadence makes its residual the dominant cost.
+
+        Behavioural first: at least ``HIGH_WAKE_MIN_REQUESTS`` turn requests in
+        the trailing six hours (the fleet's p75 rate; see the constant).
+        The chief of staff is included by IDENTITY as well (``_aida_is_hers``,
+        one stat), so a quiet day does not flip her preserved-block cap back
+        and forth between passes. Never a subagent: a child's context dies with
+        its job. Failure answers False (the ordinary, looser cap).
+        """
+        if self._parent_session_id:
+            return False
+        try:
+            from local_operator.compaction.economics import (
+                HIGH_WAKE_MIN_REQUESTS,
+                is_high_wake_rate,
+            )
+
+            rows, _since, _yields = _economic_usage_scan(
+                self._transcript, limit=HIGH_WAKE_MIN_REQUESTS, max_yields=0
+            )
+            stamps = [int(row.get("at_ms") or 0) for row in rows]
+            if is_high_wake_rate(stamps, now_ms=int(time.time() * 1000)):
+                return True
+        except Exception:  # noqa: BLE001 - a classification, never a turn failure
+            logger.debug("high-wake classification failed", exc_info=True)
+        return self._aida_is_hers()
+
+    async def _economic_prices(
+        self, context_tokens: int | None = None
+    ) -> tuple[float, float, float] | None:
+        """Serving-request rates, not million-token probes, in dollars/token.
+
+        Every bucket uses the SAME full prompt size and dispatch provenance.
+        Inclusive-input providers must include cached tokens in input_tokens;
+        otherwise one tuple silently mixes short- and long-context tariffs.
+        Deliberately uncached: size, service tier, TTL, schedule and route all
+        affect prices. Unknown provenance disables only this optional pass.
+        """
+        provider, model_id = self._idle_cache_route or (
+            self.effective_model.provider,
+            self.effective_model.model_id,
+        )
+        count = int(context_tokens or self._idle_gate_tokens() or 0)
+        provenance = self._economic_price_provenance(str(provider))
+        if count <= 0 or provenance is None:
+            return None
+        from local_operator.compaction.idle import CACHE_TTL_1H_S
+        from local_operator.model.configure import _cache_tokens_are_inside_input
+
+        inclusive = _cache_tokens_are_inside_input(str(provider))
+        ttl = float(self._idle_cache_ttl_s or 0.0)
+        write = {"cache_write_tokens": count}
+        write["cache_write_1h_tokens" if ttl >= CACHE_TTL_1H_S else "cache_write_5m_tokens"] = count
+
+        def lookup() -> tuple[float, float, float] | None:
+            prices: list[float] = []
+            for fields in ({"cache_read_tokens": count}, write, {"input_tokens": count}):
+                fields = dict(fields)
+                if inclusive:
+                    fields["input_tokens"] = count
+                micro, known = price_call(
+                    str(provider), str(model_id), Usage(**fields, **provenance)
+                )
+                if not known:
+                    return None
+                prices.append(micro / 1e6 / count)
+            return prices[0], prices[1], prices[2]
+
+        try:
+            return await asyncio.to_thread(lookup)
+        except Exception:  # noqa: BLE001 - an optimization never breaks turn end
+            logger.debug("economic compaction: pricing failed", exc_info=True)
+            return None
+
+    def _economic_price_provenance(self, provider: str) -> dict[str, Any] | None:
+        """Only carry a tariff stamp from the route that actually served it."""
+        route = self._idle_cache_route
+        if route is not None and route != (
+            self.effective_model.provider,
+            self.effective_model.model_id,
+        ):
+            return None
+        usage = self._last_usage
+        if provider == "openai" and (
+            usage is None or usage.openai_service_tier not in ("default", "fast")
+        ):
+            return None
+        return {
+            "openai_service_tier": usage.openai_service_tier if usage else None,
+            "openai_long_context": usage.openai_long_context if usage else False,
+        }
+
+    async def _economic_summary_cost(self, plan: _CompactionPlan) -> float | None:
+        """Price the actual summary template/span plus its generation bound.
+
+        Retained operator turns are still summary input. Net context savings
+        cannot price this request. A fresh Anthropic system may incur cache
+        creation, so use the larger of uncached input and a full 5m write.
+        A route change/fallback with unknown serving tariff fails closed.
+        """
+        api = plan.compaction_api
+        previous, span = api.split_leading_marker(
+            [m for m in plan.llm_history[: plan.cut] if _is_summarizable(m)]
+        )
+        prompt = api.build_compaction_prompt(span, previous_summary=previous)
+        from local_operator.compaction.tokens import count_text_tokens
+        from local_operator.model.configure import _cache_tokens_are_inside_input
+
+        count = int(await self._offloaded(api, "estimate_messages_tokens", [Message.user(prompt)]))
+        count += count_text_tokens(api.SUMMARIZATION_SYSTEM_PROMPT)
+        # The local/provider ruler calibration also applies to the summary's
+        # serialized text. Never scale down a conservatively larger local count.
+        context = int(self._last_usage.context_tokens or 0) if self._last_usage else 0
+        prefix = int(getattr(self._last_usage, "system_tokens", 0) or 0)
+        kappa = max(1.0, (context - prefix) / max(1, plan.tokens_before))
+        count = math.ceil(count * kappa)
+        provider, model_id = self._model.provider, self._model.model_id
+        if (provider, model_id) != (self.effective_model.provider, self.effective_model.model_id):
+            return None
+        provenance = self._economic_price_provenance(provider)
+        if provenance is None:
+            return None
+        common = {**provenance, "output_tokens": api.MAX_SUMMARY_TOKENS}
+        full_write = {"cache_write_tokens": count, "cache_write_5m_tokens": count}
+        if _cache_tokens_are_inside_input(provider):
+            full_write["input_tokens"] = count
+
+        def lookup() -> float | None:
+            costs = [
+                price_call(provider, model_id, Usage(input_tokens=count, **common)),
+                price_call(provider, model_id, Usage(**full_write, **common)),
+            ]
+            if not all(known for _, known in costs):
+                return None
+            return max(micro for micro, _ in costs) / 1e6
+
+        return await asyncio.to_thread(lookup)
+
+    def _economic_cold_next(self, median_gap_ms: int) -> bool:
+        """Whether the next request is expected to miss the cache anyway.
+
+        True when a typical gap from now lands past the cache expiry this
+        process measured. An UNKNOWN anchor (no usage on this route yet, or a
+        route change that reset it) answers False: the cold shortcut is a
+        reward for a deterministic miss, never a guess.
+        """
+        anchor = int(self._idle_cache_anchor_ms or 0)
+        ttl = self._idle_cache_ttl_s
+        if anchor <= 0 or not ttl or median_gap_ms <= 0:
+            return False
+        return int(time.time() * 1000) + int(median_gap_ms) > anchor + int(ttl * 1000)
+
+    async def _economic_exact_residual(
+        self, plan: _CompactionPlan, *, prefix_tokens: int, provider_context: int
+    ) -> int:
+        """Project the pass's residual from a REAL cut plan, in provider tokens.
+
+        ``kept window + capped preserved block + actual marker/carry`` measured by
+        the local ruler, scaled by this session's own provider/ruler ratio
+        ``kappa`` (provider conversation tokens over the plan's local estimate,
+        floored at one, never clipped downward), plus the shared system/tools
+        prefix. The preserved block uses the unchanged commit cap. Snapcompact
+        prepares and reuses the real archive; text summaries reserve the full
+        configured output bound. This is a conservative projection, not a
+        promise that local text tokens equal future provider billing.
+        """
+        api = plan.compaction_api
+        to_summarize = plan.llm_history[: plan.cut]
+        kept = plan.llm_history[plan.cut :]
+        kept_tokens = int(await self._offloaded(api, "estimate_messages_tokens", kept))
+        genuine_user_ids = {
+            message.id
+            for message in self._context.messages
+            if isinstance(message, Message) and message.role == "user"
+        }
+        turns: list[Any] = list(api.extract_preserved_user_turns(to_summarize, genuine_user_ids))
+        turns = list(api.collapse_relaunch_briefs(turns))
+        previous = self._transcript.latest_entry("compaction") if self._transcript else None
+        previous_payload = previous.payload if previous is not None else {}
+        dropped = _payload_count(previous_payload, "preserved_turns_dropped")
+        shed = _payload_count(previous_payload, "preserved_turns_shed")
+        # A resumed legacy marker may have been healed only in rendered context.
+        # Match commit's two-source reconciliation before pricing its notice.
+        for message in self._context.messages:
+            carried_dropped, carried_shed = api.elision_counts_of(message)
+            dropped = max(dropped, int(carried_dropped))
+            shed = max(shed, int(carried_shed))
+        capped = api.cap_preserved_user_turns(
+            turns,
+            cap=self._preserved_turns_cap(plan.settings),
+            already_dropped_genuine=dropped,
+            already_dropped_injections=shed,
+        )
+        if plan.strategy == "snapcompact":
+            from local_operator.compaction import snapcompact
+
+            # Prepare ONCE under the turn lock and reuse these exact bytes at
+            # commit. Raster/layout failure must not buy an unchecked paid LLM
+            # fallback; ordinary size/manual passes retain that safety net.
+            prepared = await self._produce_summary(
+                api,
+                [m for m in to_summarize if _is_summarizable(m)],
+                plan.strategy,
+                settings=plan.settings,
+                allow_llm_fallback=False,
+                **self._dense_tail_kwargs(plan),
+            )
+            plan.economic_summary[:] = [prepared]
+            payload = (prepared[1] or {}).get("snapcompact")
+            archive = snapcompact.Archive.model_validate(payload)
+            visual_count = snapcompact.replayed_frame_count(archive)
+            visual = visual_count * snapcompact.frame_token_estimate_for(
+                self.effective_model.provider, self.effective_model.model_id
+            )
+            summary, preserve_data = prepared
+        else:
+            # Count the empty marker's framing separately from the bounded
+            # generated text. No model call is bought for a residual estimate.
+            summary, preserve_data = "", None
+            visual_count = 0
+            visual = 0
+        preserve_data = with_attachment_manifest(
+            preserve_data, to_summarize, world_root=self._confinement_root
+        )
+        marker = build_compaction_marker(summary, preserve_data)
+        rendered_marker = self._convert_to_llm([marker])
+        from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE
+
+        marker_tokens = int(await self._offloaded(api, "estimate_messages_tokens", rendered_marker))
+        # The converter ruler already charges each replayed image at its local
+        # image price. Replace, don't double-add, the provider visual cost.
+        text_archive = marker_tokens - visual_count * IMAGE_TOKEN_ESTIMATE
+        if plan.strategy != "snapcompact":
+            from local_operator.compaction.tokens import count_text_tokens
+
+            # A provider/local-tokenizer mismatch can activate the post-hoc
+            # truncation guard, whose notice is appended beyond the text cap.
+            text_archive += api.MAX_SUMMARY_TOKENS + count_text_tokens(api.SUMMARY_TRUNCATED_MARKER)
+        preserved = [Message.user(str(turn.get("text", ""))) for turn in capped.turns]
+        # Elision is a derived notice, not a retained operator turn. Include its
+        # current counts and this plan's new drops, as commit does.
+        notice = api.elision_notice_text(capped.genuine_dropped, capped.injections_dropped)
+        if notice:
+            preserved.append(Message.user(notice))
+        carried = render_carried_tier(*self._carried_tier_live_state())
+        if carried is not None:
+            preserved.extend(self._convert_to_llm([carried]))
+        preserved_tokens = int(await self._offloaded(api, "estimate_messages_tokens", preserved))
+        local = kept_tokens + preserved_tokens + text_archive
+        allowance = text_archive + visual
+        kappa = 1.0
+        if plan.tokens_before > 0 and provider_context > prefix_tokens:
+            kappa = (provider_context - prefix_tokens) / plan.tokens_before
+        kappa = max(1.0, kappa)
+        # The pieces, so a rollout can tell a task-floor-wide kept window (the
+        # usual reason a re-check refuses) from a preserved or archive excess.
+        logger.debug(
+            "economic residual: prefix=%d kept=%d preserved=%d allowance=%d kappa=%.2f",
+            prefix_tokens,
+            kept_tokens,
+            preserved_tokens,
+            allowance,
+            kappa,
+        )
+        return math.ceil(prefix_tokens + local * kappa + visual)
+
+    async def _journal_economic_decline(
+        self, context_tokens: int, why: str, decision: Any = None
+    ) -> None:
+        """Durably record an economic "not now"; the next ask needs G_min growth."""
+        if self._transcript is None:
+            return
+        from local_operator.compaction.economics import (
+            COMPACTION_ECONOMIC_DECLINED_TYPE,
+        )
+
+        marker = self._transcript.latest_entry("compaction")
+        details: dict[str, Any] = {
+            "marker_id": marker.id if marker is not None else "",
+            "context_tokens": int(context_tokens),
+            "why": why,
+        }
+        if decision is not None:
+            details["projected_residual"] = int(decision.projected_residual)
+            details["delta_star"] = int(decision.delta_star)
+        try:
+            await self._transcript.append_custom(
+                COMPACTION_ECONOMIC_DECLINED_TYPE, details, preserve_mtime=True
+            )
+        except Exception:  # noqa: BLE001 - bookkeeping, never a crash
+            logger.debug("economic compaction: decline journal failed", exc_info=True)
+
+    async def _maybe_economic_compact(self) -> bool:
+        """Run a turn-end economic pass when it pays for itself; True if one ran.
+
+        Called from ``_maybe_compact`` only when the size gate refused with
+        ``below_threshold``, under the turn lock the caller holds, so it can
+        never splice into a running turn. Total: any failure answers False and
+        the turn end proceeds to arm the idle pass exactly as before.
+
+        No auto-continue follows an economic pass: nothing was interrupted (the
+        context was BELOW the trigger), and a continuation turn would itself
+        cost a full read of the context the pass just paid to shrink.
+        """
+        try:
+            from local_operator.compaction import api as compaction_api
+            from local_operator.compaction import economics
+
+            settings = self._compaction_settings or compaction_api.CompactionSettings()
+            if (
+                not settings.enabled
+                or self._parent_session_id
+                or self._transcript is None
+                or self._compaction_pass_in_flight
+                or self._pending_compaction is not None
+                or self._advisor_in_flight
+            ):
+                return False
+            gate_tokens = self._idle_gate_tokens()
+            if gate_tokens is None:
+                return False
+            t_eff = compaction_api.resolve_threshold_tokens(
+                self.effective_model.context_window, settings
+            )
+            g_min = compaction_api.idle_growth_for(
+                t_eff, int(getattr(settings, "idle_min_growth_tokens", 0) or 0)
+            )
+            high_wake = self._is_high_wake()
+            # Low-wake sessions keep the idle line as a floor: below it a
+            # discretionary pass trades verbatim context for savings too small
+            # to matter, and the idle pass (advisor-confirmed) already owns
+            # that band for sessions that park. High-wake sessions have only
+            # the EOQ rule and its guards, because their residual is the cost.
+            floor = (
+                0
+                if high_wake
+                else compaction_api.idle_threshold_for(
+                    t_eff, int(getattr(settings, "idle_threshold_tokens", 0) or 0)
+                )
+            )
+            if gate_tokens < max(floor, g_min):
+                return False
+            rows, since_marker, yields = _economic_usage_scan(
+                self._transcript, limit=economics.ECONOMIC_RATE_WINDOW
+            )
+            stats = economics.usage_stats(
+                rows, since_shrink=len(rows) if since_marker is None else since_marker
+            )
+            baseline, _idle_declined, marker_id = _idle_growth_baseline(self._transcript)
+            declined = _economic_declined_at(self._transcript, marker_id)
+            prices = await self._economic_prices(gate_tokens)
+            p_read, p_write, p_input = prices if prices is not None else (0.0, 0.0, 0.0)
+            strategy = self._resolve_strategy(settings)
+            streak = economics.low_yield_streak(yields, ratio=economics.ECONOMIC_MAX_RESIDUAL_RATIO)
+            cold_next = self._economic_cold_next(stats.median_gap_ms)
+
+            # Cheap admission is optimistic (zero call cost); only the exact
+            # plan can authorize payment, after the actual request is priced.
+            pass_cost = 0.0
+
+            def judge(residual: int | None) -> Any:
+                return economics.economic_compaction_due(
+                    enabled=True,
+                    strategy=strategy,
+                    is_subagent=False,
+                    priced=prices is not None,
+                    context_tokens=gate_tokens,
+                    min_context_tokens=floor,
+                    projected_residual=residual,
+                    baseline_after_tokens=baseline,
+                    declined_at_tokens=declined,
+                    growth_per_request=stats.growth_per_request,
+                    p_read=p_read,
+                    p_write=p_write,
+                    cold_event_rate=stats.cold_event_rate,
+                    cold_next=cold_next,
+                    pass_cost=pass_cost,
+                    min_gain_tokens=g_min,
+                    max_residual_ratio=economics.ECONOMIC_MAX_RESIDUAL_RATIO,
+                    low_yield_streak=streak,
+                    t_eff=t_eff,
+                )
+
+            # CHEAP residual: the last pass's MEASURED after-size when there is
+            # one (it already contains the prefix, preserved block and archive
+            # this pass would keep); otherwise an optimistic structural floor,
+            # prefix + keep window + archive allowance, which only lets the
+            # exact re-check below decide. Optimism here costs one plan per
+            # G_min of growth at most, because the re-check journals a decline.
+            if baseline:
+                cheap = int(baseline)
+            else:
+                cheap = (
+                    stats.prefix_tokens
+                    + int(settings.keep_recent_tokens)
+                    + int(economics.ECONOMIC_ARCHIVE_ALLOWANCE_TOKENS)
+                )
+            decision = judge(cheap)
+            if not decision.due:
+                logger.debug("economic compaction not due: %s", decision.reason)
+                return False
+            planned = await self._plan_compaction(respect_threshold=False)
+            if isinstance(planned, CompactionOutcome):
+                await self._journal_economic_decline(gate_tokens, f"refused:{planned.reason}")
+                return False
+            provider_context = int(self._last_usage.context_tokens or 0) if self._last_usage else 0
+            try:
+                exact = await self._economic_exact_residual(
+                    planned, prefix_tokens=stats.prefix_tokens, provider_context=provider_context
+                )
+            except Exception:  # noqa: BLE001 - paid fallback is not authorized
+                await self._journal_economic_decline(gate_tokens, "pass_failed")
+                return False
+            rewrite_prices = await self._economic_prices(exact)
+            # EOQ assumes one tariff over its interval. Crossing a whole-prompt
+            # tier violates that model; decline rather than mix its rates.
+            # price_call rounds each total to a micro-dollar: only tolerate
+            # the combined half-micro rounding errors divided by prompt size,
+            # not an arbitrary percentage that could hide a real tariff delta.
+            rounding_error = 0.5e-6 / max(1, gate_tokens) + 0.5e-6 / max(1, exact)
+            if (
+                prices is None
+                or rewrite_prices is None
+                or any(
+                    not math.isclose(a, b, rel_tol=0.0, abs_tol=rounding_error)
+                    for a, b in zip(prices, rewrite_prices)
+                )
+            ):
+                await self._journal_economic_decline(gate_tokens, "recheck:tariff_change")
+                return False
+            if strategy != "snapcompact":
+                quoted = await self._economic_summary_cost(planned)
+                if quoted is None:
+                    await self._journal_economic_decline(gate_tokens, "recheck:unpriced_pass")
+                    return False
+                pass_cost = quoted
+            decision = judge(exact)
+            if not decision.due:
+                await self._journal_economic_decline(
+                    gate_tokens, f"recheck:{decision.reason}", decision
+                )
+                return False
+        except Exception:  # noqa: BLE001 - an optimisation must never break a turn end
+            logger.debug("economic compaction failed before commit", exc_info=True)
+            return False
+
+        async def settle(outcome: CompactionOutcome) -> None:
+            # Runs BEFORE ``compaction_end`` (``_finish_compaction``): the
+            # durable after-size for the growth gate until a request measures it.
+            if not outcome.ran:
+                await self._journal_economic_decline(gate_tokens, "pass_failed", decision)
+                return
+            if self._transcript is None:
+                return
+            marker = self._transcript.latest_entry("compaction")
+            await self._transcript.append_custom(
+                economics.COMPACTION_ECONOMIC_PASS_TYPE,
+                {
+                    "marker_id": marker.id if marker is not None else "",
+                    "context_tokens": int(gate_tokens),
+                    "tokens_before": int(outcome.tokens_before),
+                    "tokens_after": int(outcome.tokens_after),
+                    "projected_residual": int(decision.projected_residual),
+                    "delta_star": int(decision.delta_star),
+                    "cold_next": bool(decision.cold_next),
+                    "high_wake": bool(high_wake),
+                },
+                preserve_mtime=True,
+            )
+
+        try:
+            outcome = await self._run_compaction(planned, reason="economic", before_end=settle)
+        except Exception:  # noqa: BLE001
+            logger.warning("economic compaction pass failed", exc_info=True)
+            await self._journal_economic_decline(gate_tokens, "pass_failed", decision)
+            return False
+        if not outcome.ran:
+            return False
+        # The same reading the size path's ``_after_compaction_pass`` installs,
+        # WITHOUT its auto-continue (see the docstring).
+        self._held_context_tokens = outcome.tokens_after
+        logger.info(
+            "economic compaction: %d -> %d (projected %d, delta* %d, cold_next=%s, high_wake=%s)",
+            outcome.tokens_before,
+            outcome.tokens_after,
+            decision.projected_residual,
+            decision.delta_star,
+            decision.cold_next,
+            high_wake,
+        )
+        return True
 
     def _idle_inputs(self, settings: Any, compaction_api: Any, context_tokens: int) -> Any:
         """Run ``idle_compaction_due`` on this session's current state."""
@@ -31122,7 +31753,10 @@ class Session:
         await self._cancel_background_compaction()
         await self._emit(CompactionStartEvent(reason=reason))
         return await self._finish_compaction(
-            plan, reason=reason, summarized=None, before_end=before_end
+            plan,
+            reason=reason,
+            summarized=plan.economic_summary[0] if plan.economic_summary else None,
+            before_end=before_end,
         )
 
     async def _cancel_background_compaction(self) -> None:
@@ -31560,7 +32194,10 @@ class Session:
                 carried_asks=carried_asks,
                 carried_decisions=carried_decisions,
                 resume_card=resume_card,
-                trigger="idle" if reason == "idle" else None,
+                # Discretionary triggers are spelled on the marker so a reader
+                # (and the economic pass's yield scan) can tell them from the
+                # size and manual passes, whose records stay byte-identical.
+                trigger=reason if reason in ("idle", "economic") else None,
             )
             # Never await speculative capture on the compaction critical path.
             # Binding it to this *committed* marker prevents cancelled/stale
@@ -32338,6 +32975,7 @@ class Session:
         dense_tail: int = 0,
         dense_previous_chars: int = 0,
         dense_closed: bool = False,
+        allow_llm_fallback: bool = True,
     ) -> tuple[str, dict[str, Any] | None]:
         """Summary text + optional ``preserve_data`` for one compaction pass.
 
@@ -32445,6 +33083,10 @@ class Session:
                 )
                 return summary or " ", {"snapcompact": _archive_to_json(archive)}
             except Exception:
+                if not allow_llm_fallback:
+                    # Below-size economics priced this strategy as free. A
+                    # paid fallback is a different, unauthorized transaction.
+                    raise
                 logger.warning("snapcompact failed; falling back to context-full", exc_info=True)
         # A pass after the first plans over ``[marker, *kept]``: the previous
         # summary is folded through the template's ``<previous-summary>``
@@ -33712,6 +34354,12 @@ class Session:
             )
         except Exception:  # noqa: BLE001 — a partial double must not evict
             return DEFAULT_PRESERVED_TURN_CAP
+        # Fail CLOSED on tighter high-wake preservation: a headline/peek hint
+        # after eviction does not preserve a standing operator instruction.
+        # A future tighter bound needs a pre-commit checkpoint through session
+        # memory's admission boundaries and a durable acknowledgement of the
+        # full evicted text first. Until then cadence changes only economics,
+        # never the amount of verbatim operator context kept.
         return max(keep_recent, capacity_cap)
 
     def _wire_legal_snapshot(self) -> list[AgentMessage]:

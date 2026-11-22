@@ -4754,13 +4754,12 @@ async def test_ctrl_e_lifts_the_question_bound() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ctrl_e_lifts_the_bound_and_does_not_promise_the_whole_question() -> None:
-    """The honest degradation: ``^e`` lifts the BOUND, it does not promise the text.
+async def test_ctrl_e_pages_the_whole_question_without_growing_the_card() -> None:
+    """A revealed question longer than the fixed card is losslessly pageable.
 
-    Past the point where the body cannot hold the question, ``_allocate`` step 5
-    clips it and marks the cut — the card's existing discipline. This is the
-    boundary where the design deliberately does NOT add an escape hatch it
-    cannot honour, and the safety property still holds there.
+    The older test certified an ellipsis without a route to its hidden text.
+    Frozen integration grants make that inadequate: every character must be
+    reachable while answer selection and the fixed geometry stay unchanged.
     """
     question = AskQuestion(
         id="very_long",
@@ -4782,8 +4781,20 @@ async def test_ctrl_e_lifts_the_bound_and_does_not_promise_the_whole_question() 
         full = _wrap(question.question, layout.width)
         # Even revealed, the body cannot hold it...
         assert len(layout.question) < len(full), (len(layout.question), len(full))
-        # ...and the card SAYS so rather than stopping mid-clause.
-        assert layout.question[-1].rstrip().endswith("…"), layout.question[-1]
+        # ...but the footer offers a lossless reader instead of an ellipsis
+        # whose discarded tail can never be inspected.
+        assert "PgUp/PgDn" in _painted_footer(app)
+        seen = set(layout.question)
+        selected = card.selected_index
+        for _ in range(len(full)):
+            previous = card._layout().question
+            await pilot.press("pagedown")
+            await pilot.pause()
+            seen.update(card._layout().question)
+            assert card.selected_index == selected
+            if card._layout().question == previous:
+                break
+        assert all(line in seen for line in full)
         # The safety property is intact at the boundary: the footer is drawn,
         # the question has a line, and an option row survives.
         assert layout.show_footer, "the exit must survive"

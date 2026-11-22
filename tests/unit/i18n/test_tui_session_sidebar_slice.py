@@ -17,14 +17,15 @@ Two claims, each driven through the REAL render paths (``render()``,
    catalogue would let a wording change slip through as "still equal".
 2. With a synthetic ``fr`` carrying only this namespace, every one of those
    surfaces paints the fr text, the ★/⌥ glyphs stay outside the words, and the
-   ``lop stop`` command token survives verbatim. The fixture symlinks the real
-   English tree so every OTHER namespace keeps rendering; only this fixture
+   ``lop stop`` command token survives verbatim. The fixture copies the real
+   English catalogues so every OTHER namespace keeps rendering; only this fixture
    ever makes the synthetic locale eligible.
 """
 
 from __future__ import annotations
 
 import json
+import shutil
 import time
 from pathlib import Path
 from typing import TypedDict
@@ -32,6 +33,7 @@ from typing import TypedDict
 import pytest
 
 from local_operator.i18n import catalogues, resolve, text
+from local_operator.i18n.keys import tui_session_sidebar as sidebar_keys
 from local_operator.resume import SessionRow
 from local_operator.session.catalog import CatalogEntry, wedged_status
 from local_operator.tui.app import OperatorApp
@@ -170,7 +172,7 @@ async def _overflow_painted(pilot, app) -> str:
 
 
 @pytest.mark.asyncio
-async def test_english_bytes_match_the_pre_extraction_literals() -> None:
+async def test_english_bytes_match_the_pre_extraction_literals(fr_sidebar) -> None:
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
@@ -209,7 +211,12 @@ async def test_english_bytes_match_the_pre_extraction_literals() -> None:
 @pytest.fixture
 def fr_sidebar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Only this fixture may make a synthetic locale eligible, never production."""
-    (tmp_path / "en").symlink_to(EN_ROOT / "en", target_is_directory=True)
+    # The loader rejects an English symlink escaping this fixture root and
+    # silently renders raw IDs instead. Copy only the tiny catalogue data (not
+    # dependencies or context sidecars); dependency sharing still applies.
+    shutil.copytree(
+        EN_ROOT / "en", tmp_path / "en", ignore=shutil.ignore_patterns("*.context.json")
+    )
     (tmp_path / "fr").mkdir()
     (tmp_path / "fr" / f"{NS}.json").write_text(
         json.dumps({k: _fr(v) for k, v in BASE.items()}, ensure_ascii=False), encoding="utf-8"
@@ -227,8 +234,55 @@ def fr_sidebar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     text._sources.cache_clear()
 
 
+def _assert_fixture_english() -> None:
+    """Pin a literal and its provenance: raw IDs must never look like English."""
+    message = sidebar_keys.section_active()
+    assert text.tr(NS)(message) == "Active Sessions"
+    rendered = text.tr_record(NS)(message)
+    assert rendered.text == "Active Sessions"
+    assert rendered.source_locale == "en"
+
+
+def test_synthetic_fixture_preserves_real_english(fr_sidebar) -> None:
+    root = catalogues.catalogue_root()
+    assert not (root / "en").is_symlink()
+    originals = sorted((EN_ROOT / "en").glob("*.json"))
+    originals = [path for path in originals if not path.name.endswith(".context.json")]
+    assert originals
+    assert sorted(path.name for path in (root / "en").iterdir()) == [
+        path.name for path in originals
+    ]
+    for original in originals:
+        copied = root / "en" / original.name
+        assert not copied.is_symlink()
+        assert copied.read_bytes() == original.read_bytes()
+    assert catalogues.load_catalogue("en", NS)[sidebar_keys.section_active().code] == (
+        "Active Sessions"
+    )
+    _assert_fixture_english()
+
+
+def test_original_symlink_is_rejected_and_english_guard_detects_raw_ids(
+    fr_sidebar, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Recreate the original defect beside the corrected fixture, retaining the
+    # real loader/resolver. Its raw-ID fallback must trip the very same guard.
+    broken = tmp_path / "original-symlink"
+    broken.mkdir()
+    (broken / "en").symlink_to(EN_ROOT / "en", target_is_directory=True)
+    monkeypatch.setattr(catalogues, "_CATALOGUES", broken)
+    with pytest.raises(catalogues.CatalogueNotFound, match="escapes the catalogue root"):
+        catalogues.load_catalogue("en", NS)
+    rendered = text.tr_record(NS)(sidebar_keys.section_active())
+    assert rendered.text == sidebar_keys.section_active().code
+    assert rendered.source_locale is None
+    with pytest.raises(AssertionError):
+        _assert_fixture_english()
+
+
 @pytest.mark.asyncio
 async def test_every_surface_follows_a_live_language_change(fr_sidebar) -> None:
+    _assert_fixture_english()
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()

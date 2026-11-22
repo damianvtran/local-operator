@@ -275,6 +275,19 @@ DEFERRED_NAMESPACES: dict[str, str] = {
         "one-string SessionSpecError; the exception carries finished text, never "
         "a catalogue key"
     ),
+    # Deferred rather than raising the eager total ceiling (PR #4297, merge gate
+    # run 44928980132): this namespace's 22 keys took hi's eager total to
+    # 78,277 B against EAGER_TOTAL_MAX_BYTES (77,824 B); it is 3,805 B in hi.
+    # No client resolves one of its keys: ``ask_question`` renders the consent
+    # card in-process and the integrations tool files the finished question,
+    # option labels and descriptions as plain strings (the affirm/decline labels
+    # are then matched as text), so no startup surface needs this copy.
+    "wire.team_integrations": (
+        "Team Integrations consent-card copy rendered in-process by "
+        "team_bridge/integrations.py::ask_question; the integrations tool files "
+        "the finished question and option labels as plain strings, never a "
+        "catalogue key"
+    ),
 }
 
 

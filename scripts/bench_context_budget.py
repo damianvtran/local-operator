@@ -2261,7 +2261,7 @@ def tool_schema_chars(tools: list[AgentTool]) -> int:
 #: through ``hub`` and its parent decides), so the child arm neither holds the
 #: tool nor renders the ``has_notify`` clause.
 CHILD_NEVER_HOLDS = frozenset(
-    {"ask", "ask_withdraw", "wake", "monitor", "patience", "no_reply", "notify"}
+    {"ask", "ask_withdraw", "wake", "monitor", "patience", "no_reply", "notify", "integrations"}
 )
 
 

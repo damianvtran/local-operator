@@ -813,6 +813,13 @@ def test_inventory_block_matches_default_tool_order(monkeypatch: pytest.MonkeyPa
             # The music trio also needs the session's ``music_job_v1`` journal
             # door — presence-only, never called by an ordering test.
             journal_music_job=_music_journal_for_blocks,
+            # ``integrations`` is createIf-gated on ``ask_user`` (above), the
+            # session's consent seam, and a Team Integrations client door (or a
+            # persisted bridge login a bare CI host does not hold) — both
+            # presence-only here (the factory field is typed Callable, hence the
+            # lambda), never called by an ordering test.
+            integration_consent=object(),
+            integrations_client_factory=lambda: object(),
         )
     )
     blocks = build_system_blocks(tools, "", ENV, DATE)
