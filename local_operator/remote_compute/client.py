@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import urllib.parse
 import uuid
 from contextlib import closing
@@ -74,11 +75,40 @@ from local_operator.remote_compute.errors import (
     retry_after_seconds,
 )
 from local_operator.remote_compute.request import RunCreateRequest
+from local_operator.remote_compute.tiers import tier_from_server
 from local_operator.tunnels import api as tunnels_api
 from local_operator.tunnels.errors import LoginRequired
 
+logger = logging.getLogger(__name__)
+
 #: Where the run endpoints live, relative to the API host.
 RUNS_PATH = "/v1/remote-compute/runs"
+
+#: Where the capacity read lives. A SIBLING of ``RUNS_PATH``, not a child of it:
+#: the tiers this deployment can provision answer "can a run be admitted at
+#: all", which a surface asks BEFORE it offers one.
+CAPACITY_PATH = "/v1/remote-compute/capacity"
+
+#: The keys a run object may carry that are SECRETS when they appear at all.
+#:
+#: Named here rather than in a surface because the create wrapper is this
+#: module's fact: ``run_token`` authenticates the pod and ``tunnel`` carries its
+#: cloudflared credentials, both returned once on the 201 (see the module
+#: docstring). :meth:`RemoteComputeClient.create_run` already refuses to carry
+#: either, and this list is the same rule applied to a whole body a surface is
+#: about to print or return — defence in depth, not a response to a known leak.
+SECRET_RUN_FIELDS: tuple[str, ...] = ("run_token", "tunnel")
+
+
+def without_secrets(payload: dict[str, Any]) -> dict[str, Any]:
+    """The run without the fields that are secrets when they appear at all.
+
+    ONE implementation for every surface that publishes a run (the CLI's
+    ``--remote-status`` and the desktop route both call this): two copies of a
+    filter is how one surface comes to print a field the other redacts.
+    """
+    return {key: value for key, value in payload.items() if key not in SECRET_RUN_FIELDS}
+
 
 #: The keys the v1 response envelope may carry, and nothing else.
 #:
@@ -371,6 +401,12 @@ class RemoteComputeClient:
     ) -> _Reply:
         """One call, as the payload plus the status that answered it.
 
+        ``path`` is relative to the API HOST, so each endpoint names its own
+        collection (``RUNS_PATH``, ``CAPACITY_PATH``) at the call site and this
+        method never has to be told which family it is speaking for. The
+        alternative — a base-path parameter — would be a knob whose only two
+        values are those constants.
+
         The STATUS comes back beside the payload because 200 and 201 mean
         different things on a create (replay versus created) and the body is
         identical either way, so the status is not recoverable from it.
@@ -393,7 +429,7 @@ class RemoteComputeClient:
         try:
             response = await self.client.request(
                 method,
-                self.api_url + RUNS_PATH + path,
+                self.api_url + path,
                 json=body,
                 params=params,
                 headers=headers,
@@ -445,7 +481,7 @@ class RemoteComputeClient:
                 "binding; a mapping could name a network this device is not in"
             )
         reply = await self._request(
-            "POST", "", body=request.to_json(), idempotency_key=idempotency_key
+            "POST", RUNS_PATH, body=request.to_json(), idempotency_key=idempotency_key
         )
         wrapper = reply.payload
         run = wrapper.get("run") if isinstance(wrapper, dict) else None
@@ -456,7 +492,7 @@ class RemoteComputeClient:
         # answered with another network's run would otherwise be reported as this
         # network's receipt.
         _confirm_network(run, expected=request.network_id)
-        return CreatedRun(run=run, replayed=reply.status == REPLAY_STATUS)
+        return CreatedRun(run=_tier_mapped_run(run), replayed=reply.status == REPLAY_STATUS)
 
     async def get_run(
         self, identifier: str, *, expected_network: str | None = None
@@ -468,7 +504,7 @@ class RemoteComputeClient:
         network's run must stop the watch with a typed failure rather than
         reporting that run's status as the one being watched.
         """
-        reply = await self._request("GET", _run_path(identifier))
+        reply = await self._request("GET", RUNS_PATH + _run_path(identifier))
         run = _single_run(reply.payload, identifier)
         if expected_network is not None:
             _confirm_network(run, expected=expected_network)
@@ -508,12 +544,51 @@ class RemoteComputeClient:
             params["network_id"] = network_id
         if status is not None:
             params["status"] = status
-        reply = await self._request("GET", "", params=params)
+        reply = await self._request("GET", RUNS_PATH, params=params)
         page = reply.payload
         runs = page.get("runs") if isinstance(page, dict) else None
         if not isinstance(runs, list) or not all(isinstance(run, dict) for run in runs):
             raise RemoteComputeError("Radient returned an invalid remote-compute run list.")
-        return runs
+        return [_tier_mapped_run(run) for run in runs]
+
+    async def capacity(self) -> list[dict[str, Any]]:
+        """Every tier this deployment can provision, and whether each is ready now.
+
+        THE SERVER'S ENVELOPE, IN THE SERVER'S VOCABULARY, TRANSLATED ONCE. The
+        read answers ``result["providers"]`` — one row per provider the deployment
+        can provision on — and each row's ``tier`` is the server's name for WHERE
+        the work runs (``fargate``, ``kubernetes``), not the id a surface offers
+        (``cloud_run``, ``dedicated``). Both are normalised HERE, at the one boundary
+        every caller crosses, through
+        :data:`~local_operator.remote_compute.tiers.SERVER_TIER_TO_TIER`: a surface
+        comparing the server's word paints a ready tier as unavailable.
+
+        A ROW WHOSE TIER THIS BUILD CANNOT NAME IS DROPPED, at debug. There is no
+        row to render — a surface matches an id it knows — and guessing one would
+        offer capacity under a word the server does not admit. A deployment that
+        grew a third tier is then a line in a log rather than a mislabelled row.
+
+        ``ready`` and ``detail`` are PASSED THROUGH WHOLE, AND NOTHING IS FILTERED
+        OUT OF THEM. ``detail`` is the deployment's own string map about its own
+        infrastructure, republished as it arrived: this module neither reads it nor
+        strips a rate or a pool name from it. The guarantee that the answer carries
+        no price is the SERVER's — it documents ``{tier, ready, detail}`` and no
+        money — so a surface must not assume a filter on this side backs it up.
+        """
+        reply = await self._request("GET", CAPACITY_PATH)
+        page = reply.payload
+        rows = page.get("providers") if isinstance(page, dict) else None
+        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+            raise RemoteComputeError("Radient returned an invalid remote-compute capacity list.")
+        mapped: list[dict[str, Any]] = []
+        for row in rows:
+            wire = row.get("tier")
+            tier = tier_from_server(wire) if isinstance(wire, str) else None
+            if tier is None:
+                logger.debug("remote compute: capacity row carries tier %r, dropped", wire)
+                continue
+            mapped.append({**row, "tier": tier})
+        return mapped
 
     async def cancel_run(self, identifier: str) -> dict[str, Any]:
         """Cancel a run. Idempotent: cancelling a finished run is not an error.
@@ -526,7 +601,9 @@ class RemoteComputeClient:
         body about another run would make this command report work cancelled
         that nobody cancelled.
         """
-        reply = await self._request("POST", _run_path(identifier) + "/cancel", empty_body_ok=True)
+        reply = await self._request(
+            "POST", RUNS_PATH + _run_path(identifier) + "/cancel", empty_body_ok=True
+        )
         if not reply.payload:
             return {}
         return _single_run(reply.payload, identifier)
@@ -540,7 +617,7 @@ class RemoteComputeClient:
         an answer about another run would have this method report work deleted
         that nobody deleted.
         """
-        reply = await self._request("DELETE", _run_path(identifier), empty_body_ok=True)
+        reply = await self._request("DELETE", RUNS_PATH + _run_path(identifier), empty_body_ok=True)
         if not reply.payload:
             return {}
         return _single_run(reply.payload, identifier)
@@ -558,7 +635,38 @@ def _single_run(payload: Any, asked_for: str) -> dict[str, Any]:
     answered = run_id(payload)
     if answered != asked_for:
         raise RunIdentityMismatch(asked_for=asked_for, answered=answered)
-    return payload
+    return _tier_mapped_run(payload)
+
+
+def _tier_mapped_run(payload: dict[str, Any]) -> dict[str, Any]:
+    """The run with the server's tier word replaced by this build's tier id.
+
+    A run row carries the SERVER's tier (``fargate``/``kubernetes``) — where the
+    deployment runs the work — and not the id a surface offers. The join is
+    :data:`~local_operator.remote_compute.tiers.SERVER_TIER_TO_TIER`, applied here
+    so every run this client hands back (a create's receipt, a per-run read, a
+    listing) speaks the one vocabulary a surface matches; a surface comparing the
+    server's word would find no tier it can label.
+
+    A ROW THAT ALREADY CARRIES THIS BUILD'S ID IS LEFT ALONE:
+    :func:`~local_operator.remote_compute.tiers.tier_from_server` answers an id in
+    :data:`~local_operator.remote_compute.tiers.TIERS` with itself, which is the
+    absence of a translation rather than a guess. Without that, a server build that
+    had caught up to this one had its tier silently removed from the row.
+
+    A TIER THIS BUILD CANNOT NAME LOSES THE FIELD AND THE ROW IS KEPT. A run is
+    work in flight: hiding it would make a running task vanish from the panel
+    exactly when the server's vocabulary moved ahead of this build, and the rest of
+    the row still says how to cancel it.
+    """
+    if "tier" not in payload:
+        return payload
+    wire = payload["tier"]
+    tier = tier_from_server(wire) if isinstance(wire, str) else None
+    if tier is None:
+        logger.debug("remote compute: a run carries tier %r, which this build cannot name", wire)
+        return {key: value for key, value in payload.items() if key != "tier"}
+    return {**payload, "tier": tier}
 
 
 def run_status(payload: dict[str, Any]) -> str:
@@ -661,6 +769,7 @@ def run_max_hours(payload: dict[str, Any]) -> float | None:
 
 
 __all__ = [
+    "CAPACITY_PATH",
     "CreatedRun",
     "ENVELOPE_KEYS",
     "KNOWN_RUN_OUTCOMES",
@@ -668,6 +777,7 @@ __all__ = [
     "MAX_IDEMPOTENCY_KEY_BYTES",
     "REPLAY_STATUS",
     "RUNS_PATH",
+    "SECRET_RUN_FIELDS",
     "TERMINAL_RUN_STATUSES",
     "RemoteComputeClient",
     "charged_amount",
@@ -680,4 +790,5 @@ __all__ = [
     "run_network",
     "run_outcome",
     "run_status",
+    "without_secrets",
 ]
