@@ -1879,6 +1879,7 @@ def _destination_move(
     in flight is still refused by the owner before any of this can start (§6.4).
     """
     from local_operator import fork as fork_mod
+    from local_operator.network import move_team
     from local_operator.network import sync as sync_mod
     from local_operator.resume import ORIGIN_FORK, mark_session_origin
     from local_operator.session.placement import (
@@ -1985,6 +1986,7 @@ def _destination_move(
                     "mode": "keep" if keep else "move",
                     "resume": bool(pending),
                     "have": {},
+                    move_team.KEY: True,
                     # THE QUEUE REQUEST rides the prepare, additively: an owner
                     # older than the key ignores it and answers ``busy`` exactly as
                     # before — so ``--queue`` against a pre-queue fleet degrades to
@@ -2312,6 +2314,18 @@ def _destination_move(
                 "",
             )
 
+    try:
+        team_identity = move_team.check_arrival(server.root, staging, prepared.get(move_team.KEY))
+    except move_team.TeamIdentityRefused as refusal:
+        # Check only after the normal pre-invite definitions push and verified
+        # pull, but before ready can authorize deletion of the source copy.
+        _report_destination_rollback(transport, session_id, lease_epoch, move_team.CODE)
+        _roll_back_destination(server, session_id, staging)
+        return (
+            None,
+            _move_refusal(session_id, move_team.CODE, str(refusal), phase_reached="prepared"),
+            "",
+        )
     # THE DESTINATION'S OWN CONTENT DIGEST, computed from the bytes it actually
     # holds over the same function the owner uses (``sync.copy_content_digest``),
     # and the value the owner commits on (review round 1, M-2). Computed HERE,
@@ -2341,6 +2355,7 @@ def _destination_move(
                 "source_device": owner_device,
                 "source_session_id": session_id,
                 "moved_at": time.time(),
+                **({move_team.KEY: team_identity} if team_identity is not None else {}),
             },
             # CARRIED AUTO AUTHORITY (§6 defect 2): the flag rode the invite from the
             # device that held the session, and it is stamped HERE because the
@@ -2535,12 +2550,15 @@ def _destination_move(
         if not keep:
             settle_promoted_handoff(server.root, session_id)
     if not promote_outcome.ok:
-        clear_handoff_entry(server.root, session_id)
+        # A committed copy blocked on a team revision remains recoverable from
+        # staging. Its journal must keep local runtime creation fenced off.
+        if not promote_outcome.team_refusal:
+            clear_handoff_entry(server.root, session_id)
         return (
             None,
             _move_refusal(
                 session_id,
-                "in_progress",
+                move_team.CODE if promote_outcome.team_refusal else "in_progress",
                 _promote_refusal_detail(target_id, promote_outcome),
                 phase_reached="handing_off",
                 changed=True,
@@ -2887,6 +2905,7 @@ def _finish_from_tombstone(
     cannot make that comparison for itself — the record is the OWNER's file, so the only
     thing it could read here is the answer somebody else wrote.
     """
+    from local_operator.network import move_team
     from local_operator.network import sync as sync_mod
     from local_operator.session.placement import clear_handoff_entry
 
@@ -2958,7 +2977,7 @@ def _finish_from_tombstone(
             None,
             _move_refusal(
                 session_id,
-                "in_progress",
+                move_team.CODE if promote_outcome.team_refusal else "in_progress",
                 _promote_refusal_detail(session_id, promote_outcome),
                 phase_reached="handing_off",
                 changed=True,
@@ -3008,12 +3027,14 @@ class _PromoteOutcome(NamedTuple):
     ``stamps_refused`` (QA Q-1) marks the one refusal that is NOT about the id
     already being taken here: the copy's origin stamps could not be lowered to
     ``verified: false``. The callers word their reply from it, so the operator is
-    not told about a collision that never happened.
+    not told about a collision that never happened. ``team_refusal`` likewise
+    distinguishes a staged copy held for an unavailable team definition.
     """
 
     ok: bool
     carry: dict[str, Any] | None
     stamps_refused: bool = False
+    team_refusal: str = ""
 
 
 #: The refusal ``_promote`` answers with when the id is taken or the copy could
@@ -3030,6 +3051,8 @@ def _promote_refusal_detail(target_id: str, outcome: _PromoteOutcome) -> str:
     the same thing. This module words its replies inline rather than through
     i18n keys, so this follows suit.
     """
+    if outcome.team_refusal:
+        return outcome.team_refusal
     if outcome.stamps_refused:
         return (
             f"{target_id} could not be adopted here because its origin stamps could not "
@@ -3169,6 +3192,14 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
             target_id,
         )
         return _PROMOTE_REFUSED
+    from local_operator.network import move_team
+
+    # Recovery can reach here without prepare, so also require a binding on
+    # the staged copy itself. Never trust the staging name or a stale check.
+    try:
+        move_team.check_promotion(server.root, source)
+    except move_team.TeamIdentityRefused as refusal:
+        return _PromoteOutcome(ok=False, carry=None, team_refusal=str(refusal))
     if target.is_symlink():
         return _PROMOTE_REFUSED
     if target.exists():
@@ -5456,6 +5487,7 @@ def _source_prepare(
     and, at the promote, into the ``desktop.json`` a session with no marker of its
     own could never otherwise have.
     """
+    from local_operator.network import move_team
     from local_operator.network import sync as sync_mod
     from local_operator.session.placement import (
         HANDOFF_PHASE_PREPARED,
@@ -5473,6 +5505,26 @@ def _source_prepare(
             "message": f"this device does not hold {session_id} any more",
             "session_id": session_id,
         }
+
+    def team_offer() -> dict[str, str] | None:
+        return move_team.source_offer(
+            server.root,
+            Path(server.root) / "sessions" / session_id,
+            supported=frame.get(move_team.KEY) is True,
+        )
+
+    def team_refusal(error: move_team.TeamIdentityRefused) -> dict[str, Any]:
+        return {
+            "result": "refused",
+            "code": move_team.CODE,
+            "message": str(error),
+            "session_id": session_id,
+        }
+
+    try:
+        expected_team = team_offer()
+    except move_team.TeamIdentityRefused as error:
+        return team_refusal(error)
     # THE ROLE-DEFINITION GATE (LOH-9 S2). The copy set excludes ``roles/`` for
     # v1, so this is the one place that can stop a deleting move from losing
     # definitions no other device has. It runs for BOTH modes (a ``--keep`` copy
@@ -5649,6 +5701,7 @@ def _source_prepare(
             "lease_epoch": new_lease_epoch(),
             "mode": "keep",
             "manifest": manifest,
+            move_team.KEY: expected_team,
             # The destination states what stayed behind, in the receipt it builds
             # (see ``MoveCarryBlock.session_roles``); 0 means none, which is every
             # ordinary move.
@@ -5929,6 +5982,12 @@ def _source_prepare(
     )
     if refused_ws is not None:
         return refused_ws
+    # The attachment can change before the runtime is retired. Re-read it
+    # with the writer stopped, before committing to a copy plan.
+    try:
+        expected_team = team_offer()
+    except move_team.TeamIdentityRefused as error:
+        return team_refusal(error)
     lease_epoch = new_lease_epoch()
     if workset_arrival is not None:
         # THE CONSENT ROW, BEFORE THE TRANSFER STARTS (security ruling, offload
@@ -6039,6 +6098,7 @@ def _source_prepare(
         "session_roles_stash": roles_stash,
         "session_id": session_id,
     }
+    answer[move_team.KEY] = expected_team
     if source_cwd:
         answer["cwd"] = source_cwd
     if workset_arrival is not None:

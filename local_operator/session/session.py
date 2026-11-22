@@ -9513,16 +9513,22 @@ class Session:
         # the revert F1 forbids. "The live state wins" is per SESSION here, not
         # per slot, wherever the two slots are mutually exclusive.
         if stored.team and not live_agent and (not live_team or live_team == stored.team):
-            team = None
+            from local_operator.network.move_team import restore_bound
+
             registry = self.team_registry
-            if registry is None:
-                looked_up_and_absent = False
-            else:
-                try:
-                    team = registry.get_team_by_name(stored.team)
-                except Exception:  # noqa: BLE001 — a bad registry row is not fatal
-                    team = None
+            # The verified object, not a second lookup by name, must be what
+            # can change the manager pins or shell confinement after migration.
+            # Unbound local attachments retain their legacy lookup behavior.
+            team = restore_bound(self._transcript.directory, stored.team, registry)
+            if team is None:
+                if registry is None:
                     looked_up_and_absent = False
+                else:
+                    try:
+                        team = registry.get_team_by_name(stored.team)
+                    except Exception:  # noqa: BLE001 — a bad registry row is not fatal
+                        team = None
+                        looked_up_and_absent = False
             if team is None:
                 missing.append((f"team {stored.team!r}", "/team"))
                 # Carried so the next mutation cannot erase it (R1).

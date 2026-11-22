@@ -1751,6 +1751,7 @@ async def test_recall_requires_the_source_team_definition(
 ) -> None:
     """Drive real relay recall and inspect runtime attachment in-process."""
     from local_operator.agents import AgentRegistry
+    from local_operator.network.move_team import TeamIdentityRefused
     from local_operator.resume import write_session_attachment
     from local_operator.session.goal import GoalState
     from local_operator.session.session import Session
@@ -1790,17 +1791,21 @@ async def test_recall_requires_the_source_team_definition(
     registry.create_team(
         TeamEditFields(name="local-control", manager="manager", instructions="local brief")
     )
+    matching_team = None
     if destination == "conflict":
         registry.create_team(
             TeamEditFields(name="identity-test", manager="scout", instructions="destination brief")
         )
     elif destination == "match":
-        registry.create_team(source_fields)
+        matching_team = registry.create_team(source_fields)
     existing_dir = _owned_session(receiver, "101010101010", rows=0)
     existing_team = "local-control" if destination == "missing" else "identity-test"
     write_session_attachment(existing_dir, team=existing_team, agent="", goal="")
     existing, existing_goal = open_session(receiver.root, existing_dir)
     before = attachment(existing, existing_goal)
+    if destination == "conflict":
+        assert before[1:] == ("scout", True)
+        assert "destination brief" in before[0]
     arrived = None
     try:
         result = _move(receiver, SESSION, monkeypatch=monkeypatch)
@@ -1823,8 +1828,17 @@ async def test_recall_requires_the_source_team_definition(
             assert arrived is not None, result
             assert observed == (True, before[0], "manager", False)
             assert "source brief" in before[0]
+
+            # A later registry edit must not switch the moved session to a
+            # different team at construction after the protocol already agreed.
+            assert matching_team is not None
+            registry.update_team(matching_team.id, TeamEditFields(instructions="different brief"))
+            with pytest.raises(TeamIdentityRefused, match="identity-test"):
+                open_session(receiver.root, moved_dir)
+            assert attachment(existing, existing_goal) == before
         else:
             assert observed[0] is False, observed
+            assert result["code"] == "team_definition_unavailable", result
             assert "identity-test" in str(observed[1]), observed
             assert arrived is None
             assert source.is_dir()
@@ -1832,6 +1846,32 @@ async def test_recall_requires_the_source_team_definition(
         if arrived is not None:
             await arrived.dispose()
         await existing.dispose()
+
+
+def test_offload_reports_a_team_conflict_without_replacing_the_local_definition(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.resume import write_session_attachment
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    source, destination, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin", settings=destination.settings)
+    directory = _owned_session(source)
+    name = "identity-test"
+    TeamRegistry(source.root).create_team(TeamEditFields(name=name, instructions="source brief"))
+    TeamRegistry(destination.root).create_team(
+        TeamEditFields(name=name, instructions="different brief")
+    )
+    write_session_attachment(directory, team=name, agent="", goal="")
+
+    result = _move(source, SESSION, to=destination.identity.device_id, monkeypatch=monkeypatch)
+
+    assert result["ok"] is False and result["code"] == "team_definition_unavailable", result
+    assert name in result["message"], result
+    assert directory.is_dir()
+    assert not (destination.root / "sessions" / SESSION).exists()
+    still_local = TeamRegistry(destination.root).get_team_by_name(name)
+    assert still_local is not None and still_local.instructions == "different brief"
 
 
 def test_a_failed_definitions_refresh_names_the_stale_copy_but_still_moves(
