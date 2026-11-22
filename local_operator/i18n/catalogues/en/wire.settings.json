@@ -663,7 +663,7 @@
   "wire.settings.speech_voice_expressiveness.choice.high.label": "high",
   "wire.settings.speech_voice_expressiveness.choice.low.description": "Restrained and plain.",
   "wire.settings.speech_voice_expressiveness.choice.low.label": "low",
-  "wire.settings.speech_voice_expressiveness.choice.medium.description": "Today's constant.",
+  "wire.settings.speech_voice_expressiveness.choice.medium.description": "Standard vocal delivery.",
   "wire.settings.speech_voice_expressiveness.choice.medium.label": "medium",
   "wire.settings.speech_voice_expressiveness.help": "How animated the delivery is. Sets ElevenLabs stability; a phrase on OpenAI.",
   "wire.settings.speech_voice_expressiveness.label": "Expressiveness",
