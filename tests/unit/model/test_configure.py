@@ -283,17 +283,7 @@ def test_create_stream_fn_returns_callable():
 
 @pytest.mark.parametrize(
     "model_id",
-    [
-        "gpt-6-astra",
-        "gpt-6.1-sol",
-        "gpt-6.1-sol-2026-10-01",
-        "gpt-6.1-terra",
-        "gpt-6-luna",
-        "gpt-6.2-astra",
-        "gpt-6.2-sol",
-        "gpt-6.2-sol-2026-10-01",
-        "gpt-6.10-sol",
-    ],
+    ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-sol-2026-10-01", "gpt-6.1-terra", "gpt-6-luna"],
 )
 def test_discovered_gpt6_uses_responses_and_prompt_cache(model_id: str) -> None:
     spec = build_model_spec("openai", model_id)

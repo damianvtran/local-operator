@@ -1658,6 +1658,96 @@ async def test_responses_developer_instructions_are_scoped_to_official_models_an
             assert body["input"][0]["role"] == "user"
 
 
+@pytest.mark.parametrize(
+    ("model_id", "base_url", "api_mode", "route", "developer_prefix", "cache_key"),
+    [
+        ("gpt-6.2-sol", None, "responses", "responses", True, False),
+        ("gpt-6.2-sol", None, "chat_completions", "chat/completions", False, False),
+        (
+            "gpt-6.2-sol",
+            "https://gateway.invalid/v1",
+            "responses",
+            "chat/completions",
+            False,
+            False,
+        ),
+        ("gpt-6.1-sol", None, "responses", "responses", False, True),
+        ("gpt-5.6-sol", None, "responses", "responses", False, True),
+    ],
+    ids=["default-responses", "explicit-chat", "custom-base", "older-discovered", "catalogue"],
+)
+async def test_openai_model_preserves_endpoint_and_cache_key_contract(
+    model_id: str,
+    base_url: str | None,
+    api_mode: str,
+    route: str,
+    developer_prefix: bool,
+    cache_key: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator.model import configure, discovery, prices
+
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content)
+        stream = (
+            _public_responses_sse()
+            if request.url.path.endswith("/responses")
+            else _sse([{"choices": [{"delta": {}, "finish_reason": "stop"}]}])
+        )
+        return httpx.Response(200, content=stream, headers={"content-type": "text/event-stream"})
+
+    # Public /v1/models can expose an ID before the pricing catalogue has a row.
+    # Exercise that path without allowing live catalogue data to mask the regression.
+    monkeypatch.setattr(configure, "_catalogue_credential", lambda *a, **kw: ("", False, None))
+    monkeypatch.setattr(
+        discovery,
+        "available_models",
+        lambda *a, **kw: ([discovery.DiscoveredModel(model_id)], "live"),
+    )
+    monkeypatch.setattr(prices, "price_catalogue_row", lambda *a, **kw: None)
+    configure.invalidate_model_info_cache()
+    try:
+        spec = configure.build_model_spec("openai", model_id)
+    finally:
+        configure.invalidate_model_info_cache()
+    if base_url is not None:
+        spec = spec.model_copy(update={"base_url": base_url})
+    request = ChatRequest(
+        model=spec,
+        system_blocks=["Reusable guidance."],
+        messages=[Message.user("hi")],
+        prompt_cache_key="lineage-123",
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = client_for_spec(spec, http_client=http, openai_api=api_mode)
+        await _collect(client.stream(request, "fixture"))
+
+    assert captured["url"] == f"{base_url or 'https://api.openai.com/v1'}/{route}"
+    body = captured["body"]
+    assert "prompt_cache_retention" not in body
+    if cache_key:
+        assert body["prompt_cache_key"] == "lineage-123"
+    else:
+        assert "prompt_cache_key" not in body
+    if developer_prefix:
+        assert "instructions" not in body
+        assert body["input"][0] == {
+            "type": "message",
+            "role": "developer",
+            "content": [{"type": "input_text", "text": "Reusable guidance."}],
+        }
+        assert body["input"][1]["role"] == "user"
+    elif route == "responses":
+        assert body["instructions"] == "Reusable guidance."
+        assert body["input"][0]["role"] == "user"
+    else:
+        assert body["messages"][0] == {"role": "system", "content": "Reusable guidance."}
+        assert "instructions" not in body and "input" not in body
+
+
 def _enum_members(node: Any) -> list[Any]:
     """Collect enum members from exactly the provider-bound JSON payload.
 

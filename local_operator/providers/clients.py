@@ -3717,7 +3717,13 @@ class OpenAICompatClient:
         return (
             not self._codex_responses_mode(oauth_access)
             and self._openai_api == "responses"
-            and request.model.supports_responses_api
+            and (
+                request.model.supports_responses_api
+                # Discovery can omit the capability for newer GPT-6 models.
+                # Keep this exception on the built-in public route; automatic
+                # caching there does not require changing cache-key eligibility.
+                or self._uses_developer_instructions(request.model, f"{self._base_url}/responses")
+            )
         )
 
     def _uses_developer_instructions(self, model: ModelSpec, endpoint: str) -> bool:
