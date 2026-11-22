@@ -41,6 +41,7 @@ from local_operator.tui.widgets.ask_queue import (
     context_text,
     dismiss_reason_text,
 )
+from tests.unit.tui.conftest import await_booted
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 pytestmark = pytest.mark.asyncio
@@ -132,7 +133,7 @@ async def test_x_on_an_open_row_opens_the_reason_card_and_sends_nothing(enabled)
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         # TWO open rows, so the door mounts the LIST: one answerable ask expands
         # straight to its card (design D11), and the list is what `x` belongs to.
         listing = await _open_list(pilot, app, [_row("a1"), _row("a2")])
@@ -158,7 +159,7 @@ async def test_enter_forwards_the_highlighted_reason(enabled):
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         listing = await _open_list(pilot, app, [_row("a1"), _row("a2")])
         await pilot.press("x")
         await _settle(pilot)
@@ -172,7 +173,7 @@ async def test_down_then_enter_forwards_answered_in_chat(enabled):
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         await _open_list(pilot, app, [_row("a1"), _row("a2")])
         await pilot.press("x")
         await _settle(pilot)
@@ -188,7 +189,7 @@ async def test_escape_puts_the_reason_card_away_and_dismisses_nothing(enabled):
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         listing = await _open_list(pilot, app, [_row("a1"), _row("a2")])
         await pilot.press("x")
         await _settle(pilot)
@@ -207,7 +208,7 @@ async def test_a_lapsed_row_still_dismisses_in_one_key_with_no_reason(enabled):
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         listing = await _open_list(pilot, app, [_row("t1", status="timed_out")])
         assert not listing.choosing
         await pilot.press("x")
@@ -222,7 +223,7 @@ async def test_the_reason_card_closes_when_its_row_leaves_the_wire(enabled):
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         listing = await _open_list(pilot, app, [_row("a1"), _row("a2")])
         await pilot.press("x")
         await _settle(pilot)
@@ -241,7 +242,7 @@ async def test_a_refused_dismiss_reports_and_clears_the_mark(enabled):
     session.dismiss_refusals["a1"] = "this ask was already answered."
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         await _open_list(pilot, app, [_row("a1"), _row("a2")])
         seen: list[str] = []
         app._ask_gesture_refusal = lambda text: seen.append(text)
@@ -265,7 +266,7 @@ async def test_a_dismissed_row_that_stays_drops_its_in_flight_mark(enabled):
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         listing = await _open_list(pilot, app, [_row("a1"), _row("a2")])
         await pilot.press("x")
         await pilot.press("enter")
@@ -311,7 +312,7 @@ async def test_a_lapsed_dismissal_keeps_its_mark_until_its_row_leaves(enabled):
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         await _open_list(pilot, app, [_row("t1", status="timed_out")])
         await pilot.press("x")
         await _settle(pilot)
@@ -381,7 +382,7 @@ async def test_the_context_line_paints_under_its_own_row_and_nowhere_else(enable
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         listing = await _open_list(
             pilot,
             app,
@@ -406,7 +407,7 @@ async def test_the_context_line_is_part_of_its_row_for_the_pointer(enabled):
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         listing = await _open_list(
             pilot,
             app,
@@ -453,7 +454,7 @@ async def test_the_reason_line_paints_under_the_dismissed_row(enabled):
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         listing = await _open_list(
             pilot,
             app,
@@ -480,7 +481,7 @@ async def test_the_reason_line_belongs_to_its_row_for_the_pointer(enabled):
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         listing = await _open_list(
             pilot,
             app,
@@ -530,7 +531,7 @@ async def test_the_context_line_leads_with_a_connector_a_row_never_has(enabled) 
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         listing = await _open_list(
             pilot,
             app,
@@ -586,7 +587,7 @@ async def test_a_successful_dismissal_states_its_receipt(enabled) -> None:
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         await _open_list(pilot, app, [_row("a1"), _row("a2")])
         seen: list[str] = []
         app._ask_gesture_notice = lambda text: seen.append(text)
@@ -600,7 +601,7 @@ async def test_the_second_reason_reports_its_own_receipt(enabled) -> None:
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         await _open_list(pilot, app, [_row("a1"), _row("a2")])
         seen: list[str] = []
         app._ask_gesture_notice = lambda text: seen.append(text)
@@ -619,7 +620,7 @@ async def test_the_lapsed_door_reports_no_reply_sent(enabled) -> None:
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         # A LAPSED-ONLY list: one answerable ask would mount its card instead.
         listing = await _open_list(pilot, app, [_row("a1", status="timed_out")])
         listing.focus()
@@ -639,7 +640,7 @@ async def test_the_reason_card_closes_when_the_row_stops_being_answerable(enable
         session = _RecordingSession()
         app = _app(session)
         async with app.run_test(size=(120, 30)) as pilot:
-            await _settle(pilot)
+            await await_booted(app, pilot)
             listing = await _open_list(pilot, app, [_row("a1"), _row("a2")])
             await pilot.press("x")
             await _settle(pilot)
@@ -662,7 +663,7 @@ async def test_the_reason_card_closes_when_the_filter_hides_its_row(enabled) -> 
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         listing = await _open_list(pilot, app, [_row("a1"), _row("a2")])
         await pilot.press("x")
         await _settle(pilot)
@@ -680,7 +681,7 @@ async def test_the_list_keys_and_filter_segments_are_inert_while_choosing(enable
     session.dismiss_refusals.clear()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         listing = await _open_list(pilot, app, [_row("a1"), _row("a2")])
         await pilot.press("x")
         await _settle(pilot)
@@ -705,7 +706,7 @@ async def test_a_click_on_a_reason_sends_that_reason(enabled) -> None:
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         listing = await _open_list(pilot, app, [_row("a1"), _row("a2")])
         await pilot.press("x")
         await _settle(pilot)
@@ -724,7 +725,7 @@ async def test_the_painted_lines_and_the_owner_map_agree_with_a_chooser_up(enabl
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         listing = await _open_list(pilot, app, [_row("a1"), _row("a2")])
         await pilot.press("x")
         await _settle(pilot)
@@ -752,7 +753,7 @@ async def test_a_fleet_dismissal_says_the_conversation_has_no_such_ask(
 
     monkeypatch.setattr("local_operator.asks.dismiss.dismiss_cold", _refuse)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         row = ask_rows([_row("a1")])[0]
         seen: list[str] = []
         app._ask_gesture_refusal = lambda text: seen.append(text)

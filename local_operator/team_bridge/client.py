@@ -75,6 +75,7 @@ import unicodedata
 import urllib.parse
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import EllipsisType
 from typing import Any, Callable, Iterable, Literal, Mapping, Sequence, TypedDict
 
 import httpx
@@ -4201,6 +4202,39 @@ class TeamBridgeClient:
         return await self._send(
             "POST",
             f"/messaging/conversations/{conversation_id}/rename",
+            body=body,
+            access=access,
+            expected_account_id=expected_account_id,
+        )
+
+    async def conversation_update(
+        self,
+        conversation_id: str,
+        *,
+        name: str | None | EllipsisType = ...,
+        topic: str | None | EllipsisType = ...,
+        tenant_id: str | None = None,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically edit supplied metadata, preserving omission and explicit clear.
+
+        Ellipsis is the absent sentinel: None is an explicit JSON null for the
+        upstream validator to refuse, and an empty topic must reach PATCH to
+        clear it. Do not normalize here: unchanged legacy values and canonical
+        name/topic validation belong to the server. The local owner receipt is
+        checked against the exact bearer by _send, never forwarded as metadata.
+        """
+        body: dict[str, Any] = {}
+        if name is not ...:
+            body["name"] = name
+        if topic is not ...:
+            body["topic"] = topic
+        if tenant_id is not None:
+            body["tenant_id"] = tenant_id
+        return await self._send(
+            "PATCH",
+            f"/messaging/conversations/{conversation_id}",
             body=body,
             access=access,
             expected_account_id=expected_account_id,

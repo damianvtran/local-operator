@@ -5290,7 +5290,11 @@ async def answer(session_id: str, body: Answer, request: Request):
     # ``answer_gate`` is the only consumer; the queued-ask branch below answers
     # from the ask log and is not subject to it.
     deadline = time.monotonic() + DESKTOP_ANSWER_BUDGET_S
-    async with errors(request), host(request).session(session_id) as bridge:
+    # A queued ask is addressed by durable ID, not by the display epoch. Its
+    # control transport must remain usable when an older owner's canonical
+    # snapshot exceeds the line limit; the pool still owns lookup and retirement.
+    session_options = {"control_only": True} if body.ask_id is not None else {}
+    async with errors(request), host(request).session(session_id, **session_options) as bridge:
         assert bridge.remote is not None
         if body.ask_id is not None:
             # A QUEUED ASK (design §2.4/§4). Answered by id, BEFORE the epoch
