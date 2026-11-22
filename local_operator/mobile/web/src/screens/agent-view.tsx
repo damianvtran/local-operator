@@ -1,5 +1,5 @@
 import { contentDir } from "../lib/content-direction";
-import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { HttpError, getSubagentDetail, getSubagentHistory } from "../api";
 import { AgentsSheet } from "../components/agents-sheet";
 import {
@@ -16,6 +16,7 @@ import { DetailRequestCoordinator } from "../detail-loader";
 import { cn } from "../lib/cn";
 import { formatEffort } from "../lib/format";
 import { navigate, navigateUp } from "../router";
+import { projectionRevealEpoch } from "../store";
 import type {
 	SessionProjection,
 	SubagentDetail,
@@ -735,6 +736,7 @@ export function AgentConversation({
 	projection,
 	connected,
 	detail,
+	revealEpoch,
 	initialAgentsOpen = false,
 }: {
 	sessionId: string;
@@ -742,6 +744,7 @@ export function AgentConversation({
 	projection: SessionProjection;
 	connected: boolean;
 	detail: SubagentDetail;
+	revealEpoch?: object;
 	initialAgentsOpen?: boolean;
 }) {
 	const [agentsOpen, setAgentsOpen] = useState(initialAgentsOpen);
@@ -844,6 +847,9 @@ export function AgentConversation({
 				jobId={jobId}
 				entries={entries}
 				streaming={detail.status === "running"}
+				/* The polled journal is history, even while a child is running.
+				   Only the detail endpoint's in-memory transcript is live. */
+				revealEpoch={detail.transcript.length > 0 ? revealEpoch : undefined}
 				peerCycles={projection?.peer_cycles === 1}
 				tailContent={
 					<>
@@ -894,11 +900,22 @@ export function AgentScreen({
 		terminal: boolean;
 	} | null>(null);
 	const loaderRef = useRef<DetailRequestCoordinator | null>(null);
+	const currentEpoch = projectionRevealEpoch(projection, connected);
+	const activeEpoch = useRef(currentEpoch);
+	const detailEpochs = useRef(new WeakMap<SubagentDetail, object>());
+	useLayoutEffect(() => { activeEpoch.current = currentEpoch; }, [currentEpoch]);
 	useEffect(() => {
 		setDetail(detailCache.get(key) ?? null);
 		setFailure(null);
 		const loader = new DetailRequestCoordinator(
-			() => getSubagentDetail(sessionId, jobId),
+			async () => {
+				// A fetch begun on the previous SSE leg must not animate a
+				// response accepted after reconnect. Cache reads are baselines too.
+				const epoch = activeEpoch.current;
+				const next = await getSubagentDetail(sessionId, jobId);
+				if (epoch) detailEpochs.current.set(next, epoch);
+				return next;
+			},
 			(next) => {
 				cacheDetail(key, next);
 				setDetail((current) => !current || next.version >= current.version ? next : current);
@@ -982,6 +999,7 @@ export function AgentScreen({
 			projection={projection}
 			connected={connected}
 			detail={detail}
+			revealEpoch={detailEpochs.current.get(detail) === currentEpoch ? currentEpoch : undefined}
 		/>
 	);
 }
