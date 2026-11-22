@@ -1,0 +1,57 @@
+"""Scoped independent audit A; no application startup or global checker."""
+import os,sys,json,hashlib,unicodedata,re,tempfile,subprocess
+from pathlib import Path
+from unittest.mock import patch
+ROOT=Path.cwd(); OUT=ROOT/'i18n/audits/evidence/ur/tui.provider_state/ua3ba0'
+from local_operator.i18n import catalogues as c, runtime as r
+from local_operator.i18n.messages import RenderedMessage
+from local_operator.i18n.display import isolated_status_text,TechnicalSpan
+from rich.text import Text
+from rich.cells import cell_len
+from scripts.i18n import check
+NS='tui.provider_state'
+print('COMMAND: /Users/damian/local-operator/.venv/bin/python '+str(OUT/'script.py.txt'))
+print('interpreter',sys.executable,'module',r.__file__,'HOME',os.environ['HOME'],'CMUX',[k for k in os.environ if k.startswith('CMUX_')])
+assert Path(r.__file__).is_relative_to(ROOT)
+paths={'en':Path('local_operator/i18n/catalogues/en')/(NS+'.json'),'context':Path('local_operator/i18n/catalogues/en')/(NS+'.context.json'),'ur':Path('local_operator/i18n/catalogues/ur')/(NS+'.json')}
+hashes={k:{'path':str(p),'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for k,p in paths.items()}
+assert [hashes[k]['sha256'] for k in ('en','context','ur')]==['113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912','67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be','fe5cfd731a80eedd50d066bce968adf6ddec24311af418fdad46db7644aef437']
+en=c.load_catalogue('en',NS); ur=c.load_catalogue('ur',NS); context=c.context('en',NS)
+assert list(en)==list(ur)==list(context) and len(ur)==5
+# Official validator restricted by discovery, not by replacing validation logic.
+with patch.object(c,'locales',return_value=('en','ur')),patch.object(c,'namespaces',return_value=(NS,)):
+    problems=check.check_catalogues(); print('OFFICIAL scoped catalogue/context/ICU',problems); assert not problems
+    original=c.load_catalogue
+    def missing(locale,namespace):
+        value=dict(original(locale,namespace))
+        if locale=='ur': value.pop(next(iter(value)))
+        return value
+    with patch.object(c,'load_catalogue',side_effect=missing):
+        failures=check.check_catalogues(); print('NEGATIVE missing-key',failures); assert any('missing key' in x for x in failures)
+    def extra(locale,namespace):
+        value=dict(original(locale,namespace))
+        if locale=='ur': value[next(iter(value))]+=' {unexpected}'
+        return value
+    with patch.object(c,'load_catalogue',side_effect=extra):
+        failures=check.check_catalogues(); print('NEGATIVE added-argument',failures); assert any('arguments' in x for x in failures)
+for key,text in ur.items():
+    assert r.message_arguments(text)==r.message_arguments(en[key])==()
+    assert r.plural_selectors(text)==() and r.plural_arguments(text)==()
+    assert all(type(node).__name__=='_Text' for node in r.parse_message(text))
+    assert unicodedata.normalize('NFC',text)==text
+    assert not any(unicodedata.category(ch) in ('Cf','Cc') for ch in text)
+    protected=r'`[^`]*`|<[^>]+>|\[[^\]]+\]|--[A-Za-z][\w-]*|[A-Za-z_][A-Za-z_0-9]*'
+    assert re.findall(protected,text)==[] # No IDs/commands/tags in these human labels.
+    raw=r.render_message(text,{},'ur'); assert raw==text
+    assert Text(raw).plain==raw and Text.from_markup(raw).plain==raw
+    projected=isolated_status_text(RenderedMessage(raw,'ur')); assert projected=='\u2067'+raw+'\u2069'
+    assert Text(projected).plain==projected
+    english=r.render_message(en[key],{},'en'); assert english==en[key]
+    assert isolated_status_text(RenderedMessage(english,'en'))==english
+    pseudo='⟦PSEUDO '+en[key]+'⟧'; assert r.render_message(pseudo,{},'en')==pseudo
+    token=' /provider'; mixed=raw+token
+    isolated=isolated_status_text(RenderedMessage(mixed,'ur'),[TechnicalSpan(len(raw)+1,len(mixed),'/provider')])
+    assert '\u2066/provider\u2069' in isolated and isolated.startswith('\u2067') and isolated.endswith('\u2069')
+    print('PASS',key,json.dumps(text,ensure_ascii=False),'zeroargs/no plural-select NFC/controlfree protected-empty plain/Rich English/pseudo RTL', 'cells',cell_len(raw),'codepoints',len(raw))
+print('PASS all five. Logical Unicode/Rich properties only; no glyph/shaping/native terminal certificate. No producer integration tested.')
+(OUT/'input-hashes.json').write_text(json.dumps(hashes,indent=2)+'\n')

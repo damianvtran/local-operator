@@ -1,0 +1,133 @@
+{
+  "locale": "ru",
+  "namespace": "tui.provider_state",
+  "audit_id": "ruA22",
+  "audit_date": "2026-11-22",
+  "executed_at_utc": "2026-11-22T12:26:06.702990+00:00",
+  "key_count": 5,
+  "source_audit_revision": "2b924d84f0e663302fd93a7b36411ee6035576fe",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "db664263efed",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "translator_session": "29d4fc18d1a7",
+    "actual_model_source": "Host model-switch notice: openai/gpt-6.1-sol; provider failure: quota; not independent runtime telemetry",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "qualification": "Native-fluent LLM judgment, not human-native or independent model telemetry verification"
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "29d4fc18d1a7",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host [model switch] message: now running as openai/gpt-6.1-sol (was anthropic/claude-opus-5-5); provider failure: quota",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "translation_method": "native LLM reasoning; no MT/API/service"
+  },
+  "translator_provenance_source": {
+    "path": "i18n/audits/evidence/ru/tui.provider_state/ru22t/record.json",
+    "sha256": "4686ee5e50184d98d96d2441406b7d32e7ac07ae3a1e1cfe5983770c86999812"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.json",
+      "sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.context.json",
+      "sha256": "67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be"
+    },
+    "ru": {
+      "path": "local_operator/i18n/catalogues/ru/tui.provider_state.json",
+      "sha256": "8536b96d908eb3f80192801d4444b283bf6a024668247f14a2ed7cb0ecf8558b"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ruA22/audit.log",
+      "sha256": "16cacb2dde241b07b074c83f2221d7839d480d9117a23a9300744539146d3557"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ruA22/directCLIledger-receipt.json",
+      "sha256": "a3e1d31ea9405884399b267efebfb9b412864fef8287c463b1d584cd551d1847"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ruA22/ledger-cli.log",
+      "sha256": "b8ca57ea3095e2df04b6272f6abd34a0b5966f4c7a6c16290aaee144026d12e1"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ruA22/report.md",
+      "sha256": "b85f1979ebfe3a1e8855aae7ba49f0b02a22819d47960e285a81530616e77355"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ruA22/script.py.txt",
+      "sha256": "c780fb6c0942128b9a4b979048a08f54d39257eee9a6a063a499c7ab5dcf5695"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "judgment_scope": "Independent A native-fluent LLM lexical audit of all five keys, plus scoped official catalogue/context/ICU checks and diagnostic renders; not other pass, styled fit, eligibility or release clearance",
+  "findings_report": "i18n/audits/evidence/ru/tui.provider_state/ruA22/report.md",
+  "notes_kind": "audit_notes_not_execution_log",
+  "actual_execution_logs": [
+    "i18n/audits/evidence/ru/tui.provider_state/ruA22/audit.log",
+    "i18n/audits/evidence/ru/tui.provider_state/ruA22/ledger-cli.log"
+  ],
+  "validation": {
+    "official_entry": "scripts.i18n.check.check_catalogues",
+    "scope": {
+      "locales": [
+        "en",
+        "ru"
+      ],
+      "namespaces": [
+        "tui.provider_state"
+      ]
+    },
+    "exit_code": 0,
+    "negative_controls": [
+      "missing key rejected",
+      "added argument rejected"
+    ],
+    "harness_failed_attempts": 0,
+    "args": 0,
+    "plural_branches": 0,
+    "select_branches": 0,
+    "plain_Rich_cells": {
+      "en": [
+        9,
+        7,
+        11,
+        17,
+        16
+      ],
+      "ru": [
+        13,
+        17,
+        14,
+        15,
+        16
+      ]
+    },
+    "native_or_styled_app_proof": false,
+    "pseudo_control": "doubled wrapper text through actual ICU and plain Rich; not a styled app pseudo-locale"
+  },
+  "ledger": {
+    "receipt": "i18n/audits/evidence/ru/tui.provider_state/ruA22/directCLIledger-receipt.json",
+    "expected_history_sha": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "dry_run_exit_code": 0,
+    "applied": false
+  },
+  "tracking_status_at_creation": "new untracked evidence bundle; manager must commit; not on main"
+}

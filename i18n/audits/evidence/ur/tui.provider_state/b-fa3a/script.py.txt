@@ -1,0 +1,54 @@
+"""Independent B mechanical probe; no application startup or global scan."""
+import copy, hashlib, json, os, re, sys, unicodedata
+from pathlib import Path
+from unittest.mock import patch
+from local_operator.i18n import catalogues as c, runtime as r, messages as m
+from local_operator.i18n.display import isolated_status_text
+from rich.text import Text
+from rich.console import Console
+from scripts.i18n import check
+ROOT=Path.cwd(); NS='tui.provider_state'
+assert Path(c.__file__).resolve().is_relative_to(ROOT)
+print('interpreter',sys.executable,'module',c.__file__,'HOME',os.environ['HOME'])
+assert not any(k.startswith('CMUX_') for k in os.environ)
+expected={'en':'113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912','context':'67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be','ur':'fe5cfd731a80eedd50d066bce968adf6ddec24311af418fdad46db7644aef437'}
+for name,rel in [('en','en/'+NS+'.json'),('context','en/'+NS+'.context.json'),('ur','ur/'+NS+'.json')]:
+ p=c.catalogue_root()/rel; digest=hashlib.sha256(p.read_bytes()).hexdigest(); assert digest==expected[name]; print('input',name,digest)
+en=c.load_catalogue('en',NS); ur=c.load_catalogue('ur',NS); ctx=c.context('en',NS)
+keys=[NS+'.'+k for k in ('logged_in','env_key','needs_login','local_ready','local_unconfigured')]
+assert list(en)==list(ur)==list(ctx)==keys
+# Retain the official full per-catalogue/context/ICU checks; narrow discovery only.
+with patch.object(c,'namespaces',return_value=(NS,)), patch.object(c,'locales',return_value=('en','ur')):
+ problems=check.check_catalogues(); print('official scoped check',problems); assert not problems
+ original=c.load_catalogue
+ for case in ('missing-key','added-argument'):
+  altered=copy.deepcopy(ur)
+  if case=='missing-key': altered.pop(keys[0])
+  else: altered[keys[0]]+=' {unexpected}'
+  def loader(locale,namespace): return altered if locale=='ur' else original(locale,namespace)
+  with patch.object(c,'load_catalogue',side_effect=loader):
+   failures=check.check_catalogues(); print('negative',case,failures)
+   assert any(('missing key' if case=='missing-key' else 'arguments') in f for f in failures)
+protected=re.compile(r'`[^`]*`|--[A-Za-z0-9_-]+|</?[^>]+>|https?://\S+')
+bidi=set('\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069')
+for key in keys:
+ for locale,source in [('en',en[key]),('ur',ur[key])]:
+  assert r.message_arguments(source)==() and r.plural_selectors(source)==()
+  assert len(r.parse_message(source))==1
+  assert unicodedata.normalize('NFC',source)==source
+  assert not any(x in bidi or unicodedata.category(x) in ('Cc','Cf') for x in source)
+  assert protected.findall(source)==protected.findall(en[key])==[]
+  assert r.render_message(source,{},locale)==source
+ assert c.context_entry_problem(ctx[key]) is None
+ assert 'maxCells' not in ctx[key]
+ assert m.render(key,{},locale='en')==en[key]
+ record=m.render_record(key,{},locale='ur'); assert record.text==ur[key] and record.source_locale=='ur'
+ projected=isolated_status_text(record); assert projected=='\u2067'+ur[key]+'\u2069'
+ assert isolated_status_text(m.render_record(key,{},locale='en'))==en[key]
+ plain=Text(ur[key]); assert plain.plain==ur[key]
+ console=Console(record=True,width=100,force_terminal=False,color_system=None)
+ console.print(plain,end=''); assert console.export_text()==ur[key]
+ pseudo='[!! '+ur[key]+' '+ur[key]+' !!]'
+ assert r.render_message(pseudo,{},'ur')==pseudo
+ print('\nPASS',key,'args=0 plural/select=0 NFC clean protected=0 raw/Rich/English/pseudo/logicalRTL',json.dumps(ur[key],ensure_ascii=False),'cells',plain.cell_len,'pseudo_cells',Text(pseudo).cell_len)
+print('PASS ALL5; lexical judgement is report.md; no native glyph, shaping, mirroring, app integration or shipping certification')

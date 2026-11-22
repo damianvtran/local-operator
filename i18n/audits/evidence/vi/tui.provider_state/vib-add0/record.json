@@ -1,0 +1,139 @@
+{
+  "record_kind": "independent_translation_audit_B",
+  "locale": "vi",
+  "namespace": "tui.provider_state",
+  "audit_date": "2026-11-22",
+  "recorded_at": "2026-11-22T12:32:14.913084+00:00",
+  "key_count": 5,
+  "source_audit_revision": "2b924d84f0e663302fd93a7b36411ee6035576fe",
+  "auditor": {
+    "agent": "i18n-auditor / provider-state-vi-audit-B",
+    "session": "add016b11be1",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "actual_model_source": "Explicit model-switch notice: openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota failure; independent per-response telemetry unavailable",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "per_response_telemetry": "unknown"
+  },
+  "translator": {
+    "agent": "i18n-translator / provider-state-vi-author",
+    "session": "5644d4838456",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": false,
+    "actual_model_source": "Explicit host/user model-switch message: openai/gpt-6.1-sol replaces anthropic/claude-opus-5-5 due to provider failure: quota",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "translator_record_path": "i18n/audits/evidence/vi/tui.provider_state/author-5644/record.json",
+  "translator_record_is_independent_approval": false,
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.json",
+      "sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.context.json",
+      "sha256": "67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be"
+    },
+    "vi": {
+      "path": "local_operator/i18n/catalogues/vi/tui.provider_state.json",
+      "sha256": "74e6607520947d1910479a85be916e8fa3e0efa6104230d19cef8d74a3aa4867"
+    }
+  },
+  "guidance_hashes": [
+    {
+      "path": "i18n/style-guides/vi.md",
+      "sha256": "99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51"
+    },
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/vi/tui.provider_state/vib-add0/report.md",
+      "sha256": "8df685a757620ac39f585828bf33e6a5192fed36e12ad240bc0d653c4eeaea0d"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/tui.provider_state/vib-add0/script.py.txt",
+      "sha256": "9345fcf0ad9339b2beb06e1087c0b332aaa0efec053e6b762f880b76c7c4def5"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/tui.provider_state/vib-add0/audit.log",
+      "sha256": "910068efdbf3497a57ae290c4977be35a5851c13dcb1c2ca65547a34f68edc5c"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/tui.provider_state/vib-add0/directledger-receipt.json",
+      "sha256": "cbcc67e6a395da4f29c7900c3739bbd76ee0daf968851f7a942c51039f9acd88"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/tui.provider_state/vib-add0/ledger-dry-run.log",
+      "sha256": "1c08729217b53e35ee0914dec9040e38533fcf38b5c1474cf2e2c9bc7a098aac"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "findings": [],
+  "per_key_judgments": [
+    {
+      "key": "tui.provider_state.logged_in",
+      "status": "passed",
+      "report": "report.md"
+    },
+    {
+      "key": "tui.provider_state.env_key",
+      "status": "passed",
+      "report": "report.md"
+    },
+    {
+      "key": "tui.provider_state.needs_login",
+      "status": "passed",
+      "report": "report.md"
+    },
+    {
+      "key": "tui.provider_state.local_ready",
+      "status": "passed",
+      "report": "report.md"
+    },
+    {
+      "key": "tui.provider_state.local_unconfigured",
+      "status": "passed",
+      "report": "report.md"
+    }
+  ],
+  "execution": {
+    "script": "script.py.txt",
+    "actual_log": "audit.log",
+    "actual_return_code": 0,
+    "scope": "official check_catalogues enumerated en,vi / tui.provider_state only; ICU rendering, negatives, NFC, synthetic pseudo expansion, plain Rich widths",
+    "report_kind": "audit_notes_not_execution_log"
+  },
+  "limitations": [
+    "No styled UI or native-font proof",
+    "No geometry or fixed 17-cell cap assertion",
+    "No eligibility or release approval",
+    "No independent per-response serving telemetry"
+  ],
+  "current_bytes_match_audited_hashes": true,
+  "ledger_disposition": "direct receipt only; optional CLI append dry-run; no apply authorized",
+  "findings_report": "i18n/audits/evidence/vi/tui.provider_state/vib-add0/report.md",
+  "ledger_validation": {
+    "command": "scripts/i18n/ledger.py append --receipt i18n/audits/evidence/vi/tui.provider_state/vib-add0/directledger-receipt.json --expected-history-sha 4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945 --dry-run",
+    "actual_return_code": 0,
+    "actual_log": "i18n/audits/evidence/vi/tui.provider_state/vib-add0/ledger-dry-run.log",
+    "applied": false
+  }
+}
