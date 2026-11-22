@@ -14,8 +14,8 @@ from typing import Any
 
 from rich.text import Text
 
+from local_operator.i18n.duration_message import format_duration
 from local_operator.i18n.keys import tui_info as keys
-from local_operator.i18n.keys import wire_session_status as duration_keys
 from local_operator.i18n.messages import Msg
 from local_operator.i18n.text import tr_record
 from local_operator.tui.i18n_status import localized_display
@@ -64,7 +64,6 @@ _resolve = {
         "tui.info",
         "tui.small",
         "tui.welcome",
-        "wire.session_status",
     )
 }
 # Explicit ownership, not ASCII detection: these are IDs and versions,
@@ -139,23 +138,19 @@ def info_duration(seconds: float) -> InfoText:
     locale, not the heavyweight catalogue's independently configured locale.
     None is a missing field, handled by the whole field message, never zero.
     """
-    total = int(max(0.0, seconds))
-    if total < 60:
-        message = duration_keys.duration_seconds(count=total)
-    elif total < 3600:
-        message = duration_keys.duration_minutes(count=total // 60)
-    elif total < 86400:
-        message = duration_keys.duration_hours_minutes(
-            hours=total // 3600,
-            minutes=(total % 3600) // 60,
-        )
-    else:
-        # Keep ungrouped 1000-day output, matching the legacy formatter.
-        message = duration_keys.duration_days_hours(
-            days=str(total // 86400),
-            hours=(total % 86400) // 3600,
-        )
-    return info_text(message)
+    return format_duration(seconds, render=_duration_info_text)
+
+
+def _duration_info_text(message: Msg) -> InfoText:
+    """Numeric duration parameters need one part with the resolver's real source.
+
+    Unlike nested Info copy there are no technical strings or child InfoText
+    parameters here. Keep fallback/unknown provenance, not the requested locale.
+    """
+    from local_operator.i18n import messages, text
+
+    record = messages.render_record(message.code, message.params, locale=text.active_locale())
+    return InfoText((_Part(record.text, record.source_locale),))
 
 
 class InfoRow(Text):

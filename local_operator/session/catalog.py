@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from local_operator.i18n.duration_message import format_duration as _format_duration
 from local_operator.i18n.messages import Msg
 from local_operator.resume import UNTITLED_CONVERSATION, SessionRow
 from local_operator.session import temporary
@@ -667,8 +668,8 @@ def status_duration(seconds: float) -> str:
     ``4m`` inside a French sentence was English leaking into a translated row
     (the operator's "no English anywhere" requirement). ``info.model`` stays
     stdlib-only by contract and keeps its ASCII spelling for machine/CLI users.
-    Info's presentation helper now reuses these audited keys with its own active
-    locale; it must not import this heavyweight catalogue or borrow our locale.
+    The shared lightweight duration leaf owns the branch arithmetic; Info uses
+    its own callback and active locale without importing this heavy catalogue.
 
     CONSTRAINTS:
 
@@ -689,24 +690,7 @@ def status_duration(seconds: float) -> str:
     * Negative ages clamp to zero like the original; callers handle ``None``
       ("not measured") themselves — this never renders ``unknown``.
     """
-    from local_operator.i18n.keys import wire_session_status
-
-    total = int(max(0.0, seconds))
-    if total < 60:
-        return _terminal_label(wire_session_status.duration_seconds(count=total))
-    if total < 3600:
-        return _terminal_label(wire_session_status.duration_minutes(count=total // 60))
-    if total < 86400:
-        return _terminal_label(
-            wire_session_status.duration_hours_minutes(
-                hours=total // 3600, minutes=(total % 3600) // 60
-            )
-        )
-    return _terminal_label(
-        wire_session_status.duration_days_hours(
-            days=str(total // 86400), hours=(total % 86400) // 3600
-        )
-    )
+    return _format_duration(seconds, render=_terminal_label)
 
 
 def waiting_label(jobs: int, subagents: int = 0) -> str:
