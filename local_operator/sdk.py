@@ -71,6 +71,8 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
+import logging
 import os
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
@@ -91,6 +93,7 @@ from local_operator.session.spec import (
 
 if TYPE_CHECKING:  # the names `__getattr__` serves, for type checkers only
     from contextlib import AbstractAsyncContextManager
+    from typing import TextIO
 
     from local_operator.harness.types import AgentEvent, EventHandler
     from local_operator.harness.verifier_evidence import (
@@ -138,8 +141,10 @@ __all__ = [
     "decode_output",
     "deliver",
     "events",
+    "format_event_trace",
     "open_session",
     "spawn_session",
+    "trace_events",
     "SessionProtocol",
 ]
 
@@ -944,6 +949,7 @@ def open_session(
     roots: SessionRoots,
     mode: Literal["own"] = "own",
     allow_multi_root: bool = False,
+    verbose: bool = False,
 ) -> AbstractAsyncContextManager[OwningSessionProtocol]: ...
 
 
@@ -954,6 +960,7 @@ def open_session(
     roots: SessionRoots,
     mode: Literal["attach"],
     allow_multi_root: bool = False,
+    verbose: bool = False,
 ) -> AbstractAsyncContextManager[ViewerSessionProtocol]: ...
 
 
@@ -964,6 +971,7 @@ def open_session(
     roots: SessionRoots,
     mode: Literal["own", "attach"],
     allow_multi_root: bool = False,
+    verbose: bool = False,
 ) -> AbstractAsyncContextManager[SessionProtocol]: ...
 
 
@@ -974,6 +982,7 @@ async def open_session(
     roots: SessionRoots,
     mode: Literal["own", "attach"] = "own",
     allow_multi_root: bool = False,
+    verbose: bool = False,
 ) -> AsyncIterator["SessionProtocol"]:
     """Open a session against explicit ``roots``; yield it; dispose on exit.
 
@@ -983,6 +992,12 @@ async def open_session(
     live (``spec.resume`` is required; every other spec field is refused) and
     yields the ``AttachedSession``; a cold id is refused with a remedy rather
     than silently becoming an owner.
+
+    ``verbose=True`` subscribes :func:`trace_events` for the session's lifetime
+    so tool calls, output validation, turn usage, and terminal status log to
+    ``logging.getLogger("local_operator.sdk")`` at ``INFO`` level (unsubscribed
+    before ``dispose()``). Default ``False`` emits nothing and adds no
+    subscription.
 
     The environment is scoped to ``roots`` for the whole ``async with`` body:
     construction, the caller's turns, and every lazy resolver in between see
@@ -1019,12 +1034,19 @@ async def open_session(
         with _scoped_process_env(roots):
             _check_resolved_roots(roots)
             session = await _build_session(spec, roots, mode=mode, world_root=world_root)
+            unsub_trace: Callable[[], None] | None = None
             try:
                 if mode == "own":
                     _assert_session_dir_under_root(session, roots)
+                if verbose:
+                    unsub_trace = trace_events(session)
                 yield session
             finally:
-                await session.dispose()
+                try:
+                    if unsub_trace is not None:
+                        unsub_trace()
+                finally:
+                    await session.dispose()
 
 
 #: ``SessionSpec.mcp_ready_timeout_s``'s default, read from the dataclass so
@@ -1397,3 +1419,328 @@ def events(session: Any) -> SessionEventStream:
     line-oriented consumers — this adapter adds no second serialization.
     """
     return SessionEventStream(session)
+
+
+# ---------------------------------------------------------------------------
+# Verbose tracing — opt-in single-line diagnostics for SDK callers
+# ---------------------------------------------------------------------------
+
+#: Default logger for SDK verbose trace lines (``logging.getLogger(__name__)``).
+_TRACE_LOGGER_NAME = "local_operator.sdk"
+#: Short call-id prefix length so logs stay compact while preserving uniqueness
+#: past common ``call_`` / ``toolu_`` prefixes.
+_TRACE_CALL_ID_LEN = 12
+#: Per-string cap for tool argument values so large file writes/reads stay readable.
+_TRACE_ARG_STRING_LIMIT = 160
+#: Overall cap on serialized JSON arguments for wide dict/list payloads.
+_TRACE_ARGS_JSON_LIMIT = 512
+#: Snippet cap for tool output/errors, validation errors, and terminal errors.
+_TRACE_SNIPPET_LIMIT = 160
+#: Container breadth/depth caps so pathological tool args cannot stall tracing.
+_TRACE_CONTAINER_MAX_ITEMS = 64
+_TRACE_CONTAINER_MAX_DEPTH = 6
+#: Environment variable name substrings whose values are treated as secrets and
+#: scrubbed before any trace line is emitted.
+_TRACE_SECRET_ENV_MARKERS: tuple[str, ...] = (
+    "KEY",
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "AUTHORIZATION",
+)
+#: Minimum secret length for env-var value scrubbing so short flags/words like
+#: ``"true"`` or ``"dev"`` are never mangled across ordinary log lines.
+_TRACE_SECRET_MIN_LEN = 8
+#: Floor on the pre-redaction prefix window for very large strings so a secret
+#: crossing the display truncation boundary is always redacted in full without
+#: scanning multi-megabyte payloads.
+_TRACE_REDACT_WINDOW_FLOOR = 4096
+
+
+def _env_secret_values() -> list[str]:
+    """Collect non-empty env values (>= 8 chars) whose names signal credentials.
+
+    Read fresh per event rather than cached at import time so credentials
+    injected after ``import local_operator.sdk`` are still scrubbed.
+    """
+    secrets: list[str] = []
+    for name, value in os.environ.items():
+        if not value or len(value) < _TRACE_SECRET_MIN_LEN:
+            continue
+        upper = name.upper()
+        if any(marker in upper for marker in _TRACE_SECRET_ENV_MARKERS):
+            secrets.append(value)
+    return secrets
+
+
+def _redact_trace_text(text: str, env_secrets: list[str]) -> str:
+    """Scrub known env secrets and credential shapes from ``text``.
+
+    Imports ``local_operator.redaction_shapes`` function-locally (stdlib-only)
+    to uphold ``sdk.py``'s import-cheap contract while reusing the repo's
+    audited redaction table and multi-spelling value scrubber.
+    """
+    if not text:
+        return text
+    from local_operator.redaction_shapes import scrub_secrets
+
+    return scrub_secrets(text, env_secrets)
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    """Collapse whitespace to one line and cap length to ``limit`` chars."""
+    single_line = " ".join(text.split())
+    if len(single_line) <= limit:
+        return single_line
+    return single_line[: max(1, limit - 3)].rstrip() + "..."
+
+
+def _redact_and_truncate(text: str, limit: int, env_secrets: list[str]) -> str:
+    """Redact BEFORE truncating so a secret crossing ``limit`` never leaks a prefix.
+
+    Very large payloads (e.g. multi-MB file reads) are windowed to at least
+    ``limit + max_secret_len + 512`` chars (floor 4096) before scrubbing so any
+    secret starting inside the visible span is seen whole without scanning MBs.
+    """
+    if not text:
+        return ""
+    max_secret_len = max((len(s) for s in env_secrets), default=0)
+    window = max(limit + max_secret_len + 512, _TRACE_REDACT_WINDOW_FLOOR)
+    pre_clipped = len(text) > window
+    candidate = text[:window] if pre_clipped else text
+    cleaned = _redact_trace_text(candidate, env_secrets)
+    single_line = " ".join(cleaned.split())
+    if len(single_line) > limit:
+        return single_line[: max(1, limit - 3)].rstrip() + "..."
+    if pre_clipped:
+        return single_line[: max(1, limit - 3)].rstrip() + "..."
+    return single_line
+
+
+def _sanitize_arg_value(value: Any, env_secrets: list[str], *, depth: int = 0) -> Any:
+    """Recursively redact and bound tool argument values before JSON encoding."""
+    if depth >= _TRACE_CONTAINER_MAX_DEPTH:
+        return "..."
+    if isinstance(value, str):
+        return _redact_and_truncate(value, _TRACE_ARG_STRING_LIMIT, env_secrets)
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for idx, (k, v) in enumerate(value.items()):
+            if idx >= _TRACE_CONTAINER_MAX_ITEMS:
+                out["..."] = f"{len(value) - _TRACE_CONTAINER_MAX_ITEMS} more"
+                break
+            key_str = _redact_and_truncate(str(k), _TRACE_ARG_STRING_LIMIT, env_secrets)
+            out[key_str] = _sanitize_arg_value(v, env_secrets, depth=depth + 1)
+        return out
+    if isinstance(value, (list, tuple)):
+        items = [
+            _sanitize_arg_value(item, env_secrets, depth=depth + 1)
+            for item in value[:_TRACE_CONTAINER_MAX_ITEMS]
+        ]
+        if len(value) > _TRACE_CONTAINER_MAX_ITEMS:
+            items.append(f"...({len(value) - _TRACE_CONTAINER_MAX_ITEMS} more)")
+        return items
+    return value
+
+
+def _extract_tool_result_text(result: Any) -> str:
+    """Read plain text from a ``ToolResult`` without serializing private fields."""
+    if result is None:
+        return ""
+    text_attr = getattr(result, "text", None)
+    if isinstance(text_attr, str):
+        return text_attr
+    content = getattr(result, "content", None)
+    if isinstance(content, list):
+        return "".join(
+            block_text
+            for block in content
+            if isinstance(block_text := getattr(block, "text", None), str)
+        )
+    return ""
+
+
+def format_event_trace(event: Any) -> str | None:
+    """Format a supported ``AgentEvent`` into a single-line, redacted trace string.
+
+    Returns ``None`` for events outside the concise diagnostic set
+    (``tool_execution_start``, ``tool_execution_end``, ``output_validation``,
+    ``turn_end``, ``agent_end``). Duck-typed on ``event.type`` so formatting
+    neither imports ``harness.types`` nor invents a second event wire format.
+    """
+    event_type = getattr(event, "type", None)
+    if event_type not in (
+        "tool_execution_start",
+        "tool_execution_end",
+        "output_validation",
+        "turn_end",
+        "agent_end",
+    ):
+        return None
+
+    env_secrets = _env_secret_values()
+
+    if event_type == "tool_execution_start":
+        tool_name = str(getattr(event, "tool_name", "") or "unknown")
+        call_id = str(getattr(event, "tool_call_id", "") or "")
+        short_id = call_id[:_TRACE_CALL_ID_LEN]
+        id_part = f" ({short_id})" if short_id else ""
+        args_raw = getattr(event, "args", None)
+        sanitized = _sanitize_arg_value({} if args_raw is None else args_raw, env_secrets)
+        args_json = json.dumps(
+            sanitized,
+            ensure_ascii=False,
+            separators=(", ", ": "),
+            default=str,
+        )
+        # Scrub serialized JSON BEFORE truncating so key-context shapes like
+        # ``{"api_key": "..."}`` are matched as a pair.
+        args_json = _truncate_text(
+            _redact_trace_text(args_json, env_secrets),
+            _TRACE_ARGS_JSON_LIMIT,
+        )
+        line = f"[tool:start] {tool_name}{id_part} {args_json}"
+
+    elif event_type == "tool_execution_end":
+        tool_name = str(getattr(event, "tool_name", "") or "unknown")
+        call_id = str(getattr(event, "tool_call_id", "") or "")
+        short_id = call_id[:_TRACE_CALL_ID_LEN]
+        id_part = f" ({short_id})" if short_id else ""
+        result = getattr(event, "result", None)
+        is_error = bool(getattr(event, "is_error", False) or getattr(result, "is_error", False))
+        status = "error" if is_error else "ok"
+        duration = getattr(event, "duration_s", None)
+        if duration is None and result is not None:
+            duration = getattr(result, "duration_s", None)
+        dur_part = f" {duration:.3f}s" if isinstance(duration, (int, float)) else ""
+        snippet_raw = _extract_tool_result_text(result)
+        snippet = (
+            _redact_and_truncate(snippet_raw, _TRACE_SNIPPET_LIMIT, env_secrets)
+            if snippet_raw
+            else ""
+        )
+        tail = f" | {snippet}" if snippet else ""
+        line = f"[tool:end] {tool_name}{id_part} {status}{dur_part}{tail}"
+
+    elif event_type == "output_validation":
+        fmt = str(getattr(event, "format", "") or "")
+        attempt = getattr(event, "attempt", 1)
+        max_attempts = getattr(event, "max_attempts", 1)
+        ok = bool(getattr(event, "ok", False))
+        exhausted = bool(getattr(event, "exhausted", False))
+        status = "ok" if ok else ("exhausted" if exhausted else "retry")
+        error_raw = str(getattr(event, "error", "") or "")
+        parts = ["[output_validation]"]
+        if fmt:
+            parts.append(fmt)
+        parts.append(f"attempt={attempt}/{max_attempts}")
+        parts.append(f"status={status}")
+        if error_raw:
+            err_text = _redact_and_truncate(error_raw, _TRACE_SNIPPET_LIMIT, env_secrets)
+            parts.append(f"error={err_text}")
+        line = " ".join(parts)
+
+    elif event_type == "turn_end":
+        message = getattr(event, "message", None)
+        usage = getattr(message, "usage", None) if message is not None else None
+        parts = ["[turn:end]"]
+        model_id = (
+            (getattr(usage, "model_id", None) if usage is not None else None)
+            or (getattr(message, "model_id", None) if message is not None else None)
+            or (getattr(message, "model", None) if message is not None else None)
+        )
+        if model_id:
+            parts.append(f"model={model_id}")
+        if usage is not None:
+            in_tok = getattr(usage, "input_tokens", 0)
+            cache_read = getattr(usage, "cache_read_tokens", 0)
+            out_tok = getattr(usage, "output_tokens", 0)
+            parts.append(f"in={in_tok} cache_read={cache_read} out={out_tok}")
+            usd_cost = getattr(usage, "usd_cost", None)
+            est_cost = getattr(usage, "estimated_usd_cost", None)
+            if isinstance(usd_cost, (int, float)):
+                parts.append(f"cost=${usd_cost:.4f}")
+            elif isinstance(est_cost, (int, float)):
+                parts.append(f"cost=~${est_cost:.4f}")
+        line = " ".join(parts)
+
+    else:  # agent_end
+        aborted = bool(getattr(event, "aborted", False))
+        error_raw = str(getattr(event, "error", "") or "")
+        failing_model = str(getattr(event, "failing_model", "") or "")
+        cut_off = str(getattr(event, "cut_off", "") or "")
+        if error_raw:
+            status = "aborted error" if aborted else "error"
+            model_part = f" model={failing_model}" if failing_model else ""
+            err_text = _redact_and_truncate(error_raw, _TRACE_SNIPPET_LIMIT, env_secrets)
+            line = f"[agent:end] {status}{model_part} | {err_text}"
+        elif aborted:
+            tail = (
+                f" | {_redact_and_truncate(cut_off, _TRACE_SNIPPET_LIMIT, env_secrets)}"
+                if cut_off
+                else ""
+            )
+            line = f"[agent:end] aborted{tail}"
+        else:
+            tail = (
+                f" | {_redact_and_truncate(cut_off, _TRACE_SNIPPET_LIMIT, env_secrets)}"
+                if cut_off
+                else ""
+            )
+            line = f"[agent:end] completed{tail}"
+
+    # Final safety sweep guarantees single-line, redacted output even if a
+    # secret spans formatted fields.
+    return " ".join(_redact_trace_text(line, env_secrets).splitlines())
+
+
+def trace_events(
+    session: Any,
+    *,
+    logger: logging.Logger | None = None,
+    stream: "TextIO | None" = None,
+) -> Callable[[], None]:
+    """Subscribe a concise, secret-redacted verbose trace handler to ``session``.
+
+    When neither ``logger`` nor ``stream`` is provided, logs ``INFO`` records
+    to ``logging.getLogger("local_operator.sdk")``. Passing ``stream`` alone
+    writes lines only to that stream (no duplicate logger output); passing both
+    writes to both. Returns an idempotent unsubscribe callable.
+
+    Defensive by contract (matching :class:`SessionEventStream`): a sink or
+    formatting error never escapes to abort the session's event dispatch.
+    """
+    target_logger = (
+        logger
+        if logger is not None
+        else (logging.getLogger(_TRACE_LOGGER_NAME) if stream is None else None)
+    )
+
+    def _on_event(event: Any) -> None:
+        try:
+            line = format_event_trace(event)
+            if line is None:
+                return
+            if target_logger is not None:
+                target_logger.info("%s", line)
+            if stream is not None:
+                stream.write(line + "\n")
+                flush = getattr(stream, "flush", None)
+                if callable(flush):
+                    flush()
+        except Exception:  # noqa: BLE001 — tracing must never break session dispatch
+            pass
+
+    raw_unsub: Callable[[], None] | None = session.subscribe(_on_event)
+    unsubscribed = False
+
+    def _unsubscribe() -> None:
+        nonlocal unsubscribed, raw_unsub
+        if unsubscribed:
+            return
+        unsubscribed = True
+        if raw_unsub is not None:
+            raw_unsub()
+            raw_unsub = None
+
+    return _unsubscribe

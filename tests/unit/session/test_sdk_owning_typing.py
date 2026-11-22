@@ -45,7 +45,7 @@ if TYPE_CHECKING:  # pyright-only: mode-precise SDK typing, asserted statically
             static_typing.assert_type(readiness, ToolReadiness)
             static_typing.assert_type(readiness.missing, tuple[str, ...])
 
-        async with sdk.open_session(spec, roots=roots, mode="own") as session:
+        async with sdk.open_session(spec, roots=roots, mode="own", verbose=True) as session:
             static_typing.assert_type(session, OwningSessionProtocol)
             session.subscribe_requests(lambda _row: None)
 
@@ -53,11 +53,11 @@ if TYPE_CHECKING:  # pyright-only: mode-precise SDK typing, asserted statically
         # no such members, so a call here would be a pyright error -- the
         # negative cannot be spelled as an assert, but the positive type
         # narrows to the viewer exactly.
-        async with sdk.open_session(spec, roots=roots, mode="attach") as session:
+        async with sdk.open_session(spec, roots=roots, mode="attach", verbose=True) as session:
             static_typing.assert_type(session, ViewerSessionProtocol)
 
         dynamic = static_typing.cast(static_typing.Literal["own", "attach"], "own")
-        async with sdk.open_session(spec, roots=roots, mode=dynamic) as session:
+        async with sdk.open_session(spec, roots=roots, mode=dynamic, verbose=True) as session:
             # A dynamic-mode caller keeps the BASE type and narrows explicitly.
             static_typing.assert_type(session, SessionProtocol)
 
@@ -82,8 +82,13 @@ def test_open_session_overloads_are_the_typed_surface() -> None:
         "AbstractAsyncContextManager[ViewerSessionProtocol]",
         "AbstractAsyncContextManager[SessionProtocol]",
     ]
-    assert overloads[0].__kwdefaults__ == {"mode": "own", "allow_multi_root": False}
-    assert overloads[1].__kwdefaults__ == {"allow_multi_root": False}
+    assert overloads[0].__kwdefaults__ == {
+        "mode": "own",
+        "allow_multi_root": False,
+        "verbose": False,
+    }
+    assert overloads[1].__kwdefaults__ == {"allow_multi_root": False, "verbose": False}
+    assert overloads[2].__kwdefaults__ == {"allow_multi_root": False, "verbose": False}
     # functools.wraps chain left by asynccontextmanager
     implementation = getattr(sdk.open_session, "__wrapped__", None)
     assert implementation is not None
