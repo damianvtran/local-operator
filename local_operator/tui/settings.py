@@ -318,6 +318,19 @@ def _load() -> dict[str, Any]:
     must not build one from a paint path, and falls back to the manager — which
     is safe there precisely because no watcher means no cross-process
     invalidation to race with.
+
+    The snapshot is trusted only while the watcher is POLLING
+    (``ConfigWatcher.is_polling``). The registry is keyed by directory path and
+    outlives the app that made it, so an unstarted or stopped watcher is a
+    frozen snapshot of whatever that path held when it was last read. A path can
+    come back with different contents — pytest's ``failed`` retention policy
+    deletes a passing test's ``tmp_path`` and numbers the next parameter's from
+    the suffixes that still exist, so the second case of
+    ``test_the_stored_mode_applies_at_boot`` was handed the first case's
+    directory and read the first case's ``by-response`` from its stale watcher
+    (CI run 45069251235). The not-polling case reads the file with
+    ``read_config_values`` (never a ``ConfigManager``), as
+    ``i18n.resolve.config_value`` does for the same reason.
     """
     values: dict[str, Any] = {}
     try:
@@ -326,8 +339,16 @@ def _load() -> dict[str, Any]:
 
         directory = config_dir()
         watcher = existing_watcher(directory)
-        if watcher is not None:
+        if watcher is not None and watcher.is_polling:
             values = dict(watcher.values)
+        elif watcher is not None:
+            # Never a ConfigManager here: a watcher exists, so the cross-process
+            # race the manager is unsafe under is live. The side-effect-free
+            # file read answers; a torn file keeps the last good snapshot.
+            from local_operator.config import read_config_values
+
+            read = read_config_values(directory)
+            values = dict(watcher.values if read is None else read)
         else:
             from local_operator.config import ConfigManager
 

@@ -124,6 +124,30 @@ def test_a_known_value_reads_back(tmp_path: Path, raw: str, expected: str) -> No
     assert transcript_display_mode() == expected
 
 
+def test_a_stale_unstarted_watcher_on_a_reused_path_does_not_answer(tmp_path: Path) -> None:
+    """A directory that comes back with new contents reads the NEW contents.
+
+    The watcher registry is keyed by path and outlives the app that made it.
+    ``tmp_path_retention_policy = "failed"`` deletes a passing test's directory
+    and the next parameter is numbered into the same path, so its first read met
+    the previous case's watcher and got the previous case's mode (CI run
+    45069251235, ``test_the_stored_mode_applies_at_boot[by-turn]`` answering
+    ``by-response``). The watcher here is never started, which is the state a
+    finished app leaves behind.
+    """
+    from local_operator.config_watch import process_watcher
+
+    _stored(tmp_path, "by-response")
+    watcher = process_watcher(tmp_path)
+    assert watcher.values["display.transcript_display"] == "by-response"
+    assert not watcher.is_polling
+
+    # Same path, different bytes, as the reused directory.
+    _stored(tmp_path, "by-turn")
+    settings_reload()
+    assert transcript_display_mode() == "by-turn"
+
+
 def test_an_absent_key_reads_as_the_default(tmp_path: Path) -> None:
     assert not (tmp_path / "config.yml").exists()
     settings_reload()
