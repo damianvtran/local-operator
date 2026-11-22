@@ -1,0 +1,93 @@
+{
+  "locale": "es",
+  "namespace": "tui.info",
+  "source_sha256": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+  "context_sha256": "aee21715fca769227b3bda5b500a5e81e51763cf86817f741baff8b1a5ef0ae7",
+  "target_sha256": "6d7db1f3fe45f99f638cbd51bdc304e5412cd3f548733df8b6d347fefc1ce327",
+  "commit": "2c282261f27b66390061563359f9cf72f2520538",
+  "scope": "e9e6c3711149..2c282261f27b",
+  "round": 2,
+  "audit_lane": "B; first full independent participation",
+  "status": "passed",
+  "translator": {
+    "agent": "translator/info-translate-es",
+    "session": "fe613bb2e394",
+    "model": "openai/gpt-6.1-sol",
+    "fallback_from": "anthropic/claude-opus-5-5",
+    "fallback_reason": "provider failure: quota",
+    "date": null,
+    "note": "Original actor for 267 unchanged values; date remains unknown. Remediation actor owns only the 10 keys identified below. Attribution copied from integration manifest, not independently observed author execution."
+  },
+  "auditor": {
+    "agent": "translation-auditor/info-r2-cache-B-es",
+    "session": "f1e2ba1d3ae5",
+    "model": "openai/gpt-6.1-sol",
+    "fallback_from": "anthropic/claude-opus-5-5",
+    "fallback_reason": "provider failure: quota",
+    "model_provenance": "Current host-delivered message: You are now running as openai/gpt-6.1-sol (was anthropic/claude-opus-5-5). Reason: provider failure: quota. Not inferred from historical receipts or the initial header.",
+    "date": "2026-11-21",
+    "result": "passed",
+    "findings": 0
+  },
+  "note": "Fresh independent semantic read of all 277 English/Spanish/context entries from authorized audited-output cache and hash-bound context sidecar. No current partner verdict was read. Zero unresolved blocker/major/minor/nit findings. This is namespace native-language/safety-copy clearance only, not a whole-interface, rendered fit, phone application, or native renderer clearance. Nine materially expanded labels are non-gating rendered-check flags, not demonstrated overflow defects. Historical R1 passed-with-minors receipt remains unchanged and stale against current source.",
+  "unresolved_counts": {"blocker": 0, "major": 0, "minor": 0, "nit": 0},
+  "read_counts": {"english": 277, "spanish": 277, "context": 277, "fresh_semantic_keys": 277, "retained_prior_semantic_keys": 0, "changed_target_keys": 10, "changed_context_keys": 12, "changed_source_fields": 2},
+  "namespace_verdict": "passed; terminal native/safety-copy audit, with rendered-fit limits explicitly unverified",
+  "subgroup_verdict": "All subgroups below clean; counts freshly derived from current cached English keys.",
+  "groups": {"heading": 7, "label": 35, "status": 9, "install": 17, "latest": 10, "kind_of_runtime": 8, "import_path": 6, "kind": 7, "session": 6, "approval": 4, "redirect": 3, "sessions": 11, "fleet_caveats": 1, "agents": 38, "env": 18, "report": 3, "info_hint": 2, "action_copy_report": 2, "latest_line": 3, "not_answering_clause": 5, "tree_lines": 1, "export": 60, "count": 4, "state": 12, "leaving": 3, "update": 2},
+  "findings_detail": [],
+  "translation_provenance": {
+    "authority": "i18n/audits/evidence/pr4420-integration-preflight.json, locales.es; original R1 receipt for unchanged authorship",
+    "unchanged_value_count": 267,
+    "changed_value_count": 10,
+    "changed_key_author": {"agent": "translator/info-remediate-es", "session": "d7ad5e38f7b6", "model": "openai/gpt-6.1-sol"},
+    "changed_keys": ["tui.info.agents.unreported_full", "tui.info.agents.unreported_short", "tui.info.agents.unreported_suffix", "tui.info.agents.retained_full", "tui.info.export.build_age", "tui.info.export.uptime", "tui.info.export.trajectories_unreported", "tui.info.export.session_counts", "tui.info.export.mobile", "tui.info.state.stale"],
+    "per_key_authorship_rule": "Exactly the 10 enumerated keys belong to changed_key_author. Every remaining current key belongs to top-level translator. No semantic retention is claimed from these authorship counts."
+  },
+  "input_binding": {
+    "manifest": "i18n/audits/evidence/pr4420-audited-input-cache/manifest.json",
+    "manifest_head": "2c282261f27b66390061563359f9cf72f2520538",
+    "english_cache_sha256": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+    "spanish_cache_sha256": "de48303b288bf451a94e38f751fc04040517ed13da8e998f13e84125357f0a05",
+    "english_canonical_map_sha256": "c06de4b6d6b19d71ff4fc20128937f72d6d18fc7757854f493e8e3834bb1423c",
+    "spanish_canonical_map_sha256": "622d8c5e7ad0b004e0e64444ec1f0b5e4b368f3a18ccdc4d90f554b501071675",
+    "verification": "Recomputed both cache-byte and canonical-map hashes, source-binding committed hashes against pin, and hash-only original EN/ES file metadata. Parsed context only after its SHA matched the required value. No original catalogue prose output, Git prose route, public-reader retry, or repository mutation."
+  },
+  "semantic_evidence": {
+    "held": "límite excedido; sigue activo describes an exceeded bound with the process still active; does not assert hang, unresponsiveness, or permission to stop. Read all updated HELD_PROVEN/HELD_UNPROVEN context and the panel's state-copy path. Kill-ladder text is a separate not_answering_clause guarded by available && wedged, not stall-held.",
+    "stale": "proceso inexistente names absent process, unlike dato antiguo for cached latest-version age. Exact classify helper compiled from candidate with injected synthetic pid_alive: absent PID + fresh heartbeat -> stale; absent PID + old heartbeat -> stale; alive PID + old heartbeat -> wedged; alive PID + fresh heartbeat -> live. No real PID query or signal.",
+    "unknown_duration": "unmeasured renders antigüedad desconocida and tiempo activo desconocido, agreeing with feminine/masculine labels respectively; known 0 segundos remains zero, and 2 minutos remains known. String argument and other-branch interpolation intact; unmeasured never exposed.",
+    "unreported_and_retained": "sin datos is number-neutral and distinct from measured zero; 1 de 1 runtime sin datos. Retained-history agreement is now 1 finalizado (conservado), 2 finalizados (conservados), without adding historical jobs to running/queued work.",
+    "lower_bound": "Fleet trajectory lower-bound marker remains on trayectorias, not runtime census. Caveat preserves missing subagent reporting and límite inferior. Count arguments and ≥ ownership preserved.",
+    "deeper": "+ 3 en niveles inferiores counts three elided entities located at lower levels; it does not say 3 niveles inferiores or imply three extra levels. Confirmed argument context and _tree_lines use. No new finding manufactured from the word niveles alone.",
+    "effective_model": "Responde labels the effective answering model, with modelo efectivo in export; it is not a status assertion.",
+    "credentials": "configurada is normal Spanish credential setup/store wording in this diagnostic context, not an appointed role; ninguna guardada preserves none stored.",
+    "phone_relay": "relé del teléfono consistently identifies the relay rather than a phone installation; instalado/no instalado and funciona correctamente remain orthogonal installation/health observations.",
+    "register_glossary": "Tú instructions and infinitive action hints are consistent. sesión, subagente, trayectoria, equipo, ajustes, habilidad, caché and relé are consistent; code árbol and compilation compilación retain their distinct concepts.",
+    "technical_english_exceptions": "Source-equal Python, Terminal/terminal, runtime/Runtimes, editable, auto, pid, and technical Python/terminal export field bodies are legitimate technology names, recorded developer terminology, cognates or protected machine labels. git, PyPI, wheel, sys.path, commands, flags, IDs and placeholder payloads are not residual untranslated human prose.",
+    "prior_minor_recheck": "R1 ES1 unreported agreement, ES2 retained agreement, and ES3 mobile noun gender all resolved in current values; independently verified from current cache and actual formatter output. No current A report read."
+  },
+  "mechanical_evidence": {
+    "artifact": "scratchpad://pr4420-r2-B-es-controls.json",
+    "script": "scratchpad://es_b_controls.py",
+    "method": "Compile only candidate runtime.py and format.py under synthetic package without app __init__, catalogue imports or config. Compile exact classify AST with synthetic PID evidence. All message input comes from authorized cache.",
+    "parse_argument_kind_select_and_skeleton_parity_keys": 277,
+    "plural_categories": ["one", "many", "other"],
+    "cldr_samples": {"0": "other", "1": "one", "2": "other", "5": "other", "11": "other", "21": "other", "1000": "other", "1000000": "many", "1500000": "other"},
+    "render_cases": 2493,
+    "select_arm_cases": 50,
+    "missing_argument_negative_cases": 183,
+    "changed_literal_pseudo_expanded_and_rendered_keys": 10,
+    "authored_bidi_controls": 0,
+    "rtl": "Spanish is LTR; no RTL layout clearance claimed.",
+    "setup_recoveries": "First controls invocation used plural_category argument order incorrectly in reporting only; corrected and reran. AST extension first lacked synthetic lineno; fixed missing locations and reran successfully. Final command exit 0; errors empty."
+  },
+  "rendered_check_flags": {
+    "severity": "non-gating fit risk, not proven overflow",
+    "keys_en_es_cells": {"tui.info.label.install_kind": [12,19], "tui.info.label.install_path": [12,19], "tui.info.label.running_code": [12,19], "tui.info.label.built": [5,11], "tui.info.label.working_dir": [11,21], "tui.info.label.config_dir": [10,21], "tui.info.label.cache_dir": [9,19], "tui.info.label.agent_home": [10,21], "tui.info.label.log_dir": [7,23]},
+    "measurement": "Plain precomposed Spanish Latin characters each occupy one terminal cell; counts expose expansion only. Sidecar specifies measured fitting rather than fixed numeric budgets. Actual renderer was not run by request."
+  },
+  "not_run": ["whole-interface/native-renderer clearance", "rendered terminal/browser/phone fitting", "live config or API", "real stop/kill/process probes", "pytest/full checks/build/dependencies", "generation/ledger/commit/push", "current partner A/B report reads"],
+  "evidence_read_artifact": "scratchpad://es-b-side-by-side.txt",
+  "receipt_disposition": "New complete receipt only; preserve old blocked/failed/passed historical files. Parent owns archival and any ledger eligibility decision."
+}

@@ -45,7 +45,7 @@
  "tui.info.status.leaving_for_build": "正退出以切换构建",
  "tui.info.status.no_movement": "无进展{BUILD_DRAIN_PROGRESS_S}",
  "tui.info.status.leaving": "正在退出",
- "tui.info.status.bound_held": "停滞超限，仍存活",
+ "tui.info.status.bound_held": "超限标记未清，仍存活",
  "tui.info.status.updating": "正在更新",
  "tui.info.status.updated": "已更新",
  "tui.info.status.update_failed": "更新失败",
