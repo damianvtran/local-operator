@@ -1747,7 +1747,9 @@ def trace_events(
 
     # The attached viewer gives its first regular consumer sole ownership of
     # the replay buffer. Tracing must not take that consumer's place.
-    observe = getattr(session, "_observe_events", None)
+    observe: Callable[[Callable[[Any], None]], Callable[[], None]] | None = getattr(
+        session, "_observe_events", None
+    )
     raw_unsub: Callable[[], None] | None = (
         observe(_on_event) if callable(observe) else session.subscribe(_on_event)
     )

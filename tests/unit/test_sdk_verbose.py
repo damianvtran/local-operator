@@ -595,7 +595,7 @@ async def test_open_session_attached_trace_preserves_backlog_and_logs_each_frame
     from local_operator.session.attached import AttachedSession
 
     viewer = AttachedSession(
-        config_dir=scratch.config_dir, session_id="viewer", takeover_factory=lambda: None
+        config_dir=Path(scratch.config_dir), session_id="viewer", takeover_factory=lambda: None
     )
     viewer._ready_for_events = True
     start = ToolExecutionStartEvent(tool_call_id="call_backlog", tool_name="read", args={})
@@ -639,7 +639,7 @@ def test_attached_trace_follows_sync_seed_order_without_consuming_replay(
     from local_operator.session.frontend_state import FrontendSessionState
 
     viewer = AttachedSession(
-        config_dir=scratch.config_dir, session_id="viewer", takeover_factory=lambda: None
+        config_dir=Path(scratch.config_dir), session_id="viewer", takeover_factory=lambda: None
     )
     start = ToolExecutionStartEvent(tool_call_id="call_fixture", tool_name="read", args={})
     end = ToolExecutionEndEvent(
