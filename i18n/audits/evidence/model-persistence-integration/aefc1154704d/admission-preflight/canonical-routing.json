@@ -1,0 +1,86 @@
+[
+  {
+    "locale": "fr",
+    "bundle": "a-0ecda03",
+    "path": "/Users/damian/local-operator/.worktrees/i18n-model-persist-notice/i18n/audits/evidence/fr/tui.model_persistence/a-0ecda03/receipt.json",
+    "row_sha256": "bc94ab329417506086e79cee192315d7ff2a8162dcb850313b9a87b9f467d956"
+  },
+  {
+    "locale": "fr",
+    "bundle": "b-1bf2",
+    "path": "/Users/damian/local-operator/.worktrees/i18n-model-persist-notice/i18n/audits/evidence/fr/tui.model_persistence/b-1bf2/current-ledger.json",
+    "row_sha256": "a14f19e7c54dd173355cc179f5027b8a7ae9a40582767dc6465a151c6a516951"
+  },
+  {
+    "locale": "zh-CN",
+    "bundle": "zhA26c",
+    "path": "/Users/damian/local-operator/.worktrees/i18n-model-persist-notice/i18n/audits/evidence/zh-CN/tui.model_persistence/zhA26c/receipt.json",
+    "row_sha256": "0adee1130722c334046464a0f2103a16e928ffafb4bf2b93eee5d65add09cfbd"
+  },
+  {
+    "locale": "zh-CN",
+    "bundle": "b-fbdc1",
+    "path": "/Users/damian/local-operator/.worktrees/i18n-model-persist-notice/i18n/audits/evidence/zh-CN/tui.model_persistence/b-fbdc1/receipt.json",
+    "row_sha256": "31aefc78ff68ce8a9c631bec80a97b96d54f60f18c2c556af43e7618ee0932fe"
+  },
+  {
+    "locale": "es",
+    "bundle": "esA-c8fb",
+    "path": "/Users/damian/local-operator/.worktrees/i18n-model-persist-notice/i18n/audits/evidence/es/tui.model_persistence/esA-c8fb/receipt.json",
+    "row_sha256": "224dbcfcc73c1ff8c34498904792e31b2a8eeff1d44b581f23ded2a599f470ec"
+  },
+  {
+    "locale": "es",
+    "bundle": "esB-2e43",
+    "path": "/Users/damian/local-operator/.worktrees/i18n-model-persist-notice/i18n/audits/evidence/es/tui.model_persistence/esB-2e43/receipt.json",
+    "row_sha256": "2299c321845d9d14cde0dc842561ab875db1da71d28c817e685715f24e9abe87"
+  },
+  {
+    "locale": "ru",
+    "bundle": "ru-A2986",
+    "path": "/Users/damian/local-operator/.worktrees/i18n-model-persist-notice/i18n/audits/evidence/ru/tui.model_persistence/ru-A2986/receipt.json",
+    "row_sha256": "63719e2fff0e1485c83c3f8d75529056597f175f0ed518bcee1a7a1e830d04fe"
+  },
+  {
+    "locale": "ru",
+    "bundle": "ru-bcbb",
+    "path": "/Users/damian/local-operator/.worktrees/i18n-model-persist-notice/i18n/audits/evidence/ru/tui.model_persistence/ru-bcbb/receipt.json",
+    "row_sha256": "06134699b2d4cc7a93a171279e5306fdf06865ae72c4abeb402917c7e9b10e85"
+  },
+  {
+    "locale": "vi",
+    "bundle": "viA1",
+    "path": "/Users/damian/local-operator/.worktrees/i18n-model-persist-notice/i18n/audits/evidence/vi/tui.model_persistence/viA1/receipt.json",
+    "row_sha256": "8e5ebb4debf1a2faf099a27d21622eb0c709d3447546db7d22904edf83dc36cf"
+  },
+  {
+    "locale": "vi",
+    "bundle": "vib674",
+    "path": "/Users/damian/local-operator/.worktrees/i18n-model-persist-notice/i18n/audits/evidence/vi/tui.model_persistence/vib674/receipt.json",
+    "row_sha256": "43db16339948d6c0ce62d8add3cbdd3adb4a27089f30583cd6166b6902e75640"
+  },
+  {
+    "locale": "ur",
+    "bundle": "a-caf2",
+    "path": "/Users/damian/.local-operator/sessions/aefc1154704d/scratchpad/admission-preflight/ur-a-existing-entry.json",
+    "row_sha256": "1f1f111c03a7ce7f8a5586a51f27aa2c823ec6f3578961441ed21ca828bb03f6"
+  },
+  {
+    "locale": "ur",
+    "bundle": "b-41b0",
+    "path": "/Users/damian/local-operator/.worktrees/i18n-model-persist-notice/i18n/audits/evidence/ur/tui.model_persistence/b-41b0/receipt.json",
+    "row_sha256": "84c41ffa2a28f24278929278607b7db217232fc19215e88be159a392258df4d5"
+  },
+  {
+    "locale": "hi",
+    "bundle": "a29r2",
+    "path": "/Users/damian/local-operator/.worktrees/i18n-model-persist-notice/i18n/audits/evidence/hi/tui.model_persistence/a29r2/receipt.json",
+    "row_sha256": "f368718f91505c084870311dcb892f38cc506d17fddc4b1dc4a4a23a8a454629"
+  },
+  {
+    "locale": "hi",
+    "bundle": "B2-a776",
+    "path": "/Users/damian/local-operator/.worktrees/i18n-model-persist-notice/i18n/audits/evidence/hi/tui.model_persistence/B2-a776/receipt.json",
+    "row_sha256": "f87a549489b96a7a845fadbf6b69e1736d42b052d1d9b863de4fe5d2a78f69b8"
+  }
+]

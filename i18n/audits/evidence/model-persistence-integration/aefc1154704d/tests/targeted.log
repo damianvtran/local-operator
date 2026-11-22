@@ -1,0 +1,15 @@
+[run_bounded] memory budget 4398 MiB (auto); sampled owned child group and escaped descendants
+local stall report: ON (900s of no completed test), reporting only. Silence the report with LOCAL_OPERATOR_LOCAL_STALL_SECONDS=0 (a per-test bound survives that).
+.......................................                                  [100%]
+=============================== warnings summary ===============================
+tests/unit/tui/test_model_persistence_notice.py::test_notice_resolves_each_semantic_branch_at_current_locale[None-False-routes0-en]
+  /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/types.py:426: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/
+    @validator(
+
+tests/unit/tui/test_model_persistence_notice.py::test_notice_resolves_each_semantic_branch_at_current_locale[None-False-routes0-en]
+  /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/types.py:446: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/
+    @validator("end_time_utc")
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+39 passed, 2 warnings in 10.31s
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=e567827999db4f838a713e78841cc93b completion=/Users/damian/.local-operator/sessions/aefc1154704d/scratchpad/run-bounded-runs/e567827999db4f838a713e78841cc93b.completion.json

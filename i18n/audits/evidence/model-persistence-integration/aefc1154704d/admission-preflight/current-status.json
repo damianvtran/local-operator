@@ -1,0 +1,44 @@
+[
+  {
+    "locale": "fr",
+    "rows": 2,
+    "last_status": "passed",
+    "last_auditor": "1bf2a3e4c433"
+  },
+  {
+    "locale": "zh-CN",
+    "rows": 2,
+    "last_status": "passed",
+    "last_auditor": "fbdc1a799cf0"
+  },
+  {
+    "locale": "es",
+    "rows": 2,
+    "last_status": "passed",
+    "last_auditor": "2e43efb61fa1"
+  },
+  {
+    "locale": "ru",
+    "rows": 2,
+    "last_status": "passed",
+    "last_auditor": "bcbb66e8cd81"
+  },
+  {
+    "locale": "vi",
+    "rows": 2,
+    "last_status": "passed",
+    "last_auditor": "674d6e6c175e"
+  },
+  {
+    "locale": "ur",
+    "rows": 2,
+    "last_status": "passed",
+    "last_auditor": "41b08626ce5f"
+  },
+  {
+    "locale": "hi",
+    "rows": 4,
+    "last_status": "passed",
+    "last_auditor": "a776dd8a4364"
+  }
+]

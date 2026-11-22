@@ -1,0 +1,100 @@
+[
+  {
+    "locale": "fr",
+    "bundle": "a-0ecda03",
+    "rc": 0,
+    "stdout": "i18n/audit-history/fr/tui.model_persistence.json\n",
+    "stderr": ""
+  },
+  {
+    "locale": "fr",
+    "bundle": "b-1bf2",
+    "rc": 0,
+    "stdout": "i18n/audit-history/fr/tui.model_persistence.json\n",
+    "stderr": ""
+  },
+  {
+    "locale": "zh-CN",
+    "bundle": "zhA26c",
+    "rc": 0,
+    "stdout": "i18n/audit-history/zh-CN/tui.model_persistence.json\n",
+    "stderr": ""
+  },
+  {
+    "locale": "zh-CN",
+    "bundle": "b-fbdc1",
+    "rc": 0,
+    "stdout": "i18n/audit-history/zh-CN/tui.model_persistence.json\n",
+    "stderr": ""
+  },
+  {
+    "locale": "es",
+    "bundle": "esA-c8fb",
+    "rc": 0,
+    "stdout": "i18n/audit-history/es/tui.model_persistence.json\n",
+    "stderr": ""
+  },
+  {
+    "locale": "es",
+    "bundle": "esB-2e43",
+    "rc": 0,
+    "stdout": "i18n/audit-history/es/tui.model_persistence.json\n",
+    "stderr": ""
+  },
+  {
+    "locale": "ru",
+    "bundle": "ru-A2986",
+    "rc": 0,
+    "stdout": "i18n/audit-history/ru/tui.model_persistence.json\n",
+    "stderr": ""
+  },
+  {
+    "locale": "ru",
+    "bundle": "ru-bcbb",
+    "rc": 0,
+    "stdout": "i18n/audit-history/ru/tui.model_persistence.json\n",
+    "stderr": ""
+  },
+  {
+    "locale": "vi",
+    "bundle": "viA1",
+    "rc": 0,
+    "stdout": "i18n/audit-history/vi/tui.model_persistence.json\n",
+    "stderr": ""
+  },
+  {
+    "locale": "vi",
+    "bundle": "vib674",
+    "rc": 0,
+    "stdout": "i18n/audit-history/vi/tui.model_persistence.json\n",
+    "stderr": ""
+  },
+  {
+    "locale": "ur",
+    "bundle": "a-caf2",
+    "rc": 0,
+    "stdout": "i18n/audit-history/ur/tui.model_persistence.json\n",
+    "stderr": ""
+  },
+  {
+    "locale": "ur",
+    "bundle": "b-41b0",
+    "rc": 0,
+    "stdout": "i18n/audit-history/ur/tui.model_persistence.json\n",
+    "stderr": ""
+  },
+  {
+    "locale": "hi",
+    "bundle": "a29r2",
+    "rc": 0,
+    "stdout": "i18n/audit-history/hi/tui.model_persistence.json\n",
+    "stderr": ""
+  },
+  {
+    "locale": "hi",
+    "bundle": "B2-a776",
+    "rc": 0,
+    "stdout": "i18n/audit-history/hi/tui.model_persistence.json\n",
+    "stderr": ""
+  }
+]

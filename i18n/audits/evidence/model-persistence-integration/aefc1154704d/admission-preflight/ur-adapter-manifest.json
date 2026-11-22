@@ -1,0 +1,11 @@
+{
+  "wrapper_path": "/Users/damian/local-operator/.worktrees/i18n-model-persist-notice/i18n/audits/evidence/ur/tui.model_persistence/a-caf2/receipt.json",
+  "wrapper_raw_sha256": "2dde3b435c4562cf2f8bb8d426e5a56b013bba5a2f02c8b26518d8aba66a0337",
+  "adapter_path": "/Users/damian/.local-operator/sessions/aefc1154704d/scratchpad/admission-preflight/ur-a-existing-entry.json",
+  "adapter_raw_sha256": "71018debb3eb84149f45262dd7b24cecd17f0da33afe65bfa9653c3550ed8fa9",
+  "structural_equality": true,
+  "operation": "json serialization of sole existing entries[0], no field/value changes",
+  "cli_contract": "scripts/i18n/ledger.py main append calls _read then append -> _rows; does not unwrap schema1",
+  "original_wrapper_unchanged": true,
+  "parent_correction": "Parent initially stated wrapped CLI input supported; actual source rejects wrapper. Parent accepts exact row extraction after apply with equality/hash evidence."
+}

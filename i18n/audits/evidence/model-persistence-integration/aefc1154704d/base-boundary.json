@@ -1,0 +1,16 @@
+{
+  "observed_origin_main": "f76cfd9dc40a2f973925584c6691ebc46b4266f9",
+  "merge_base": "764ac7a1ea9d6eb1f29ddecf324c5e05d10f423a",
+  "missing_suffixes": [
+    "i18n/audit-history/es/tui.editor_readonly.json",
+    "i18n/audit-history/fr/tui.editor_readonly.json",
+    "i18n/audit-history/hi/tui.editor_readonly.json",
+    "i18n/audit-history/ru/tui.editor_readonly.json",
+    "i18n/audit-history/ur/tui.editor_readonly.json",
+    "i18n/audit-history/vi/tui.editor_readonly.json",
+    "i18n/audit-history/zh-CN/tui.editor_readonly.json"
+  ],
+  "merge_tree_rc": 0,
+  "merge_tree_output": "77a131cf76b1d1082398db9fdac89bce6d00cdde\n",
+  "qualification": "virtual merge used committed entry HEAD 912e165, not uncommitted integration changes; no conflict suggested for committed branch, NOT proof integration delta conflict-free"
+}

@@ -1,0 +1,37 @@
+[run_bounded] memory budget 3578 MiB (auto); sampled owned child group and escaped descendants
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________________ test_forced_english_is_rejected ________________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10bc9d1f0>
+
+    def test_forced_english_is_rejected(monkeypatch):
+        path = Path(app_module.__file__).parents[2] / "tests/unit/tui/test_model_persistence_notice.py"
+        spec = importlib.util.spec_from_file_location("notice_regression_control", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        monkeypatch.setattr(app_module, "active_locale", lambda: "en")
+        try:
+>           module.test_notice_follows_live_locale_without_rewriting_previous_text()
+
+../../../.local-operator/sessions/aefc1154704d/scratchpad/tests/test_force_english_control.py:16: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def test_notice_follows_live_locale_without_rewriting_previous_text():
+        set_active_locale("en")
+        english = _notice(label="opaque/model")
+        assert english == (
+            f"model: opaque/model — {PERSIST_HINT} · "
+            "switch to the boot default with /model saved · /settings edits the boot default too"
+        )
+        set_active_locale("fr")
+        french = _notice(label="opaque/model")
+>       assert french != english
+               ^^^^^^^^^^^^^^^^^
+E       AssertionError
+
+tests/unit/tui/test_model_persistence_notice.py:64: AssertionError
+=========================== short test summary info ============================
+FAILED ::test_forced_english_is_rejected - AssertionError
+1 failed in 1.36s
+[run_bounded] contract=command-status rc=1 cause=child-exit cleanup=unknown invocation_id=99cbb57b1c3f49219a41104e7ffcfa3a completion=/Users/damian/.local-operator/sessions/aefc1154704d/scratchpad/run-bounded-runs/99cbb57b1c3f49219a41104e7ffcfa3a.completion.json

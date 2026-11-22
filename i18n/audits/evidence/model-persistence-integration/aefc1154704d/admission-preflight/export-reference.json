@@ -1,0 +1,6 @@
+{
+  "source": "/Users/damian/.local-operator/sessions/aefc1154704d/scratchpad/admission-preflight/current-ledger.json",
+  "sha256": "651f12da8a924a8946b12095eed6a7d6036de27c674d6d3dbb79afd28838b2b6",
+  "bytes": 5214574,
+  "note": "Full supported export retained in session scratch; per-locale current status and actual canonical append receipts committed to avoid duplicating entire programme history."
+}

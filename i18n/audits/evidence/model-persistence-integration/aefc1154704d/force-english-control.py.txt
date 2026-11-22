@@ -1,0 +1,18 @@
+"""Deliberately failing control: pinning the consumer to English must be caught."""
+import importlib.util
+from pathlib import Path
+
+from local_operator.i18n.text import set_active_locale
+import local_operator.tui.app as app_module
+
+
+def test_forced_english_is_rejected(monkeypatch):
+    path = Path(app_module.__file__).parents[2] / "tests/unit/tui/test_model_persistence_notice.py"
+    spec = importlib.util.spec_from_file_location("notice_regression_control", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(app_module, "active_locale", lambda: "en")
+    try:
+        module.test_notice_follows_live_locale_without_rewriting_previous_text()
+    finally:
+        set_active_locale("en")
