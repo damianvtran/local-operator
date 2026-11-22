@@ -10,8 +10,13 @@ from rich.text import Text
 from local_operator.i18n.keys import tui_model_persistence as keys
 from local_operator.i18n.text import active_locale, set_active_locale
 from local_operator.slash_commands import PERSIST_HINT
-from local_operator.tui.app import OperatorApp
+from local_operator.tui.app import OperatorApp, _status_line
 from local_operator.tui.widgets.editor import Editor
+from local_operator.tui.widgets.model_picker import (
+    PERSIST_CLAUSE_MARKER,
+    PERSIST_HINT_PREFIX,
+    ModelPicker,
+)
 from local_operator.tui.widgets.transcript import (
     NoticeBlock,
     TranscriptView,
@@ -20,7 +25,40 @@ from local_operator.tui.widgets.transcript import (
     wrap_cells,
 )
 from tests.unit.tui.conftest import await_session_boot
-from tests.unit.tui.test_app_pilot import FakeSession, _factory
+from tests.unit.tui.test_app_pilot import (
+    FakeSession,
+    _AccessController,
+    _factory,
+    _open_model_picker,
+)
+
+
+class _CountingAccessController(_AccessController):
+    """The pilot's catalogue fake, counting the reads a repaint must not make.
+
+    A locale move is supposed to cost one paint of state the widget already
+    holds, so the three reads that would mean it went back to the app's populate
+    path — the static catalogue, the live fetch and the credential store — are
+    counted here rather than inferred from timing.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003 - forwarded
+        super().__init__(*args, **kwargs)
+        self.catalogue_reads = 0
+        self.live_fetches = 0
+        self.credential_reads = 0
+
+    def static_catalogue(self):
+        self.catalogue_reads += 1
+        return super().static_catalogue()
+
+    async def live_catalogue(self, *, ttl_s=None):
+        self.live_fetches += 1
+        return await super().live_catalogue(ttl_s=ttl_s)
+
+    def has_any_credential(self, provider):
+        self.credential_reads += 1
+        return super().has_any_credential(provider)
 
 
 def _notice(*, setup: str | None = None, missing: bool = False, label: str = "") -> str:
@@ -178,3 +216,138 @@ def test_notice_authored_newlines_indent_and_copy_stay_intact():
     rows = block._rows(18)
     assert rows == ["  前/model default", "  后", "", "    /settings尾"]
     assert block.text() == text
+
+
+# -- the picker FOOTER (a fixed-width row, not a wrapping notice) -------------
+#
+# The footer was the second surface this slice left in English: its clause was
+# the import-time ``PERSIST_HINT`` the app composed into the picker's status
+# string, and that string is composed when the app POPULATES the list while the
+# footer is repainted later by the WIDGET (a resize, a scroll, a key, a locale
+# move). A sentence baked into the status therefore kept painting English after
+# a language switch. The clause now travels as ``PERSIST_CLAUSE_MARKER`` and the
+# widget resolves the audited key at paint time, so these tests pin BOTH halves:
+# the painted row follows the active locale, and the legacy English adapter keeps
+# behaving byte-for-byte for every caller that still hands it over.
+
+
+def _picker(status: str) -> ModelPicker:
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows([], status=status)
+    return picker
+
+
+def _footer_rows(picker: ModelPicker, width: int = 90) -> list[str]:
+    return [row.plain for row in picker._footer_rows(width)]
+
+
+@pytest.mark.parametrize("locale", ["en", "fr", "es", "zh-CN", "ru", "vi", "ur", "hi"])
+def test_footer_paints_the_persist_clause_in_the_active_locale(locale):
+    """The protected footer row IS the audited key, resolved when it is painted."""
+    set_active_locale(locale)
+    clause = keys.persist().envelope(locale=locale)["text"]
+    rows = _footer_rows(
+        _picker(_status_line("cached: anthropic, openrouter", PERSIST_CLAUSE_MARKER))
+    )
+    # Last row, because the clause keeps its own protected row rather than losing
+    # the command behind a longer status clause.
+    assert rows[-1].strip() == clause, rows[-1]
+    assert PERSIST_CLAUSE_MARKER not in "\n".join(rows), rows
+    if locale == "en":
+        assert rows[-1].strip() == PERSIST_HINT
+
+
+def test_a_legacy_english_footer_status_still_renders_byte_for_byte():
+    """The prefix branch is unchanged for any caller that still composes it.
+
+    ``PERSIST_HINT`` remains the English adapter the catalogue note names for
+    CLI/help/receipt consumers, and the picker still recognises a status that
+    carries it. That path must stay byte-for-byte and locale-blind: it renders
+    what the caller handed over, in the caller's language.
+    """
+    set_active_locale("en")
+    english = _footer_rows(_picker(_status_line("cached: anthropic", PERSIST_HINT)))[-1]
+    set_active_locale("fr")
+    french = _footer_rows(_picker(_status_line("cached: anthropic", PERSIST_HINT)))[-1]
+    assert english.strip() == PERSIST_HINT
+    assert french == english
+    assert keys.persist().envelope(locale="fr")["text"] not in french
+
+
+@pytest.mark.parametrize("locale", ["en", "fr", "es", "zh-CN", "ru", "vi", "ur", "hi"])
+def test_the_marker_is_never_prefix_parsed_and_the_status_stays_locale_free(locale):
+    """The parser boundary, both directions.
+
+    The marker is not a legacy lead (so the English prefix parser cannot claim
+    it), and the app hands over the marker — never the sentence — so translated
+    bytes never enter the status the widget stores. That matters because a French
+    clause DOES open with the same command and would be captured by the legacy
+    prefix; it would then be rendered byte-for-byte and would stop following the
+    locale on the next paint.
+    """
+    set_active_locale(locale)
+    clause = keys.persist().envelope(locale=locale)["text"]
+    assert not PERSIST_CLAUSE_MARKER.startswith(PERSIST_HINT_PREFIX)
+    assert clause.startswith(PERSIST_HINT_PREFIX)
+    # What the app composes, in every locale, is the marker.
+    state = SimpleNamespace(_setup_state=None, _model_missing_for=None)
+    assert OperatorApp._footer_persist_hint(cast(OperatorApp, state)) == PERSIST_CLAUSE_MARKER
+    # Painting resolves the marker and STORES nothing: the widget's status is
+    # still the marker afterwards, which is what lets the next paint re-resolve.
+    picker = _picker(PERSIST_CLAUSE_MARKER)
+    assert _footer_rows(picker)[-1].strip() == clause
+    assert picker._status == PERSIST_CLAUSE_MARKER
+    assert clause not in picker._status
+
+
+@pytest.mark.asyncio
+async def test_open_picker_paints_a_footer_in_the_configured_language(monkeypatch):
+    """Real open, real frame: the footer row is the French clause, command exact."""
+    monkeypatch.setenv("LOP_LANG", "fr")
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=_AccessController())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
+        assert active_locale() == "fr"
+        picker = await _open_model_picker(app, pilot)
+        painted = [strip.text for strip in app.screen._compositor.render_strips()]
+        row = picker.render_text(100).plain.split("\n")[-1]
+    clause = keys.persist().envelope(locale="fr")["text"]
+    # The command is an ASCII literal in the translated clause: byte-exact and in
+    # LTR reading order, so it stays copy-pasteable.
+    assert row.strip().startswith("/model default "), row
+    assert row.strip() == clause, row
+    assert not {"\u202a", "\u202b", "\u202c", "\u2066", "\u2067", "\u2068", "\u2069"} & set(row)
+    # …and it reached the FRAME, not just the widget's return value.
+    assert any(line.strip() == clause for line in painted), painted
+    assert not any(PERSIST_HINT in line for line in painted), painted
+
+
+@pytest.mark.asyncio
+async def test_live_locale_move_repaints_the_open_footer_without_reloading(monkeypatch):
+    """A language switch repaints the opened list and reads nothing again.
+
+    The clause is resolved at paint time, so the app has to ask for that paint —
+    and the paint must be all it costs: no credential read, no catalogue
+    repopulation, no provider worker.
+    """
+    monkeypatch.setenv("LOP_LANG", "en")
+    ctrl = _CountingAccessController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
+        await _open_model_picker(app, pilot)
+        before_paint = [strip.text for strip in app.screen._compositor.render_strips()]
+        before_reads = (ctrl.catalogue_reads, ctrl.live_fetches, ctrl.credential_reads)
+        app._apply_language("fr")
+        await pilot.pause()
+        await pilot.pause()
+        after_paint = [strip.text for strip in app.screen._compositor.render_strips()]
+    french = keys.persist().envelope(locale="fr")["text"]
+    # The transcript's already-printed notice keeps the language it was printed
+    # in — historical blocks are never rewritten — so the proof is about the
+    # FOOTER row: it carried the whole English hint before the move and the whole
+    # French clause after it. Those are the only full-length rows of either.
+    assert any(line.strip() == PERSIST_HINT for line in before_paint), before_paint
+    assert not any(line.strip() == PERSIST_HINT for line in after_paint), after_paint
+    assert any(line.strip() == french for line in after_paint), after_paint
+    assert (ctrl.catalogue_reads, ctrl.live_fetches, ctrl.credential_reads) == before_reads
