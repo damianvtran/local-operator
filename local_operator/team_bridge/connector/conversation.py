@@ -101,6 +101,53 @@ from .wake import (
 
 logger = logging.getLogger(__name__)
 
+
+def _log_conversation_failure(failure: Exception, phase: str, reference: str) -> None:
+    """Observe a hold without retaining inbound content in a log record.
+
+    Exact types, never dynamic names/codes/text: even a refusal can carry a
+    remote body, URL or provider echo. Phases come from local control flow.
+    Hash the complete reference to correlate a row without logging its
+    attacker-controlled identifiers. This observer never changes hold policy.
+    """
+    phases = {
+        "setup",
+        "body_fetch",
+        "attachments",
+        "recovery",
+        "screening",
+        "hub_admission",
+        "routing",
+        "wake_decision",
+        "reservation",
+        "card_handoff",
+    }
+    failure_class = {
+        BridgeRefusal: "bridge_refusal",
+        RuntimeError: "runtime_error",
+        ValueError: "value_error",
+        TypeError: "type_error",
+        OSError: "os_error",
+        TimeoutError: "timeout",
+        ConnectionError: "connection_error",
+    }.get(type(failure), "unknown")
+    status = failure.http_status if type(failure) is BridgeRefusal else None
+    safe_status = (
+        status
+        if type(status) is int
+        and status in {400, 401, 403, 404, 408, 409, 422, 429, 500, 502, 503, 504}
+        else "unknown"
+    )
+    logger.warning(
+        "bridge: conversation delivery held code=conversation_failed "
+        "phase=%s failure_class=%s http_status=%s row_ref=%s",
+        phase if type(phase) is str and phase in phases else "unknown",
+        failure_class,
+        safe_status,
+        hashlib.sha256(reference.encode("utf-8")).hexdigest(),
+    )
+
+
 #: The served guidance version the card names. Triage rules (inform /
 #: course-correct / ask, no new work, scope) live in that served text; the card
 #: deliberately does not duplicate them. Bump WITH the served version (§11.3).
@@ -2993,6 +3040,8 @@ async def handle_conversation_available(
         }
 
     terminal = False
+    # Closed local identifiers: exception data never chooses a diagnostic stage.
+    failure_phase = "setup"
     client: Any = None
 
     async def held(code: str) -> dict[str, Any]:
@@ -3037,6 +3086,7 @@ async def handle_conversation_available(
 
         # The iteration's batch pass may already hold this message's body
         # read (connector/batch_screen.py); reuse it rather than a second GET.
+        failure_phase = "body_fetch"
         fetched = take_fetched(ref) or await _fetch_body(client, ref, owner, access)
         if fetched is None:
             # Missing/old classification route or an unbound response: keep
@@ -3082,6 +3132,7 @@ async def handle_conversation_available(
         # and the screening model can see them; otherwise the text is
         # screened alone and the images stay withheld (no attachments_hash
         # is ever admitted for them), with an explicit line on the card.
+        failure_phase = "attachments"
         descriptors = fetched.attachments
         screened_images: Any = None
         attachments_note: str | None = None
@@ -3207,6 +3258,7 @@ async def handle_conversation_available(
                     )
 
         if recovery is not None:
+            failure_phase = "recovery"
             # The branch always returns; its terminal bookkeeping has to be back
             # in this frame before the ``finally`` retires the durable retry row.
             recovered_delivery = await _deliver_recovered(
@@ -3235,6 +3287,7 @@ async def handle_conversation_available(
             terminal = recovered_delivery.terminal
             return recovered_delivery.result
 
+        failure_phase = "screening"
         item = _screening_item(
             owner=owner,
             conversation_id=ref.conversation_id,
@@ -3299,6 +3352,7 @@ async def handle_conversation_available(
 
             # The ONE coarse class may leave this machine with the verdict;
             # the receipt's raw categories never do (contract v1).
+            failure_phase = "hub_admission"
             admitted = await client.conversation_admit(
                 ref.conversation_id,
                 message_id,
@@ -3394,6 +3448,7 @@ async def handle_conversation_available(
             if admitted_files_hash is not None
             else SCREENING_TEMPLATE_V3_SHA256 if admitted_hash else _text_admit_template(result)
         )
+        failure_phase = "hub_admission"
         try:
             await _admit(files_hash=admitted_files_hash, template=admit_template)
         except BridgeRefusal as refusal:
@@ -3420,6 +3475,7 @@ async def handle_conversation_available(
         # stored ON the reservation: a replay (a hub re-delivery, a re-driven
         # hold) takes the target from the stored row and never recomputes it, so
         # a message cannot be routed twice or to two sessions.
+        failure_phase = "routing"
         plan = plan_route(
             config_dir=config_dir,
             endpoint_id=str(getattr(owner, "endpoint_id", "") or ""),
@@ -3431,6 +3487,7 @@ async def handle_conversation_available(
             sender_account_id=str(sender.get("account_id") or ""),
             thread_root_id=ref.thread_root_id,
         )
+        failure_phase = "wake_decision"
         wake: WakeDecision | None = await decide_wake(
             owner,
             ref,
@@ -3441,6 +3498,7 @@ async def handle_conversation_available(
             body_text=body_text,
             sender_account_id=str(sender.get("account_id") or ""),
         )
+        failure_phase = "reservation"
         recorded = _record_body_reservation(
             store,
             owner,
@@ -3501,6 +3559,7 @@ async def handle_conversation_available(
             logger.warning("bridge: card re-posted code=card_unrecorded")
         if recorded not in (RESERVATION_RECORDED, RESERVATION_ALREADY_RECORDED):
             return {"action": "hold", "message_id": message_id, "code": recorded}
+        failure_phase = "card_handoff"
         metadata = replace(
             metadata,
             session_agent_display=(
@@ -3570,11 +3629,8 @@ async def handle_conversation_available(
         }
     except StoreRefused as failure:
         return {"action": "hold", "message_id": message_id, "code": failure.code}
-    except Exception:  # noqa: BLE001 — a connector turn must not die on one item
-        # This is the first connector error sink: an exception or traceback
-        # can retain fetched body/provider echoes even when its message is not
-        # explicitly interpolated. Emit only a closed structural code here.
-        logger.warning("bridge: conversation delivery held code=conversation_failed")
+    except Exception as failure:  # noqa: BLE001 — a connector turn must not die on one item
+        _log_conversation_failure(failure, failure_phase, ref.encode())
         # R2: an unexpected failure is a hold the sender should see too, and it
         # goes through the ONE guarded publish path (``held``), never a bare
         # call inside this handler's own except clause.
