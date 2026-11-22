@@ -1,0 +1,23 @@
+# Run from the manager-owned PR worktree. ISO is a fresh directory under
+# $LOCAL_OPERATOR_SCRATCHPAD; Python is the existing primary .venv interpreter.
+# No inherited environment except PATH; PYTHONPATH binds the worktree source.
+env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" \
+ LOCAL_OPERATOR_SCRATCHPAD="$LOCAL_OPERATOR_SCRATCHPAD" PATH="$PATH" \
+ TERM=xterm-256color LOP_LANG=en LOCAL_OPERATOR_NO_NOTIFICATIONS=1 \
+ LOCAL_OPERATOR_NO_DESKTOP_LAUNCH=1 LOCAL_OPERATOR_NO_TERMINAL_TITLE=1 \
+ LOCAL_OPERATOR_NO_SHIMMER=1 PYTHONPATH="$PWD" \
+ ~/local-operator/.venv/bin/python scripts/run_bounded.py \
+ --contract=command-status --timeout 540 -- \
+ ~/local-operator/.venv/bin/python -m pytest -n 0 -q \
+ tests/unit/tui/test_agent_facts.py \
+ tests/unit/tui/test_agent_class_slash.py::test_the_settings_pane_rows_state_each_profiles_class \
+ tests/unit/tui/test_agent_class_slash.py::test_the_pane_paints_the_class_marker_one_rung_brighter \
+ tests/unit/tui/test_agent_class_slash.py::test_the_facts_indent_is_paid_once_however_many_parts \
+ tests/unit/tui/test_agent_class_slash.py::test_a_budgeted_facts_line_drops_the_tail_whole_and_keeps_the_marker \
+ tests/unit/tui/test_agent_class_slash.py::test_the_scope_token_takes_a_second_facts_row_when_it_cannot_fit \
+ tests/unit/test_agent_labels.py::test_agent_listing_rows_carries_the_raw_label_beside_the_name \
+ tests/unit/test_profile_scope.py::test_listing_carries_both_stores_session_first \
+ tests/unit/test_profile_scope.py::test_a_session_row_shadows_a_global_name \
+ tests/unit/session/runtime/test_agent_class_routed.py::test_the_routed_bare_agent_lists_the_roster_instead_of_going_silent \
+ tests/unit/session/runtime/test_agent_class_routed.py::test_a_routed_bare_agent_lists_the_packaged_starters_too \
+ tests/unit/tui/test_settings_view.py::test_localized_enum_browsing_preserves_wire_values

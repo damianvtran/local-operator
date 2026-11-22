@@ -1,0 +1,48 @@
+{
+  "old_base": "d8d81b6ea98095d982a213cb21513b1fa4742502",
+  "old_head": "6561e6241461d0c7f4f49111a1ab6dc8456542e6",
+  "merged_main": "a8ecfef75d0245cb20d925c0bde0f94fad4b5973",
+  "authored_paths": 80,
+  "upstream_overlap": [
+    "local_operator/tui/widgets/settings_view.py"
+  ],
+  "authored_path_bytes_unchanged": 79,
+  "authored_patch_line_multiset_equal": true,
+  "authored_patch_added_lines": 10018,
+  "authored_patch_removed_lines": 127,
+  "added_or_removed_feature_lines_after_convergence": 0,
+  "resolution": "Retain both adjacent independent imports: AgentFact/AgentFacts/agent_fact_record and catalogues. No functional conflict.",
+  "upstream_functions_added_or_changed": [
+    "SettingsView._detail_clause",
+    "SettingsView._row_text",
+    "_choice_label",
+    "_render_value"
+  ],
+  "all_upstream_changed_functions_ast_equal_main": true,
+  "feature_changed_functions_ast_equal_old_head": [
+    "SettingsView.__init__",
+    "SettingsView._budget_pane_rows",
+    "SettingsView._budget_pane_rows.cost",
+    "SettingsView._paint_pane",
+    "SettingsView.load",
+    "_paint_facts",
+    "_paint_facts_lines",
+    "_paint_facts_lines.width",
+    "_paint_team_facts",
+    "_paint_team_facts_lines"
+  ],
+  "main_audit_history_files_preserved": 605,
+  "badge_audit_suffixes_unchanged": 7,
+  "frozen_raw_catalogue_context_files_unchanged": 9,
+  "version_file_byte_equal_main": true,
+  "frame_retention": "Agent facts producer, app snapshot adapter, all feature painter function ASTs, feature tests, catalogue/context bytes, audit suffixes and prior frame artifacts unchanged. Upstream settings-choice renderers are independent functions and preserved exactly from main. No fresh native or rendered frames claimed.",
+  "sha256_unchanged_badge_histories": {
+    "i18n/audit-history/es/wire.agent_badges.json": "fc6e6dc9409d694236d40ff216debfebb2b926485f3b60d57e2098053c24805e",
+    "i18n/audit-history/fr/wire.agent_badges.json": "7be618b1082881e45c6d0bb110579955984cbce71ef573aaf3872c589a8f7577",
+    "i18n/audit-history/hi/wire.agent_badges.json": "15e33a5fc89ac4fc56bc5a0d42677b023a1db7e4a768b9dbcb37a9a922137c11",
+    "i18n/audit-history/ru/wire.agent_badges.json": "d14700c29492a044739ee4101cefe285b2a6d4fc56fbb1fd48ba7d6b5f29ef0c",
+    "i18n/audit-history/ur/wire.agent_badges.json": "c74aa9d896a082baafd63eaa48251e06e2d6cfb0ae3137b2e58c940434b2e9dc",
+    "i18n/audit-history/vi/wire.agent_badges.json": "84c0ce17f8195dd1a59193b5015ea074c5aea47328dad5e5ce21735c6be3817f",
+    "i18n/audit-history/zh-CN/wire.agent_badges.json": "81d6b191a1f73eb4b4db9241a86ece5b7c016b3ae6b11e43e517d620fd41941d"
+  }
+}

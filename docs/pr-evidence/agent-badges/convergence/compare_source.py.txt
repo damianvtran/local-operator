@@ -1,0 +1,69 @@
+import ast, collections, hashlib, json, pathlib, subprocess
+root=pathlib.Path.cwd()
+old='6561e6241461d0c7f4f49111a1ab6dc8456542e6'
+base='d8d81b6ea98095d982a213cb21513b1fa4742502'
+main='a8ecfef75d0245cb20d925c0bde0f94fad4b5973'
+def git(*args):
+    print('READ', args[:3], flush=True)
+    return subprocess.check_output(['git',*args],cwd=root,timeout=15)
+def blob(ref,path): return git('show',f'{ref}:{path}')
+paths=git('diff','--name-only',base,old).decode().splitlines()
+upstream=set(git('diff','--name-only',base,main).decode().splitlines())
+overlap=sorted(set(paths)&upstream)
+assert overlap==['local_operator/tui/widgets/settings_view.py'],overlap
+changed=git('diff','--name-only',old,'--',*paths).decode().splitlines()
+assert changed==overlap, changed
+same=[p for p in paths if p not in changed]
+def lines(diff):
+    return collections.Counter(l for l in diff.splitlines() if l.startswith((b'+',b'-')))
+prior=git('diff','--no-ext-diff',base,old,'--',*paths)
+merged=git('diff','--no-ext-diff',main,'--',*paths)
+a,b=lines(prior),lines(merged)
+assert a==b, {'removed':dict(a-b),'added':dict(b-a)}
+# Every pre-existing audit suffix comes from main, and the seven new badge
+# receipts plus raw catalogues/context stay byte-identical to the frozen head.
+history=git('ls-tree','-r','--name-only',main,'--','i18n/audit-history').decode().splitlines()
+history_delta=git('diff','--name-only',main,'--','i18n/audit-history').decode().splitlines()
+assert sorted(history_delta)==sorted(p for p in paths if p.startswith('i18n/audit-history/'))
+freeze='7d03eb5874ddbf8d3d16aeed8a12d7d204d68603'
+copy=[p for p in paths if p.startswith('local_operator/i18n/catalogues/')]
+assert not git('diff','--name-only',freeze,'--',*copy)
+new_history=[p for p in paths if p.startswith('i18n/audit-history/')]
+assert len(new_history)==7
+assert not git('diff','--name-only',old,'--',*new_history)
+assert not git('diff','--name-only',main,'--','pyproject.toml')
+p='local_operator/tui/widgets/settings_view.py'
+def functions(data):
+    result={}
+    def walk(node,prefix=''):
+        for n in ast.iter_child_nodes(node):
+            if isinstance(n,(ast.ClassDef,ast.FunctionDef,ast.AsyncFunctionDef)):
+                name=prefix+n.name
+                if not isinstance(n,ast.ClassDef): result[name]=ast.dump(n,include_attributes=False)
+                walk(n,name+'.')
+    walk(ast.parse(data))
+    return result
+oldf,mainf,nowf=functions(blob(old,p)),functions(blob(main,p)),functions((root/p).read_bytes())
+up_changes=sorted(k for k in nowf if oldf.get(k)!=nowf[k])
+assert all(nowf[k]==mainf.get(k) for k in up_changes),up_changes
+basef=functions(blob(base,p))
+feature_changes=sorted(k for k in oldf if oldf[k]!=basef.get(k))
+assert all(nowf[k]==oldf[k] for k in feature_changes), feature_changes
+report={
+ 'old_base':base,'old_head':old,'merged_main':main,
+ 'authored_paths':len(paths),'upstream_overlap':overlap,
+ 'authored_path_bytes_unchanged':len(same),'authored_patch_line_multiset_equal':True,
+ 'authored_patch_added_lines':sum(v for k,v in a.items() if k.startswith(b'+')),
+ 'authored_patch_removed_lines':sum(v for k,v in a.items() if k.startswith(b'-')),
+ 'added_or_removed_feature_lines_after_convergence':0,
+ 'resolution':'Retain both adjacent independent imports: AgentFact/AgentFacts/agent_fact_record and catalogues. No functional conflict.',
+ 'upstream_functions_added_or_changed':up_changes,
+ 'all_upstream_changed_functions_ast_equal_main':True,
+ 'feature_changed_functions_ast_equal_old_head':feature_changes,
+ 'main_audit_history_files_preserved':len(history),'badge_audit_suffixes_unchanged':len(new_history),
+ 'frozen_raw_catalogue_context_files_unchanged':len(copy),'version_file_byte_equal_main':True,
+ 'frame_retention':'Agent facts producer, app snapshot adapter, all feature painter function ASTs, feature tests, catalogue/context bytes, audit suffixes and prior frame artifacts unchanged. Upstream settings-choice renderers are independent functions and preserved exactly from main. No fresh native or rendered frames claimed.',
+ 'sha256_unchanged_badge_histories':{p:hashlib.sha256((root/p).read_bytes()).hexdigest() for p in new_history},
+}
+print(json.dumps(report,indent=2))
+(root/'docs/pr-evidence/agent-badges/convergence/source-proof.json').write_text(json.dumps(report,indent=2)+'\n')

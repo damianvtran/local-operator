@@ -57,11 +57,12 @@ from textual.widgets import Static
 from local_operator import keymap as keymap_mod
 from local_operator import settings_io
 from local_operator.agent_profiles import AgentFact, AgentFacts, agent_fact_record
+from local_operator.i18n import catalogues
 from local_operator.i18n.keys import tui_settings_view as _sv
 from local_operator.i18n.keys import tui_settings_view_chrome as _svc
 from local_operator.i18n.keys import tui_small as _x
 from local_operator.i18n.keys import tui_sound as _sound_keys
-from local_operator.i18n.messages import Msg
+from local_operator.i18n.messages import Msg, _namespace_for
 from local_operator.i18n.text import active_locale, register_refresh, tr, tr_record
 from local_operator.settings_io import Kind, Scope, Section, Setting
 from local_operator.team_bridge import availability as bridge_availability
@@ -4478,20 +4479,7 @@ class SettingsView(Vertical):
             # difference alone does not survive a monochrome terminal, and
             # "which one am I on" is the question the expansion exists to answer.
             line.append("● " if chosen else "○ ", style=accent if chosen else dim)
-            choice_label = (
-                technical_display(str(row.choice.label)).plain
-                if row.setting.key == "language"
-                else _paint(
-                    row.choice.label,
-                    # BOOL labels carry the provenance resolved beside them;
-                    # registry choices are English-source fallback prose.
-                    source_locale=(
-                        _BOOL_SOURCES[bool(row.choice.value)]
-                        if row.setting.kind is Kind.BOOL
-                        else "en"
-                    ),
-                )
-            )
+            choice_label = _choice_label(row.setting, row.choice)
             line.append(choice_label, style=base)
             if row.choice.value == row.setting.default:
                 # Which member SHIPPED, named in the list rather than inferred
@@ -4636,7 +4624,7 @@ class SettingsView(Vertical):
                 # press rather than after it.
                 line.append(" \u25b8", style=dim)
             return line
-        line.append(_render_value(value), style=value_style)
+        line.append(_render_value(value, setting=setting), style=value_style)
         if setting.kind in (Kind.BOOL, Kind.ENUM):
             if self._expanded == setting.key:
                 line.append(" ▾", style=dim)
@@ -5777,7 +5765,9 @@ class SettingsView(Vertical):
         if not settings_io.is_default(self._manager, setting):
             # `raw=True`: the value is a word INSIDE this sentence, so only the
             # sentence is projected (PR #4361 R1).
-            return _t_chrome(_svc.clause_default(value=_render_value(setting.default, raw=True)))
+            return _t_chrome(
+                _svc.clause_default(value=_render_value(setting.default, setting=setting, raw=True))
+            )
         return ""
 
     def _gated_off(self, setting: Setting) -> bool:
@@ -7332,7 +7322,37 @@ def _value_tail(text: str, cells: int) -> str:
     return "".join(reversed(kept))
 
 
-def _render_value(value: Any, *, raw: bool = False) -> str:
+def _choice_label(setting: Setting, choice: settings_io.Choice, *, raw: bool = False) -> str:
+    """Share the picker's human label without changing the value edited or saved.
+
+    Registry labels retain their message: resolve that message at paint time so
+    a live locale change and an English fallback carry their actual provenance.
+    Nested default sentences need unprojected text; projecting both the label
+    and its enclosing sentence would introduce nested bidi isolates in Urdu.
+    Native language names and unkeyed technical choices keep their own spelling.
+    """
+    if setting.key == "language":
+        label = str(choice.label)
+        return label if raw else technical_display(label).plain
+    message = getattr(choice.label, "message", None)
+    if isinstance(message, Msg):
+        # Reuse the wire renderer's root-aware cached namespace discovery, but
+        # the TUI's cached resolver for repaint: render_record/message_display
+        # would reread the catalogue for every visible choice on every frame.
+        namespace = _namespace_for(str(catalogues.catalogue_root()), message.code)
+        if namespace is not None:
+            record = tr_record(namespace)(message)
+            return record.text if raw else _paint(record.text, source_locale=record.source_locale)
+    label = str(choice.label)
+    if raw:
+        return label
+    return _paint(
+        label,
+        source_locale=_BOOL_SOURCES[bool(choice.value)] if setting.kind is Kind.BOOL else "en",
+    )
+
+
+def _render_value(value: Any, *, setting: Setting | None = None, raw: bool = False) -> str:
     """One vocabulary for every displayed value.
 
     Booleans read as ``on``/``off`` rather than ``True``/``False`` because that
@@ -7346,6 +7366,13 @@ def _render_value(value: Any, *, raw: bool = False) -> str:
     # choice can never disagree. `raw=True` returns plain text for a caller
     # that substitutes the word into another catalogued sentence; the default
     # is display-projected, for a value painted on its own.
+    # Only ENUM has a setting-specific human vocabulary. Resolve just the
+    # matching member (including tri-state None/bools), never translate wire
+    # tokens globally or feed human labels back into the editor/persistence.
+    if setting is not None and setting.kind is Kind.ENUM:
+        for choice in setting.resolved_choices:
+            if type(choice.value) is type(value) and choice.value == value:
+                return _choice_label(setting, choice, raw=raw)
     small = _raw_t if raw else _t
     chrome = _raw_chrome if raw else _t_chrome
     if value is None:

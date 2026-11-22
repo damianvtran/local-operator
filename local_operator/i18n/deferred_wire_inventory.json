@@ -206,9 +206,11 @@
         }
       ],
       "references": {
-        "remote_compute/cli.py": 57,
+        "remote_compute/cli.py": 36,
         "remote_compute/config.py": 3,
-        "remote_compute/tiers.py": 4
+        "remote_compute/messages.py": 23,
+        "remote_compute/tiers.py": 4,
+        "server/routes/desktop_remote_compute.py": 5
       }
     },
     "wire.slash": {

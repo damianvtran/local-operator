@@ -1,0 +1,27 @@
+[run_bounded] memory budget 4554 MiB (auto); sampled owned child group and escaped descendants
+local stall report: ON (900s of no completed test), reporting only. Silence the report with LOCAL_OPERATOR_LOCAL_STALL_SECONDS=0 (a per-test bound survives that).
+.......................................................                  [100%]
+=============================== warnings summary ===============================
+local_operator/types.py:426
+  /Users/damian/local-operator/.worktrees/i18n-agent-facts/local_operator/types.py:426: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/
+    @validator(
+
+local_operator/types.py:446
+  /Users/damian/local-operator/.worktrees/i18n-agent-facts/local_operator/types.py:446: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/
+    @validator("end_time_utc")
+
+tests/unit/tui/test_settings_view.py::test_localized_enum_browsing_preserves_wire_values[tool_approval_mode-ask-auto]
+  /Users/damian/local-operator/.worktrees/i18n-agent-facts/local_operator/server/models/schemas.py:732: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/
+    class ModelEntry(BaseModel):
+
+tests/unit/tui/test_settings_view.py::test_localized_enum_browsing_preserves_wire_values[tool_approval_mode-ask-auto]
+  /Users/damian/local-operator/.worktrees/i18n-agent-facts/local_operator/server/models/schemas.py:767: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/
+    class ModelListResponse(BaseModel):
+
+tests/unit/tui/test_settings_view.py::test_localized_enum_browsing_preserves_wire_values[tool_approval_mode-ask-auto]
+  /Users/damian/local-operator/.worktrees/i18n-agent-facts/local_operator/server/models/schemas.py:814: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/
+    class ProviderListResponse(BaseModel):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+55 passed, 5 warnings in 7.05s
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=1aa76dff1ca8446e97742bb7fbc84b7d completion=/Users/damian/.local-operator/sessions/cf41cc5a1ab1/scratchpad/run-bounded-runs/1aa76dff1ca8446e97742bb7fbc84b7d.completion.json
