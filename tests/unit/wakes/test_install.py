@@ -1305,23 +1305,24 @@ def test_the_uninstall_refuses_a_store_the_shared_unit_does_not_serve(
     assert calls == [], f"a refused uninstall must not reach launchctl: {calls}"
 
 
-@pytest.mark.parametrize("entrypoint", ["startup", "refresh"])
-@pytest.mark.parametrize("retired", [False, True])
-@pytest.mark.parametrize("held", [False, True])
+@pytest.mark.parametrize("entrypoint", ["startup", "refresh", "outer"])
+@pytest.mark.parametrize("unit", ["absent", "retired", "uninstalled", "uninstalled-after-startup"])
+@pytest.mark.parametrize("goal", ["eligible", "held", "cleared", "absent"])
 def test_goal_recovery_bootstraps_a_missing_or_retired_supervisor(
     redirected_home: Path,
     tmp_path: Path,
     shared_label_allowed: None,
     monkeypatch: pytest.MonkeyPatch,
     entrypoint: str,
-    retired: bool,
-    held: bool,
+    unit: str,
+    goal: str,
 ) -> None:
+    import subprocess
     from subprocess import CompletedProcess
 
-    from local_operator import launchd, supervisors
+    from local_operator import launchd, supervisors, update
     from local_operator.config_migrations import run_startup_migrations
-    from local_operator.resume import TRANSCRIPT_NAME, write_goal_record
+    from local_operator.resume import GOAL_SIDECAR_NAME, TRANSCRIPT_NAME, write_goal_record
     from local_operator.wakes import install
     from local_operator.wakes.store import write_entry
 
@@ -1329,16 +1330,19 @@ def test_goal_recovery_bootstraps_a_missing_or_retired_supervisor(
     directory = root / "sessions" / "syntheticgoal"
     directory.mkdir(parents=True)
     (directory / TRANSCRIPT_NAME).touch()
-    write_goal_record(
-        directory,
-        {
-            "status": "active",
-            "goal": "Finish fixture",
-            "token": "goal-1",
-            "judge": {"state": "waiting"},
-        },
-    )
-    if held:
+    if goal != "absent":
+        write_goal_record(
+            directory,
+            {
+                "status": "active",
+                "goal": "Finish fixture",
+                "token": "goal-1",
+                "judge": {"state": "waiting"},
+            },
+        )
+    if goal == "cleared":
+        (directory / GOAL_SIDECAR_NAME).unlink()
+    if goal == "held":
         write_entry(
             root,
             directory.name,
@@ -1347,7 +1351,7 @@ def test_goal_recovery_bootstraps_a_missing_or_retired_supervisor(
             preserve={"goal_only": True, "stopped_at": 1},
         )
     path = plist_path()
-    if retired:
+    if unit != "absent":
         path.parent.mkdir(parents=True)
         path.write_bytes(plistlib.dumps(render_plist(root)))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
@@ -1361,19 +1365,60 @@ def test_goal_recovery_bootstraps_a_missing_or_retired_supervisor(
     def launchctl(*args: str) -> CompletedProcess[str]:
         calls.append(args[0])
         if args[0] == "print":
-            loaded = retired or "bootstrap" in calls
+            loaded = path.exists() and (
+                (unit != "absent" and "bootout" not in calls) or "bootstrap" in calls
+            )
             return CompletedProcess(args, 0 if loaded else 1, "state = not running", "")
         return CompletedProcess(args, 0, "", "")
 
     monkeypatch.setattr(install, "_launchctl", launchctl)
+    uninstalled = unit.startswith("uninstalled")
+    if uninstalled:
+        if unit == "uninstalled-after-startup":
+            run_startup_migrations(root)
+        assert install.uninstall().reason == "uninstalled"
+        assert not path.exists()
+        calls.clear()
+    retired = unit == "retired"
+    should_arm = goal == "eligible" and not uninstalled
+    expected = "revived" if should_arm else "current" if retired else "not-installed"
     if entrypoint == "refresh":
-        result = install.refresh_plist_if_stale()
-        assert result.kind == (("current" if retired else "not-installed") if held else "revived")
+        assert install.refresh_plist_if_stale().kind == expected
+    elif entrypoint == "outer":
+        # Use the real discovery/dispatch decision and child's wake repair,
+        # intercepting the process boundary before any live daemon is reached.
+        dispatches: list[list[str]] = []
+        monkeypatch.setattr(update, "_DAEMONS_ARE_LAUNCHD_AGENTS", True)
+        monkeypatch.setattr(update, "_secret_broker_socket_present", lambda: False)
+        argv = [
+            sys.executable,
+            "-m",
+            "local_operator",
+            "update",
+            "--refresh-daemons",
+            "--services-only",
+        ]
+        monkeypatch.setattr(update, "_daemon_refresh_invocation", lambda: (argv, sys.executable))
+
+        def run(child_argv: list[str], **kwargs: object) -> CompletedProcess[str]:
+            dispatches.append(child_argv)
+            assert install.refresh_plist_if_stale().kind == expected
+            return CompletedProcess(child_argv, 0, "", "")
+
+        monkeypatch.setattr(subprocess, "run", run)
+        outcome = update.refresh_service_daemons_after_upgrade()
+        assert not outcome.warnings
+        assert dispatches == ([argv] if retired or should_arm else [])
     else:
         run_startup_migrations(root)
         first = calls.copy()
         run_startup_migrations(root)
         assert calls == first
-    assert ("kickstart" in calls) == (retired and not held)
-    assert ("bootstrap" in calls) == (not retired and not held)
-    assert path.exists() == (retired or not held)
+    assert ("kickstart" in calls) == (retired and should_arm)
+    assert ("bootstrap" in calls) == (not retired and should_arm)
+    assert path.exists() == (retired or should_arm)
+    if uninstalled:
+        assert calls == []
+        assert install.ensure_supervisor_installed(root).installed
+        assert not install._uninstalled_marker(root).exists()
+        assert path.exists()

@@ -637,7 +637,23 @@ class InstallOutcome:
 NOT_AVAILABLE_REASON = "supervisor not yet available"
 
 
+def _uninstalled_marker(root: Path) -> Path:
+    # An absent unit cannot distinguish a first install from deliberate removal.
+    return root / ".wake-supervisor-uninstalled"
+
+
 def ensure_supervisor_installed(config_dir: Path) -> InstallOutcome:
+    """Install on demand after an explicit install or a new wake arm."""
+    result = _ensure_supervisor_installed(config_dir)
+    if result.installed:
+        try:
+            _uninstalled_marker(config_dir).unlink(missing_ok=True)
+        except OSError:
+            logger.warning("wake supervisor: could not clear uninstall marker", exc_info=True)
+    return result
+
+
+def _ensure_supervisor_installed(config_dir: Path) -> InstallOutcome:
     """Make sure the wake supervisor is installed for ``config_dir``.
 
     Contract (binding on the real implementation, not just the stub):
@@ -994,16 +1010,31 @@ def _has_recoverable_goals(root: Path) -> bool:
     return bool(candidates(root, read_index(root)))
 
 
+def goal_recovery_needs_refresh() -> bool:
+    """Read-only dispatch hint when the macOS updater discovers no services."""
+    root = ambient_config_dir()
+    try:
+        return (
+            not _uninstalled_marker(root).exists()
+            and (root / "sessions").is_dir()
+            and _has_recoverable_goals(root)
+            and _shared_label_refusal(root) is None
+        )
+    except OSError:
+        logger.debug("wake supervisor: could not scan legacy goals", exc_info=True)
+        return False
+
+
 def bootstrap_goal_recovery(root: Path) -> None:
     """Migrate cold obligations on first startup, even with no unit to refresh."""
     receipt = root / ".goal-recovery-bootstrap-v1"
-    if receipt.exists() or not (root / "sessions").is_dir() or not is_supported():
+    if receipt.exists() or _uninstalled_marker(root).exists():
         return
-    # The old updater can skip its refresh child entirely if no service was
-    # installed. First startup of the new build is independent of that gate.
-    # Retry a refused install; a successful migration is not permission to
-    # undo a subsequent explicit wake uninstall on every CLI invocation.
-    if _has_recoverable_goals(root) and not ensure_supervisor_installed(root).installed:
+    if not (root / "sessions").is_dir() or not is_supported():
+        return
+    # Retry a refused install. Only a new wake arm or explicit install can
+    # supersede an uninstall, so recovery never clears that authority marker.
+    if _has_recoverable_goals(root) and not _ensure_supervisor_installed(root).installed:
         return
     receipt.touch()
 
@@ -1049,6 +1080,8 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
         store = launchd.config_dir_from_plist(launchd.load(path)) or ambient_config_dir()
         if _shared_label_refusal(store) is not None:
             return launchd.PlistRefresh(name=name, kind="not-addressable")
+        if _uninstalled_marker(store).exists():
+            return launchd.PlistRefresh(name=name, kind="not-installed")
         outcome = launchd.rewrite_if_stale(name=name, path=path, rendered=render_plist(store))
         if outcome.kind == "current":
             # A CURRENT PLIST IS NOT A CURRENT BUILD: this unit names the stable
@@ -1064,7 +1097,7 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
             )
         if outcome.kind in {"not-installed", "current"} and _has_recoverable_goals(store):
             if not supervisor_state(store).running:
-                installed = ensure_supervisor_installed(store)
+                installed = _ensure_supervisor_installed(store)
                 return launchd.PlistRefresh(
                     name=name,
                     kind="revived" if installed.installed else "failed",
@@ -1116,9 +1149,17 @@ def uninstall() -> InstallOutcome:
     kind = supervisors.supervisor()
     if kind is None:
         return InstallOutcome(installed=False, reason=UNSUPPORTED_REASON)
-    refusal = _shared_label_refusal(ambient_config_dir())
+    root = ambient_config_dir()
+    refusal = _shared_label_refusal(root)
     if refusal is not None:
         return InstallOutcome(installed=False, reason=refusal)
+    # Persist the operator's decision before removing the unit: startup and
+    # upgrade must not interpret a (possibly interrupted) uninstall as vacancy.
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        _uninstalled_marker(root).touch()
+    except OSError as exc:
+        return InstallOutcome(installed=False, reason=f"could not record uninstall: {exc}")
     if kind == supervisors.SYSTEMCTL:
         # With KillMode=process, `disable --now` signals only the supervisor.
         # Its finally sweep normally forwards SIGTERM, but an unresponsive or
@@ -1134,7 +1175,7 @@ def uninstall() -> InstallOutcome:
         # token; the sweep is still scoped to THIS store, so no other install's
         # runtimes can be reached, and every candidate is re-identified by exact
         # pid, argv, root and session at signal time.
-        swept = sweep(ambient_config_dir(), any_owner=True, why="uninstall")
+        swept = sweep(root, any_owner=True, why="uninstall")
         logger.info("wake supervisor: uninstall signalled %d owned runtime(s)", len(swept))
         unit = supervisors.systemd_unit_path(SYSTEMD_UNIT)
         timer = supervisors.systemd_unit_path(SYSTEMD_TIMER)
@@ -1160,7 +1201,7 @@ def uninstall() -> InstallOutcome:
         ok, detail = supervisors.delete_task(TASK_NAME)
         if not ok:
             return InstallOutcome(installed=False, reason=f"could not remove the task: {detail}")
-        task_record_path(ambient_config_dir()).unlink(missing_ok=True)
+        task_record_path(root).unlink(missing_ok=True)
         return InstallOutcome(installed=False, reason="uninstalled")
     path = plist_path()
     if _launchd_is_addressable():
