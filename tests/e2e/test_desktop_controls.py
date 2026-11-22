@@ -288,6 +288,11 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
                 # `POST /v1/desktop/sessions/{id}/temporary`); a slash
                 # destination with no renderer adapter would dead-end.
                 "temporary",
+                # TUI-only: the transcript display mode is a terminal setting
+                # (operator decision, 2026-11-22) and the row's copy lives in
+                # the `tui.transcript_display` namespace, which the desktop
+                # bundles (built from `wire.*` alone) cannot resolve.
+                "transcript",
             }
             assert len(catalog) == len(SLASH_COMMANDS) - len(withheld)
             # The literal is DELIBERATE, unlike its three neighbours. The
