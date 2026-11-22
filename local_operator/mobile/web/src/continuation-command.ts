@@ -46,8 +46,11 @@ import type { InputMode, PromptImage, SkillExpansionReceipt } from "./types";
  * carrying screenshots is ~3 M, so a second one can be refused with
  * `QuotaExceededError`. A refused write is NEVER a reason to refuse the send: the
  * envelope is held in memory instead (`continuation-memory.ts`), the request goes
- * out under its UUID, and an in-page retry replays it. Only survival across a
- * reload is lost in that case.
+ * out under its UUID, and an in-page retry replays it. Survival across a reload is
+ * lost in that case, and so is the de-duplication it bought: an AMBIGUOUS failure
+ * followed by a reload (iOS evicts tabs mid-upload) mints a fresh UUID on the next
+ * send, so the first body may be admitted twice. That is the price of not
+ * refusing the send, and it applies only while the browser refuses the write.
  *
  * The keep/clear split for a caught HTTP error is centralised in
  * `isAmbiguousDeliveryStatus` so transport, correlation, and tests share one
@@ -228,6 +231,8 @@ function storedEnvelope(key: string): ContinuationEnvelope | null {
 	const raw = localStorage.getItem(key);
 	if (!raw) return heldEnvelope(key);
 	if (raw.length > MAX_STORED_COMMAND_CHARS) {
+		/* Over the bound: never trustworthy as a persisted copy. A memory copy of
+		   the same key (held because it was too large to persist) still counts. */
 		localStorage.removeItem(key);
 		return heldEnvelope(key);
 	}
@@ -248,8 +253,12 @@ function storedEnvelope(key: string): ContinuationEnvelope | null {
 		}
 		if (validEnvelope(value)) {
 			/* Upgrade the short-lived raw envelope shipped by the previous build
-			   without granting it unbounded storage lifetime. */
+			   without granting it unbounded storage lifetime. When the write is
+			   refused the envelope is held in memory instead, and the raw copy is
+			   removed: left in place, every read would upgrade it again with a
+			   fresh `saved_at` and the 24 h TTL would never expire. */
 			saveEnvelope(key, value, Date.now());
+			if (localStorage.getItem(key) === raw) localStorage.removeItem(key);
 			return value;
 		}
 	} catch {

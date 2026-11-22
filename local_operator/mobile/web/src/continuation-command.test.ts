@@ -207,7 +207,7 @@ describe("submitContinuation", () => {
 			expect(getPendingContinuation("rotom")).toBeNull();
 		});
 
-		it("prefers the persisted copy once storage works again", async () => {
+		it("persists later envelopes normally once storage recovers, keeping the held one retryable", async () => {
 			const spy = quota();
 			mockedSendCommand.mockRejectedValueOnce(new Error("Load failed"));
 			await expect(submitContinuation("a", "prompt", "one")).rejects.toThrow();
@@ -215,7 +215,36 @@ describe("submitContinuation", () => {
 			mockedSendCommand.mockRejectedValueOnce(new Error("Load failed"));
 			await expect(submitContinuation("b", "prompt", "two")).rejects.toThrow();
 			expect(localStorage.getItem("lo-mobile-command:b")).not.toBeNull();
+			expect(localStorage.getItem("lo-mobile-command:a")).toBeNull();
 			expect(getPendingContinuation("a")).not.toBeNull();
+		});
+
+		it("expires a held envelope after the 24 h TTL like a persisted one", async () => {
+			let clock = 1_000_000;
+			vi.spyOn(Date, "now").mockImplementation(() => clock);
+			quota();
+			mockedSendCommand.mockRejectedValueOnce(new Error("Load failed"));
+			await expect(submitContinuation("ttl", "prompt", "old")).rejects.toThrow();
+			clock += 23 * 60 * 60 * 1000;
+			expect(getPendingContinuation("ttl")).not.toBeNull();
+			clock += 2 * 60 * 60 * 1000;
+			expect(getPendingContinuation("ttl")).toBeNull();
+		});
+
+		it("does not refresh a legacy raw envelope's age on every read while the write is refused", async () => {
+			let clock = 5_000_000;
+			vi.spyOn(Date, "now").mockImplementation(() => clock);
+			const legacy = {
+				op: "prompt",
+				command_id: "12345678-1234-4678-9234-567812345678",
+				text: "legacy",
+			};
+			localStorage.setItem("lo-mobile-command:old", JSON.stringify(legacy));
+			quota();
+			expect(getPendingContinuation("old")?.text).toBe("legacy");
+			expect(localStorage.getItem("lo-mobile-command:old")).toBeNull();
+			clock += 25 * 60 * 60 * 1000;
+			expect(getPendingContinuation("old")).toBeNull();
 		});
 	});
 });
