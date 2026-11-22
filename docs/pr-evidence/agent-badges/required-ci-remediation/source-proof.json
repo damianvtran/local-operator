@@ -1,0 +1,18 @@
+{
+  "base": "e12cb57872faf05f74fcef66b926d286983ce32f",
+  "head": "3cb0e8c1f91cc93c9db18b07f423a9318c6e7401",
+  "changed_files": [
+    "local_operator/tui/widgets/settings_view.py",
+    "tests/unit/i18n/test_catalogues.py",
+    "tests/unit/tui/test_agent_facts.py"
+  ],
+  "all_other_tracked_paths_unchanged": true,
+  "settings_module_ast_except_paint_facts_lines_identical": true,
+  "namespace_contract_exactly_one_entry_added": "wire.agent_badges",
+  "all_namespace_mutation_control_source_unchanged": true,
+  "file_sha256": {
+    "local_operator/tui/widgets/settings_view.py": "bf110778204c4aef042498f95b464f96d891c87166a37a0b5fc98818c09b72ce",
+    "tests/unit/i18n/test_catalogues.py": "f5bc7563ffd7d29db820f19e86f9c1a9b5650a6d6bea93b7a16d664f0f91d5df",
+    "tests/unit/tui/test_agent_facts.py": "c66d314a7558a49bbaa15904af311d11c281a4b437ed348f4bd6858a74f00556"
+  }
+}

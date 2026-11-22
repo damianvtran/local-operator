@@ -1,0 +1,61 @@
+[run_bounded] memory budget 4248 MiB (auto); sampled owned child group and escaped descendants
+local stall report: ON (900s of no completed test), reporting only. Silence the report with LOCAL_OPERATOR_LOCAL_STALL_SECONDS=0 (a per-test bound survives that).
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_spilling_duplicate_facts_projects_only_first_occurrences _________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10f533c80>
+
+    def test_spilling_duplicate_facts_projects_only_first_occurrences(monkeypatch):
+        import local_operator.tui.widgets.settings_view as view
+        from local_operator.i18n.messages import RenderedMessage
+    
+        original = view.agent_fact_record
+    
+        def expanded_record(fact):
+            return RenderedMessage("K" * 24, "en") if fact.code == "kind" else original(fact)
+    
+        monkeypatch.setattr(view, "agent_fact_record", expanded_record)
+        kind = AgentFact("kind", "role")
+        scope = AgentFact("scope", "session")
+        marker = AgentFact("action_class", "proactive")
+        model = AgentFact("model", "opaque · proactive")
+        facts = (kind, scope, model, marker, scope, marker)
+        before = tuple(facts)
+        painted_facts = []
+        original_paint = view._paint_facts
+    
+        def record_paint(items, room, *, muted, faint):
+            painted_facts.append(items)
+            return original_paint(items, room, muted=muted, faint=faint)
+    
+        monkeypatch.setattr(view, "_paint_facts", record_paint)
+        # Both first occurrences spill, but equal later facts must remain in order.
+        # This pins list.remove semantics, not a remove-all filtering shortcut.
+        lines = _paint_facts_lines(facts, 27, muted=MUTED, faint=FAINT)
+        assert lines == [
+            _paint_facts((kind, model, scope, marker), 27, muted=MUTED, faint=FAINT),
+            _paint_facts((marker,), 27, muted=MUTED, faint=FAINT),
+            _paint_facts((scope,), 27, muted=MUTED, faint=FAINT),
+        ]
+        # Inspect the projection too: truncation can hide later duplicate tokens,
+        # so pixel equality alone would not catch accidentally removing them all.
+>       assert painted_facts == [(kind, model, scope, marker), (marker,), (scope,)]
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AssertionError
+
+tests/unit/tui/test_agent_facts.py:228: AssertionError
+=============================== warnings summary ===============================
+tests/unit/tui/test_agent_facts.py::test_spilling_duplicate_facts_projects_only_first_occurrences
+  /Users/damian/local-operator/.worktrees/i18n-agent-facts/local_operator/types.py:426: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/
+    @validator(
+
+tests/unit/tui/test_agent_facts.py::test_spilling_duplicate_facts_projects_only_first_occurrences
+  /Users/damian/local-operator/.worktrees/i18n-agent-facts/local_operator/types.py:446: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/
+    @validator("end_time_utc")
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/tui/test_agent_facts.py::test_spilling_duplicate_facts_projects_only_first_occurrences
+1 failed, 2 warnings in 1.12s
+[run_bounded] contract=command-status rc=1 cause=child-exit cleanup=unknown invocation_id=f61cac8432e74e78a2d98d6b82e8effc completion=/Users/damian/.local-operator/sessions/b94afe0ff711/scratchpad/run-bounded-runs/f61cac8432e74e78a2d98d6b82e8effc.completion.json

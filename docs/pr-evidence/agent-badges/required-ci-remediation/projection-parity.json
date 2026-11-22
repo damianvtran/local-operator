@@ -1,0 +1,16 @@
+{
+  "base": "e12cb57872faf05f74fcef66b926d286983ce32f",
+  "source": "/Users/damian/local-operator/.worktrees/i18n-agent-facts/local_operator/__init__.py",
+  "cases": 3696,
+  "locales": 8,
+  "expansions": [
+    "actual",
+    "long-kind",
+    "long-all"
+  ],
+  "equal": true,
+  "painted_fragments_styles_geometry_sha256": "f7c24b47cee51e3f4e5055e3d260156e0c5a594337706bd3b28b34ba811762ab",
+  "before_function_ast_sha256": "2d98ea030b3e0ddd83539b1600dc8aa4507f08dd62d19acbf85fff320f3f31b8",
+  "current_file_sha256": "bf110778204c4aef042498f95b464f96d891c87166a37a0b5fc98818c09b72ce",
+  "limits": "Projection proof only; no new native/font/shaping or global-English certification."
+}
