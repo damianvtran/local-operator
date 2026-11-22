@@ -23,9 +23,9 @@ import pytest
 
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.tool_fold import ToolFoldLayer
+from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.tool_card import ToolCard
-from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.transcript import (
     GAP_CLASS,
     NoticeBlock,
@@ -244,6 +244,41 @@ async def test_a_fold_bar_claims_those_same_printables() -> None:
         await _settle(pilot)
         assert seen == ["No failed calls in this turn"], "the bar did not claim f"
         assert turn_bar.has_focus
+
+        await pilot.press("F")
+        await _settle(pilot)
+        assert len(seen) == 2, "F did not reach the previous-failure action"
+
+        await pilot.press("plus")
+        await _settle(pilot)
+        assert turn_bar.expanded, "+ did not reach the open-this-turn action"
+
+        await pilot.press("minus")
+        await _settle(pilot)
+        assert not turn_bar.expanded, "- did not reach the defaults action"
+
+
+@pytest.mark.asyncio
+async def test_escape_never_closes_a_fold() -> None:
+    """Esc keeps its app-wide meaning; it is not a fold key."""
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = app.query_one(TranscriptView)
+        _user(view, "anchor:u1")
+        [_tool(view, f"t{index}", TOOLS[index]) for index in range(3)]
+        _answer(view)
+        await _settle(pilot)
+        (turn_bar,) = _bars(view)
+        turn_bar.focus()
+        turn_bar.activate()
+        await _settle(pilot)
+        assert turn_bar.expanded
+
+        await pilot.press("escape")
+        await _settle(pilot)
+        assert turn_bar.expanded, "escape closed the fold"
 
 
 @pytest.mark.asyncio
