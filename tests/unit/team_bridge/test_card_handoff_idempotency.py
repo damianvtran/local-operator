@@ -890,3 +890,82 @@ def test_agent_display_denial_never_wakes_initial_or_owed(tmp_path, monkeypatch,
     assert _handle(owner, config_dir, server)["action"] == "hold"
     assert receiver.dispatched == dispatched
     assert len(refreshes) == (1 if phase == "initial" else 2)
+
+
+@pytest.mark.parametrize("phase", ["initial", "owed"])
+@pytest.mark.parametrize("status", [200, 401])
+def test_post_allow_real_client_never_replays_auth_refusal(tmp_path, monkeypatch, phase, status):
+    """Count physical requests, not helper calls, through HTTP and SQLite.
+
+    The second scripted response would succeed if OAuth replay accidentally
+    returned: a 401 must hold before that answer can hide the fresh denial.
+    """
+    import httpx
+
+    from local_operator.team_bridge.client import TeamBridgeClient
+    from tests.unit.team_bridge.test_client import FakeRow, FakeStore, _err, _ok
+
+    owner, config_dir, server, receiver = _rig(tmp_path, monkeypatch)
+    server.sender = {"account_id": "acc_peer", "kind": "agent", "display_label": "Endpoint (Owner)"}
+    auth = FakeStore(
+        [FakeRow(1, data={"access": "synthetic-token", "account_id": owner.account_id})],
+        refresh={"access": "synthetic-refreshed-token"},
+    )
+    requests = []
+    active_status = 200  # owed setup must first deliver, leaving its marker unpaid
+
+    def handler(request):
+        assert request.method == "GET"
+        assert request.url.path.endswith(f"/messages/{rig.MESSAGE_ID}/body")
+        requests.append(request)
+        if active_status == 401 and len(requests) == 1:
+            return _err(401, "unauthorized")
+        return _ok(
+            {**server.body_response(), "agent_session": {"display_label": "Authorized task"}}
+        )
+
+    monkeypatch.setattr(
+        "local_operator.team_bridge.client.org_oauth_destination_allowed", lambda _: True
+    )
+    client = TeamBridgeClient(
+        base_url=owner.canonical_base_url,
+        store=auth,
+        credential_id=1,
+        transport=httpx.MockTransport(handler),
+    )
+    original = rig.FakeWire.conversation_body
+
+    async def body(self, cid, mid, **kwargs):
+        if not kwargs.get("expected_account_id"):
+            return await original(self, cid, mid, **kwargs)
+        # The rig's classification access is synthetic; this read uses a real,
+        # owner-pinned client access record, exercising _send/_authorized.
+        kwargs["access"] = await client.current_access()
+        return await client.conversation_body(cid, mid, **kwargs)
+
+    monkeypatch.setattr(rig.FakeWire, "conversation_body", body)
+    if phase == "owed":
+        _fail_marker_once(monkeypatch)
+        assert _handle(owner, config_dir, server)["action"] == "delivered"
+        assert len(requests) == 1
+        assert "Authorized task" in receiver.accepted_text[0]
+        requests.clear()
+    dispatched = list(receiver.dispatched)
+    active_status = status
+    result = _handle(owner, config_dir, server)
+    assert len(requests) == 1
+    forced_refreshes = sum(force for _, force in auth.refresh_calls)
+    assert forced_refreshes == 0
+    if status == 401:
+        assert result["action"] == "hold"
+        assert result["code"] == "display_authority_refused"
+        assert receiver.dispatched == dispatched  # no new card or wake handoff
+    else:
+        assert result["action"] == "delivered"
+        assert len(receiver.dispatched) == len(dispatched) + 1
+        assert "Authorized task" in receiver.accepted_text[0]
+    print(
+        f"POST_ALLOW phase={phase} status={status} GETs={len(requests)} "
+        f"forced_refreshes={forced_refreshes} action={result['action']} "
+        f"new_dispatches={len(receiver.dispatched) - len(dispatched)}"
+    )

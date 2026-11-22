@@ -313,3 +313,92 @@ def test_session_display_receipt_closed_roundtrip_and_projection():
     assert checked["bridge_receipt"]["sender"]["agent_session"]["display_label"] == "Task"
     checked["bridge_receipt"]["sender"]["agent_session"]["authority"] = "spoof"
     assert validated_display_receipt(checked, owner=owner()) == {}
+
+
+@pytest.mark.asyncio
+async def test_hostile_session_display_producer_validator_projection(tmp_path, monkeypatch):
+    """The optional leaf stays safe without becoming an identity or route."""
+    import hashlib
+
+    from local_operator.mobile import peer_send
+    from local_operator.team_bridge.connector.conversation import (
+        ConversationCardMetadata,
+        _deliver_card,
+        _post_allow_session_display,
+    )
+    from local_operator.team_bridge.display_receipt import projected_display_receipt
+    from local_operator.team_bridge.types import ConversationFeedRef
+    from tests.unit.team_bridge.test_conversation_delivery import _enroll
+
+    store = _enroll(tmp_path, owner(), "synthetic-session")
+    body = "screened bytes unchanged"
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    bidi_controls = "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+    hostile = 'Task "quoted"\n\x00\x1b' + bidi_controls + "z" * 500
+    sent = []
+
+    class Client:
+        async def conversation_body(self, cid, mid, **kwargs):
+            assert kwargs["refresh_on_401"] is False
+            return {
+                "message_id": mid,
+                "body": body,
+                "body_hash": digest,
+                "sender_kind": "agent",
+                "agent_session": {"display_label": hostile, "authority": "spoof"},
+            }
+
+    label = await _post_allow_session_display(
+        Client(),
+        owner(),
+        SimpleNamespace(credential_id=1),
+        ConversationFeedRef(
+            conversation_id="conversation", message_id="message", conversation_seq=4, mention=False
+        ),
+        digest,
+        store=store,
+        settings=None,
+    )
+    assert label is not None and len(label) == 200
+    assert '"quoted"' in label
+    assert not any(c in bidi_controls or ord(c) < 32 for c in label)
+
+    async def primitive(_context, **kwargs):
+        sent.append(kwargs)
+        return SimpleNamespace(detail="delivered", state="delivered")
+
+    monkeypatch.setattr(peer_send, "session_has_durable_history", lambda _: True)
+    monkeypatch.setattr(peer_send, "deliver_peer_message_outcome", primitive)
+    metadata = ConversationCardMetadata(
+        conversation_id="conversation",
+        tenant_id="tenant",
+        conversation_label="Project notes",
+        sender_label="Endpoint (Owner)",
+        sender_kind="agent",
+        mention=False,
+        message_id="message",
+        conversation_seq=4,
+        conversation_kind="dm",
+        session_agent_display=label,
+    )
+    assert (
+        await _deliver_card(owner(), metadata, session_id="synthetic-session", config_dir=tmp_path)
+        == "delivered"
+    )
+    checked = validated_display_receipt(sent[0]["sender"], owner=owner())
+    projected = projected_display_receipt(checked)
+    assert projected == checked
+    assert projected["bridge_receipt"]["sender"] == {
+        "name": "Endpoint (Owner)",
+        "kind": "agent",
+        "agent_session": {"display_label": label},
+    }
+    assert projected["bridge_receipt_source"] == carriage()["bridge_receipt_source"]
+    assert "authority" not in str(projected)
+    assert body not in str(projected)
+    # A hostile leaf arriving directly at the validator also cannot leak bidi;
+    # discard only that leaf, preserving the admitted owner-bound receipt.
+    checked["bridge_receipt"]["sender"]["agent_session"]["display_label"] = "Task\u202eOwner\u202c"
+    fallback = projected_display_receipt(validated_display_receipt(checked, owner=owner()))
+    assert fallback["bridge_receipt"]["sender"] == {"name": "Endpoint (Owner)", "kind": "agent"}
+    assert fallback["bridge_receipt_source"] == projected["bridge_receipt_source"]

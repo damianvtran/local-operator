@@ -180,10 +180,7 @@ from typing import Annotated, Any, Literal, cast
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.json_schema import SkipJsonSchema
 
-from local_operator.community.agent_ops import (
-    COMMUNITY_OPS,
-    COMMUNITY_POST_OP,
-)
+from local_operator.community.agent_ops import COMMUNITY_OPS, COMMUNITY_POST_OP
 from local_operator.community.agent_ops import approval_tier as community_approval_tier
 from local_operator.community.agent_ops import (
     execute_community_op,

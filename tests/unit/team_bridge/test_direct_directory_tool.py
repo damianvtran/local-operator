@@ -591,7 +591,13 @@ async def test_session_display_live_feature_wire_types(tmp_path, monkeypatch, ba
     runtime = _runtime(client, config_dir=tmp_path)
     runtime.owner = replace(runtime.owner, canonical_base_url=base)
     # Deliberately seed a positive cache decoy; the direct status route wins.
-    client.cached_conversation_features = lambda *a, **k: {"team_bridge_agent_session_display": 1}
+    from local_operator.team_bridge.client import StatusDiscipline
+
+    monkeypatch.setattr(
+        StatusDiscipline,
+        "cached_conversation_features",
+        lambda self: {"team_bridge_agent_session_display": 1},
+    )
     kwargs = await _session_display_send_kwargs(runtime, "Host task")
     await client.conversation_send(
         "bcv_abcd1234",

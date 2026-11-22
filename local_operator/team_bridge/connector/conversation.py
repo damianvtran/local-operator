@@ -855,6 +855,7 @@ async def _post_allow_session_display(
             access=access,
             expected_account_id=owner.account_id,
             pre_http_guard=guard,
+            refresh_on_401=False,
         )
     except BridgeRefusal as failure:
         guard()
@@ -891,11 +892,19 @@ async def _post_allow_session_display(
     session = fetched.get("agent_session")
     if not isinstance(session, Mapping) or not isinstance(session.get("display_label"), str):
         return None
-    # Keep only the closed leaf. Flatten controls before typed receipt carriage;
-    # model-facing rendering separately quotes it as untrusted display.
+    from ..display_receipt import SESSION_DISPLAY_BIDI_CONTROLS
+
+    # Keep only the closed leaf. Directional controls can spoof downstream
+    # plain-text presentation even though the model-facing card quotes JSON.
     label = " ".join(
         "".join(
-            c if ord(c) >= 32 and not 127 <= ord(c) <= 159 else " "
+            (
+                c
+                if ord(c) >= 32
+                and not 127 <= ord(c) <= 159
+                and c not in SESSION_DISPLAY_BIDI_CONTROLS
+                else " "
+            )
             for c in session["display_label"]
         ).split()
     )[:200]

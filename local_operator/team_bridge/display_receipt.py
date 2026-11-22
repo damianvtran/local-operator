@@ -2,6 +2,12 @@
 
 from typing import Any
 
+# Only the new session-display leaf uses this restriction; legacy labels and
+# authority/source fields retain their existing validation contract.
+SESSION_DISPLAY_BIDI_CONTROLS = frozenset(
+    "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+)
+
 
 def validated_display_receipt(carriage: dict[str, Any], *, owner: Any) -> dict[str, Any]:
     """Return optional presentation facts, never an authority descriptor."""
@@ -60,6 +66,13 @@ def validated_display_receipt(carriage: dict[str, Any], *, owner: Any) -> dict[s
         or not _label(session.get("display_label"), 240)
     ):
         return {}
+    if session is not None and any(
+        c in SESSION_DISPLAY_BIDI_CONTROLS for c in session["display_label"]
+    ):
+        # A hostile optional display must not discard owner-bound provenance
+        # or the message. Reject this leaf only, preserving generic presentation.
+        sender = {key: value for key, value in sender.items() if key != "agent_session"}
+        session = None
     if not isinstance(conversation, dict) or set(conversation) - {"kind", "label"}:
         return {}
     if any(not _label(sender[key], 240) for key in ("name", "organization") if key in sender):

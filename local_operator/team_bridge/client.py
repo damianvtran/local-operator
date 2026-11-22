@@ -2514,6 +2514,7 @@ class TeamBridgeClient:
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
         empty_result: bool = False,
+        refresh_on_401: bool = True,
         content: bytes | None = None,
         pre_http_guard: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
@@ -2537,6 +2538,7 @@ class TeamBridgeClient:
             content=content,
             expected_account_id=expected_account_id,
             pre_http_guard=pre_http_guard,
+            refresh_on_401=refresh_on_401,
         )
         if response.status_code >= 400:
             if response.status_code == 400 and body is not None and _observation.WIRE_KEY in body:
@@ -2622,6 +2624,7 @@ class TeamBridgeClient:
         extra_headers: Mapping[str, str] | None = None,
         oversize_code: str = "attachment_too_large",
         oversize_sentence: str = _OVERSIZE_ATTACHMENT_SENTENCE,
+        refresh_on_401: bool = True,
     ) -> httpx.Response:
         """Resolve, send, refresh-once-on-401: the response, refusals UNMAPPED.
 
@@ -2656,7 +2659,9 @@ class TeamBridgeClient:
             )
         except httpx.HTTPError as failure:
             raise BridgeUnreachable() from failure
-        if response.status_code == 401:
+        # An admission-bound display read must observe the first refusal;
+        # refreshing would erase that authority signal and replay the GET.
+        if response.status_code == 401 and refresh_on_401:
             refreshed = await self._refreshed_access(pinned)
             try:
                 response = await self._dispatch(
@@ -4950,8 +4955,9 @@ class TeamBridgeClient:
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
         pre_http_guard: Callable[[], None] | None = None,
+        refresh_on_401: bool = True,
     ) -> dict[str, Any]:
-        """The classification fetch for an agent member: body + binding hash."""
+        """Fetch body + binding hash; post-allow display opts out of 401 replay."""
 
         params: dict[str, Any] = {}
         if tenant_id:
@@ -4962,6 +4968,7 @@ class TeamBridgeClient:
             "GET",
             f"/messaging/conversations/{conversation_id}/messages/{message_id}/body",
             params=params or None,
+            refresh_on_401=refresh_on_401,
             access=access,
             expected_account_id=expected_account_id,
             pre_http_guard=pre_http_guard,
