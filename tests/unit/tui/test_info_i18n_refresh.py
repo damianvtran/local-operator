@@ -1,5 +1,6 @@
 """A mounted /info must repaint through both real language-setting routes."""
 
+import ast
 import asyncio
 import os
 import subprocess
@@ -17,6 +18,32 @@ from local_operator.tui.widgets.info_panel import InfoScreen
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 from tests.unit.tui.test_info_panel import _live, _snapshot
 from tests.unit.tui.test_language_live import _boot, _write_elsewhere
+
+
+# CI installs only local_operator, not tests. The other-process writer must use
+# installed production APIs even when the parent can import test helpers.
+_EXTERNAL_LANGUAGE_WRITE = """\
+from pathlib import Path
+import sys
+from local_operator import settings_io
+from local_operator.config import ConfigManager
+
+setting = settings_io.resolve_key("language")
+assert setting is not None
+settings_io._store(ConfigManager(Path(sys.argv[1])), setting.path, "fr")
+"""
+
+
+def test_external_language_writer_imports_only_installed_modules() -> None:
+    # Parent PYTHONPATH may expose tests locally and mask a broken child import.
+    # Pin the standalone payload's imports independently of that environment.
+    imports = {
+        node.module if isinstance(node, ast.ImportFrom) else alias.name
+        for node in ast.walk(ast.parse(_EXTERNAL_LANGUAGE_WRITE))
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in node.names
+    }
+    assert imports == {"pathlib", "sys", "local_operator", "local_operator.config"}
 
 
 @pytest.mark.asyncio
@@ -81,9 +108,7 @@ async def test_mounted_info_repaints_without_refetching(
                     [
                         sys.executable,
                         "-c",
-                        "from pathlib import Path; import sys; "
-                        "from tests.unit.tui.test_language_live import _write_elsewhere; "
-                        "_write_elsewhere(Path(sys.argv[1]), 'fr')",
+                        _EXTERNAL_LANGUAGE_WRITE,
                         str(config_dir),
                     ],
                     cwd=tmp_path,
