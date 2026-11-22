@@ -1,0 +1,32 @@
+{
+  "record_reference": "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9-fix1/record.json",
+  "provenance": {
+    "agent": "i18n-translator",
+    "session": "fdf96049990f",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": false,
+    "actual_model_source": "Current resumed-run host Model declaration; no current-run fallback event supplied",
+    "fallback": {
+      "used": false,
+      "scope": "current resumed remediation run only; historical author fallback unchanged"
+    }
+  },
+  "status": "translated",
+  "exit_code": 0,
+  "command": "env -i HOME=\"$LOCAL_OPERATOR_SCRATCHPAD/hi-fix1-home\" LOCAL_OPERATOR_CONFIG_DIR=\"$LOCAL_OPERATOR_SCRATCHPAD/hi-fix1-home/.local-operator\" PATH=\"$PATH\" TERM=xterm-256color PYTHONPATH=/Users/damian/local-operator/.worktrees/i18n-model-persist-notice /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/hi/tui.model_persistence/author-fdf9-fix1/validator.py.txt",
+  "execution_log": "audit.log",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9-fix1/notes.md",
+      "sha256": "631524c741c00ac4829286f3e3d0a6747345790092e21f4fcbea192f38a9e7a7"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9-fix1/validator.py.txt",
+      "sha256": "d97272ea7d4fff1996f31e26bc53d4471d322fc52ed6b5c9128640b58df9d695"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9-fix1/audit.log",
+      "sha256": "80803a93c5a490f4c93d408ed8b7bcb9a05313507fef63ea52c6096c6ad148ed"
+    }
+  ]
+}

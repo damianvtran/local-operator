@@ -1,6 +1,6 @@
 {
  "tui.model_persistence.persist": "/model default से इस मॉडल को नए सत्रों के डिफ़ॉल्ट के रूप में सहेजें",
  "tui.model_persistence.settings": "/settings से भी नए सत्रों का डिफ़ॉल्ट बदलें",
- "tui.model_persistence.saved": "/model saved से इस सत्र में सहेजे गए डिफ़ॉल्ट पर जाएँ",
+ "tui.model_persistence.saved": "/model saved से इस सत्र का मॉडल सहेजे गए डिफ़ॉल्ट पर बदलें",
  "tui.model_persistence.with_model": "मॉडल: {label} — {routes}"
 }
