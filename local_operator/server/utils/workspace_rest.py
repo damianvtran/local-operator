@@ -28,7 +28,7 @@ from local_operator.session.retention import _ACTIVITY_FILES, TRANSCRIPT_FILENAM
 from local_operator.session.row_clip import ROW_RANGE_MAX_BYTES
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import SessionRecord
-from local_operator.session.transcript import ENTRY_CUSTOM
+from local_operator.session.transcript import ENTRY_CUSTOM, TranscriptEntry
 from local_operator.session_lease import LEASE_NAME, MIRROR_NAME, RECOVERY_LOCK_NAME
 from local_operator.tui.sidebar_pins import PINS_FILE
 from local_operator.wakes import store as wakes
@@ -227,7 +227,12 @@ def _no_wake_schedule(path: Path, expected: _FileStamp) -> bool:
         if not isinstance(payload, dict):
             return False
         if payload.get("custom_type") == WAKE_SCHEDULES_CUSTOM_TYPE:
-            details = payload.get("details")
+            # Replay drops malformed envelopes. For absence proof the newest
+            # would-be snapshot is unknown, not a clear or a cue to fall back.
+            entry = TranscriptEntry.from_json(line.decode("utf-8"))
+            if entry is None:
+                return False
+            details = entry.payload.get("details")
             return isinstance(details, dict) and details.get("schedules") == []
     return True
 

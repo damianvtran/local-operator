@@ -2302,6 +2302,7 @@ def test_workspace_rest_fences_durable_writes_after_catalogue(tmp_path, monkeypa
                     assert (await pool.set_archived(sid, False))["archived"] is False
                     assert sid not in read_archived(tmp_path)
             elif change.startswith("wake"):
+                transcript = None
                 if change.endswith("undo"):
                     # The wake writer persists the transcript first; the
                     # index may disappear when the last schedule is removed.
@@ -2311,7 +2312,7 @@ def test_workspace_rest_fences_durable_writes_after_catalogue(tmp_path, monkeypa
                     )
                 entry = await asyncio.to_thread(_wake, tmp_path, sid)
                 assert entry is not None and entry.is_file()
-                if change.endswith("undo"):
+                if transcript is not None:
                     await transcript.append_custom(WAKE_SCHEDULES_CUSTOM_TYPE, {"schedules": []})
                     assert await asyncio.to_thread(remove_entry, tmp_path, sid)
             else:
@@ -2359,23 +2360,57 @@ def test_workspace_rest_rejects_corrupt_veto_without_changing_display(tmp_path, 
     assert ordinary["status"]["code"] == "complete" and "workspace_rest" not in ordinary
 
 
-def test_workspace_rest_reads_durable_wake_when_the_projection_is_missing(tmp_path):
-    from local_operator.harness.wake import WAKE_SCHEDULES_CUSTOM_TYPE
-    from local_operator.session.transcript import Transcript
-    from local_operator.wakes.store import entry_path
+@pytest.mark.parametrize("corruption", ["missing-id", "invalid-timestamp"])
+def test_workspace_rest_reads_durable_wake_when_the_projection_is_missing(tmp_path, corruption):
+    from local_operator.harness.wake import WAKE_SCHEDULES_CUSTOM_TYPE, WakeSchedule
+    from local_operator.session.retention import TRANSCRIPT_FILENAME
+    from local_operator.session.transcript import ENTRY_CUSTOM
+    from local_operator.wakes import arm, store
 
     sid = "e5" * 6
     directory = _cold_workspace_session(tmp_path, sid)
     feed = _feed(tmp_path)
     feed._take_baseline()
     first = _workspace_row(tmp_path, sid, feed)["workspace_rest"]
-    transcript = Transcript(directory)
-    asyncio.run(transcript.append_custom(WAKE_SCHEDULES_CUSTOM_TYPE, {"schedules": [{"id": "w"}]}))
-    assert not entry_path(tmp_path, sid).exists()
+    schedule = WakeSchedule(
+        id="w1", message="remind me", next_due_at=int(time.time() * 1000) + 60_000
+    )
+    asyncio.run(arm._append(directory, [schedule]))
+    assert arm._read_rows(directory) == [schedule]
+    assert not store.entry_path(tmp_path, sid).exists()
     row = _workspace_row(tmp_path, sid, feed)
     assert row["status"]["code"] == "complete" and "workspace_rest" not in row
-    asyncio.run(transcript.append_custom(WAKE_SCHEDULES_CUSTOM_TYPE, {"schedules": []}))
-    assert _workspace_row(tmp_path, sid, feed)["workspace_rest"]["revision"] != first["revision"]
+
+    # The clear's payload looks right, but a replay cannot use its envelope.
+    envelope = {"ts": 1.0} if corruption == "missing-id" else {"id": "clear", "ts": "invalid"}
+    malformed = json.dumps(
+        {
+            **envelope,
+            "type": ENTRY_CUSTOM,
+            "payload": {"custom_type": WAKE_SCHEDULES_CUSTOM_TYPE, "details": {"schedules": []}},
+        }
+    )
+
+    def append_malformed_clear():
+        with (directory / TRANSCRIPT_FILENAME).open("a", encoding="utf-8") as journal:
+            journal.write(malformed + "\n")
+
+    append_malformed_clear()
+    assert arm._read_rows(directory) == [schedule]
+    row = _workspace_row(tmp_path, sid, feed)
+    assert row["status"]["code"] == "complete" and "workspace_rest" not in row
+
+    asyncio.run(arm._append(directory, []))
+    assert arm._read_rows(directory) == []
+    assert not store.entry_path(tmp_path, sid).exists()
+    settled = _workspace_row(tmp_path, sid, feed)["workspace_rest"]
+    assert settled["epoch"] == first["epoch"] and settled["revision"] != first["revision"]
+    assert _workspace_row(tmp_path, sid, feed)["workspace_rest"] == settled
+
+    # Replay may fall back to the older clear; a cleanup proof must not.
+    append_malformed_clear()
+    assert arm._read_rows(directory) == []
+    assert "workspace_rest" not in _workspace_row(tmp_path, sid, feed)
 
 
 @pytest.mark.parametrize("order", ["answered-first", "queued-first", "queued-only", "answer-only"])
