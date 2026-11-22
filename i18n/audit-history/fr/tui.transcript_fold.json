@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "tui.transcript_fold",
-  "history_sha256": "ea7fe41f2a9b980499cff40d3a0401df9bc6cabb2753aa74c676bd828601881a",
+  "history_sha256": "6ff032d5407c74d9254ffd373bad1ae7d540c40c00498815cd5220daa6d76904",
   "entries": [
     {
       "locale": "fr",
@@ -49,6 +49,55 @@
         "tui.transcript_fold.work"
       ],
       "note": "Independent audit round 2 at HEAD 3db30d25b over this locale's three new namespaces: all 21 (locale, namespace) pairs passed, 0 blocker / 0 major unresolved. MINOR A8 (ru tui.transcript_fold.failed, count-last under tail truncation) and NIT A13/R2-1 skipped by decision: recorded in the PR thread as deferred, never fixed. Provenance is as relayed in the integrating coder's brief and the auditor's own report (i18n-audit-fold.md round 2) and the translator's hand-off (i18n-translator-handoff.md); the coder inspected no harness route log and reports no provider fallback. The audited values are the committed values. Audit round 1 failed 5 of this namespace's 7 pairs (es, fr, zh-CN, ru, hi) at English hash ebe87cf054d019c4742f26752aa5de52960afc40492b20f364bfd457ddeff60c; that round was never appended to the ledger and is NOT reconstructed here — no receipt is invented for it. This note is its record. The A1 English-source fix changed the namespace hash to 7ba0ac8f, the values the findings named were revised, and all pairs were re-audited at HEAD."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.transcript_fold",
+      "source_sha256": "5159c597988cd0e6579b05cf21c10da024d0f9628f95981957aa9398f2f27238",
+      "context_sha256": "88dfffd58636a4e34cb6d6ee2e0002515d5405d223b371fda5fc0d5de8970969",
+      "target_sha256": "2eb243b5b8cc6c125fcd4e787d25aa6fe25d87891df7c558b5b05fd6b6bd86f1",
+      "translator": {
+        "agent": "i18n-translator (lopdev task subagent, session label i18n-translator-fold; resumed lop job 60d57a5499ee)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-22",
+        "model_kind": "actual served model, as reported by the translator's own hand-off (no provider fallback)"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent lopdev task subagent, session label i18n-auditor-fold; resumed lop job cec162d72199); distinct instance and model from the translator",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-22",
+        "result": "passed",
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 1
+        },
+        "independent_from_translator": true,
+        "model_kind": "actual served model, as reported by the auditor's own round-3 report (no provider fallback)"
+      },
+      "status": "passed",
+      "keys": [
+        "tui.transcript_fold.failed",
+        "tui.transcript_fold.foot_actions",
+        "tui.transcript_fold.foot_actions_no_time",
+        "tui.transcript_fold.foot_failed",
+        "tui.transcript_fold.foot_failed_no_reason",
+        "tui.transcript_fold.kind_messages",
+        "tui.transcript_fold.kind_shell",
+        "tui.transcript_fold.kind_subagents",
+        "tui.transcript_fold.legend_all",
+        "tui.transcript_fold.legend_enter",
+        "tui.transcript_fold.legend_failed",
+        "tui.transcript_fold.legend_heading",
+        "tui.transcript_fold.legend_left_right",
+        "tui.transcript_fold.no_failed",
+        "tui.transcript_fold.times",
+        "tui.transcript_fold.turn",
+        "tui.transcript_fold.work"
+      ],
+      "note": "Independent audit round 3 at HEAD d553d2c91 over this locale's tui.transcript_fold: the three kind nouns (kind_messages, kind_shell, kind_subagents) were added to the English source after the round-2 receipt, moving its hash from 7ba0ac8f to 5159c597; no earlier English value changed. All 7 locales were re-audited at the new hash and passed, 0 blocker / 0 major unresolved. The delta's only finding was NIT R3-1 (the unkeyed \", \" list separator, code, out of catalogue scope); carried MINOR A8 and NIT A13/R2-1 remain skipped by decision, recorded in the PR thread as deferred, never fixed. Provenance is as relayed in the integrating coder's brief and the auditor's own report (i18n-audit-fold.md round 3) and the translator's hand-off (i18n-translator-handoff.md); the coder inspected no harness route log and reports no provider fallback. The audited values are the committed values. The earlier row for this namespace stays: it is the round-2 audit at 7ba0ac8f, superseded by this row, not erased."
     }
   ]
 }
