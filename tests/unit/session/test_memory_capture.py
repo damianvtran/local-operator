@@ -1832,3 +1832,62 @@ async def test_the_four_attribution_shapes_map_to_exact_literal_and_status(
     assert terminal == (status, reason)
     detail = _detail(store, shape)
     assert (detail.status, detail.reason) == (status, reason)
+
+
+def test_post_compaction_hint_is_bounded_review_not_automatic_confirmation(store):
+    """A procedural nudge preserves source/revision state and injects no bodies."""
+    from local_operator.compaction.tokens import count_text_tokens
+    from local_operator.memory import SUGGESTION_TOKENS
+
+    rows = extract("", "# Key Decisions\n- Keep synthetic Mercury requests on staged rollout")
+    persist(store, "review-marker", rows, "ok")
+    candidate = store.search("Mercury requests")[0]
+    before = store.show("session", candidate["id"])
+    text = hint(store, "review-marker")
+    assert "small relevant candidate set" in text
+    assert "source entry attribution" in text
+    assert "revision-checked edits" in text
+    assert "inspect predecessors before explicit replaces" in text
+    assert "unreviewed candidates unconfirmed" in text
+    assert "conflicts/age" in text and "authoritative sources" in text
+    assert "Mercury requests" not in text
+    assert count_text_tokens(text) <= 180
+    assert SUGGESTION_TOKENS == 180  # title/ID suggestions keep their existing contract
+    assert store.show("session", candidate["id"]) == before
+    assert before["fact"]["status"] == "candidate"
+
+
+def test_reviewed_candidate_correction_keeps_source_and_refuses_stale_revision(store):
+    """Exercise the existing exact-revision path the hint asks the model to use."""
+    original = store.put(
+        "session",
+        {
+            "title": "Mercury routing decision",
+            "body": "Route Mercury via staged queue",
+            "subject": "mercury-routing",
+            "status": "candidate",
+            "source": {"session": "synthetic-source", "entry": "entry-42", "kind": "reported"},
+        },
+    )
+    inspected = store.show("session", original["id"])
+    corrected = dict(inspected["fact"], body="Route Mercury via approved queue", status="active")
+    updated = store.put(
+        "session", corrected, entity=original["id"], expected_version=original["version"]
+    )
+    with pytest.raises(MemoryError, match="changed concurrently"):
+        store.put("session", corrected, entity=original["id"], expected_version=original["version"])
+    final = store.show("session", updated["id"])["fact"]
+    assert final["source"] == inspected["fact"]["source"]
+    assert final["subject"] == "mercury-routing" and final["status"] == "active"
+    replacement = store.put(
+        "session",
+        dict(
+            final,
+            title="Mercury routing supersedes old decision",
+            body="Route Mercury via final queue",
+            replaces=updated["id"],
+        ),
+    )
+    found = store.search("Mercury routing", tokens=1200)
+    assert replacement["id"] in {item["id"] for item in found}
+    assert updated["id"] not in {item["id"] for item in found}

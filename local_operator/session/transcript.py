@@ -3712,6 +3712,17 @@ class Transcript:
         """All entries in append order (in-memory snapshot)."""
         return list(self._entries)
 
+    def recent_entries(self, limit: int) -> list[TranscriptEntry]:
+        """The newest ``limit`` entries in append order, without copying the rest.
+
+        For per-turn-end readers (the economic compaction gate) on journals
+        that are hundreds of thousands of rows long, where ``entries()``'s
+        full copy would be paid at every wake.
+        """
+        if limit <= 0:
+            return []
+        return list(self._entries[-limit:])
+
     def latest_custom(self, custom_type: str) -> dict[str, Any] | None:
         """Details of the newest custom entry of ``custom_type`` (backward
         scan, first hit wins — each change appends a full snapshot)."""
