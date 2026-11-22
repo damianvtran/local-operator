@@ -187,8 +187,13 @@ Two columns, not a ruler:
   revealed at col 6 painted its own body at col 4 — the row walked right and
   left its content behind.
 
-A receipt card (scheduled wake, inbound peer message) keeps the ledger spine it
-has always drawn: it is not a step of a turn the fold condenses. The inset is NOT
+A receipt card (scheduled wake, inbound peer message) steps with the tool rows
+around it: the three are ONE ledger, and a receipt left on the plain spine while
+the tool rows beside it stepped in is the column defect the operator reported
+long before the fold existed ("the peer message doesn't have the proper left
+padding like the other tool cards"). Receipt bodies follow their row like a
+card's. Notices, prose and the fold's own bars are not ledger rows and keep their
+column. The inset is NOT
 CSS padding: it is threaded through `row_indent(width, depth)` and read by the row
 builder AND the copy gutter, so a selection of a fold-covered row cannot eat a
 character of its tool name; `detail_indent` does the same for the body rows and

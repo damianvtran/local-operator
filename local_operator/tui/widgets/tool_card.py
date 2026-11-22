@@ -4268,16 +4268,6 @@ class ToolCard(ExpandableActionBlock):
             return detail_indent(self._built_width, self.fold_depth)
         return self._row_indent() + self.ICON_COLS
 
-    def _detail_layout(self, width: int) -> tuple[int, int]:
-        """The detail block's text measure and lead, at ``width``.
-
-        One derivation for every body below the summary row (see
-        :func:`detail_indent` for why the lead follows the row), so a new body
-        cannot pick the plain spine while the row has stepped in.
-        """
-        inset = detail_indent(width, self.fold_depth)
-        return max(1, width - 2 - inset), " " * inset
-
     def _row_indent(self) -> int:
         """Cells of left inset on the summary row AS BUILT.
 

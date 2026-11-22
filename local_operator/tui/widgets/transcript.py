@@ -1289,6 +1289,26 @@ class ExpandableActionBlock(TranscriptBlock):
         self.fold_depth = depth
         self._refresh_row()
 
+    def _detail_inset(self, width: int) -> tuple[int, str]:
+        """The expanded body's indent in cells and as a lead, at ``width``.
+
+        :data:`~local_operator.tui.widgets.tool_card.OUTPUT_INDENT` at the plain
+        spine, plus the fold step THIS ROW took — one derivation for every
+        ledger row's body (a card's ``action:``/``target:``/output rows, a wake's
+        delivered prompt, a peer's identity and message). A body on the fixed
+        spine under a row that has stepped in reads as the next row's content,
+        which is the defect the fold's first frames showed.
+        """
+        from local_operator.tui.widgets.tool_card import detail_indent
+
+        inset = detail_indent(width, self.fold_depth)
+        return inset, " " * inset
+
+    def _detail_layout(self, width: int) -> tuple[int, int]:
+        """The expanded body's text measure and lead, at ``width``."""
+        inset, lead = self._detail_inset(width)
+        return max(1, width - 2 - inset), lead
+
     @property
     def expanded(self) -> bool:
         return self._expanded
@@ -2492,10 +2512,10 @@ class WakeBlock(ExpandableActionBlock):
         copied. Read back off the row as built rather than assumed, because
         the inset is given up on a narrow ledger.
         """
-        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, ToolCard
+        from local_operator.tui.widgets.tool_card import ToolCard
 
         if index != 0:
-            return OUTPUT_INDENT
+            return self._detail_inset(self._built_width)[0]
         return self._row_indent() + ToolCard.ICON_COLS
 
     def refresh_row(self, width: int | None = None) -> None:
@@ -2589,11 +2609,11 @@ class WakeBlock(ExpandableActionBlock):
         # really be drawn in. Read off the width being BUILT rather than
         # `_built_width`, which this runs before updating, and through the
         # ledger's one derivation so the copy gutter reads the same rule.
-        indent = row_indent(width)
+        indent = row_indent(width, self.fold_depth)
         # The content box this row is built in — the SAME derivation
         # `_refresh_row` records the name column against, so the guard's question
         # and the builder's answer cannot be asked of two different widths (R2).
-        width = row_body_width(width)
+        width = row_body_width(width, self.fold_depth)
 
         icon = tool_icon(self.tool_name)
         label = display_name(self.tool_name)
@@ -2647,7 +2667,7 @@ class WakeBlock(ExpandableActionBlock):
 
     def _build_content(self, width: int) -> Text:
         """The card: the one-row summary, plus the delivered prompt expanded."""
-        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, truncate_cells
+        from local_operator.tui.widgets.tool_card import truncate_cells
 
         row = self._build_row(width)
         if not self._expanded:
@@ -2658,8 +2678,8 @@ class WakeBlock(ExpandableActionBlock):
         # how-to included) reads as a second, louder wake. Just the delivered
         # prompt, indented under the headline. Wrapped, not truncated-per-line:
         # a wake's body is a paragraph the user wrote, not a command's stdout.
-        line_width = max(1, width - 2 - OUTPUT_INDENT)
-        indent = " " * OUTPUT_INDENT
+        inset, indent = self._detail_inset(width)
+        line_width = max(1, width - 2 - inset)
         message = getattr(self, "_message", "") or self._summary()[1]
         # Split on the author's line breaks FIRST: a catch-up is several
         # "- id (due …): …" lines, and wrapping the whole blob as one
@@ -3241,10 +3261,10 @@ class PeerMessageBlock(ExpandableActionBlock):
         row's name when copied. Read back off the row as built rather than
         assumed, because the inset is given up on a narrow ledger.
         """
-        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, ToolCard
+        from local_operator.tui.widgets.tool_card import ToolCard
 
         if index != 0:
-            return OUTPUT_INDENT
+            return self._detail_inset(self._built_width)[0]
         return self._row_indent() + ToolCard.ICON_COLS
 
     def copy_row_is_chrome(self, index: int) -> bool:
@@ -3343,11 +3363,11 @@ class PeerMessageBlock(ExpandableActionBlock):
         # really be drawn in. Read off the width being BUILT rather than
         # `_built_width`, which this runs before updating, and through the
         # ledger's one derivation so the copy gutter reads the same rule.
-        indent = row_indent(width)
+        indent = row_indent(width, self.fold_depth)
         # The content box this row is built in — the SAME derivation
         # `_refresh_row` records the name column against, so the guard's question
         # and the builder's answer cannot be asked of two different widths (R2).
-        width = row_body_width(width)
+        width = row_body_width(width, self.fold_depth)
 
         icon = tool_icon(self.tool_name)
         label = display_name(self.tool_name)
@@ -3476,7 +3496,7 @@ class PeerMessageBlock(ExpandableActionBlock):
         because it is the shorter, fixed-shape fact; a blank row separates
         them so a long message does not read as a continuation of the label.
         """
-        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, truncate_cells
+        from local_operator.tui.widgets.tool_card import truncate_cells
 
         row = self._build_row(width)
         if not self._expanded:
@@ -3495,8 +3515,8 @@ class PeerMessageBlock(ExpandableActionBlock):
         # Floored at MIN_BODY so the wrap width and `_header`'s fit test
         # reason about the same minimum: unfloored this reached 1 cell and
         # turned a two-line note into 40 rows of one-character columns.
-        line_width = max(width - 2 - OUTPUT_INDENT, self.MIN_BODY)
-        indent = " " * OUTPUT_INDENT
+        inset, indent = self._detail_inset(width)
+        line_width = max(width - 2 - inset, self.MIN_BODY)
 
         # Wrapped, not truncated: the identity is one paragraph, and at narrow
         # widths a truncated pid is worse than a second row — it is the field a
@@ -3967,10 +3987,9 @@ class TeamBridgeBlock(PeerMessageBlock):
         changes, and only when a loader exists (otherwise byte-identical to the
         card this class always painted).
         """
-        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT
-
         self._show_more_row = -1
-        line_width = max(width - 2 - OUTPUT_INDENT, self.MIN_BODY)
+        inset, _ = self._detail_inset(width)
+        line_width = max(width - 2 - inset, self.MIN_BODY)
         resolved = self._resolved_rows(line_width) if self._expanded else None
         if resolved is None:
             return super()._build_content(width)
@@ -3984,7 +4003,7 @@ class TeamBridgeBlock(PeerMessageBlock):
             self._text = original
         dim = Style(color=theme_mod.semantic_color("dim"))
         warn = Style(color=theme_mod.semantic_color("warning"))
-        indent = " " * OUTPUT_INDENT
+        indent = self._detail_inset(width)[1]
         row.append("\n", style=dim)
         row.append("\n" + indent, style=warn)
         row.append(_bt(tui_bridge_card.frame_untrusted()), style=warn)
@@ -4197,10 +4216,10 @@ class _SingleRowBarBlock(ExpandableActionBlock):
         rows, so a gutter measured against a different spine would eat the
         first character of its name when copied.
         """
-        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, ToolCard
+        from local_operator.tui.widgets.tool_card import ToolCard
 
         if index != 0:
-            return OUTPUT_INDENT
+            return self._detail_inset(self._built_width)[0]
         return self._row_indent() + ToolCard.ICON_COLS
 
     def copy_row_is_chrome(self, index: int) -> bool:
@@ -7126,14 +7145,13 @@ class AskResponseBlock(WakeBlock):
 
     def _build_content(self, width: int) -> Text:  # type: ignore[override]
         """The summary row, plus the Q&A when the row is opened."""
-        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, truncate_cells
+        from local_operator.tui.widgets.tool_card import truncate_cells
 
         row = self._build_row(width)
         if not self._expanded:
             return row
         dim = Style(color=theme_mod.semantic_color("dim"))
-        line_width = max(1, width - 2 - OUTPUT_INDENT)
-        indent = " " * OUTPUT_INDENT
+        line_width, indent = self._detail_layout(width)
         for prefix, text, style in self._expansion_lines():
             room = max(1, line_width - len(prefix))
             for index, wrapped in enumerate(wrap_cells(text, room) or [""]):

@@ -71,6 +71,7 @@ from local_operator.tui.tool_outline import (
     outline_of,
 )
 from local_operator.tui.widgets.transcript import (
+    ExpandableActionBlock,
     FoldBarBlock,
     NoticeBlock,
     QuietGroupBlock,
@@ -906,18 +907,24 @@ class ToolFoldLayer:
             self.invalidate()
 
     def _apply_depths(self) -> None:
-        """Give every row the inset the step it belongs to earned.
+        """Give every ledger row the inset the step it belongs to earned.
 
-        Only TOOLCARDS are written: a receipt row, a notice and prose keep the
+        Every expandable action row steps TOGETHER — a tool card, a scheduled
+        wake receipt and an inbound peer receipt are one ledger, and a receipt
+        left on the plain spine while the tool rows beside it stepped in is the
+        column defect this repo fixed once already ("the peer message doesn't
+        have the proper left padding like the other tool cards"); in By
+        response the tool rows have been one step in from the start, so the
+        receipts have to follow them there too.
+
+        Prose, notices and the fold's own bars are not ledger rows and keep the
         column they always drew, and a bar's own depth is fixed at its bar
         column when it is constructed. ``set_fold_depth`` is a no-op when the
         level has not moved, so a long transcript re-derives without rebuilding
         a row.
         """
-        from local_operator.tui.widgets.tool_card import ToolCard
-
         for row_id, block in self._rows.items():
-            if isinstance(block, ToolCard):
+            if isinstance(block, ExpandableActionBlock):
                 block.set_fold_depth(self._row_depth.get(row_id, 0))
 
     def _apply_ink(self) -> None:

@@ -286,11 +286,17 @@ async def test_the_queued_row_stops_saying_composing_the_moment_dictation_ends()
         # a frozen frame is what a stopped claim LOOKS like, and a ticking one
         # is what they reported for thirty to sixty minutes. Compared on THE
         # ROW, not on the whole frame: the frame also carries the status bar's
-        # own clock and spinner, which tick for their own reasons.
-        before = _rows_for(app, "wake")
+        # own clock and spinner, which tick for their own reasons. Compared on
+        # the row's WORDS: the fold's re-derive is coalesced to a frame, and the
+        # ledger lane re-fits around the step it takes, so the padding between
+        # the summary and the right-aligned status can change without the claim
+        # changing.
+        before = [" ".join(row.split()) for row in _rows_for(app, "wake")]
         await asyncio.sleep(1.1)
         await _parked(pilot)
-        assert _rows_for(app, "wake") == before, "the queued row must not tick"
+        assert [" ".join(row.split()) for row in _rows_for(app, "wake")] == before, (
+            "the queued row must not tick"
+        )
 
         # The band must not say the model is composing either — it reads the
         # same registry, and the row's claim is what it echoes.
@@ -425,11 +431,17 @@ async def test_a_never_run_call_settles_when_the_verdict_exists() -> None:
 
         await turn.finish()
         # Turn death is now a no-op for this row: it has an outcome, and the
-        # retirement pass only touches cards that are still live.
+        # retirement pass only touches cards that are still live. Compared on
+        # the row's WORDS: the settled turn re-derives in the next frame and the
+        # ledger lane can re-fit around the fold's step, which moves the
+        # right-aligned status column without changing what the row says.
         app.post_message(TurnBoundaryEnd())
         await _parked(pilot)
         assert wake_cards[0].state == "error"
-        assert [row for row in _rows_for(app, "wake") if "never sent" in row] == wake_rows
+        after = [row for row in _rows_for(app, "wake") if "never sent" in row]
+        assert [" ".join(row.split()) for row in after] == [
+            " ".join(row.split()) for row in wake_rows
+        ]
 
 
 @pytest.mark.asyncio

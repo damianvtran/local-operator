@@ -433,10 +433,11 @@ def test_narrow_widths_stack_the_key_above_the_description() -> None:
     for broken in ("compose", "r", "pagedow", "n,"):
         assert broken not in rows, f"force-broken fragment {broken!r} came back"
     # The row count is the other half of D1 (79 rows pre-fix at 30 columns).
-    # 67 since the transcript-fold section landed: a third section's heading,
-    # its four rows and each description's second stacked line. Re-measured
-    # from `build_legend_rows(22)` in this change rather than guessed.
-    assert len(rows) == 67, f"the stacked row count moved: {len(rows)}"
+    # 66 since the fold legend's `-` clause was shortened to "resets it": the
+    # section's rows are the same four, but one description now wraps to one
+    # stacked line instead of two. Re-measured from `build_legend_rows(22)` in
+    # this change rather than guessed.
+    assert len(rows) == 66, f"the stacked row count moved: {len(rows)}"
     # The boundary: at the first width whose column holds the longest word,
     # the layout is columnar again (the key shares its line with copy).
     boundary = [row.plain for row in build_legend_rows(31)]

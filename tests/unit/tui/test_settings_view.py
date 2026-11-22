@@ -5385,7 +5385,10 @@ async def test_the_transcript_display_row_offers_both_layouts_and_writes_flat(
         index = _select(view, "display.transcript_display")
         lines = view.render_lines_for_test()
         row = lines[index + 2]
-        assert "Transcript display" in row and "by-turn" in row, row
+        # The collapsed row paints the LABEL, not the stored token: localization
+        # landed beside this row's choices, and the token is what the write at
+        # the end of this test checks (`by-turn` on disk).
+        assert "Transcript display" in row and "By turn" in row, row
         headers = [
             (offset, line)
             for offset, line in enumerate(lines[: index + 2])
