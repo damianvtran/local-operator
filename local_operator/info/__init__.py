@@ -18,6 +18,8 @@ Importing this package must stay cheap: ``collect`` reaches ``mobile.resources``
 belong on the path every ``lop --version`` pays for.
 """
 
+from typing import TYPE_CHECKING, Any
+
 from local_operator.info.collect import (
     LiveState,
     build_subagent_tree,
@@ -38,7 +40,20 @@ from local_operator.info.model import (
     SessionsInfo,
     SubagentLine,
 )
-from local_operator.info.render import build_export, relativise_home
+if TYPE_CHECKING:
+    from local_operator.info.render import build_export, relativise_home
+
+
+def __getattr__(name: str) -> Any:
+    # Importing a DTO also executes this package. The localized renderer reaches
+    # Rich through info.copy, so defer it until a caller actually requests an
+    # export; preserve the public functions themselves (and their signatures).
+    if name in {"build_export", "relativise_home", "render"}:
+        from importlib import import_module
+
+        render = import_module("local_operator.info.render")
+        return render if name == "render" else getattr(render, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     "UNKNOWN",
