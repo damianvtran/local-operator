@@ -1240,9 +1240,8 @@ async def test_navigation_crosses_a_section_header_without_stalling():
         await pilot.pause()
         await pilot.press("ctrl+b")
         await pilot.pause()
-        assert app._sidebar_timer is not None
-        app._sidebar_timer.pause()
         sidebar = app._session_sidebar
+        _quiesce_sidebar_refresh(app)
         sidebar.set_entries(_mixed_entries())
         await _focus_settled(pilot, sidebar)
         # The frame really does carry both headers.
@@ -1260,6 +1259,147 @@ async def test_navigation_crosses_a_section_header_without_stalling():
         # boundary costs no extra press and never parks on a header.
         assert walked == ["act2", "old1", "old2"], walked
         assert all(step in {entry.id for entry in sidebar.entries} for step in walked)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timer_only", [False, True], ids=["real-helper", "timer-only-control"])
+async def test_navigation_retires_the_real_opening_catalog(monkeypatch, timer_only):
+    """Drive the ORIGINAL navigation test with its opening read landing late.
+
+    The timer-only control must fail that function's existing walked assertion,
+    not an independent reimplementation of navigation. The real helper case is
+    deliberately red until that function actually calls the helper. Hold only
+    the real disk read's return; the app, collect, worker and key delivery remain
+    real. Worker completion, rather than a sleep, orders the destructive read
+    before the first Down and proves that generation rejection is the repair.
+    """
+    import inspect
+
+    from textual.pilot import Pilot
+
+    from local_operator.tui import session_catalog
+
+    original = test_navigation_crosses_a_section_header_without_stalling
+    original_load = session_catalog.load_catalog
+    original_run_worker = OperatorApp.run_worker
+    original_press = Pilot.press
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    thread_finished = asyncio.Event()
+    release = threading.Event()
+    load_started = threading.Event()
+    workers = []
+    apps = []
+    generations = []
+    down_ids = []
+    load_calls = []
+    settled = False
+
+    def held_load(*args, **kwargs):
+        # Delegate against the autouse fixture's real empty catalog; returning
+        # a canned [] would bypass the collect path this regression guards.
+        load_started.set()
+        try:
+            rows = original_load(*args, **kwargs)
+            load_calls.append(rows)
+            loop.call_soon_threadsafe(entered.set)
+            release.wait()
+            assert rows == [], rows
+            return rows
+        except Exception:
+            # A broken fixture/read must fail through worker.wait(), not leave
+            # the UI waiting forever for an event only a successful read sets.
+            loop.call_soon_threadsafe(entered.set)
+            raise
+        finally:
+            loop.call_soon_threadsafe(thread_finished.set)
+
+    def capture_worker(self, *args, **kwargs):
+        worker = original_run_worker(self, *args, **kwargs)
+        if kwargs.get("group") == "sidebar-catalog":
+            apps.append(self)
+            workers.append(worker)
+            generations.append(self._sidebar_refresh_generation)
+        return worker
+
+    def pause_timer_only(app):
+        assert app._sidebar_timer is not None
+        app._sidebar_timer.pause()
+
+    async def ordered_press(self, *keys, **kwargs):
+        nonlocal settled
+        if keys == ("down",) and not settled:
+            await entered.wait()
+            assert len(workers) == 1
+            app = apps[0]
+            assert app._sidebar_refresh_again is False
+            before = app._sidebar_refresh_generation
+            assert app._session_sidebar.cursor_id == "act1"
+            assert {entry.id for entry in app._session_sidebar.entries} == {
+                "act1", "act2", "old1", "old2"
+            }
+            release.set()
+            await workers[0].wait()
+            assert app._sidebar_refresh_generation == before
+            assert app._sidebar_refresh_pending is False
+            assert app._sidebar_refresh_again is False
+            assert len(workers) == len(load_calls) == 1
+            # Record whether the ORIGINAL function invalidated its opening read.
+            # Do not assert repair here: baseline must reach its own assertion.
+            settled = True
+        result = await original_press(self, *keys, **kwargs)
+        if keys == ("ctrl+b",):
+            await entered.wait()
+            assert len(workers) == 1
+        elif keys == ("down",):
+            down_ids.append(apps[0]._session_sidebar.cursor_id)
+        return result
+
+    monkeypatch.setattr(session_catalog, "load_catalog", held_load)
+    monkeypatch.setattr(OperatorApp, "run_worker", capture_worker)
+    monkeypatch.setattr(Pilot, "press", ordered_press)
+    if timer_only:
+        monkeypatch.setitem(globals(), "_quiesce_sidebar_refresh", pause_timer_only)
+
+    # Pytest assertion rewriting changes exception text. Tie the negative
+    # control to the original code object AND exact existing assertion line,
+    # plus the actual cursor IDs, rather than accepting any AssertionError.
+    source, first_line = inspect.getsourcelines(original)
+    walked_line = first_line + next(
+        index for index, line in enumerate(source)
+        if line.strip().startswith('assert walked == ["act2", "old1", "old2"]')
+    )
+    try:
+        if timer_only:
+            with pytest.raises(AssertionError) as failure:
+                await original()
+            frames = []
+            traceback = failure.value.__traceback__
+            while traceback is not None:
+                frames.append((traceback.tb_frame.f_code, traceback.tb_lineno))
+                traceback = traceback.tb_next
+            assert frames[-1] == (original.__code__, walked_line)
+            assert down_ids == ["", "", ""]
+            assert str(failure.value).startswith("['', '', '']")
+            assert apps[0]._sidebar_refresh_generation == generations[0]
+        else:
+            await original()
+            assert down_ids == ["act2", "old1", "old2"]
+            assert apps[0]._sidebar_refresh_generation == generations[0] + 1
+        assert settled
+        assert len(workers) == len(load_calls) == 1
+        assert apps[0]._sidebar_refresh_again is False
+    finally:
+        # Unblock collect even when setup/assertions fail; wait for the captured
+        # workers so neither the executor thread nor a catalog task leaks out.
+        release.set()
+        if load_started.is_set():
+            await thread_finished.wait()
+        for worker in workers:
+            # App teardown can cancel a worker on an earlier setup failure;
+            # cancellation is already reaped, not a second failure to mask it.
+            if not worker.is_cancelled:
+                await worker.wait()
 
 
 @pytest.mark.asyncio
