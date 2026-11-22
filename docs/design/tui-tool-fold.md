@@ -27,12 +27,22 @@ cross-client parity fixture.
 
 Never two bars saying the same thing: a turn holding exactly ONE run is *flat*,
 and opening its turn bar reveals that run's children directly (no run bar in
-between). A turn bar is only drawn when it would hide at least
-`TURN_BAR_MIN_ROWS = 3` rows.
+between). A loose narration line does not make a flat turn non-flat; a turn bar
+is only drawn when it would hide at least `TURN_BAR_MIN_ROWS = 3` rows.
 
-**What never folds.** A call awaiting approval (`waiting`), an `ask`, and a
-generated image split a run and stay visible. A row a fold would hide is always
-exempted first; the layer never has to ask a row whether it may hide.
+**The turn bar ends at the answer.** A row appended after the final answer — a
+slash receipt, a system notice, an inbound peer message or a scheduled wake that
+arrives while the agent is idle — is not work the answer condenses. It stays
+visible, it is not counted in the bar's tally, and opening the bar cannot reveal
+a second bar over the same calls.
+
+**What never folds.** A call awaiting approval (`waiting`; a LIVE call's card is
+`running`, so the session's pending ids decide), an `ask`, and a generated image
+split a run and stay visible. A turn bar covers only tool rows and narration:
+an error/failed notice, an interactive notice, a receipt (peer, wake, monitor), a
+slash receipt, a streaming row and every other kind the outline does not name
+stay visible with every bar closed. Rows a fold could hide are exempted first;
+the layer never has to ask a row whether it may hide.
 
 ## 2. Defaults
 
@@ -46,6 +56,10 @@ exempted first; the layer never has to ask a row whether it may hide.
   `tf:sub:<first-tool-id>`) and lives for the view's lifetime (no persistence;
   `/clear` resets it).
 - A `waiting` call keeps its row; nothing open or closed changes that.
+- The STORED mode is applied where the view is created: at boot next to the
+  composer flags, and in the full-page subagent transcript. A setting is not a
+  value only a change can deliver; the view's class default is a fallback for an
+  unreadable file, not the boot layout.
 
 ## 3. Keys (on a focused fold bar only)
 
@@ -55,35 +69,50 @@ exempted first; the layer never has to ask a row whether it may hide.
 | up / down | walk the visible ledger, bars included |
 | left | close; when already closed, step OUT to the parent bar |
 | right | open; when already open, step INTO the first child (bar, else row) |
-| `f` / `F` | next / previous failed call in document order, opening every bar over it and focusing the call |
-| `+` | open every level of the focused bar's turn |
-| `-` | that turn back to its defaults (drop the turn's explicit choices) |
+| `f` / `F` | next / previous failed call in the focused TURN, opening every bar over it, focusing the call and scrolling it into view |
+| `+` | open every level of the focused bar's turn; keep the bar on screen |
+| `-` | that turn back to its defaults (drop the turn's explicit choices, even when the keyboard is on a child bar) |
 | esc | never closes a fold — it keeps its app-wide meaning |
 
-**The printable keys are claimed on `FoldBarBlock` and nowhere else.**
-`ExpandableActionBlock.on_key` forwards every unbound printable to the composer,
-so binding `f`/`F`/`+`/`-` higher in the hierarchy would swallow the first
-letter of a sentence typed while a tool row had focus. A focused bar is a
-navigation surface, and there the design deliberately spends those characters.
+**The printable keys are claimed on `FoldBarBlock` and nowhere else — plus the
+one card the ladder is standing on.** `ExpandableActionBlock.on_key` forwards
+every unbound printable to the composer, so binding `f`/`F`/`+`/`-` higher in
+the hierarchy would swallow the first letter of a sentence typed while a tool
+row had focus. A focused bar is a navigation surface, and there the design
+deliberately spends those characters. The jump then lands the keyboard on the
+CALL; `f`/`F` continue the ladder only while that card is the layer's failed-call
+cursor, and on every other card the characters reach the composer as before, so
+typing `found` on a row still works.
 `c` was not chosen for anything: it is taken app-wide. `v` is not a key either —
 the layout is the `display.transcript_display` setting plus `/transcript
 by-turn|by-response`.
 
-`f`/`F` land the keyboard on the CALL (that is where the reader acts). A
-ToolCard does not bind those characters, so the next jump is taken from a bar
-again (Up from the call returns to it); the layer keeps a failing-call cursor so
-that press continues the ladder rather than restarting from the bar's first row.
+`f`/`F` land the keyboard on the CALL (that is where the reader acts). The
+ladder is SCOPED to the turn the reader is standing in and circular inside it: a
+clean turn reports `No failed calls in this turn` as a toast — never a transcript
+row, which the reader's own keystrokes would otherwise append — and pressing `f`
+twice from the same card keeps stepping instead of typing an `f` into the draft.
 
 ## 4. Summary grammar
 
 `N actions · kind, kind +M · ✗ K failed` — one grammar on every bar.
 
-- Kinds use the existing shortened nouns (bash→shell, task→subagents,
-  hub/send→messages), in order of first appearance, at most 3 then `+M`.
+- Kinds use the shortened nouns in order of first appearance, at most 3 then
+  `+M`. The three builtin nouns are catalogue copy (bash→`shell`,
+  task→`subagents`, hub/send→`messages`), so the seven shipped locales read
+  them; an MCP tool folds through the row's own display-name path
+  (`mcp__linear_create_issue` → `create_issue`), never the wire identifier.
+- A run bar is named `work` in By turn's ledger and has **no name** in By
+  response's layout B: four identical cells on every run bar of a skimmable
+  step list say nothing. A turn bar always names the turn; a sub bar names its
+  tool.
 - A same-tool sub bar says `tool ×N` in place of the count, because its name
   column already names the tool.
 - `✗ K failed` is muted on a turn that ANSWERED (failures are history) and
   danger+bold only when the turn DIED.
+- Time is right-aligned in the ledger's duration column — the same column as
+  the rows the bar covers (a bar's clock two cells right of its own members' was
+  the D4 defect), and focusing a bar does not move it.
 - Time is right-aligned in the ledger's duration column. It is the SUM of the
   calls' known durations (`ToolCard.duration_s`), not a wall clock; a call with
   no recorded duration contributes nothing, and a span with none shows no time.
@@ -134,10 +163,15 @@ receipt bar (they fold with the receipt, not with their neighbours).
 
 - A failed call is counted on its bar (`✗ K failed`) and stays INSIDE the folded
   run. Nothing is released into the transcript.
-- The ONE exemption: a turn that died (no answer, or a turn-failed notice) pins
-  its LAST failed call below the collapsed fold, so the reason is reachable
-  without unfolding a sixteen-call batch. `f`/`F` open whatever is needed for any
-  failure.
+- **"No answer" is not "failed".** A turn reads as dead only when the harness's
+  own notice says so — a `turn failed` / `Stopped with an error` row — or when
+  the last settled turn ends on an error notice. A steer, a deliberate stop and
+  a `turn cut off` notice stay neutral: no danger tally, no `✗ turn failed`
+  foot. The cut-off's own warning row stays visible.
+- The ONE exemption: a turn that died or is the last settled turn with no answer
+  pins its LAST failed call below the collapsed fold, so the reason is reachable
+  without unfolding a sixteen-call batch. A mid-turn steer segment does not pin.
+  `f`/`F` open whatever is needed for any failure.
 - On a turn that answered, the tally is muted — history, not alarm (desktop
   issue #6's ruling, kept).
 - A turn-failed notice keeps its stored text; the By-response FOOT renders the
@@ -165,7 +199,14 @@ actions ends with a one-row foot:
 
 The foot mounts only when the turn settles (a live total would be a number still
 moving) and only when the turn had at least one action. A plain answer has
-nothing to total. By turn: no foot.
+nothing to total. A turn that neither answered nor failed (a steer segment, a
+stop, a cut-off) gets NO foot: `✓` would claim it succeeded and `✗` would state
+an outcome nobody diagnosed. By turn: no foot.
+
+A dead turn's foot also REPLACES every stored row that restates the same
+failure — the `turn failed` stop notice and the raw `[session incident …]`
+record both, when a resumed transcript carries both — so the reason is painted
+once, not three times.
 
 ## 8. Indent rule
 
@@ -180,7 +221,10 @@ Two columns, not a ruler:
   an unfolded call at col 3 beside a row revealed at col 6 — read as two kinds
   of row;
 - a row REVEALED under an open bar, and a pinned failure below a collapsed one,
-  draws **two cells deeper again** (four total);
+  draws **two cells deeper again** (four total); a sub bar nests **two cells
+  deeper than the run it belongs to** (its own level 2), and the calls revealed
+  under it take the level below that (six total), because the prototype's
+  `browser ×16` bar must read as owned by the run, not as its sibling;
 - a call's own DETAIL rows (`action:`/`target:`/`error:`, output, args) stay one
   cell RIGHT of the row at every level, as they always did at the plain spine
   (`detail_indent`). They used to sit on the fixed `OUTPUT_INDENT`, so a row
@@ -220,9 +264,10 @@ registered theme (`tests/unit/tui/test_palette_contrast.py`).
 - **A page-seam turn gets no turn bar and no foot.** Its prompt row is outside
   the loaded window, so the bar would label a turn whose start the reader cannot
   see and hide exactly the rows they resumed to read. Its runs still fold.
-- **`f`/`F` need a bar under the keyboard.** The jump focuses the call
-  (deliberately); the next jump is taken from a bar, and a ToolCard does not
-  claim the characters because it must keep forwarding typing to the composer.
+- **`f`/`F` continue from the card they landed on.** The card claims those two
+  characters only while it is the ladder's cursor; every other row forwards them
+  to the composer as before, and the ladder is scoped to the turn the keyboard
+  is standing in.
 - **Narration muting is a re-tint of the flattened message.** Inline code, links
   and headings in a narration block take the muted ink too; emphasis, fences and
   list structure are untouched.
