@@ -178,6 +178,9 @@ class ConversationCardMetadata:
     #: local sessions that posted in this DM recently, ``(session_id,
     #: minutes_ago, ref or None)``, newest first. Names only; never a body.
     route_candidates: tuple[tuple[str, int, str | None], ...] = ()
+    # Appended for positional compatibility. Ephemeral post-allow display only,
+    # never a routing/allocation identity or a durable card-record field.
+    session_agent_display: str | None = None
 
 
 def card_directed(metadata: ConversationCardMetadata) -> str:
@@ -277,6 +280,17 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
         "",
         mention_line,
     ]
+    if metadata.sender_kind == "agent":
+        # Endpoint provenance stays separate; missing display is not evidence
+        # that the configured chief-of-staff authored this particular message.
+        lines.append(
+            "session agent (untrusted display): "
+            + (
+                json.dumps(_one_line(metadata.session_agent_display), ensure_ascii=True)
+                if metadata.session_agent_display
+                else "unspecified"
+            )
+        )
     if directed == "thread":
         # The ONE case the card cannot already say: this endpoint is woken for a
         # reply it did not get named in (it follows the thread). `mention` and
@@ -767,6 +781,12 @@ async def _fetch_body(
     # message is text-only exactly as before. ``display`` carries main's
     # transient label mapping alongside the image binding: both are facts of
     # the SAME authorized read, so one carrier keeps them from drifting apart.
+    # Classification metadata is never session display provenance, even when
+    # a broken/malicious hub supplies it before recorded allow.
+    fetched = dict(fetched)
+    fetched.pop("agent_session", None)
+    if isinstance(fetched.get("sender"), Mapping):
+        fetched["sender"] = {k: v for k, v in fetched["sender"].items() if k != "agent_session"}
     served_attachments_hash = fetched.get("attachments_hash")
     served_files_hash = fetched.get("files_hash")
     return _Fetched(
@@ -780,6 +800,106 @@ async def _fetch_body(
         files=parse_file_descriptors(fetched.get("files")),
         files_hash=served_files_hash if isinstance(served_files_hash, str) else None,
     )
+
+
+async def _post_allow_session_display(
+    client: Any,
+    owner: Any,
+    access: Any,
+    ref: ConversationFeedRef,
+    expected_body_hash: str,
+    *,
+    store: Any,
+    settings: Any,
+) -> str | None:
+    """One exact, post-allow presentation read; never replace screened facts.
+
+    Missing old routes and display-only transport failures degrade to the
+    owner-bound endpoint. Authority denials or changed message bytes hold.
+    """
+    from ..store import StoreRefused
+
+    base = getattr(client, "base_url", None)
+    source = getattr(client, "_store", None)
+    credential = getattr(client, "_pinned_credential_id", None)
+
+    def guard() -> None:
+        code = _producer_fence(store, owner, access, settings)
+        if code:
+            raise StoreRefused(code, "post-allow display fence")
+        row_reader = getattr(client, "_pinned_row", None)
+        row = row_reader() if row_reader is not None else None
+        if (
+            (
+                row_reader is not None
+                and (
+                    row is None
+                    or row.id != owner.credential_id
+                    or not isinstance(row.data, Mapping)
+                    or row.data.get("account_id") != owner.account_id
+                )
+            )
+            or getattr(client, "base_url", None) != base
+            or getattr(client, "_store", None) is not source
+            or getattr(client, "_pinned_credential_id", None) != credential
+        ):
+            raise StoreRefused("owner_changed", "post-allow display source")
+
+    guard()
+    try:
+        fetched = await client.conversation_body(
+            ref.conversation_id,
+            ref.message_id,
+            tenant_id=owner.tenant_id,
+            endpoint_id=owner.endpoint_id,
+            access=access,
+            expected_account_id=owner.account_id,
+            pre_http_guard=guard,
+        )
+    except BridgeRefusal as failure:
+        guard()
+        # Only untyped old-route absence is optional. Typed 404s (deleted,
+        # revoked, membership/join-floor) are current authority refusals.
+        unsupported = failure.http_status in (404, 405) and failure.server_code_present is False
+        transient = (
+            failure.http_status in (408, 429)
+            or (failure.http_status is not None and failure.http_status >= 500)
+            or failure.code == "bridge_unreachable"
+        )
+        if unsupported or transient:
+            return None
+        raise StoreRefused("display_authority_refused", "post-allow display denied") from failure
+    except (TimeoutError, OSError):
+        guard()
+        return None
+    guard()
+    if (
+        not isinstance(fetched, Mapping)
+        or fetched.get("message_id") != ref.message_id
+        or fetched.get("body_hash") != expected_body_hash
+        or not isinstance(fetched.get("body"), str)
+    ):
+        raise StoreRefused("body_hash_mismatch", "post-allow display binding")
+    try:
+        digest = hashlib.sha256(fetched["body"].encode("utf-8")).hexdigest()
+    except UnicodeEncodeError as failure:
+        raise StoreRefused("body_hash_mismatch", "post-allow display binding") from failure
+    if digest != expected_body_hash:
+        raise StoreRefused("body_hash_mismatch", "post-allow display binding")
+    if fetched.get("sender_kind") != "agent":
+        return None
+    session = fetched.get("agent_session")
+    if not isinstance(session, Mapping) or not isinstance(session.get("display_label"), str):
+        return None
+    # Keep only the closed leaf. Flatten controls before typed receipt carriage;
+    # model-facing rendering separately quotes it as untrusted display.
+    label = " ".join(
+        "".join(
+            c if ord(c) >= 32 and not 127 <= ord(c) <= 159 else " "
+            for c in session["display_label"]
+        ).split()
+    )[:200]
+    return label or None
 
 
 def _card_metadata(
@@ -1700,7 +1820,7 @@ async def _deliver_card(
 #: ``test_admission_records_exactly_one_contentless_reservation``, which scans
 #: every column for the conversation subject and sender label). A rebuilt card
 #: takes them from the live metadata of the members re-driven now instead.
-_CARD_RECORD_LABELS = ("conversation_label", "sender_label")
+_CARD_RECORD_LABELS = ("conversation_label", "sender_label", "session_agent_display")
 #: The ROUTING fields (#4258) are not presentation of the original card but
 #: the current DELIVERY decision: the caller re-reads the stored route on every
 #: replay and passes the matching ``session_id`` (the routed target, or the
@@ -1717,7 +1837,7 @@ def _card_record(metadata: ConversationCardMetadata) -> str:
     """The write-once, CONTENTLESS record of a card, stored at mint time.
 
     The fields of :class:`ConversationCardMetadata` (a type that by
-    construction cannot carry a body) minus its two free-text labels: ids,
+    construction cannot carry a body) minus its free-text presentation labels: ids,
     seq, closed-vocabulary kinds, flags, counts and the fixed-template withheld
     notes. ``sender_several`` keeps the one fact about the labels the rebuild
     needs: whether the card named one sender or ``several members``. Output-
@@ -1764,6 +1884,7 @@ def _card_from_record(
             **raw,
             conversation_label=live.conversation_label,
             sender_label=_SEVERAL_SENDERS if several else live.sender_label,
+            session_agent_display=None if several else live.session_agent_display,
             **{name: getattr(live, name) for name in _CARD_RECORD_LIVE},
         )
     except (KeyError, ValueError, TypeError) as exc:
@@ -1771,6 +1892,9 @@ def _card_from_record(
     recorded = set(rebuilt.coalesced_message_ids or (rebuilt.message_id,))
     if rebuilt.conversation_id != live.conversation_id or not set(members) <= recorded:
         raise StoreRefused("card_binding_mismatch", "handoff record")
+    if len(recorded) > 1 and set(live.coalesced_message_ids or (live.message_id,)) != recorded:
+        # A subset replay cannot attest a session name for the original burst.
+        rebuilt = replace(rebuilt, session_agent_display=None)
     return rebuilt
 
 
@@ -1955,6 +2079,13 @@ async def _deliver_card_to(
             "bridge_receipt": {
                 "v": 1,
                 "sender": {
+                    **(
+                        {"agent_session": {"display_label": metadata.session_agent_display}}
+                        if metadata.sender_kind == "agent"
+                        and metadata.session_agent_display
+                        and len(metadata.coalesced_message_ids) <= 1
+                        else {}
+                    ),
                     **(
                         {"name": metadata.sender_label}
                         if metadata.sender_label and len(metadata.coalesced_message_ids) <= 1
@@ -2742,6 +2873,13 @@ async def _deliver_recovered(
         # second membership test: the two are complements, and pyright cannot
         # prove that, leaving ``recovered`` possibly unbound below.
         recovered = _stored_route(store, owner, ref, config_dir)
+    if recovery in ("images_admitted", "text_admitted") and metadata.sender_kind == "agent":
+        metadata = replace(
+            metadata,
+            session_agent_display=await _post_allow_session_display(
+                client, owner, access, ref, served_digest, store=store, settings=settings
+            ),
+        )
     if recovered.target is not None:
         metadata = replace(
             metadata,
@@ -2895,7 +3033,14 @@ async def handle_conversation_available(
             # Missing/old classification route or an unbound response: keep
             # the hold rather than treating a weaker history read as authority.
             return await held("body_unavailable")
-        body_text, body_hash, display = fetched.body, fetched.body_hash, fetched.display
+        # A broken hub must not inject pre-allow presentation into screening,
+        # allocation or a first card, including batch-classification responses.
+        display = dict(fetched.display)
+        display.pop("agent_session", None)
+        if isinstance(display.get("sender"), Mapping):
+            display["sender"] = {k: v for k, v in display["sender"].items() if k != "agent_session"}
+        fetched = replace(fetched, display=display)
+        body_text, body_hash = fetched.body, fetched.body_hash
         # ONLY this gated classification read supplies allocation identity.
         # An older server omits it: keep unknown provenance (conservative
         # budget), never recover it from a durable ref or a display label.
@@ -3347,6 +3492,16 @@ async def handle_conversation_available(
             logger.warning("bridge: card re-posted code=card_unrecorded")
         if recorded not in (RESERVATION_RECORDED, RESERVATION_ALREADY_RECORDED):
             return {"action": "hold", "message_id": message_id, "code": recorded}
+        metadata = replace(
+            metadata,
+            session_agent_display=(
+                await _post_allow_session_display(
+                    client, owner, access, ref, served_digest, store=store, settings=settings
+                )
+                if metadata.sender_kind == "agent"
+                else None
+            ),
+        )
         if metadata.owner_released:
             # The hub admitted it and the body is reserved: the release is
             # ``admitted`` whatever the card hand-off does next.

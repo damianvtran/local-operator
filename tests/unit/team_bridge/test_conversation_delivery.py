@@ -2896,3 +2896,244 @@ def test_threaded_route_names_only_keys_the_bridge_tool_accepts() -> None:
     assert BridgeToolParams.model_validate(
         {"op": "channel_post", "body": "ok", "channel_id": CONVERSATION_ID, "new_post": True}
     ).new_post
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    [
+        "valid",
+        "missing",
+        "malformed",
+        "unknown",
+        "timeout",
+        "5xx",
+        "old404",
+        "old405",
+        "401",
+        "403",
+        "deleted404",
+        "revoked404",
+        "join404",
+        "id",
+        "hash",
+        "body",
+        "owner",
+        "source",
+    ],
+)
+async def test_post_allow_exact_session_display_binding(tmp_path, monkeypatch, case):
+    """Optional display degrades; authority and exact-body failures never wake."""
+    from local_operator.team_bridge.types import ConversationFeedRef
+
+    owner = _owner("a", 1)
+    store = _enroll(tmp_path, owner, "sess_a")
+    access = SimpleNamespace(credential_id=1)
+    ref = ConversationFeedRef(
+        conversation_id=CONVERSATION_ID, message_id=MESSAGE_ID, conversation_seq=1, mention=True
+    )
+    digest = hashlib.sha256(BODY.encode()).hexdigest()
+    payload = {
+        "message_id": MESSAGE_ID,
+        "body": BODY,
+        "body_hash": digest,
+        "sender_kind": "agent",
+        "agent_session": {"display_label": "Task\n <quoted>", "routing": "ignored"},
+    }
+    calls = []
+
+    class Client:
+        _store = object()
+
+        async def conversation_body(self, cid, mid, **kwargs):
+            calls.append((cid, mid, kwargs))
+            kwargs["pre_http_guard"]()
+            if case == "owner":
+                store.invalidate(owner)
+            if case == "source":
+                self._store = object()
+            if case == "timeout":
+                raise TimeoutError()
+            if case in (
+                "5xx",
+                "old404",
+                "old405",
+                "401",
+                "403",
+                "deleted404",
+                "revoked404",
+                "join404",
+            ):
+                status, code = {
+                    "5xx": (503, "unavailable"),
+                    "old404": (404, "not_found"),
+                    "old405": (405, "method_not_allowed"),
+                    "401": (401, "unauthorized"),
+                    "403": (403, "forbidden"),
+                    "deleted404": (404, "message_not_found"),
+                    "revoked404": (404, "conversation_not_found"),
+                    "join404": (404, "message_not_found"),
+                }[case]
+                raise conversation_mod.BridgeRefusal(
+                    code,
+                    "fixture",
+                    http_status=status,
+                    server_code_present=case not in ("old404", "old405"),
+                )
+            if case == "id":
+                payload["message_id"] = "bcmsg_other001"
+            if case == "hash":
+                payload["body_hash"] = "0" * 64
+            if case == "body":
+                payload["body"] += "changed"
+            if case == "missing":
+                payload.pop("agent_session")
+            if case == "malformed":
+                payload["agent_session"] = {"display_label": True}
+            if case == "unknown":
+                payload["agent_session"] = {"unknown": "name"}
+            return payload
+
+    client = Client()
+    denied = case in (
+        "401",
+        "403",
+        "deleted404",
+        "revoked404",
+        "join404",
+        "id",
+        "hash",
+        "body",
+        "owner",
+        "source",
+    )
+    if denied:
+        with pytest.raises(StoreRefused):
+            await conversation_mod._post_allow_session_display(
+                client, owner, access, ref, digest, store=store, settings=None
+            )
+    else:
+        result = await conversation_mod._post_allow_session_display(
+            client, owner, access, ref, digest, store=store, settings=None
+        )
+        assert result == ("Task <quoted>" if case == "valid" else None)
+    assert len(calls) == 1
+    assert calls[0][:2] == (CONVERSATION_ID, MESSAGE_ID)
+    assert calls[0][2]["access"] is access
+    assert calls[0][2]["expected_account_id"] == owner.account_id
+
+
+def test_first_agent_card_uses_only_post_allow_display_and_keeps_body(tmp_path, monkeypatch):
+    owner = _owner("a", 1)
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    _enroll(config_dir, owner, "sess_a")
+    server = FakeServer(
+        notify={"bep_a": "all"},
+        active={"bep_a": True},
+        mentioned={"bep_a"},
+        sender={"account_id": "acc_peer", "kind": "agent", "display_label": "Endpoint (Owner)"},
+    )
+    transcripts, _ = _wire_rig(monkeypatch, server, {"a": (owner, config_dir)})
+    calls = []
+    original = FakeWire.conversation_body
+
+    async def body(self, cid, mid, **kwargs):
+        calls.append((cid, mid, bool(server.admits)))
+        result = await original(self, cid, mid, **kwargs)
+        result["agent_session"] = {
+            "display_label": "Authorized task" if server.admits else "PREALLOW_CANARY"
+        }
+        return result
+
+    monkeypatch.setattr(FakeWire, "conversation_body", body)
+    original_screen = conversation_mod.screen_item
+
+    async def screen(*args, **kwargs):
+        assert "PREALLOW_CANARY" not in repr((args, kwargs))
+        return await original_screen(*args, **kwargs)
+
+    monkeypatch.setattr(conversation_mod, "screen_item", screen)
+    original_allocation = conversation_mod._allocation_sender
+    original_metadata = conversation_mod._card_metadata
+
+    def allocation(display):
+        assert "agent_session" not in display and "PREALLOW_CANARY" not in repr(display)
+        return original_allocation(display)
+
+    def metadata(owner, ref, display):
+        assert "agent_session" not in display and "PREALLOW_CANARY" not in repr(display)
+        return original_metadata(owner, ref, display)
+
+    monkeypatch.setattr(conversation_mod, "_allocation_sender", allocation)
+    monkeypatch.setattr(conversation_mod, "_card_metadata", metadata)
+    out = _run(owner, config_dir)
+    assert out["handled"][0]["action"] == "delivered"
+    assert calls == [(CONVERSATION_ID, MESSAGE_ID, False), (CONVERSATION_ID, MESSAGE_ID, True)]
+    row = transcripts["sess_a"][0]
+    assert "Authorized task" in row["payload"] and "Endpoint (Owner)" in row["payload"]
+    assert "PREALLOW_CANARY" not in row["payload"]
+    assert row["sender_display"]["bridge_receipt"]["sender"]["agent_session"] == {
+        "display_label": "Authorized task"
+    }
+    assert server.body == BODY
+    for reservation in _reservation_rows(config_dir):
+        assert "Authorized task" not in str(reservation)
+    # Reservation rows include the immutable handoff JSON; display never enters it.
+    assert all("Authorized task" not in str(row) for row in _reservation_rows(config_dir))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status,error",
+    [
+        (404, {"error": "Not Found"}),
+        (405, {"error": "Method Not Allowed"}),
+        (404, {"error": "missing", "code": "message_not_found"}),
+        (404, {"error": "missing", "code": "bridge_error"}),
+        (404, {"error": "missing", "code": None}),
+        (403, {"error": "denied", "code": "agent_not_permitted"}),
+    ],
+)
+async def test_post_allow_route_absence_uses_wire_code_presence(
+    tmp_path, monkeypatch, status, error
+):
+    import httpx
+
+    from local_operator.team_bridge.client import TeamBridgeClient
+    from tests.unit.team_bridge.test_client import FakeRow, FakeStore
+
+    monkeypatch.setattr(
+        "local_operator.team_bridge.client.org_oauth_destination_allowed", lambda _: True
+    )
+    owner = _owner("a", 1)
+    store = _enroll(tmp_path, owner, "sess_a")
+    client = TeamBridgeClient(
+        base_url=owner.canonical_base_url,
+        credential_id=1,
+        store=FakeStore(
+            rows=[FakeRow(1, data={"access": "fixture", "account_id": owner.account_id})]
+        ),
+        transport=httpx.MockTransport(lambda req: httpx.Response(status, json=error)),
+    )
+    access = await client.current_access()
+    ref = conversation_mod.ConversationFeedRef(
+        conversation_id=CONVERSATION_ID, message_id=MESSAGE_ID, conversation_seq=1, mention=True
+    )
+
+    async def fetch():
+        return await conversation_mod._post_allow_session_display(
+            client,
+            owner,
+            access,
+            ref,
+            hashlib.sha256(BODY.encode()).hexdigest(),
+            store=store,
+            settings=None,
+        )
+
+    if "code" in error:
+        with pytest.raises(StoreRefused):
+            await fetch()
+    else:
+        assert await fetch() is None

@@ -921,6 +921,7 @@ class BridgeRefusal(Exception):
         http_status: int | None = None,
         details: Mapping[str, Any] | None = None,
         retry_after_seconds: int | None = None,
+        server_code_present: bool | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -928,6 +929,9 @@ class BridgeRefusal(Exception):
         self.http_status = http_status
         self.details: dict[str, Any] = dict(details or {})
         self.retry_after_seconds = retry_after_seconds
+        # Preserve parser provenance: an uncoded old-route 404 is not a typed
+        # missing-message/join-floor refusal, even if both normalize to a fallback code.
+        self.server_code_present = server_code_present
 
     @property
     def advice(self) -> str | None:
@@ -1961,6 +1965,7 @@ def _refusal(response: httpx.Response) -> BridgeRefusal:
         http_status=status,
         details=details,
         retry_after_seconds=retry_after,
+        server_code_present=("code" in body) if body is not None else None,
     )
 
 
@@ -4497,6 +4502,7 @@ class TeamBridgeClient:
         agent_label: str | None = None,
         actor_endpoint_id: str | None = None,
         origin_session_id: str | None = None,
+        agent_session: Mapping[str, str] | None = None,
         thread_root_id: str | None = None,
         attachment_ids: Sequence[str] | None = None,
         mentions: Sequence[Mapping[str, Any]] | None = None,
@@ -4554,6 +4560,13 @@ class TeamBridgeClient:
             body["actor_endpoint_id"] = actor_endpoint_id
         if origin_session_id:
             body["origin_session_id"] = origin_session_id
+        # Negotiated once by the host sender; retry must retain this envelope.
+        if agent_session is not None:
+            if set(agent_session) != {"display_label"} or not isinstance(
+                agent_session.get("display_label"), str
+            ):
+                raise ValueError("invalid agent session display")
+            body["agent_session"] = dict(agent_session)
         if thread_root_id:
             body["thread_root_id"] = thread_root_id
         if mentions:
@@ -4935,6 +4948,8 @@ class TeamBridgeClient:
         tenant_id: str | None = None,
         endpoint_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
+        pre_http_guard: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """The classification fetch for an agent member: body + binding hash."""
 
@@ -4948,6 +4963,8 @@ class TeamBridgeClient:
             f"/messaging/conversations/{conversation_id}/messages/{message_id}/body",
             params=params or None,
             access=access,
+            expected_account_id=expected_account_id,
+            pre_http_guard=pre_http_guard,
         )
 
     async def conversation_admit(

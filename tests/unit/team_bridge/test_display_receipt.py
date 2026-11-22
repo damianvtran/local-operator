@@ -295,3 +295,21 @@ async def test_unadmitted_coalesced_card_has_counts_and_ordered_sources_but_no_i
     assert "admission" not in receipt["bridge_receipt"]
     assert "body" not in receipt["bridge_receipt"]
     assert "images" not in receipt["bridge_receipt"]
+
+
+def test_session_display_receipt_closed_roundtrip_and_projection():
+    from local_operator.team_bridge.display_receipt import projected_display_receipt
+
+    value = carriage()
+    value["bridge_receipt"]["sender"] = {
+        "kind": "agent",
+        "name": "Endpoint (Owner)",
+        "agent_session": {"display_label": "Task"},
+    }
+    checked = validated_display_receipt(value, owner=owner())
+    assert checked == value
+    assert projected_display_receipt(checked) == checked
+    value["bridge_receipt"]["sender"]["agent_session"]["display_label"] = "mutated"
+    assert checked["bridge_receipt"]["sender"]["agent_session"]["display_label"] == "Task"
+    checked["bridge_receipt"]["sender"]["agent_session"]["authority"] = "spoof"
+    assert validated_display_receipt(checked, owner=owner()) == {}

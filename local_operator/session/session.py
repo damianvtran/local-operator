@@ -4675,6 +4675,10 @@ class Session:
         #: wiring (the tool-context parity guard does exactly that), matching
         #: the three registries above.
         self.bridge_runtime = bridge_runtime
+        # The runtime survives profile switches. Track the resolved host
+        # identity here, then freeze it in each dispatch context; never derive
+        # authorship from a transcript title, endpoint name or mutable client.
+        self._bridge_session_agent_display = getattr(bridge_runtime, "session_agent_display", None)
         #: The team this session is running as manager of, when ``/team``
         #: launched it. Held here so every ``task`` child inherits the group's
         #: collaboration and project briefs without the manager restating them.
@@ -9150,6 +9154,7 @@ class Session:
         """
         self._goal_state.agent_brief = ""
         self._goal_state.agent_name = self._team_manager_name()
+        self._bridge_session_agent_display = self._goal_state.agent_name or None
         self._attached_profile_tools = ()
         # The team's manager supersedes any carried unresolved agent name (R1),
         # exactly as a successful ``/agent`` attach does.
@@ -9166,6 +9171,7 @@ class Session:
         """
         self._goal_state.agent_brief = ""
         self._goal_state.agent_name = ""
+        self._bridge_session_agent_display = None
         self._attached_profile_tools = ()
         self._clear_unresolved("agent")
 
@@ -9960,6 +9966,7 @@ class Session:
         # contradicting each other. Both fields are stamped together in
         # ``_stamp_agent_brief``; they must be cleared together too.
         self._goal_state.agent_name = ""
+        self._bridge_session_agent_display = None
         # An explicit detach also retires a carried unresolved name (R1), or
         # ``/agent clear`` would appear to work and the profile would come back
         # at the next resume.
@@ -9984,6 +9991,7 @@ class Session:
         # case): the profile IS attached and the band must name it, so the
         # segment tracks "which profile is in force", not "did it layer text".
         self._goal_state.agent_name = display_name
+        self._bridge_session_agent_display = display_name or None
         # A successful attach supersedes any carried unresolved name (R1).
         self._clear_unresolved("agent")
         # The single funnel every successful ``/agent`` attach passes through
@@ -25488,6 +25496,7 @@ class Session:
             # itself — one value, both roles, so the check and the executor
             # cannot see different answers. ``None`` keeps the tool absent.
             bridge_runtime=self.bridge_runtime,
+            bridge_session_agent_display=getattr(self, "_bridge_session_agent_display", None),
             delegated_tools={
                 tool.name: tool for tool in self._tools if tool.name.startswith("mcp__")
             },
