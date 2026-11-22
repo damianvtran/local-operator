@@ -1427,8 +1427,6 @@ def events(session: Any) -> SessionEventStream:
 # Verbose tracing — opt-in single-line diagnostics for SDK callers
 # ---------------------------------------------------------------------------
 
-#: Default logger for SDK verbose trace lines (``logging.getLogger(__name__)``).
-_TRACE_LOGGER_NAME = "local_operator.sdk"
 #: Short call-id prefix length so logs stay compact while preserving uniqueness
 #: past common ``call_`` / ``toolu_`` prefixes.
 _TRACE_CALL_ID_LEN = 12
@@ -1710,7 +1708,7 @@ def trace_events(
     target_logger = (
         logger
         if logger is not None
-        else (logging.getLogger(_TRACE_LOGGER_NAME) if stream is None else None)
+        else (logging.getLogger(__name__) if stream is None else None)
     )
 
     def _on_event(event: Any) -> None:
