@@ -1,37 +1,25 @@
-"""End-to-end: the ask gate over a REAL session, queue, transcript and provider.
+"""End-to-end: queued ask admission over a real session, queue and transcript.
 
-Why this file exists
---------------------
-
-The unit matrix pins the gate's parts; these cells pin the ASSEMBLED path the
-operator named in the brief — "a forked, hidden check runs before the ask
-reaches them" — with the real ``ask`` tool, the real queued engine, a real
-transcript and a scripted provider answering the fork. Each cell drives one of
-the three verdicts and reads the OBSERVABLE each one must leave (or not leave):
-
-* **clear** — nothing queues, nothing reaches ``asks.jsonl``, and the model's
-  next request carries the decision-point note (the transcript keeps it).
-* **raise** — the ask reaches the queue untouched, exactly one row, and the
-  model's next request carries today's receipt.
-* **kill switch** — ``LOP_ASK_GATE`` off: the fork is NEVER called (asserted on
-  the provider-call count, not on an absence of text) and the ask queues.
-* **honor rule** — a re-raise of the same content reaches the queue WITHOUT a
-  second fork (again on the call count).
-
-The stream is scripted (one canned turn per model call, the fork included —
-it is a real provider call through the session's own stream fn) for the reason
-``test_ask_queue_e2e`` gives: the failure signal is "the fork never ran / ran
-twice", and live latency would only make that signal slower to read.
+The provider is scripted, but each call enters through ``Session.prompt`` and
+uses the production tool, queue, and transcript paths. A legacy clearance
+request would still receive a valid ``clear`` verdict, so the first-call test
+can distinguish a diverted receipt from a visible queued receipt.
 """
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from local_operator.asks import policy, store
+from local_operator.harness.rows import is_ask_gate_divert_row
+from local_operator.harness.types import AbortSignal, ChatRequest, StreamEvent
+from local_operator.session.frontend_state import FrontendUpdate
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.session import Session
 from tests.e2e.harness import (
     ScriptedStream,
@@ -71,7 +59,7 @@ def _session(config_dir: Path, name: str, stream: ScriptedStream) -> Session:
 
 async def _hook_never_awaited(questions: list[Any]) -> dict[str, list[str]] | None:
     """The queued arm's host hook: present (it is the mode's second condition),
-    but the gate and the queue mean it must never be awaited."""
+    but the queue owns admission and must not await the blocking hook."""
     return None
 
 
@@ -79,63 +67,101 @@ def _tool_texts(request: Any) -> list[str]:
     return [m.text for m in request.messages if getattr(m, "role", "") == "tool"]
 
 
-# ---------------------------------------------------------------------------
-# clear — nothing reaches the user, the note reaches the model
-# ---------------------------------------------------------------------------
+def _ask_turn(call_id: str) -> list[StreamEvent]:
+    return tool_call_turn(
+        text="Asking.", tool_name="ask", tool_call_id=call_id, arguments=_ask_args()
+    )
+
+
+class _AdmissionStream(ScriptedStream):
+    def __init__(self, turns: list[list[StreamEvent]]) -> None:
+        super().__init__(turns)
+        self.clearance = ScriptedStream([text_turn(VERDICT_CLEAR)])
+
+    def __call__(
+        self, request: ChatRequest, signal: AbortSignal | None = None
+    ) -> AsyncIterator[StreamEvent]:
+        # A regressed fork should hide the ask, not exhaust the ordinary tape.
+        if request.purpose == "clearance":
+            return self.clearance(request, signal)
+        return super().__call__(request, signal)
+
+
+def _tool_result(session: Session, call_id: str) -> dict[str, Any]:
+    results = [
+        entry.payload
+        for entry in session.transcript.entries()
+        if entry.payload.get("role") == "tool" and entry.payload.get("tool_call_id") == call_id
+    ]
+    assert len(results) == 1, "each ask call must leave exactly one tool result"
+    return results[0]
 
 
 @pytest.mark.asyncio
-async def test_a_clear_verdict_diverts_with_no_queue_row_and_the_note_reaches_the_model(
+async def test_first_ask_queues_unchanged_with_a_visible_transcript_receipt(
     headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
-    stream = ScriptedStream(
-        [
-            # 1: the model asks.
-            tool_call_turn(
-                text="Asking.",
-                tool_name="ask",
-                tool_call_id="ask-1",
-                arguments=_ask_args(),
-            ),
-            # 2: the fork's OWN request, answered by the scripted provider.
-            text_turn(VERDICT_CLEAR),
-            # 3: the model, having read the note, carries on.
-            text_turn("Proceeding with Ship it."),
-        ]
+    monkeypatch.setattr(policy, "ASK_GATE", True)
+    stream = _AdmissionStream([_ask_turn("ask-1"), text_turn("Waiting on the operator.")])
+    session = _session(headless_tui_env, "first-ask", stream)
+    handle = ServingSessionHandle(
+        session, asyncio.get_running_loop(), cwd=str(headless_tui_env), install_ask_surface=True
     )
-    session = _session(headless_tui_env, "gate-clear", stream)
-    session.set_ask_handler(_hook_never_awaited)
+    desktop_updates: list[FrontendUpdate] = []
+    phone_asks: list[str] = []
+    desktop_sub = await handle.subscribe_frontend(desktop_updates.append)
+    unsub_phone = handle.subscribe(
+        lambda: phone_asks.extend(row.ask_id for row in handle.session_projection_seed.asks or [])
+    )
     try:
-        with bounded(BOUND_S, "clear verdict diverts"):
+        with bounded(BOUND_S, "first ask queues without diversion"):
             await session.prompt("deploy it")
 
-        directory = session.transcript.directory
-        # NOTHING queued: no log, no open record, no events.
-        assert not store.asks_log_path(directory).exists()
-        assert store.ask_ids(store.read_events(directory)) == []
-        assert session.ask_queue().open_records() == []
-
-        # The residual call/result pair IS in the transcript, marker included —
-        # that is what lets the human surfaces filter it owner-side.
-        entries = session.transcript.entries()
-        results = [
-            entry
-            for entry in entries
-            if entry.payload.get("role") == "tool" and entry.payload.get("tool_call_id") == "ask-1"
+        result = _tool_result(session, "ask-1")
+        # Replay hides both the call and its result from this stored marker.
+        # Check it before queue/provider counts: on base the call was hidden.
+        assert not is_ask_gate_divert_row({"type": "message", "payload": result}), result
+        calls = [
+            call
+            for entry in session.transcript.entries()
+            for call in entry.payload.get("tool_calls", [])
+            if call["id"] == "ask-1"
         ]
-        assert len(results) == 1, "exactly one result row for the diverted call"
-        details = (results[0].payload.get("provider_payload") or {}).get("details") or {}
-        assert details.get("ask_gate", {}).get("hidden") is True
+        assert len(calls) == 1
+        assert calls[0]["name"] == "ask"
+        assert calls[0]["arguments"] == _ask_args()
 
-        # The MODEL saw the note: the next request carries it as the tool result.
-        # (Request #2 was the fork itself — purpose "clearance" — recorded by the
-        # session's own stream fn, which is what keeps the cache lineage.)
-        assert [r.purpose for r in stream.requests][1] == "clearance"
-        texts = _tool_texts(stream.requests[-1])
-        assert any("[Ask clearance]" in text for text in texts), texts
+        (card,) = session.ask_queue().open_records()
+        assert card["tool_call_id"] == "ask-1"
+        (question,) = card["questions"]
+        for key, value in _ask_args()["questions"][0].items():
+            assert question[key] == value
+        events = store.read_events(session.transcript.directory)
+        assert [(event["kind"], event["ask_id"]) for event in events] == [
+            (store.EVENT_QUEUED, card["ask_id"])
+        ]
+
+        assert not result.get("is_error")
+        details = result["provider_payload"]["details"]
+        assert details["ask_id"] == card["ask_id"]
+        assert details["status"] == "queued"
+        assert "answers" not in details and "ask_gate" not in details
+        assert any(
+            row["ask_id"] == card["ask_id"] and row["status"] == store.STATUS_OPEN
+            for update in desktop_updates
+            for row in update.changes.get("asks") or []
+        )
+        assert card["ask_id"] in phone_asks
+        assert stream.clearance.requests == []
+        assert len(stream.requests) == 2
+        (receipt,) = _tool_texts(stream.requests[-1])
+        assert card["ask_id"] in receipt and "queued" in receipt.lower()
+        assert all(fragment not in receipt for fragment in ("[Ask clearance]", "Ship it", "Wait"))
         assert stream.exhausted_at is None
     finally:
+        desktop_sub.unsubscribe()
+        unsub_phone()
         await dispose_quietly(session)
 
 
@@ -220,49 +246,48 @@ async def test_gate_off_never_calls_the_fork_and_the_ask_still_queues(
         await dispose_quietly(session)
 
 
-# ---------------------------------------------------------------------------
-# the honor rule — a re-raise of the same content skips the fork
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
-async def test_a_reraise_of_the_same_content_reaches_the_queue_without_a_second_fork(
+async def test_identical_reask_is_refused_while_the_first_card_is_open(
     headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
-    stream = ScriptedStream(
+    monkeypatch.setattr(policy, "ASK_GATE", True)
+    stream = _AdmissionStream(
         [
-            # 1: the model asks; 2: the fork answers clear; 3: the model asks
-            # AGAIN with the same content (allowed — the note licenses it);
-            # 4: the final answer. NO turn 5: a second fork would consume the
-            # script's tail and the request count assertion below would fail.
-            tool_call_turn(
-                text="Asking.",
-                tool_name="ask",
-                tool_call_id="ask-1",
-                arguments=_ask_args(),
-            ),
-            text_turn(VERDICT_CLEAR),
-            tool_call_turn(
-                text="Actually, this one is theirs.",
-                tool_name="ask",
-                tool_call_id="ask-2",
-                arguments=_ask_args(),
-            ),
-            text_turn("Waiting."),
+            _ask_turn("ask-1"),
+            text_turn("Waiting on the operator."),
+            _ask_turn("ask-2"),
+            text_turn("Still waiting."),
         ]
     )
-    session = _session(headless_tui_env, "gate-reraise", stream)
+    session = _session(headless_tui_env, "reask", stream)
     session.set_ask_handler(_hook_never_awaited)
     try:
-        with bounded(BOUND_S, "re-raise skips the fork"):
+        with bounded(BOUND_S, "admit the first ask"):
             await session.prompt("deploy it")
 
-        ask_ids = store.ask_ids(store.read_events(session.transcript.directory))
-        assert len(ask_ids) == 1, "the re-raise is the one that queued"
-        # Four provider calls: ask, fork, re-raise-ask, final. Five would mean
-        # a second fork fired for identical content.
-        assert len(stream.requests) == 4, [r.purpose for r in stream.requests]
+        first = _tool_result(session, "ask-1")
+        assert not is_ask_gate_divert_row({"type": "message", "payload": first}), first
+        (card,) = session.ask_queue().open_records()
+        assert card["tool_call_id"] == "ask-1"
+        directory = session.transcript.directory
+        before = store.read_events(directory)
+        assert [event["kind"] for event in before] == [store.EVENT_QUEUED]
+
+        # The first prompt has returned and the real card is still open, so
+        # the second prompt must refuse the duplicate, not admit it in its place.
+        assert len(stream.requests) == 2
+        with bounded(BOUND_S, "refuse the identical re-ask"):
+            await session.prompt("check the deployment decision again")
+
+        assert _tool_result(session, "ask-2")["is_error"] is True
+        texts = _tool_texts(stream.requests[-1])
+        refusal = "an open ask already carries that question text"
+        assert any(refusal in text for text in texts), texts
+        assert session.ask_queue().open_records() == [card]
+        assert store.read_events(directory) == before
+        assert len(stream.requests) == 4
+        assert stream.clearance.requests == []
         assert stream.exhausted_at is None
     finally:
         await dispose_quietly(session)
