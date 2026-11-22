@@ -496,7 +496,8 @@ MEASURED_TOKENS: dict[str, int] = {
     # 1996 -> 1990 (same PR, CI context-budget fix): the wire description drops
     # "teammates use bridge" (restated by the ONE-channel sentence) and the
     # ``to`` hint's "or substring" (implied by WHOLE), paying for the emoji hint.
-    "bridge": 1990,
+    # File-read admission guidance, paid for by deduplicating existing prose.
+    "bridge": 1992,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
@@ -1269,6 +1270,31 @@ def test_the_bridge_doc_explains_the_withheld_body_fields(
 
     for field in ("delay", "transient", "receiver_last_active_s"):
         assert field in doc, f"the bridge doc does not explain {field}"
+
+
+def test_the_bridge_doc_distinguishes_file_serving_from_read_admission(
+    default_surface: list[AgentTool],
+) -> None:
+    """Pin the served reference, not module comments or the every-turn wire cap."""
+
+    tool = next(tool for tool in default_surface if tool.name == "bridge")
+    resolver = make_tool_doc_resolver(lambda: default_surface)
+    doc = resolver("tool://bridge")
+    assert doc == render_tool_doc(tool)
+    assert doc is not None
+    for fact in (
+        "`download_only` is serving policy",
+        "`agent_read: true`",
+        "message's `files_hash`",
+        "`purpose=context`",
+        "No public download op is needed",
+        "BODY admission is separate",
+        "existing `body_state`",
+        "No URL, human credentials or human-only access-path bypass",
+        "not sender, incident or extension exemptions",
+    ):
+        assert fact in doc
+        assert fact not in tool.description, "guidance must not enlarge the every-turn wire"
 
 
 def test_the_tier_configured_arm_is_pinned_too(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
