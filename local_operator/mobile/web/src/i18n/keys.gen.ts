@@ -556,6 +556,8 @@ export type MessageParams = {
   "relay.transcript.fold.python": { "count": number };
   "relay.transcript.fold.shell": { "count": number };
   "relay.transcript.fold.unit": { "kind": string; "count": number; "name": string };
+  "relay.transcript.jump.latest": undefined;
+  "relay.transcript.jump.latest_short": undefined;
   "relay.transcript.label.ask": undefined;
   "relay.transcript.label.job": undefined;
   "relay.transcript.label.messages": undefined;

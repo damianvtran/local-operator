@@ -54,3 +54,44 @@ export function followScrollTop(input: {
 	if (input.reserveEdge && input.scrollTop <= 0) return null;
 	return Math.max(0, Math.min(input.scrollTop + input.domDelta, input.max));
 }
+
+/**
+ * WHETHER THE "JUMP TO LATEST" CHIP IS OFFERED.
+ *
+ * The follow rules above are all about NOT moving a reader who left the tail,
+ * so the way back has to be a control they press. It is offered exactly when
+ * they are away from the tail AND something arrived after they left it:
+ * `growth` is the transcript's own content key (rows, the tail row's id, its
+ * streamed length, whether it settled, the pending-echo ids) and `seen` is the
+ * value it had when they were last at the tail.
+ *
+ * WHY THE KEY AND NOT A COUNT. The projection re-sends a fresh `entries`
+ * array on every SSE repaint, so a row count or array identity would offer the
+ * chip on a repaint that changed nothing; the key moves only on content. And
+ * older history is not in it at all — a page of earlier rows lands in `older`,
+ * not the live projection — so a reader paging back is never told the tail
+ * moved when it did not.
+ */
+export function jumpOffered(input: {
+	/** Whether the reader is at the tail (the scroller's own <48px rule). */
+	pinned: boolean;
+	/** The transcript's content key now. */
+	growth: string;
+	/** The content key the reader last left the tail at. */
+	seen: string;
+}): boolean {
+	return !input.pinned && input.growth !== input.seen;
+}
+
+/** The command ids a list of pending echoes GAINED — a send from this device.
+ *
+ * Sending is a request to see the message, so it is the one change that may
+ * move a reader who had scrolled up. Reconciliation only ever REMOVES ids (the
+ * real row takes the message over), so a removal is not a send; and the
+ * comparison is a set because a resolve can land in the same frame as the next
+ * send — a prefix test would then miss the new command. */
+export function newCommandIds(previous: ReadonlySet<string>, next: Iterable<string>): string[] {
+	const added: string[] = [];
+	for (const id of next) if (!previous.has(id)) added.push(id);
+	return added;
+}

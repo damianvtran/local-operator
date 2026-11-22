@@ -38,5 +38,7 @@
   "relay.transcript.bridge.not_member": "Вы больше не участвуете в этом разговоре",
   "relay.transcript.bridge.offline": "Нет связи с Radient — откройте разговор заново, чтобы повторить попытку",
   "relay.transcript.bridge.deleted": "Это сообщение удалено",
-  "relay.transcript.bridge.more_messages": "{count, plural, one {Ещё # сообщение в этой карточке} few {Ещё # сообщения в этой карточке} many {Ещё # сообщений в этой карточке} other {Ещё # сообщения в этой карточке}}"
+  "relay.transcript.bridge.more_messages": "{count, plural, one {Ещё # сообщение в этой карточке} few {Ещё # сообщения в этой карточке} many {Ещё # сообщений в этой карточке} other {Ещё # сообщения в этой карточке}}",
+  "relay.transcript.jump.latest": "Перейти к последнему",
+  "relay.transcript.jump.latest_short": "Последнее"
 }

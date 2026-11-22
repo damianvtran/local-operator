@@ -38,5 +38,7 @@
   "relay.transcript.bridge.not_member": "你已不在此对话中",
   "relay.transcript.bridge.offline": "无法连接Radient——重新打开对话以重试",
   "relay.transcript.bridge.deleted": "此消息已被删除",
-  "relay.transcript.bridge.more_messages": "{count, plural, other {此卡片中还有#条消息}}"
+  "relay.transcript.bridge.more_messages": "{count, plural, other {此卡片中还有#条消息}}",
+  "relay.transcript.jump.latest": "跳到最新消息",
+  "relay.transcript.jump.latest_short": "最新"
 }

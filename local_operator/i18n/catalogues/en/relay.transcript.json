@@ -38,5 +38,7 @@
   "relay.transcript.bridge.not_member": "You are no longer in this conversation",
   "relay.transcript.bridge.offline": "Couldn't reach Radient — reopen the conversation to retry",
   "relay.transcript.bridge.deleted": "This message was deleted",
-  "relay.transcript.bridge.more_messages": "{count, plural, one {# more message in this card} other {# more messages in this card}}"
+  "relay.transcript.bridge.more_messages": "{count, plural, one {# more message in this card} other {# more messages in this card}}",
+  "relay.transcript.jump.latest": "Jump to latest",
+  "relay.transcript.jump.latest_short": "Latest"
 }

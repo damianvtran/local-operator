@@ -93,6 +93,14 @@ def fold_unit(*, kind: str, count: int | float, name: str) -> Msg:
     return Msg("relay.transcript.fold.unit", {"kind": kind, "count": count, "name": name})
 
 
+def jump_latest() -> Msg:
+    return Msg("relay.transcript.jump.latest", {})
+
+
+def jump_latest_short() -> Msg:
+    return Msg("relay.transcript.jump.latest_short", {})
+
+
 def label_ask() -> Msg:
     return Msg("relay.transcript.label.ask", {})
 

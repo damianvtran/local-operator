@@ -18,10 +18,11 @@ import { ImageGenCard } from "./image-gen-card";
 import { SupplementBlock } from "./supplement-block";
 import { ToolRow } from "./tool-row"
 import { RowBoundary } from "./row-boundary";
+import { JumpToLatest } from "./jump-to-latest";
 import { Disclosure } from "./ui/disclosure";
 import { CONTENT_RESIZED_EVENT } from "../lib/content-resized";
 import { MESSAGE_PRESSED_EVENT } from "../lib/message-fold";
-import { followScrollTop } from "../lib/scroll-follow";
+import { followScrollTop, jumpOffered, newCommandIds } from "../lib/scroll-follow";
 import { getHistory, getSubagentHistory } from "../api";
 import { messageRuntime } from "../store";
 import { cn } from "../lib/cn";
@@ -720,6 +721,23 @@ export function Transcript({
 	   for the real one, one entry longer) is a change here too. */
 	const pendingKey = pending.map((echo) => echo.commandId).join(",");
 	const growthSignal = `${entries.length}:${tail?.id ?? ""}:${tail?.text?.length ?? 0}:${tail?.final ?? ""}:${pendingKey}`;
+	/* THE WAY BACK TO THE TAIL, and the two states it is decided from. `seen` is
+	   the content key at the reader's last pinned frame: the chip is offered when
+	   `growthSignal` moves away from it while they are NOT pinned (`jumpOffered`,
+	   `lib/scroll-follow`). `pendingIds` compares this device's own in-flight
+	   sends by identity, so a message THE READER SENT can snap them back to the
+	   tail without treating a streamed reply the same way. */
+	const [jumpChip, setJumpChip] = useState(false);
+	const pinnedGrowthRef = useRef(growthSignal);
+	const pendingIdsRef = useRef(new Set(pending.map((echo) => echo.commandId)));
+	/* A different conversation keeps nothing from the last one: its saved
+	   `scrollTop` is restored below, which makes its tail position a fresh fact. */
+	useEffect(() => {
+		pinnedRef.current = true;
+		pinnedGrowthRef.current = growthSignal;
+		setJumpChip(false);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [scrollKey]);
 
 	/* One ordered held list, upserted by the live/replay-stable row key. Rows
 	   falling out of the daemon's sliding projection stay held: deleting them
@@ -891,14 +909,40 @@ export function Transcript({
 		</RowBoundary>
 	);
 
-	/* Follow the tail on new content, but only when already at the bottom. */
+	/* Follow the tail on new content, but only when already at the bottom. An
+	   unpinned reader is offered the chip instead, and only once content has
+	   actually moved since they left (`jumpOffered`). */
 	useEffect(() => {
 		const el = scrollRef.current;
-		if (el && pinnedRef.current) {
-			el.scrollTop = el.scrollHeight;
+		if (pinnedRef.current) {
+			if (el) el.scrollTop = el.scrollHeight;
+			pinnedGrowthRef.current = growthSignal;
+			setJumpChip(false);
+			return;
 		}
+		setJumpChip(jumpOffered({ pinned: false, growth: growthSignal, seen: pinnedGrowthRef.current }));
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [growthSignal]);
+
+	/* SENDING IS ASKING TO SEE WHAT YOU SENT. `pending` carries this device's
+	   own echoes, so an id it is only now showing is a send from here — the one
+	   content change allowed to move a reader who had scrolled up (design
+	   request, shared across the three surfaces). It runs as a LAYOUT effect so
+	   the snap happens in the same commit that painted the new row: as a passive
+	   effect the follow effect above would run first, offer the chip and paint a
+	   frame with the sent message below the fold. */
+	useLayoutEffect(() => {
+		const previous = pendingIdsRef.current;
+		const next = new Set(pending.map((echo) => echo.commandId));
+		pendingIdsRef.current = next;
+		if (newCommandIds(previous, next).length === 0) return;
+		pinnedRef.current = true;
+		pinnedGrowthRef.current = growthSignal;
+		setJumpChip(false);
+		const el = scrollRef.current;
+		if (el) el.scrollTop = el.scrollHeight;
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [pendingKey]);
 
 	/* Follow the tail when the SCROLLER ITSELF is resized, not just when content
 	   arrives. The effect above triggers on new content, and a container that
@@ -1097,6 +1141,13 @@ export function Transcript({
 		if (!el) return;
 		pinnedRef.current =
 			el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+		/* Back at the tail by ANY means — a flick, a drag, the chip's own jump,
+		   the keyboard re-pinning — so the way back is no longer needed, and the
+		   content key to measure new arrivals against is the one they are seeing. */
+		if (pinnedRef.current) {
+			pinnedGrowthRef.current = growthSignal;
+			setJumpChip(false);
+		}
 		sessionStorage.setItem(`lo-mobile-scroll:${scrollKey}`, String(el.scrollTop));
 		/* Near the top: reveal what is already held, then fetch what is not.
 		   ONE mechanism at a time, in that order, and no button.
@@ -1226,92 +1277,112 @@ export function Transcript({
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [topInset, older, windowSize, entries, pending, hasMore, loadingOlder, visibleItems, openRuns, contentResized]);
 
-	return (
-		<div
-			ref={node => { scrollRef.current = node; return scrollCue(node); }}
-			onScroll={onScroll}
-			/* THE TRANSCRIPT KEEPS ITS OWN MOMENTUM (the "two scroll bars"
-			   report). `overscroll-behavior-y: contain` stops a drag that reaches
-			   either end of the conversation from chaining to the document, which
-			   is where a thumb on the composer or a flick at the top edge used to
-			   move the whole page instead. The window is locked at the stylesheet
-			   level too (`styles/index.css`, html/body); this is the half that
-			   belongs to the scroller, so a future shell that forgets the lock
-			   still cannot turn a conversation swipe into a page scroll.
+	/* The chip's jump: back to the tail, re-engaging the follow exactly as a
+	   flick to the bottom would — the scroller's own `onScroll` then keeps the
+	   pin state in agreement with where the view actually is. */
+	const jumpToLatest = () => {
+		const el = scrollRef.current;
+		pinnedRef.current = true;
+		pinnedGrowthRef.current = growthSignal;
+		setJumpChip(false);
+		if (!el) return;
+		el.scrollTop = el.scrollHeight;
+		sessionStorage.setItem(`lo-mobile-scroll:${scrollKey}`, String(el.scrollTop));
+	};
 
-			   Inline rather than a class for the reason `lib/column.ts` spells
-			   out: the vitest layer has no stylesheet, so only an inline style
-			   RESOLVES and a test can fail when the property is dropped. */
-			style={{ overscrollBehaviorY: "contain" }}
-			className={cn(
-				/* overflow-x-hidden as the backstop: break-words on the rows should
-				   wrap everything, but a table or pre that still overflows scrolls
-				   INSIDE itself, never the whole chat sideways. */
-				"lo-scroll lo-fade-y flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overflow-x-hidden px-3 py-2",
-				/* ONE HAND ON `scrollTop` (round 3; extended in round 4). The reserve,
-				   the live window's oldest-row removal at the cap, a prepended page and
-				   the window's own expansion are all "height above the reader" — and
-				   both the platform and the follow effect above want to answer for each,
-				   together moving a mid-history reader by a whole row per event. The
-				   opt-out leaves the follow effect as the only hand: it holds the
-				   reader's row structurally (see it above) instead of splitting the job
-				   with native anchoring, which is Chrome-only — Safari has none, so the
-				   manual path is the whole mechanism there. The session LIST keeps
-				   anchoring ON (`screens/session-list.tsx`, QA round 4, Q6): it has no
-				   manual path of its own and needs the platform for insertions from
-				   other clients — the two answers differ on purpose. */
-				"[overflow-anchor:none]",
-			)}
-		>
-			{/* THE OVERLAY'S HEIGHT, RESERVED (round 2, U23 = D7). First child on
-			    purpose: everything the reader can reach through this scroller —
-			    the load indicator, the "show N more" control, the rows — has to
-			    start below anything painted over the scroller's top edge. The
-			    height is the owner's measurement of the rung (see `topInset`); it
-			    is CONTENT and not padding, because `scrollHeight` has to carry it
-			    or the reserved space itself could not be scrolled past. */}
-			{topInset > 0 ? (
-				<div
-					aria-hidden
-					data-scroll-top-inset=""
-					className="shrink-0"
-					style={{ height: `${topInset}px` }}
-				/>
-			) : null}
-			{/* History loads automatically as the user scrolls up. The slot below is the
-			   only chrome, and it is ONE height in every state (see `HistorySlot`):
-			   the old 2px bar / 1px hairline pair moved the rows by a pixel per swap
-			   and the anchor hold's compensating write re-fired `scroll` into a fetch. */}
-			{slotState !== null ? <HistorySlot state={slotState} onActivate={onSlot} /> : null}
-			{detachedOpener ? <div data-detached-opener="true"><Entry entry={detachedOpener} pid={pid} /></div> : null}
-			{seamOpen ? <SeamLine /> : null}
-			{pagedItems.map((item) => {
-				if (item.kind === "quiet") {
-					return <RowBoundary key={item.key}>
-						<QuietGroupRow group={item.group} partial={headCut && item.group.rowIds[0] === (merged[0] ? rowKey(merged[0]) : undefined)}>
-							{item.group.rowIds.map((id) => {
-								const member = merged.find((entry) => rowKey(entry) === id);
-								return member ? transcriptRow(member) : null;
-							})}
-						</QuietGroupRow>
-					</RowBoundary>;
-				}
-				if (item.kind !== "row") {
+	return (
+		/* THE CHIP'S BOX. The scroller is the only child that scrolls; this
+		   wrapper adds no padding and no gap, so the transcript's geometry is
+		   exactly what it was, and the chip floats over the scroller's own
+		   bottom-right corner without ever entering its flow. */
+		<div className="relative flex min-h-0 flex-1 flex-col">
+			<div
+				ref={node => { scrollRef.current = node; return scrollCue(node); }}
+				onScroll={onScroll}
+				/* THE TRANSCRIPT KEEPS ITS OWN MOMENTUM (the "two scroll bars"
+				   report). `overscroll-behavior-y: contain` stops a drag that reaches
+				   either end of the conversation from chaining to the document, which
+				   is where a thumb on the composer or a flick at the top edge used to
+				   move the whole page instead. The window is locked at the stylesheet
+				   level too (`styles/index.css`, html/body); this is the half that
+				   belongs to the scroller, so a future shell that forgets the lock
+				   still cannot turn a conversation swipe into a page scroll.
+
+				   Inline rather than a class for the reason `lib/column.ts` spells
+				   out: the vitest layer has no stylesheet, so only an inline style
+				   RESOLVES and a test can fail when the property is dropped. */
+				style={{ overscrollBehaviorY: "contain" }}
+				className={cn(
+					/* overflow-x-hidden as the backstop: break-words on the rows should
+					   wrap everything, but a table or pre that still overflows scrolls
+					   INSIDE itself, never the whole chat sideways. */
+					"lo-scroll lo-fade-y flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overflow-x-hidden px-3 py-2",
+					/* ONE HAND ON `scrollTop` (round 3; extended in round 4). The reserve,
+					   the live window's oldest-row removal at the cap, a prepended page and
+					   the window's own expansion are all "height above the reader" — and
+					   both the platform and the follow effect above want to answer for each,
+					   together moving a mid-history reader by a whole row per event. The
+					   opt-out leaves the follow effect as the only hand: it holds the
+					   reader's row structurally (see it above) instead of splitting the job
+					   with native anchoring, which is Chrome-only — Safari has none, so the
+					   manual path is the whole mechanism there. The session LIST keeps
+					   anchoring ON (`screens/session-list.tsx`, QA round 4, Q6): it has no
+					   manual path of its own and needs the platform for insertions from
+					   other clients — the two answers differ on purpose. */
+					"[overflow-anchor:none]",
+				)}
+			>
+				{/* THE OVERLAY'S HEIGHT, RESERVED (round 2, U23 = D7). First child on
+				    purpose: everything the reader can reach through this scroller —
+				    the load indicator, the "show N more" control, the rows — has to
+				    start below anything painted over the scroller's top edge. The
+				    height is the owner's measurement of the rung (see `topInset`); it
+				    is CONTENT and not padding, because `scrollHeight` has to carry it
+				    or the reserved space itself could not be scrolled past. */}
+				{topInset > 0 ? (
+					<div
+						aria-hidden
+						data-scroll-top-inset=""
+						className="shrink-0"
+						style={{ height: `${topInset}px` }}
+					/>
+				) : null}
+				{/* History loads automatically as the user scrolls up. The slot below is the
+				   only chrome, and it is ONE height in every state (see `HistorySlot`):
+				   the old 2px bar / 1px hairline pair moved the rows by a pixel per swap
+				   and the anchor hold's compensating write re-fired `scroll` into a fetch. */}
+				{slotState !== null ? <HistorySlot state={slotState} onActivate={onSlot} /> : null}
+				{detachedOpener ? <div data-detached-opener="true"><Entry entry={detachedOpener} pid={pid} /></div> : null}
+				{seamOpen ? <SeamLine /> : null}
+				{pagedItems.map((item) => {
+					if (item.kind === "quiet") {
+						return <RowBoundary key={item.key}>
+							<QuietGroupRow group={item.group} partial={headCut && item.group.rowIds[0] === (merged[0] ? rowKey(merged[0]) : undefined)}>
+								{item.group.rowIds.map((id) => {
+									const member = merged.find((entry) => rowKey(entry) === id);
+									return member ? transcriptRow(member) : null;
+								})}
+							</QuietGroupRow>
+						</RowBoundary>;
+					}
+					if (item.kind !== "row") {
+						return <CondensedRows key={item.key} items={[item]} pid={pid} supplements={supplements ?? {}}
+							supplementLive={(beat) => beatLive(beat, projectionPid ?? pid)} openRuns={openRuns} onToggle={toggleCondensed} />;
+					}
 					return <CondensedRows key={item.key} items={[item]} pid={pid} supplements={supplements ?? {}}
 						supplementLive={(beat) => beatLive(beat, projectionPid ?? pid)} openRuns={openRuns} onToggle={toggleCondensed} />;
-				}
-				return <CondensedRows key={item.key} items={[item]} pid={pid} supplements={supplements ?? {}}
-					supplementLive={(beat) => beatLive(beat, projectionPid ?? pid)} openRuns={openRuns} onToggle={toggleCondensed} />;
-			})}
-			{pagedItems.length === 0 && pending.length === 0 ? emptyContent : null}
-			{/* After the last projected row, because that is where the session will
-			    write them. */}
-			{pending.map((echo) => (
-				<RowBoundary key={echo.commandId}>
-					<PendingEchoRow echo={echo} streaming={streaming} />
-				</RowBoundary>
-			))}
-			{tailContent}
+				})}
+				{pagedItems.length === 0 && pending.length === 0 ? emptyContent : null}
+				{/* After the last projected row, because that is where the session will
+				    write them. */}
+				{pending.map((echo) => (
+					<RowBoundary key={echo.commandId}>
+						<PendingEchoRow echo={echo} streaming={streaming} />
+					</RowBoundary>
+				))}
+				{tailContent}
+			</div>
+			{jumpChip ? <JumpToLatest onJump={jumpToLatest} /> : null}
 		</div>
 	);
 }

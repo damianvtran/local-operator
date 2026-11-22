@@ -38,5 +38,7 @@
   "relay.transcript.bridge.not_member": "اب آپ اس گفتگو میں شامل نہیں ہیں",
   "relay.transcript.bridge.offline": "Radient سے رابطہ نہیں ہوا — دوبارہ کوشش کے لیے گفتگو دوبارہ کھولیں",
   "relay.transcript.bridge.deleted": "یہ پیغام حذف کر دیا گیا",
-  "relay.transcript.bridge.more_messages": "{count, plural, one {اس کارڈ میں # مزید پیغام} other {اس کارڈ میں # مزید پیغامات}}"
+  "relay.transcript.bridge.more_messages": "{count, plural, one {اس کارڈ میں # مزید پیغام} other {اس کارڈ میں # مزید پیغامات}}",
+  "relay.transcript.jump.latest": "تازہ ترین پیغام پر جائیں",
+  "relay.transcript.jump.latest_short": "تازہ ترین"
 }
