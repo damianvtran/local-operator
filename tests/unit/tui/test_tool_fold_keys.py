@@ -418,6 +418,25 @@ async def test_a_dead_turn_gets_a_wrapped_foot_and_its_notice_is_replaced() -> N
 
 
 @pytest.mark.asyncio
+async def test_a_turn_paused_on_approval_gets_no_foot() -> None:
+    """Waiting is not dead: no failure total under a question nobody answered."""
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = app.query_one(TranscriptView)
+        view.set_display_mode("by-response")
+        _user(view, "anchor:u1")
+        _tool(view, "t0", "bash")
+        waiting = ToolCard("t1", "bash", {"command": "rm -rf build"})
+        view.append_block(waiting)
+        waiting.mark_waiting()
+        await _settle(pilot)
+
+        assert _foots(view) == [], "a paused turn claimed a settled total"
+
+
+@pytest.mark.asyncio
 async def test_by_turn_has_no_foot() -> None:
     from tests.unit.tui.conftest import StyledTranscriptApp
 

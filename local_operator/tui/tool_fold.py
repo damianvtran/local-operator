@@ -715,6 +715,11 @@ class ToolFoldLayer:
         for turn in outline.turns:
             if turn.live or turn.user_id is None or not turn.facts.count:
                 continue
+            # A call awaiting approval has not SETTLED: the turn is paused on a
+            # question, not dead, and a `✗ turn failed` foot under it would state
+            # an outcome the reader is being asked to decide.
+            if self._turn_is_paused(turn, by_id):
+                continue
             anchor = last_of_turn.get(turn.key)
             if anchor is None:
                 continue
@@ -740,6 +745,17 @@ class ToolFoldLayer:
                 )
             )
         return feet
+
+    @staticmethod
+    def _turn_is_paused(turn: Turn, by_id: dict[str, TranscriptBlock]) -> bool:
+        """True when a call in ``turn`` is waiting for the reader's approval."""
+        from local_operator.tui.widgets.tool_card import ToolCard
+
+        for row_id in _turn_row_ids(turn):
+            block = by_id.get(row_id)
+            if isinstance(block, ToolCard) and block.state == "waiting":
+                return True
+        return False
 
     def _add_sub_bars(
         self,
