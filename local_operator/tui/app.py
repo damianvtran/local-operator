@@ -402,6 +402,7 @@ from local_operator.tui.terminal_title import (
     terminal_title_enabled,
 )
 from local_operator.tui.widgets import welcome as welcome_mod
+from local_operator.tui.provider_state import ProviderStateRow, provider_state_label
 from local_operator.tui.widgets.approval import (
     ApprovalBlock,
     ApprovalPolicy,
@@ -41409,7 +41410,7 @@ class OperatorApp(App[None]):
         view.load(
             teams=self._settings_team_rows(),
             agents=self._settings_agent_rows(),
-            providers=self._settings_provider_rows(),
+            provider_states=self._settings_provider_rows(),
             provider_catalogue=self._settings_provider_catalogue(),
             model_catalogue=self._settings_model_catalogue(),
         )
@@ -41482,16 +41483,16 @@ class OperatorApp(App[None]):
             logger.debug("settings: agent rows unavailable", exc_info=True)
         return rows
 
-    def _settings_provider_rows(self) -> list[tuple[str, str]]:
-        """Logged-in providers as ``(id, state)`` for the settings pane.
+    def _settings_provider_rows(self) -> list[ProviderStateRow]:
+        """Logged-in providers as immutable coded rows for the settings pane.
 
         The states come from the controller's ONE view (``view_rows``, through
-        :data:`_VIEW_STATE_COPY`) rather than a locally-invented vocabulary, so
+        the presentation resolver) rather than a locally-invented vocabulary, so
         this pane, ``/provider``, the ``/login`` picker and the desktop's census
         keep describing one situation with one set of words — the drift this
         surface already records having had.
         """
-        rows: list[tuple[str, str]] = []
+        rows: list[ProviderStateRow] = []
         providers = self._providers
         if providers is None:
             return rows
@@ -41505,7 +41506,7 @@ class OperatorApp(App[None]):
                     # the narrower "who am I logged in as", which is the half
                     # that bears on which default model will work.
                     continue
-                rows.append((definition.id, _VIEW_STATE_COPY[row.state]))
+                rows.append(ProviderStateRow(definition.id, row.state))
         except Exception:  # noqa: BLE001 — never crash the page on a store read
             logger.debug("settings: provider rows unavailable", exc_info=True)
         return rows
@@ -49717,7 +49718,7 @@ class OperatorApp(App[None]):
         message worth reading.
 
         The states are the controller's ONE view (``view_rows``, through
-        :data:`_VIEW_STATE_COPY`), not a fourth vocabulary invented here, so
+        :func:`provider_state_label`), not a fourth vocabulary invented here, so
         `/model`, `/provider`, the settings pane and the `/login` picker keep
         describing one situation with one set of words.
         """
@@ -49737,10 +49738,10 @@ class OperatorApp(App[None]):
         # A provider the registry does not know is ``needs login``: no env var
         # resolves for it and no login flow exists, which is exactly what the
         # old per-provider derivation answered for an unknown id.
-        state = _VIEW_STATE_COPY[row.state] if row is not None else _VIEW_STATE_COPY["needs_login"]
-        if state == "needs login":
+        state_code = row.state if row is not None else "needs_login"
+        if state_code == "needs_login":
             return "", f"{provider} needs login — /login {provider}"
-        return f" · {provider} {state}", None
+        return f" · {provider} {provider_state_label(state_code)}", None
 
     # -- model picker -------------------------------------------------------
     def on_model_query_opened(self, message: ModelQueryOpened) -> None:
@@ -51713,7 +51714,7 @@ class OperatorApp(App[None]):
             items: list[tuple[str, str]] = []
             for definition in self._providers.login_providers():
                 # ONE state vocabulary, resolved in ONE place (the controller's
-                # ``view_rows``, rendered through ``_VIEW_STATE_COPY``). This
+                # ``view_rows``, rendered through ``provider_state_label``). This
                 # line, the ``/login`` picker, the settings pane and the
                 # desktop's census answer the same question on four surfaces,
                 # and two of them had already drifted: the picker said "needs
@@ -55171,13 +55172,13 @@ class OperatorApp(App[None]):
         """
         if row is None:
             return ""
-        return getattr(row, "state_detail", None) or _VIEW_STATE_COPY[row.state]
+        return getattr(row, "state_detail", None) or provider_state_label(row.state)
 
     def _login_choices(self) -> list[ArgumentChoice]:
         """Every loginable provider, with where the user stands on each.
 
         The states come from the controller's ONE view (``view_rows``) through
-        :data:`_VIEW_STATE_COPY`, so this list, ``/provider``, the settings pane
+        :func:`provider_state_label`, so this list, ``/provider``, the settings pane
         and the desktop's census render one fact from one derivation — the
         picker and ``/provider`` had drifted before ("needs login" against "—").
 
@@ -67184,28 +67185,6 @@ def _tree_listing(
 #: credential, the plural for a row removing several of ONE kind
 #: (``remove 2 oauth logins`` — the count a bare kind would hide).
 _CREDENTIAL_KINDS = {"oauth": ("oauth", "oauth logins"), "api_key": ("api key", "api keys")}
-
-
-#: The WORDS for the controller's machine states (``ProviderViewRow.state``,
-#: spelled :data:`local_operator.providers.controller.VIEW_STATES`).
-#:
-#: The machine state is ONE fact and is owned by the backend, which is what
-#: lets the desktop render it as its own copy and the census publish it as an
-#: enum; this table is the TUI's copy of it, kept here rather than derived from
-#: the enum so a wording change does not silently rewrite a wire contract.
-#:
-#: The five strings are exactly the ones the TUI printed before the enum existed
-#: (``_credential_state``), pinned by ``tests/unit/tui`` so a surface can never
-#: invent a sixth vocabulary. An unknown state is a ``KeyError`` on purpose: a
-#: row that renders as blank would read as "nothing to say" when it means "this
-#: app does not understand the backend".
-_VIEW_STATE_COPY: dict[str, str] = {
-    "logged_in": "logged in",
-    "env_key": "env key",
-    "needs_login": "needs login",
-    "local_ready": "configured server",
-    "local_unconfigured": "configure server",
-}
 
 
 #: Cells an identity may spend inside a `/logout` row's detail column.
