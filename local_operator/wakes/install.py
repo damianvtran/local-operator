@@ -70,6 +70,7 @@ from local_operator.i18n.keys import wire_wakes_supervisor
 from local_operator.i18n.messages import render_resolved
 from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.paths import config_dir as ambient_config_dir
+from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable, WakeWriteLock
 
 logger = logging.getLogger(__name__)
 
@@ -642,15 +643,29 @@ def _uninstalled_marker(root: Path) -> Path:
     return root / ".wake-supervisor-uninstalled"
 
 
+def _supervisor_lock(root: Path) -> WakeWriteLock:
+    # This is store-wide and separate from session wake-write locks: arming a
+    # wake can reach the installer from the session persist path. Only entry
+    # points take it; the underlying installer never reacquires it.
+    return WakeWriteLock(root, name=".wake-supervisor.lock")
+
+
 def ensure_supervisor_installed(config_dir: Path) -> InstallOutcome:
     """Install on demand after an explicit install or a new wake arm."""
-    result = _ensure_supervisor_installed(config_dir)
-    if result.installed:
-        try:
-            _uninstalled_marker(config_dir).unlink(missing_ok=True)
-        except OSError:
-            logger.warning("wake supervisor: could not clear uninstall marker", exc_info=True)
-    return result
+    try:
+        config_dir.mkdir(parents=True, exist_ok=True)
+        with _supervisor_lock(config_dir):
+            result = _ensure_supervisor_installed(config_dir)
+            if result.installed:
+                try:
+                    _uninstalled_marker(config_dir).unlink(missing_ok=True)
+                except OSError:
+                    logger.warning(
+                        "wake supervisor: could not clear uninstall marker", exc_info=True
+                    )
+            return result
+    except (OSError, WakeLockBusy, WakeLockUnavailable) as exc:
+        return InstallOutcome(installed=False, reason=f"install failed: {exc}")
 
 
 def _ensure_supervisor_installed(config_dir: Path) -> InstallOutcome:
@@ -1032,11 +1047,15 @@ def bootstrap_goal_recovery(root: Path) -> None:
         return
     if not (root / "sessions").is_dir() or not is_supported():
         return
-    # Retry a refused install. Only a new wake arm or explicit install can
-    # supersede an uninstall, so recovery never clears that authority marker.
-    if _has_recoverable_goals(root) and not _ensure_supervisor_installed(root).installed:
-        return
-    receipt.touch()
+    recoverable = _has_recoverable_goals(root)
+    with _supervisor_lock(root):
+        # The scan can overlap uninstall. Check authority again while holding
+        # the same lock as removal, and keep it through the service mutation.
+        if receipt.exists() or _uninstalled_marker(root).exists():
+            return
+        if recoverable and not _ensure_supervisor_installed(root).installed:
+            return  # Retry a refused install; automatic recovery never rearms.
+        receipt.touch()
 
 
 def refresh_plist_if_stale() -> launchd.PlistRefresh:
@@ -1080,45 +1099,54 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
         store = launchd.config_dir_from_plist(launchd.load(path)) or ambient_config_dir()
         if _shared_label_refusal(store) is not None:
             return launchd.PlistRefresh(name=name, kind="not-addressable")
-        if _uninstalled_marker(store).exists():
+        if not store.is_dir() and not path.exists():
             return launchd.PlistRefresh(name=name, kind="not-installed")
-        outcome = launchd.rewrite_if_stale(name=name, path=path, rendered=render_plist(store))
-        if outcome.kind == "current":
-            # A CURRENT PLIST IS NOT A CURRENT BUILD: this unit names the stable
-            # shim, so its content is byte-identical across generations while a
-            # daemon started from an older one keeps serving it. See
-            # :func:`launchd.restart_if_build_moved`.
-            outcome = launchd.restart_if_build_moved(
-                name=name,
-                label=LABEL,
-                path=path,
-                recovery="lop wake install",
-                run=_launchctl,
-            )
-        if outcome.kind in {"not-installed", "current"} and _has_recoverable_goals(store):
-            if not supervisor_state(store).running:
-                installed = _ensure_supervisor_installed(store)
-                return launchd.PlistRefresh(
-                    name=name,
-                    kind="revived" if installed.installed else "failed",
-                    detail=installed.reason,
-                )
-        if outcome.kind != "repaired":
-            return outcome
-        # bootout + bootstrap through the shared helper, unlike the
-        # `kickstart -k` a few lines up in ``ensure_supervisor_installed``: that
-        # repair restarts a STOPPED job whose plist is already correct, while
-        # this one has just CHANGED the plist, and launchd restarts a kickstarted
-        # job from its in-memory definition — measured, it keeps running the old
-        # argv. See :mod:`local_operator.launchd`.
-        reloaded = launchd.reload_job(label=LABEL, path=path, runner=_launchctl)
-        if not reloaded.ok:
-            # Names the recovery, because the job is DOWN at this point: see
-            # `launchd.reload_failure`.
-            return reloaded.as_refresh_failure(name=name, path=path, recovery="lop wake install")
-        return outcome
+        with _supervisor_lock(store):
+            return _refresh_plist_locked(name, path, store)
     except Exception as exc:  # noqa: BLE001 — a repair must never fail an upgrade
         return launchd.PlistRefresh(name=name, kind="failed", detail=str(exc))
+
+
+def _refresh_plist_locked(name: str, path: Path, store: Path) -> launchd.PlistRefresh:
+    # Rewriting and reloading can revive the job too, not just the cold
+    # installer. Keep every mutation behind the same uninstall authority check.
+    if _uninstalled_marker(store).exists():
+        return launchd.PlistRefresh(name=name, kind="not-installed")
+    outcome = launchd.rewrite_if_stale(name=name, path=path, rendered=render_plist(store))
+    if outcome.kind == "current":
+        # A CURRENT PLIST IS NOT A CURRENT BUILD: this unit names the stable
+        # shim, so its content is byte-identical across generations while a
+        # daemon started from an older one keeps serving it. See
+        # :func:`launchd.restart_if_build_moved`.
+        outcome = launchd.restart_if_build_moved(
+            name=name,
+            label=LABEL,
+            path=path,
+            recovery="lop wake install",
+            run=_launchctl,
+        )
+    if outcome.kind in {"not-installed", "current"} and _has_recoverable_goals(store):
+        if not supervisor_state(store).running:
+            installed = _ensure_supervisor_installed(store)
+            return launchd.PlistRefresh(
+                name=name,
+                kind="revived" if installed.installed else "failed",
+                detail=installed.reason,
+            )
+    if outcome.kind != "repaired":
+        return outcome
+    # bootout + bootstrap through the shared helper, unlike the
+    # `kickstart -k` a few lines up in ``ensure_supervisor_installed``: that
+    # repair restarts a STOPPED job whose plist is already correct, while
+    # this one has just CHANGED the plist, and launchd restarts a kickstarted
+    # job from its in-memory definition — measured, it keeps running the old
+    # argv. See :mod:`local_operator.launchd`.
+    reloaded = launchd.reload_job(label=LABEL, path=path, runner=_launchctl)
+    if not reloaded.ok:
+        # Names the recovery, because the job is DOWN at this point: see
+        # `launchd.reload_failure`.
+        return reloaded.as_refresh_failure(name=name, path=path, recovery="lop wake install")
+    return outcome
 
 
 def _is_loaded(config_dir: Path) -> bool:
@@ -1153,10 +1181,18 @@ def uninstall() -> InstallOutcome:
     refusal = _shared_label_refusal(root)
     if refusal is not None:
         return InstallOutcome(installed=False, reason=refusal)
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        with _supervisor_lock(root):
+            return _uninstall_locked(root, kind)
+    except (OSError, WakeLockBusy, WakeLockUnavailable) as exc:
+        return InstallOutcome(installed=False, reason=f"could not uninstall: {exc}")
+
+
+def _uninstall_locked(root: Path, kind: str) -> InstallOutcome:
     # Persist the operator's decision before removing the unit: startup and
     # upgrade must not interpret a (possibly interrupted) uninstall as vacancy.
     try:
-        root.mkdir(parents=True, exist_ok=True)
         _uninstalled_marker(root).touch()
     except OSError as exc:
         return InstallOutcome(installed=False, reason=f"could not record uninstall: {exc}")

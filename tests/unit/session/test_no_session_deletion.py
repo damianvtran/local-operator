@@ -3497,7 +3497,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "cleanup of this function's own mkstemp temp FILE",
     ),
     (
-        "local_operator/wakes/install.py::uninstall",
+        "local_operator/wakes/install.py::ensure_supervisor_installed",
+        "<path>.unlink",
+        "the fixed .wake-supervisor-uninstalled FILE at the store root, cleared on rearm",
+    ),
+    (
+        "local_operator/wakes/install.py::_uninstall_locked",
         "<path>.unlink",
         "the LaunchAgent plist, or the systemd SERVICE + TIMER units, or the "
         "recorded Windows task definition — one platform's set, never a directory",

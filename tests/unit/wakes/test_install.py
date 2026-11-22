@@ -1322,7 +1322,11 @@ def test_goal_recovery_bootstraps_a_missing_or_retired_supervisor(
 
     from local_operator import launchd, supervisors, update
     from local_operator.config_migrations import run_startup_migrations
-    from local_operator.resume import GOAL_SIDECAR_NAME, TRANSCRIPT_NAME, write_goal_record
+    from local_operator.resume import (
+        GOAL_SIDECAR_NAME,
+        TRANSCRIPT_NAME,
+        write_goal_record,
+    )
     from local_operator.wakes import install
     from local_operator.wakes.store import write_entry
 
@@ -1422,3 +1426,95 @@ def test_goal_recovery_bootstraps_a_missing_or_retired_supervisor(
         assert install.ensure_supervisor_installed(root).installed
         assert not install._uninstalled_marker(root).exists()
         assert path.exists()
+
+
+@pytest.mark.parametrize("entrypoint", ["startup", "refresh"])
+def test_uninstall_cannot_pass_inflight_automatic_supervisor_mutation(
+    redirected_home: Path,
+    tmp_path: Path,
+    shared_label_allowed: None,
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from subprocess import CompletedProcess
+    from threading import Event
+
+    from local_operator import launchd, supervisors
+    from local_operator.config_migrations import run_startup_migrations
+    from local_operator.resume import TRANSCRIPT_NAME, write_goal_record
+    from local_operator.wakes import install
+    from local_operator.wakes.lock import WakeWriteLock
+
+    root = tmp_path / "config"
+    directory = root / "sessions" / "syntheticoverlap"
+    directory.mkdir(parents=True)
+    (directory / TRANSCRIPT_NAME).touch()
+    write_goal_record(
+        directory,
+        {
+            "status": "active",
+            "goal": "Finish overlap fixture",
+            "token": "goal-overlap",
+            "judge": {"state": "waiting"},
+        },
+    )
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    monkeypatch.setattr(supervisors, "supervisor", lambda: supervisors.LAUNCHCTL)
+    monkeypatch.setattr(install, "_launchd_is_addressable", lambda: True)
+    path = plist_path()
+    monkeypatch.setattr(
+        launchd, "is_own_plist", lambda candidate, label: candidate == path and label == LABEL
+    )
+
+    at_install, resume_install = Event(), Event()
+    original_install = install._ensure_supervisor_installed
+    calls: list[str] = []
+
+    def pause_install(store: Path) -> install.InstallOutcome:
+        at_install.set()
+        assert resume_install.wait(15), "fixture stranded automatic install"
+        return original_install(store)
+
+    loaded = False
+
+    def launchctl(*args: str) -> CompletedProcess[str]:
+        nonlocal loaded
+        calls.append(args[0])
+        if args[0] == "print":
+            return CompletedProcess(args, 0 if loaded else 1, "state = running", "")
+        if args[0] in {"bootstrap", "bootout"}:
+            loaded = args[0] == "bootstrap"
+        return CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(install, "_ensure_supervisor_installed", pause_install)
+    monkeypatch.setattr(install, "_launchctl", launchctl)
+    acquire = WakeWriteLock.acquire
+
+    def try_lock(lock: WakeWriteLock) -> None:
+        # One real kernel attempt distinguishes contention from no shared
+        # lock; waiting out the production deadline would prove nothing more.
+        if at_install.is_set():
+            lock.timeout_s = 0
+        acquire(lock)
+
+    monkeypatch.setattr(WakeWriteLock, "acquire", try_lock)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        if entrypoint == "startup":
+            recovery = pool.submit(run_startup_migrations, root)
+        else:
+            recovery = pool.submit(install.refresh_plist_if_stale)
+        try:
+            assert at_install.wait(15), "automatic recovery did not reach the mutation boundary"
+            overlapping = install.uninstall()
+        finally:
+            resume_install.set()
+        recovery.result(timeout=15)
+    assert overlapping.reason != "uninstalled", "uninstall returned before automatic mutation"
+    assert "bootstrap" in calls and path.is_file()
+    assert install.uninstall().reason == "uninstalled"
+    assert install._uninstalled_marker(root).is_file()
+    calls.clear()
+    run_startup_migrations(root)
+    assert install.refresh_plist_if_stale().kind == "not-installed"
+    assert not path.exists() and not loaded and not calls
