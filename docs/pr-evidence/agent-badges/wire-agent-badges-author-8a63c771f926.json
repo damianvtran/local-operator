@@ -1,0 +1,350 @@
+{
+  "receipt_kind": "translation_author_only",
+  "namespace": "wire.agent_badges",
+  "key": "wire.agent_badges.packaged",
+  "date_utc": "2026-11-22T07:56:19.512284+00:00",
+  "author": {
+    "agent": "translator (lopdev)",
+    "session_id": "8a63c771f926",
+    "actual_translation_model": "openai/gpt-6.1-sol",
+    "initial_model": "anthropic/claude-opus-5-5",
+    "fallback": {
+      "occurred": true,
+      "reason": "provider failure: quota",
+      "source": "host model-switch notice before translation authoring"
+    }
+  },
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-agent-facts",
+  "source_commit": "741a45d8465c5f4608e374a1bffeb9d2190065cf",
+  "source_raw_sha256": "5caa688fa6d6a78f315e32f7bb1db3b8cae08c77f727dd36af22e45a0206a23b",
+  "source_canonical_sha256": "db915e9d40dd3e036e2c7401e6af74c7bf3cdfc97e40e1305ec6bb039b1308f9",
+  "context_raw_sha256": "8ab96370595b180339f4a6392daaef10a6f8324f202f3738dfc97574df5591e7",
+  "context_canonical_sha256": "3cd7f264b7726aff1d0cc09f2fff7343314ce7447b74c10ae0406a14f85c049c",
+  "source_context_unchanged_after": true,
+  "source_read_method": "read_public_copy exact source key and context in this worktree; adjacent keys via the same approved tool",
+  "locale_allocation": "Seven one-key locale files explicitly assigned in the final detailed task; authored here, not seven independent translator agents",
+  "width_contract": {
+    "shared_total_cells": 27,
+    "separator_estimate": " · ",
+    "warning": "Counts are rich.cells.cell_len string estimates, not rendered approval; role/specialist, separator, badge and optional proactive share the one 27-cell facts line. Preserve the proactive marker whole on a second line as needed; no arbitrary per-word cap. Urdu shaping and bidi remain renderer responsibilities; private root width regressions are not assessed here."
+  },
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "path": "/Users/damian/local-operator/.worktrees/i18n-agent-facts/local_operator/i18n/catalogues/zh-CN/wire.agent_badges.json",
+      "key_count": 1,
+      "value": "内置",
+      "backtranslation": "built-in",
+      "style_glossary_choice": "Reuse 内置 from the existing starter sentence; terse Chinese provenance, no final punctuation.",
+      "source_raw_sha256": "5caa688fa6d6a78f315e32f7bb1db3b8cae08c77f727dd36af22e45a0206a23b",
+      "source_canonical_sha256": "db915e9d40dd3e036e2c7401e6af74c7bf3cdfc97e40e1305ec6bb039b1308f9",
+      "target_raw_sha256": "7d4ee2c090bf96f8d280e84e057d208b65372000bccb851bba0b88c65666d3f1",
+      "target_canonical_sha256": "2069a56e6f08dcd5e42c593bb65450af2def498277d3c400709e4b834adfc6ff",
+      "canonical_source_binding": {
+        "source_canonical_sha256": "db915e9d40dd3e036e2c7401e6af74c7bf3cdfc97e40e1305ec6bb039b1308f9",
+        "key": "wire.agent_badges.packaged"
+      },
+      "label_cells": 4,
+      "adjacent_catalogue_context": {
+        "role": "角色",
+        "specialist": "专家",
+        "proactive": "主动",
+        "scope_conversation": "本会话"
+      },
+      "existing_starter_context": "编辑前需先安装此内置初始配置。",
+      "combination_cell_estimates": {
+        "role": {
+          "without_proactive_cells": 11,
+          "with_proactive_cells": 18,
+          "with_proactive_exceeds_27": false
+        },
+        "specialist": {
+          "without_proactive_cells": 11,
+          "with_proactive_cells": 18,
+          "with_proactive_exceeds_27": false
+        }
+      },
+      "mechanical": {
+        "json_parse": "pass",
+        "exact_source_key_set": "pass",
+        "NFC": "pass",
+        "stored_control_or_format_characters": 0,
+        "placeholders_ICU_CLDR": "N/A: source and target are plain labels; no placeholders, plural/select branches, skeletons, markup or escapes to exercise"
+      },
+      "status": "author_draft_pending_independent_audits"
+    },
+    {
+      "locale": "fr",
+      "path": "/Users/damian/local-operator/.worktrees/i18n-agent-facts/local_operator/i18n/catalogues/fr/wire.agent_badges.json",
+      "key_count": 1,
+      "value": "fourni",
+      "backtranslation": "supplied",
+      "style_glossary_choice": "Reuse fourni from modèle fourni; masculine agent agreement, lowercase fragment, not installé or trusted.",
+      "source_raw_sha256": "5caa688fa6d6a78f315e32f7bb1db3b8cae08c77f727dd36af22e45a0206a23b",
+      "source_canonical_sha256": "db915e9d40dd3e036e2c7401e6af74c7bf3cdfc97e40e1305ec6bb039b1308f9",
+      "target_raw_sha256": "e4312efcb294f012872a50cb9adc1a64ca51b36abd730d10a97e172bd4cf46ab",
+      "target_canonical_sha256": "5c67fa894b7c003f6188022cd453f578864b971f07785116fa7b3005c5246a97",
+      "canonical_source_binding": {
+        "source_canonical_sha256": "db915e9d40dd3e036e2c7401e6af74c7bf3cdfc97e40e1305ec6bb039b1308f9",
+        "key": "wire.agent_badges.packaged"
+      },
+      "label_cells": 6,
+      "adjacent_catalogue_context": {
+        "role": "rôle",
+        "specialist": "spécialiste",
+        "proactive": "proactif",
+        "scope_conversation": "cette conversation"
+      },
+      "existing_starter_context": "Installez ce modèle fourni avant de le modifier.",
+      "combination_cell_estimates": {
+        "role": {
+          "without_proactive_cells": 13,
+          "with_proactive_cells": 24,
+          "with_proactive_exceeds_27": false
+        },
+        "specialist": {
+          "without_proactive_cells": 20,
+          "with_proactive_cells": 31,
+          "with_proactive_exceeds_27": true
+        }
+      },
+      "mechanical": {
+        "json_parse": "pass",
+        "exact_source_key_set": "pass",
+        "NFC": "pass",
+        "stored_control_or_format_characters": 0,
+        "placeholders_ICU_CLDR": "N/A: source and target are plain labels; no placeholders, plural/select branches, skeletons, markup or escapes to exercise"
+      },
+      "status": "author_draft_pending_independent_audits"
+    },
+    {
+      "locale": "es",
+      "path": "/Users/damian/local-operator/.worktrees/i18n-agent-facts/local_operator/i18n/catalogues/es/wire.agent_badges.json",
+      "key_count": 1,
+      "value": "incluido",
+      "backtranslation": "included",
+      "style_glossary_choice": "Reuse incluido, agreeing with agente; the guide fixes starter as plantilla incluida, not a new initial-profile term.",
+      "source_raw_sha256": "5caa688fa6d6a78f315e32f7bb1db3b8cae08c77f727dd36af22e45a0206a23b",
+      "source_canonical_sha256": "db915e9d40dd3e036e2c7401e6af74c7bf3cdfc97e40e1305ec6bb039b1308f9",
+      "target_raw_sha256": "393ca75c04e0e28adb8acd766c00850f07578fe54c2b7fe3307557b7eda333dc",
+      "target_canonical_sha256": "2097ac78a6870078931a57146040e81cb39931e347f4f8ea9bc373cbdb418e92",
+      "canonical_source_binding": {
+        "source_canonical_sha256": "db915e9d40dd3e036e2c7401e6af74c7bf3cdfc97e40e1305ec6bb039b1308f9",
+        "key": "wire.agent_badges.packaged"
+      },
+      "label_cells": 8,
+      "adjacent_catalogue_context": {
+        "role": "rol",
+        "specialist": "especialista",
+        "proactive": "proactivo",
+        "scope_conversation": "esta conversación"
+      },
+      "existing_starter_context": "Instala esta plantilla incluida antes de editarla.",
+      "combination_cell_estimates": {
+        "role": {
+          "without_proactive_cells": 14,
+          "with_proactive_cells": 26,
+          "with_proactive_exceeds_27": false
+        },
+        "specialist": {
+          "without_proactive_cells": 23,
+          "with_proactive_cells": 35,
+          "with_proactive_exceeds_27": true
+        }
+      },
+      "mechanical": {
+        "json_parse": "pass",
+        "exact_source_key_set": "pass",
+        "NFC": "pass",
+        "stored_control_or_format_characters": 0,
+        "placeholders_ICU_CLDR": "N/A: source and target are plain labels; no placeholders, plural/select branches, skeletons, markup or escapes to exercise"
+      },
+      "status": "author_draft_pending_independent_audits"
+    },
+    {
+      "locale": "ru",
+      "path": "/Users/damian/local-operator/.worktrees/i18n-agent-facts/local_operator/i18n/catalogues/ru/wire.agent_badges.json",
+      "key_count": 1,
+      "value": "встроенный",
+      "backtranslation": "built-in",
+      "style_glossary_choice": "Reuse встроенный from встроенный шаблон; masculine агент agreement, not установленный.",
+      "source_raw_sha256": "5caa688fa6d6a78f315e32f7bb1db3b8cae08c77f727dd36af22e45a0206a23b",
+      "source_canonical_sha256": "db915e9d40dd3e036e2c7401e6af74c7bf3cdfc97e40e1305ec6bb039b1308f9",
+      "target_raw_sha256": "329a61c18aeee9cd811586349999e88f16b1e769ec5c54ff5c3e854412d1cff2",
+      "target_canonical_sha256": "0c21bed9208d0a21a0197e88eba3e37fdeca85ab8c084cec9dff895032a8416f",
+      "canonical_source_binding": {
+        "source_canonical_sha256": "db915e9d40dd3e036e2c7401e6af74c7bf3cdfc97e40e1305ec6bb039b1308f9",
+        "key": "wire.agent_badges.packaged"
+      },
+      "label_cells": 10,
+      "adjacent_catalogue_context": {
+        "role": "роль",
+        "specialist": "специалист",
+        "proactive": "проактивный",
+        "scope_conversation": "эта беседа"
+      },
+      "existing_starter_context": "Установите этот встроенный шаблон перед изменением.",
+      "combination_cell_estimates": {
+        "role": {
+          "without_proactive_cells": 17,
+          "with_proactive_cells": 31,
+          "with_proactive_exceeds_27": true
+        },
+        "specialist": {
+          "without_proactive_cells": 23,
+          "with_proactive_cells": 37,
+          "with_proactive_exceeds_27": true
+        }
+      },
+      "mechanical": {
+        "json_parse": "pass",
+        "exact_source_key_set": "pass",
+        "NFC": "pass",
+        "stored_control_or_format_characters": 0,
+        "placeholders_ICU_CLDR": "N/A: source and target are plain labels; no placeholders, plural/select branches, skeletons, markup or escapes to exercise"
+      },
+      "status": "author_draft_pending_independent_audits"
+    },
+    {
+      "locale": "vi",
+      "path": "/Users/damian/local-operator/.worktrees/i18n-agent-facts/local_operator/i18n/catalogues/vi/wire.agent_badges.json",
+      "key_count": 1,
+      "value": "đi kèm",
+      "backtranslation": "bundled / accompanying",
+      "style_glossary_choice": "Reuse đi kèm from mẫu đi kèm; ordinary bundled provenance, lowercase NFC, not cài đặt.",
+      "source_raw_sha256": "5caa688fa6d6a78f315e32f7bb1db3b8cae08c77f727dd36af22e45a0206a23b",
+      "source_canonical_sha256": "db915e9d40dd3e036e2c7401e6af74c7bf3cdfc97e40e1305ec6bb039b1308f9",
+      "target_raw_sha256": "ac9a9baac27826ad4966f87b1d26dbd8c9db94b26d7e9ffd3cb8cec56d49a8ca",
+      "target_canonical_sha256": "7e07bd86de91af1853f68df86e1fbf32bff84f624e83abb69a5bec9b239c1334",
+      "canonical_source_binding": {
+        "source_canonical_sha256": "db915e9d40dd3e036e2c7401e6af74c7bf3cdfc97e40e1305ec6bb039b1308f9",
+        "key": "wire.agent_badges.packaged"
+      },
+      "label_cells": 6,
+      "adjacent_catalogue_context": {
+        "role": "vai trò",
+        "specialist": "chuyên gia",
+        "proactive": "chủ động",
+        "scope_conversation": "cuộc trò chuyện này"
+      },
+      "existing_starter_context": "Cài mẫu đi kèm này trước khi sửa.",
+      "combination_cell_estimates": {
+        "role": {
+          "without_proactive_cells": 16,
+          "with_proactive_cells": 27,
+          "with_proactive_exceeds_27": false
+        },
+        "specialist": {
+          "without_proactive_cells": 19,
+          "with_proactive_cells": 30,
+          "with_proactive_exceeds_27": true
+        }
+      },
+      "mechanical": {
+        "json_parse": "pass",
+        "exact_source_key_set": "pass",
+        "NFC": "pass",
+        "stored_control_or_format_characters": 0,
+        "placeholders_ICU_CLDR": "N/A: source and target are plain labels; no placeholders, plural/select branches, skeletons, markup or escapes to exercise"
+      },
+      "status": "author_draft_pending_independent_audits"
+    },
+    {
+      "locale": "hi",
+      "path": "/Users/damian/local-operator/.worktrees/i18n-agent-facts/local_operator/i18n/catalogues/hi/wire.agent_badges.json",
+      "key_count": 1,
+      "value": "साथ मिला",
+      "backtranslation": "supplied with / received along with",
+      "style_glossary_choice": "Reuse साथ मिला, the citation form of साथ मिले in the existing starter sentence; everyday Hindi rather than a heavy embedded calque.",
+      "source_raw_sha256": "5caa688fa6d6a78f315e32f7bb1db3b8cae08c77f727dd36af22e45a0206a23b",
+      "source_canonical_sha256": "db915e9d40dd3e036e2c7401e6af74c7bf3cdfc97e40e1305ec6bb039b1308f9",
+      "target_raw_sha256": "f5e37710fac3b43a63ce5e85da03cd20151302440a29566e40ca83f432cacbc9",
+      "target_canonical_sha256": "a24a9eb91f1ef350aab41ef0ebf826adb3982d13920b1858bec7df8d69c42e40",
+      "canonical_source_binding": {
+        "source_canonical_sha256": "db915e9d40dd3e036e2c7401e6af74c7bf3cdfc97e40e1305ec6bb039b1308f9",
+        "key": "wire.agent_badges.packaged"
+      },
+      "label_cells": 5,
+      "adjacent_catalogue_context": {
+        "role": "भूमिका",
+        "specialist": "विशेषज्ञ",
+        "proactive": "स्वप्रेरित",
+        "scope_conversation": "यह बातचीत"
+      },
+      "existing_starter_context": "इस साथ मिले शुरुआती नमूने को बदलने से पहले इंस्टॉल करें।",
+      "combination_cell_estimates": {
+        "role": {
+          "without_proactive_cells": 11,
+          "with_proactive_cells": 20,
+          "with_proactive_exceeds_27": false
+        },
+        "specialist": {
+          "without_proactive_cells": 13,
+          "with_proactive_cells": 22,
+          "with_proactive_exceeds_27": false
+        }
+      },
+      "mechanical": {
+        "json_parse": "pass",
+        "exact_source_key_set": "pass",
+        "NFC": "pass",
+        "stored_control_or_format_characters": 0,
+        "placeholders_ICU_CLDR": "N/A: source and target are plain labels; no placeholders, plural/select branches, skeletons, markup or escapes to exercise"
+      },
+      "status": "author_draft_pending_independent_audits"
+    },
+    {
+      "locale": "ur",
+      "path": "/Users/damian/local-operator/.worktrees/i18n-agent-facts/local_operator/i18n/catalogues/ur/wire.agent_badges.json",
+      "key_count": 1,
+      "value": "ساتھ فراہم کردہ",
+      "backtranslation": "supplied with",
+      "style_glossary_choice": "Choose ساتھ فراہم کردہ (supplied with) as native provenance wording instead of the existing پیکج شدہ loan phrase; no installation/trust claim, logical-order text, no stored direction controls.",
+      "source_raw_sha256": "5caa688fa6d6a78f315e32f7bb1db3b8cae08c77f727dd36af22e45a0206a23b",
+      "source_canonical_sha256": "db915e9d40dd3e036e2c7401e6af74c7bf3cdfc97e40e1305ec6bb039b1308f9",
+      "target_raw_sha256": "90185ca989752bde7e56c3269609eae6aceca184fca4b8f67845a9b42258365b",
+      "target_canonical_sha256": "77f9409b8bac6197bb939d5b5238fa3e9db7b82677f26466f93cc8f985b455d4",
+      "canonical_source_binding": {
+        "source_canonical_sha256": "db915e9d40dd3e036e2c7401e6af74c7bf3cdfc97e40e1305ec6bb039b1308f9",
+        "key": "wire.agent_badges.packaged"
+      },
+      "label_cells": 15,
+      "adjacent_catalogue_context": {
+        "role": "کردار",
+        "specialist": "ماہر",
+        "proactive": "پیش قدم",
+        "scope_conversation": "اس گفتگو میں"
+      },
+      "existing_starter_context": "ترمیم سے پہلے یہ پیکج شدہ آغازی پروفائل انسٹال کریں۔",
+      "combination_cell_estimates": {
+        "role": {
+          "without_proactive_cells": 23,
+          "with_proactive_cells": 33,
+          "with_proactive_exceeds_27": true
+        },
+        "specialist": {
+          "without_proactive_cells": 22,
+          "with_proactive_cells": 32,
+          "with_proactive_exceeds_27": true
+        }
+      },
+      "mechanical": {
+        "json_parse": "pass",
+        "exact_source_key_set": "pass",
+        "NFC": "pass",
+        "stored_control_or_format_characters": 0,
+        "placeholders_ICU_CLDR": "N/A: source and target are plain labels; no placeholders, plural/select branches, skeletons, markup or escapes to exercise"
+      },
+      "status": "author_draft_pending_independent_audits"
+    }
+  ],
+  "audit": {
+    "self_audit_performed": false,
+    "independent_audit": "pending; root to assign two readers",
+    "native_speaker_audit_claimed": false,
+    "promoted_or_eligibility_changed": false
+  },
+  "checks_scope": "Only these seven draft JSON files parsed and checked mechanically; no generation, whole-repo gates, installs, rendering, staged changes, commits, pushes, PRs or CI",
+  "terms_invented": "No coined terms; Urdu provenance phrasing chosen explicitly, remaining six reuse established adjacent starter wording",
+  "prior_target_files": "none; all seven checked absent before any creation"
+}
