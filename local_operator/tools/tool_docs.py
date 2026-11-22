@@ -897,7 +897,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "unknown (capability off, screening pending/refused, missing grant). "
             "BODY admission is separate: use body and existing `body_state`, not "
             "files. Fetch refusal stays opaque: revoked, expired or not admitted. "
-            "No alternate URLs, human credentials or owner-audit bypass. Legitimate "
+            "No URL, human credentials or human-only access-path bypass. Legitimate "
             "CSV/Markdown uses existing screening and exact file-set grants, "
             "not sender, incident or extension exemptions.\n"
             "- IMAGES: no base64 in bodies; `attachments` if hub allows.\n"

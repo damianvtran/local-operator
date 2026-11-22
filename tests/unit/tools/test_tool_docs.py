@@ -1290,7 +1290,7 @@ def test_the_bridge_doc_distinguishes_file_serving_from_read_admission(
         "No public download op is needed",
         "BODY admission is separate",
         "existing `body_state`",
-        "alternate URLs, human credentials or owner-audit",
+        "No URL, human credentials or human-only access-path bypass",
         "not sender, incident or extension exemptions",
     ):
         assert fact in doc
