@@ -10,11 +10,11 @@
   "wire.settings.keymap.start_recording.label": "Начать запись",
   "wire.settings.keymap.start_recording.help": "Запускает запись речи в текст в окне настольного приложения.",
   "wire.settings.keymap.transcript_up.label": "Прокрутить вверх",
-  "wire.settings.keymap.transcript_up.help": "Прокручивает разговор на две строки вверх; курсор остаётся на месте.",
+  "wire.settings.keymap.transcript_up.help": "Прокручивает беседу на две строки вверх; курсор остаётся в поле ввода.",
   "wire.settings.keymap.transcript_down.label": "Прокрутить вниз",
-  "wire.settings.keymap.transcript_down.help": "Прокручивает разговор на две строки вниз; курсор остаётся на месте.",
+  "wire.settings.keymap.transcript_down.help": "Прокручивает беседу на две строки вниз; курсор остаётся в поле ввода.",
   "wire.settings.keymap.transcript_half_up.label": "Полстраницы вверх",
-  "wire.settings.keymap.transcript_half_up.help": "Прокручивает разговор на полэкрана вверх; курсор остаётся на месте.",
+  "wire.settings.keymap.transcript_half_up.help": "Прокручивает беседу на полэкрана вверх; курсор остаётся в поле ввода.",
   "wire.settings.keymap.transcript_half_down.label": "Полстраницы вниз",
-  "wire.settings.keymap.transcript_half_down.help": "Прокручивает разговор на полэкрана вниз; курсор остаётся на месте."
+  "wire.settings.keymap.transcript_half_down.help": "Прокручивает беседу на полэкрана вниз; курсор остаётся в поле ввода."
 }

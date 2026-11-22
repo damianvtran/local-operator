@@ -30,6 +30,7 @@ from local_operator.tui.widgets.transcript import (
     UserBlock,
 )
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
+from tests.unit.tui.test_band_panels import FakeSession as BandFakeSession
 from tests.unit.tui.test_band_panels import _async_factory, _fake_jobs, _Job
 
 DRAFT = "half a thought"
@@ -382,7 +383,7 @@ async def test_key_repeat_at_the_top_coalesces_to_one_paging_check() -> None:
 
 @pytest.mark.asyncio
 async def test_the_subagent_page_scrolls_its_own_transcript() -> None:
-    session = FakeSession()
+    session = BandFakeSession()
     session.jobs = _fake_jobs(_Job("sub-1", "audit the ingest path"))
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(120, 40)) as pilot:

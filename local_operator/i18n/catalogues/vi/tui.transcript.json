@@ -16,6 +16,6 @@
   "tui.transcript.hub.reply_requested": "Đã yêu cầu trả lời",
   "tui.transcript.hub.steered": "Đã đổi chỉ dẫn",
   "tui.transcript.hub.from": "Từ {identity}",
-  "tui.transcript.jump_to_latest": "Đến mới nhất",
+  "tui.transcript.jump_to_latest": "Đến tin mới nhất",
   "tui.transcript.jump_to_latest.short": "Mới nhất"
 }

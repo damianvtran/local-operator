@@ -13,8 +13,8 @@
   "wire.settings.keymap.transcript_up.help": "बातचीत को दो पंक्तियाँ ऊपर स्क्रॉल करता है; कर्सर अपनी जगह रहता है।",
   "wire.settings.keymap.transcript_down.label": "नीचे स्क्रॉल करें",
   "wire.settings.keymap.transcript_down.help": "बातचीत को दो पंक्तियाँ नीचे स्क्रॉल करता है; कर्सर अपनी जगह रहता है।",
-  "wire.settings.keymap.transcript_half_up.label": "आधा पृष्ठ ऊपर",
-  "wire.settings.keymap.transcript_half_up.help": "बातचीत को आधा पृष्ठ ऊपर स्क्रॉल करता है; कर्सर अपनी जगह रहता है।",
-  "wire.settings.keymap.transcript_half_down.label": "आधा पृष्ठ नीचे",
-  "wire.settings.keymap.transcript_half_down.help": "बातचीत को आधा पृष्ठ नीचे स्क्रॉल करता है; कर्सर अपनी जगह रहता है।"
+  "wire.settings.keymap.transcript_half_up.label": "आधा पेज ऊपर",
+  "wire.settings.keymap.transcript_half_up.help": "बातचीत को आधी स्क्रीन ऊपर स्क्रॉल करता है; कर्सर अपनी जगह रहता है।",
+  "wire.settings.keymap.transcript_half_down.label": "आधा पेज नीचे",
+  "wire.settings.keymap.transcript_half_down.help": "बातचीत को आधी स्क्रीन नीचे स्क्रॉल करता है; कर्सर अपनी जगह रहता है।"
 }

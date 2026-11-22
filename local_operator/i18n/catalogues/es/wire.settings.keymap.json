@@ -14,7 +14,7 @@
   "wire.settings.keymap.transcript_down.label": "Desplazar hacia abajo",
   "wire.settings.keymap.transcript_down.help": "Desplaza la conversación dos líneas hacia abajo; el cursor no se mueve.",
   "wire.settings.keymap.transcript_half_up.label": "Media página arriba",
-  "wire.settings.keymap.transcript_half_up.help": "Desplaza la conversación media pantalla hacia arriba; el cursor no se mueve.",
+  "wire.settings.keymap.transcript_half_up.help": "Desplaza la conversación media pantalla arriba; el cursor no se mueve.",
   "wire.settings.keymap.transcript_half_down.label": "Media página abajo",
-  "wire.settings.keymap.transcript_half_down.help": "Desplaza la conversación media pantalla hacia abajo; el cursor no se mueve."
+  "wire.settings.keymap.transcript_half_down.help": "Desplaza la conversación media pantalla abajo; el cursor no se mueve."
 }

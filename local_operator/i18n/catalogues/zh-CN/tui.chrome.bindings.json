@@ -3,7 +3,7 @@
   "tui.chrome.bindings.legend_app_ctrl_b": "显示或隐藏会话列表",
   "tui.chrome.bindings.legend_app_ctrl_c": "中断本轮；连按两次退出",
   "tui.chrome.bindings.legend_app_ctrl_g": "循环切换子智能体面板",
-  "tui.chrome.bindings.legend_app_ctrl_home_end": "跳到对话开头或结尾（alt+g/G）",
+  "tui.chrome.bindings.legend_app_ctrl_home_end": "跳到会话记录开头或结尾（alt+g/G）",
   "tui.chrome.bindings.legend_app_ctrl_l": "清空会话记录（历史仍保留）",
   "tui.chrome.bindings.legend_app_ctrl_n_ctrl_s": "新建会话 / 恢复会话",
   "tui.chrome.bindings.legend_app_ctrl_t": "展开或折叠待办面板",

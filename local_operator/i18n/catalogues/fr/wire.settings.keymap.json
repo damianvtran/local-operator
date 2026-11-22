@@ -10,11 +10,11 @@
   "wire.settings.keymap.start_recording.label": "Démarrer l’enregistrement",
   "wire.settings.keymap.start_recording.help": "Démarre l’enregistrement de dictée dans la fenêtre de l’application de bureau.",
   "wire.settings.keymap.transcript_up.label": "Défiler vers le haut",
-  "wire.settings.keymap.transcript_up.help": "Défile la conversation de deux lignes vers le haut ; le curseur reste sur place.",
+  "wire.settings.keymap.transcript_up.help": "Remonte la conversation de deux lignes ; la saisie garde le curseur.",
   "wire.settings.keymap.transcript_down.label": "Défiler vers le bas",
-  "wire.settings.keymap.transcript_down.help": "Défile la conversation de deux lignes vers le bas ; le curseur reste sur place.",
+  "wire.settings.keymap.transcript_down.help": "Descend la conversation de deux lignes ; la saisie garde le curseur.",
   "wire.settings.keymap.transcript_half_up.label": "Demi-page vers le haut",
-  "wire.settings.keymap.transcript_half_up.help": "Défile la conversation d’un demi-écran vers le haut ; le curseur reste sur place.",
+  "wire.settings.keymap.transcript_half_up.help": "Remonte la conversation d’un demi-écran ; la saisie garde le curseur.",
   "wire.settings.keymap.transcript_half_down.label": "Demi-page vers le bas",
-  "wire.settings.keymap.transcript_half_down.help": "Défile la conversation d’un demi-écran vers le bas ; le curseur reste sur place."
+  "wire.settings.keymap.transcript_half_down.help": "Descend la conversation d’un demi-écran ; la saisie garde le curseur."
 }
