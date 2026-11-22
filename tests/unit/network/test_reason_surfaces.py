@@ -904,6 +904,16 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the session's own compaction refusal token, journalled as bookkeeping, never rendered",
     ),
+    # Economic compaction's two decline paths mirror the idle journal above:
+    # the planner's refusal and the economic gate's recheck verdict are LOCAL
+    # machine tokens, prefixed into ``why`` by _journal_economic_decline. It
+    # appends COMPACTION_ECONOMIC_DECLINED_TYPE as a custom bookkeeping record,
+    # not a message; _economic_declined_at reads only marker_id/context_tokens
+    # for growth gating. Neither token is rendered as a human explanation.
+    ("local_operator/session/session.py", "Session._maybe_economic_compact", "reason"): (
+        2,
+        "local planner/gate refusal tokens journalled for economic growth gating, never rendered",
+    ),
     # A node site card's signed decision the browser bridge refused: ``reason`` is
     # the bridge's machine refusal code (``unsigned_decision``/``no_approver``/
     # ``wrong_key``/``bad_signature``/...). The ``str()`` coercion only keys a

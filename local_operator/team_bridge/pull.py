@@ -51,6 +51,7 @@ from local_operator.team_bridge.store import (
 )
 from local_operator.team_bridge.types import (
     DELIVERY_STATES,
+    RECEIPT_ACK_TARGETS,
     AckTarget,
     FeedSeq,
     InboxCursor,
@@ -327,7 +328,7 @@ async def ack(
     owner: OwnerSnapshot,
     message_id: str,
     target: AckTarget,
-    receipt: ScreeningReceipt,
+    receipt: ScreeningReceipt | None,
     *,
     config_dir: Path,
     access: OAuthAccess | None,
@@ -428,7 +429,7 @@ async def flush_ack(
     if intent["state"] == ACK_CONFLICT:
         return AckOutcome(intent_id, ACK_CONFLICT, None, intent.get("error_code"), None)
     receipt = intent["receipt"]
-    if receipt is None:
+    if receipt is None and intent["target"] in RECEIPT_ACK_TARGETS:
         raise PullRefused("no_intent", "intent carries no screening tuple; hold")
 
     def _commit_result(

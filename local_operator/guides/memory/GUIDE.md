@@ -106,6 +106,16 @@ uri/author), `status` (active/candidate/disputed/superseded/expired), `pinned`,
 `created_at`, `source_time`, `verified_at`, `expires_at` (Unix seconds or null),
 and optional `replaces` (an explicit old ID in the same scope).
 Never mark an inference as observed. Captures are candidates, not confirmed facts.
+After compaction, deliberately review only a **small task-relevant set** of
+candidates: inspect their original source entries, keep a stable subject, and
+confirm accurate scope/kind and source attribution before revision-checked edits.
+Leave the rest unconfirmed; a successful capture is not acknowledgement that
+all asks or standing directives survived, and never authorizes tighter trimming.
+Before consequential work, use bounded search/read (the 1200-token default),
+inspect conflicts, age and source revisions, and verify against an authoritative
+source. Correct stale decisions with the exact current revision; when explicitly
+storing a separate replacement use `replaces` with the inspected old ID. Never
+silently promote, bulk-inject candidates or append another growing summary.
 
 - Search: `read("memory://session?q=deployment+proof&tokens=1200")`; omit scope
   to search current authorized scopes. Default 1200, hard 2000 tokens.

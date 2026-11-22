@@ -63,6 +63,12 @@ from .cutpoint import (
     replay_preserved_turns,
     task_boundary_floor,
 )
+from .economics import (
+    COMPACTION_ECONOMIC_DECLINED_TYPE,
+    COMPACTION_ECONOMIC_PASS_TYPE,
+    EconomicDecision,
+    economic_compaction_due,
+)
 from .idle import (
     COMPACTION_IDLE_DECLINED_TYPE,
     COMPACTION_IDLE_PASS_TYPE,
@@ -166,6 +172,10 @@ __all__ = [
     "TOOL_RESULT_TAIL_CHARS",
     "USELESS_NOTICE",
     "build_advisor_prompt",
+    "COMPACTION_ECONOMIC_DECLINED_TYPE",
+    "COMPACTION_ECONOMIC_PASS_TYPE",
+    "EconomicDecision",
+    "economic_compaction_due",
     "COMPACTION_IDLE_DECLINED_TYPE",
     "COMPACTION_IDLE_PASS_TYPE",
     "IdleDecision",

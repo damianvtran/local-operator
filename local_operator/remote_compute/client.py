@@ -62,13 +62,16 @@ from local_operator.providers.auth_store import (
 )
 from local_operator.remote_compute.config import invalid_override, resolve_api_url
 from local_operator.remote_compute.errors import (
-    ERROR_BY_STATUS,
     InvalidIdempotencyKey,
     NetworkMismatch,
     RemoteComputeError,
     RunIdentityMismatch,
     Unreachable,
     UnreadableEnvelope,
+    refusal_code,
+    refusal_for,
+    refusal_message,
+    retry_after_seconds,
 )
 from local_operator.remote_compute.request import RunCreateRequest
 from local_operator.tunnels import api as tunnels_api
@@ -231,23 +234,44 @@ def _confirm_network(run: dict[str, Any], *, expected: str) -> str:
     return returned
 
 
-def _failed(status: int) -> RemoteComputeError | LoginRequired:
-    """The typed error for ``status``, with a sentence that carries no body.
+def _failed(response: httpx.Response) -> RemoteComputeError | LoginRequired:
+    """The typed error for this refusal, BY CODE and then by status.
 
     ``401`` is answered with the SHARED ``LoginRequired`` rather than a row in
-    :data:`ERROR_BY_STATUS`: its remedy is the one a tunnel request's is (run
+    :data:`~local_operator.remote_compute.errors.ERROR_BY_STATUS`: its remedy is the
+    one a tunnel request's is (run
     ``lop login radient``), and a second class for the same meaning would make
     every handler learn the difference.
+
+    THE BODY IS READ HERE AND NOWHERE ELSE, and only through the two closed
+    readers in :mod:`local_operator.remote_compute.errors`: a ``code`` that is a
+    member of the contract's set, and the server's sentence for the ONE
+    disambiguation a codeless 409 needs. Neither is carried on the error, so the
+    redaction rule (no word of a provider body reaches a log) still holds; a body
+    that will not parse leaves both ``None`` and the status table answers, which
+    is how an older server behaves.
     """
-    if status == 401:
-        return LoginRequired(
-            "The Radient login was refused for this remote-compute request (HTTP 401); log in "
-            "again with `lop login radient`."
-        )
-    error = ERROR_BY_STATUS.get(status)
-    if error is not None:
-        return error(f"Radient refused the remote-compute request (HTTP {status}).")
-    return RemoteComputeError(f"Radient remote-compute request failed (HTTP {status}).")
+    status = response.status_code
+    body = _refusal_body(response)
+    return refusal_for(
+        status,
+        code=refusal_code(body),
+        message=refusal_message(body),
+        retry_after=retry_after_seconds(response.headers.get("Retry-After")),
+    )
+
+
+def _refusal_body(response: httpx.Response) -> object:
+    """The refusal body as JSON, or ``None`` when it is not one.
+
+    A body is allowed to be prose, HTML from a proxy, or empty; none of those is
+    an error here, because a refusal with no readable code is exactly the case
+    the status fallback exists for.
+    """
+    try:
+        return response.json()
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -394,7 +418,7 @@ class RemoteComputeClient:
             raise Unreachable("Radient could not be reached for this remote-compute request.")
         # Never surface a provider body — see the module docstring.
         if response.status_code >= 400:
-            raise _failed(response.status_code)
+            raise _failed(response)
         if empty_body_ok and not response.content.strip():
             # A cancel answers 204 (or a bodiless 200) on success, and a bodiless
             # success is not a malformed response.
@@ -451,7 +475,12 @@ class RemoteComputeClient:
         return run
 
     async def list_runs(
-        self, *, network_id: str | None = None, limit: int = 50, offset: int = 0
+        self,
+        *,
+        status: str | None = None,
+        network_id: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         """One page of runs, newest first by the server's ordering.
 
@@ -460,15 +489,25 @@ class RemoteComputeClient:
         a query string is almost always an unset variable the caller meant to
         leave out.
 
+        ``status`` is the same kind of filter and gets the same refusal. It is
+        NOT checked against :data:`KNOWN_RUN_STATUSES`: that set is what this
+        build can READ, and a server that gained a status the client does not
+        know yet can still be asked about it — filtering it locally would make
+        the panel silently empty instead of showing what the server holds.
+
         The page is ``result["runs"]``, with the page's own ``limit``/``offset``
         beside it; only the runs are returned, because a caller that read the
         echoed paging back would be trusting the server's copy of its own request.
         """
         if network_id is not None and not network_id.strip():
             raise ValueError("network_id must be a network id or omitted, not an empty string")
+        if status is not None and not status.strip():
+            raise ValueError("status must be a run status or omitted, not an empty string")
         params: dict[str, Any] = {"limit": limit, "offset": offset}
         if network_id is not None:
             params["network_id"] = network_id
+        if status is not None:
+            params["status"] = status
         reply = await self._request("GET", "", params=params)
         page = reply.payload
         runs = page.get("runs") if isinstance(page, dict) else None
@@ -488,6 +527,20 @@ class RemoteComputeClient:
         that nobody cancelled.
         """
         reply = await self._request("POST", _run_path(identifier) + "/cancel", empty_body_ok=True)
+        if not reply.payload:
+            return {}
+        return _single_run(reply.payload, identifier)
+
+    async def delete_run(self, identifier: str) -> dict[str, Any]:
+        """Delete a run's record. A bodiless 2xx is SUCCESS, as a cancel's is.
+
+        The endpoint is ``DELETE /v1/remote-compute/runs/:id`` and it documents no
+        response body; the run's secrets are gone with it, so nothing here keeps
+        a copy. When a body does come back it must name the run that was deleted —
+        an answer about another run would have this method report work deleted
+        that nobody deleted.
+        """
+        reply = await self._request("DELETE", _run_path(identifier), empty_body_ok=True)
         if not reply.payload:
             return {}
         return _single_run(reply.payload, identifier)

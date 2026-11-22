@@ -1575,9 +1575,9 @@ def _cwd_entries(*, fresh: bool = False) -> tuple[CwdEntry, ...] | None:
     named. A success is cached for :data:`_CWD_INVENTORY_TTL_S` unless
     ``fresh``.
 
-    ``hidepid``: ``/proc`` mounted ``hidepid=1|2|invisible`` hides OTHER uids'
-    processes only, and this inventory reads this uid's alone, so it is
-    unaffected.
+    The inventory only sees processes exposed by the current procfs view.
+    The liveness re-check for an observed holder (:func:`_still_exists`) does
+    not treat a missing procfs entry as proof of exit.
 
     A per-pid ``EACCES`` on this uid's ``cwd`` link does NOT fail the scan
     (operator directive 2026-11-14, node-2 field cases 1c and 2): see
@@ -2044,13 +2044,14 @@ def _still_exists(pid: int) -> bool:
     between the scan and this check reads as existing and keeps the tree
     busy: the safe direction, so no start-time comparison is needed.
 
-    Read from the SAME source as :func:`_cwd_entries`: ``<_PROC_ROOT>/<pid>``
-    where that process table exists (Linux; tests point it at a fake tree),
-    ``kill(pid, 0)`` elsewhere. The inventory lists this uid's pids only, so
-    ``hidepid`` (which hides other uids) cannot make a holder look gone.
+    A visible procfs entry is positive evidence. A missing entry can reflect
+    restricted visibility rather than exit, so confirm it with ``kill(pid, 0)``
+    just as on systems without procfs.
     """
-    if os.path.isdir(os.path.join(_PROC_ROOT, "self")):
-        return os.path.lexists(os.path.join(_PROC_ROOT, str(pid)))
+    if os.path.isdir(os.path.join(_PROC_ROOT, "self")) and os.path.lexists(
+        os.path.join(_PROC_ROOT, str(pid))
+    ):
+        return True
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
