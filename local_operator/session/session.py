@@ -6017,6 +6017,7 @@ class Session:
             deliver=self._deliver_monitor,
             persist=self._persist_monitor_schedules,
             on_change=self._on_monitor_change,
+            on_quiet_check=self._on_quiet_monitor_check,
             index_writable=lambda: not self._monitor_index_write_failed,
             classify=monitor_classify,
             announce=self._announce_monitor_notice,
@@ -36443,6 +36444,13 @@ class Session:
                 self.refresh_frontend_state()
             except Exception:  # noqa: BLE001 — a paint must not break a tick
                 logger.debug("monitor frontend refresh failed", exc_info=True)
+
+    def _on_quiet_monitor_check(self) -> None:
+        # Keep a continuously attached Run details current without turning a
+        # quiet check into an index write or a full session-state refresh.
+        store = getattr(self, "_frontend_state_store", None)
+        if store is not None:
+            store.refresh_observed_monitors(self._monitors)
 
     def _ensure_wake_supervisor(self) -> None:
         """Install-on-demand chokepoint (design §4.2a). Best-effort; the hook
