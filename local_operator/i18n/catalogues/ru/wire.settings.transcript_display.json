@@ -1,0 +1,8 @@
+{
+  "wire.settings.transcript_display.choice.by_response.description": "каждый завершённый ответ",
+  "wire.settings.transcript_display.choice.by_response.label": "По ответам",
+  "wire.settings.transcript_display.choice.by_turn.description": "один ответ на ход",
+  "wire.settings.transcript_display.choice.by_turn.label": "По ходам",
+  "wire.settings.transcript_display.help": "«По ходам» сворачивает каждый ход до его ответа. «По ответам» оставляет на экране каждый завершённый ответ, а итоговый ответ хода по-прежнему отмечен.",
+  "wire.settings.transcript_display.label": "Отображение транскрипта"
+}

@@ -1,0 +1,16 @@
+{
+  "tui.transcript_fold.failed": "✗ {label} ناکام",
+  "tui.transcript_fold.foot_actions": "{count, plural, one {{label} کارروائی} other {{label} کارروائیاں}} · {time}",
+  "tui.transcript_fold.foot_actions_no_time": "{count, plural, one {{label} کارروائی} other {{label} کارروائیاں}}",
+  "tui.transcript_fold.foot_failed": "ٹرن ناکام · {reason}",
+  "tui.transcript_fold.foot_failed_no_reason": "ٹرن ناکام",
+  "tui.transcript_fold.legend_all": "+ ٹرن کی ہر سطح کھولیں؛ - ڈیفالٹ پر واپس",
+  "tui.transcript_fold.legend_enter": "بار کھولیں یا بند کریں",
+  "tui.transcript_fold.legend_failed": "f/F اگلی/پچھلی ناکام کال پر جائیں",
+  "tui.transcript_fold.legend_heading": "ٹرانسکرپٹ سمیٹنا",
+  "tui.transcript_fold.legend_left_right": "left بند کرے یا باہر آئے؛ right کھولے یا اندر جائے",
+  "tui.transcript_fold.no_failed": "اس ٹرن میں کوئی ناکام کال نہیں",
+  "tui.transcript_fold.times": "×{label}",
+  "tui.transcript_fold.turn": "ٹرن",
+  "tui.transcript_fold.work": "کام"
+}

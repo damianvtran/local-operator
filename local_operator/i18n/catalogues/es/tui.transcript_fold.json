@@ -1,0 +1,16 @@
+{
+  "tui.transcript_fold.failed": "✗ {label} fallidas",
+  "tui.transcript_fold.foot_actions": "{count, plural, one {{label} acción} many {{label} acciones} other {{label} acciones}} · {time}",
+  "tui.transcript_fold.foot_actions_no_time": "{count, plural, one {{label} acción} many {{label} acciones} other {{label} acciones}}",
+  "tui.transcript_fold.foot_failed": "turno fallido · {reason}",
+  "tui.transcript_fold.foot_failed_no_reason": "turno fallido",
+  "tui.transcript_fold.legend_all": "+ abre todos los niveles del turno; - restablece",
+  "tui.transcript_fold.legend_enter": "abrir o cerrar la barra",
+  "tui.transcript_fold.legend_failed": "f/F: llamada fallida siguiente/anterior",
+  "tui.transcript_fold.legend_heading": "plegado de transcripción",
+  "tui.transcript_fold.legend_left_right": "izquierda cierra o sale; derecha abre o entra",
+  "tui.transcript_fold.no_failed": "Ninguna llamada fallida en este turno",
+  "tui.transcript_fold.times": "×{label}",
+  "tui.transcript_fold.turn": "turno",
+  "tui.transcript_fold.work": "trabajo"
+}

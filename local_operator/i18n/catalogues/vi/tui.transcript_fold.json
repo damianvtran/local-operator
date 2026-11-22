@@ -1,0 +1,16 @@
+{
+  "tui.transcript_fold.failed": "✗ {label} lỗi",
+  "tui.transcript_fold.foot_actions": "{count, plural, other {{label} thao tác}} · {time}",
+  "tui.transcript_fold.foot_actions_no_time": "{count, plural, other {{label} thao tác}}",
+  "tui.transcript_fold.foot_failed": "lượt thất bại · {reason}",
+  "tui.transcript_fold.foot_failed_no_reason": "lượt thất bại",
+  "tui.transcript_fold.legend_all": "+ mở mọi cấp của lượt; - về mặc định",
+  "tui.transcript_fold.legend_enter": "mở hoặc đóng thanh",
+  "tui.transcript_fold.legend_failed": "f/F nhảy tới lệnh gọi lỗi kế/trước",
+  "tui.transcript_fold.legend_heading": "thu gọn bản ghi",
+  "tui.transcript_fold.legend_left_right": "trái đóng hoặc ra ngoài; phải mở hoặc vào trong",
+  "tui.transcript_fold.no_failed": "Không có lệnh gọi lỗi trong lượt này",
+  "tui.transcript_fold.times": "×{label}",
+  "tui.transcript_fold.turn": "lượt",
+  "tui.transcript_fold.work": "công việc"
+}

@@ -1,0 +1,8 @@
+{
+  "wire.settings.transcript_display.choice.by_response.description": "हर पूर्ण उत्तर",
+  "wire.settings.transcript_display.choice.by_response.label": "उत्तर के अनुसार",
+  "wire.settings.transcript_display.choice.by_turn.description": "प्रति टर्न एक उत्तर",
+  "wire.settings.transcript_display.choice.by_turn.label": "टर्न के अनुसार",
+  "wire.settings.transcript_display.help": "“टर्न के अनुसार” हर टर्न को उसके उत्तर तक समेट देता है। “उत्तर के अनुसार” हर पूर्ण उत्तर को स्क्रीन पर रखता है, और टर्न का अंतिम उत्तर फिर भी चिह्नित रहता है।",
+  "wire.settings.transcript_display.label": "ट्रांसक्रिप्ट प्रदर्शन"
+}

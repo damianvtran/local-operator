@@ -1,0 +1,7 @@
+{
+  "tui.transcript_display.save_failed": "Không thể lưu cách hiển thị bản ghi: {reason}",
+  "tui.transcript_display.set": "Bản ghi: {mode}",
+  "tui.transcript_display.slash": "Thu gọn bản ghi theo lượt hoặc theo phản hồi",
+  "tui.transcript_display.unknown": "Chế độ không hợp lệ {echo} · chọn by-turn hoặc by-response",
+  "tui.transcript_display.usage": "Bản ghi: {mode} · chọn by-turn hoặc by-response"
+}

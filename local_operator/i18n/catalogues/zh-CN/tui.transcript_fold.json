@@ -1,0 +1,16 @@
+{
+  "tui.transcript_fold.failed": "✗ {label}失败",
+  "tui.transcript_fold.foot_actions": "{count, plural, other {{label}项操作}} · {time}",
+  "tui.transcript_fold.foot_actions_no_time": "{count, plural, other {{label}项操作}}",
+  "tui.transcript_fold.foot_failed": "本轮失败 · {reason}",
+  "tui.transcript_fold.foot_failed_no_reason": "本轮失败",
+  "tui.transcript_fold.legend_all": "+展开本轮全部层级；-恢复默认",
+  "tui.transcript_fold.legend_enter": "展开或折叠此栏",
+  "tui.transcript_fold.legend_failed": "f/F跳到下一个/上一个失败调用",
+  "tui.transcript_fold.legend_heading": "记录折叠",
+  "tui.transcript_fold.legend_left_right": "左键折叠或退出；右键展开或进入",
+  "tui.transcript_fold.no_failed": "本轮没有失败的调用",
+  "tui.transcript_fold.times": "×{label}",
+  "tui.transcript_fold.turn": "本轮",
+  "tui.transcript_fold.work": "工作"
+}
