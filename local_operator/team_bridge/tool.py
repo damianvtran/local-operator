@@ -4381,11 +4381,17 @@ async def _history_files(
             continue
         if not descriptors:
             if count > 0:
+                # This history/thread projection supplies only a count, not the
+                # provenance of missing descriptors: capability off, a pending or
+                # refused screen, and a missing file-set grant look alike here.
+                # State availability, never invent a screening verdict or infer
+                # BODY admission (reported separately by body_state). A count
+                # grants no authority to fetch; keep this branch metadata-only.
                 blocks.append(
                     _file_provenance(
                         channel_id,
                         message,
-                        [f"[{count} file(s) withheld: not admitted by screening]"],
+                        [f"[{count} file(s) withheld: unavailable for agent context]"],
                         [],
                     )
                 )
