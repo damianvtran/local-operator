@@ -455,7 +455,7 @@ async def test_modern_ui_delayed_timeout_after_delivery_never_replays(
     delay past the budget: exactly ONE dispatch, no replay.
 
     Distinct from the immediate-transport-failure test above: here the POST is
-    accepted (a 200 arrives) but the response is DELAYED past the outer budget,
+    accepted by the transport but its response is DELAYED past the outer budget,
     and the record rotates before the retry branch could run. The outer
     `asyncio.timeout` must fire first and land as `BridgeUnreachable` with the
     transport never sending a second request — the pre-delivery retry branch is
@@ -464,6 +464,20 @@ async def test_modern_ui_delayed_timeout_after_delivery_never_replays(
     """
     publish(tmp_path, instance_id="instance-a")
     posts = 0
+    operation_timeout: asyncio.Timeout | None = None
+    real_timeout = asyncio.timeout
+
+    def timeout_after_delivery(delay: float | None) -> asyncio.Timeout:
+        nonlocal operation_timeout
+        if operation_timeout is None:
+            # Capture the operation's outer context, but arm it only after POST
+            # arrives. A tiny wall-clock budget can expire during healthy preflight
+            # on a busy runner, never reaching the delivered-action state we test.
+            operation_timeout = real_timeout(None)
+            return operation_timeout
+        # Health probes retain their real contexts; only the operation's expiry
+        # is driven by the delivery handshake rather than runner scheduling.
+        return real_timeout(delay)
 
     async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal posts
@@ -474,13 +488,18 @@ async def test_modern_ui_delayed_timeout_after_delivery_never_replays(
         posts += 1
         # A second incarnation is advertised while our request is in flight.
         publish(tmp_path, instance_id="instance-b")
-        await asyncio.sleep(2.0)  # outlives the tiny budget below
-        return httpx.Response(200, json={"ok": True})
+        assert operation_timeout is not None
+        operation_timeout.reschedule(asyncio.get_running_loop().time())
+        # Withhold the response until the real outer timeout cancels this POST.
+        # No sleep or enlarged budget can accidentally buy a pre-delivery pass.
+        await asyncio.Event().wait()
+        raise AssertionError("the delivered POST must be cancelled by the outer timeout")
 
     client = _client_with_transport(tmp_path, monkeypatch, handler)
-    client.timeout_for = lambda method, params: 0.1  # type: ignore[assignment]
+    monkeypatch.setattr(asyncio, "timeout", timeout_after_delivery)
     with pytest.raises(BridgeUnreachable):
         await client.call("open", {"url": "https://example.test"})
+    assert operation_timeout is not None and operation_timeout.expired()
     assert posts == 1, "a possibly-delivered action is never replayed after a record rotation"
 
 
