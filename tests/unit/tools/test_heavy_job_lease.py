@@ -135,6 +135,17 @@ IOS_HEAVY = [
     ("yarn eas build --local", "eas build --local"),
     ("npm exec -- eas build --local", "eas build --local"),
     ("nice -n 10 xcodebuild -scheme App", "xcodebuild"),
+    ("npx expo@latest run:ios", "expo run:ios"),
+    ("npx expo@~51.0.0 prebuild", "expo prebuild"),
+    ("npx @expo/cli run:ios", "expo run:ios"),
+    ("npx @expo/cli@latest prebuild", "expo prebuild"),
+    ("pnpm dlx @expo/cli prebuild", "expo prebuild"),
+    ("npx pod-install@latest", "pod install"),
+    ("npx expo --config app.json run:ios", "expo run:ios"),
+    ("pod --project-directory ios install", "pod install"),
+    ("pod _1.15.2_ install", "pod install"),
+    ("eas build --local=true", "eas build --local"),
+    ("xcodebuild -exportLocalizations -project App.xcodeproj", "xcodebuild"),
     ("git status && pod install 2>&1 | tail -5", "pod install"),
 ]
 
@@ -148,6 +159,9 @@ IOS_NOT_HEAVY = [
     "xcodebuild -showdestinations -scheme App",
     "xcodebuild -help",
     "xcodebuild --help",
+    "pod install -h",
+    "expo prebuild -h",
+    "eas build --local -h",
     "pod --version",
     "pod --help",
     "pod install --help",
@@ -329,6 +343,9 @@ def _nested(command: str) -> str:
         ("expo run:ios", "expo run:ios"),
         ("cd ios && pod install", "pod install"),
         ("npx eas-cli@latest build --local", "eas build --local"),
+        ("npx expo@latest run:ios", "expo run:ios"),
+        ("npx pod-install@latest", "pod install"),
+        ("npx @expo/cli prebuild", "expo prebuild"),
     ],
 )
 def test_ios_builds_stay_heavy_past_the_depth_bound(command: str, reason: str) -> None:

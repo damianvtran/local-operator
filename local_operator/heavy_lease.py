@@ -350,7 +350,7 @@ _SHALLOW_HEAVY_TOOLS = {"esbuild", "tsc", "vue-tsc", "vitest", "jest", "electron
 _XCODEBUILD_INFO_FLAGS = frozenset(
     {"-version", "-list", "-showsdks", "-showBuildSettings", "-showBuildSettingsForIndex"}
     | {"-showdestinations", "-showTestPlans", "-usage", "-help", "-license"}
-    | {"-checkFirstLaunchStatus", "-runFirstLaunch", "-exportLocalizations"}
+    | {"-checkFirstLaunchStatus", "-runFirstLaunch"}
 )
 
 #: Placeholder for a ``$(…)``/backtick substitution, masked out of the line
@@ -447,20 +447,13 @@ def _shallow_guess(command: str) -> str | None:
         name = os.path.basename(word.strip("'\""))
         if name in _SHALLOW_HEAVY_TOOLS:
             return name
-        if name in (
-            "xcodebuild",
-            "pod-install",
-            "expo",
-            "pod",
-            "eas",
-            "eas-cli",
-        ) or name.startswith("eas-cli@"):
+        if (tool := _native_tool_name(word)) in _NATIVE_MOBILE_TOOLS:
             after_words: list[str] = []
             for later in words[index + 1 :]:
                 if later in ("&&", "||", ";", "|", "&"):
                     break
                 after_words.append(later.strip("'\""))
-            if verdict := _classify_native_mobile(name, after_words):
+            if verdict := _classify_native_mobile(tool, after_words):
                 return verdict
         is_module = name == "-m" and words[index + 1 : index + 2] == ["pytest"]
         if name == "pytest" or is_module:
@@ -680,6 +673,18 @@ def _shell_c_string(args: list[str]) -> str | None:
     return None
 
 
+_NATIVE_MOBILE_TOOLS = frozenset({"xcodebuild", "pod-install", "expo", "pod", "eas", "eas-cli"})
+
+
+def _native_tool_name(token: str) -> str:
+    """The tool a token names: no quotes, directory or npx ``@version``; the
+    package ``@expo/cli`` (what ``npx @expo/cli`` runs) is ``expo``."""
+    token = token.strip("'\"")
+    if re.fullmatch(r"@expo/cli(@[^/]*)?", token):
+        return "expo"
+    return re.sub(r"@[^/]*$", "", os.path.basename(token))
+
+
 def _classify_native_mobile(program: str, args: list[str]) -> str | None:
     """Native iOS/Expo build tools: ``xcodebuild``, ``expo run:ios|prebuild``,
     ``pod install``/``pod-install``, ``eas build --local``.
@@ -687,20 +692,26 @@ def _classify_native_mobile(program: str, args: list[str]) -> str | None:
     Why (2026-11-22): the lease counted none of these, so several lanes compiled
     iOS apps at once and the host reached load 290-750 on 14 cores. ``program``
     may carry an npx version (``eas-cli@latest``). Informational calls
-    (``xcodebuild -version|-list``, ``pod --version``) and everything else
+    (``xcodebuild -version|-list``, ``pod --version``, ``-h``) and everything else
     (``expo start``, ``pod repo update``, a REMOTE ``eas build``) are not heavy.
     """
-    program = re.sub(r"@[^/]*$", "", program)
+    if "-h" in args:  # `-h` is help for these tools (`xcodebuild -help` is listed below)
+        return None
     first = _positionals(args)[:1]
     if program == "xcodebuild":
         return None if any(a in _XCODEBUILD_INFO_FLAGS for a in args) else "xcodebuild"
     if program == "pod-install":
         return "pod install"
-    if program == "pod" and first == ["install"]:
+    # Subcommand anywhere in the line, not the first positional: an option VALUE
+    # can come first (`pod --project-directory ios install`, `expo --config a run:ios`).
+    if program == "pod" and "install" in args:
         return "pod install"
-    if program == "expo" and first in (["run:ios"], ["prebuild"]):
-        return f"expo {first[0]}"
-    if program in ("eas", "eas-cli") and first == ["build"] and "--local" in args:
+    if program == "expo":
+        for sub in ("run:ios", "prebuild"):
+            if sub in args:
+                return f"expo {sub}"
+    local = any(a in ("--local", "--local=true") for a in args)
+    if program in ("eas", "eas-cli") and first == ["build"] and local:
         return "eas build --local"
     return None
 
@@ -809,6 +820,8 @@ def _classify_segment(
     if not tokens:
         return None
     program = os.path.basename(tokens[0])
+    if (tool := _native_tool_name(tokens[0])) in _NATIVE_MOBILE_TOOLS:
+        program = tool  # `expo@latest`, `eas-cli@12`, `@expo/cli`: strip the package spec
     args = tokens[1:]
     # pytest's `-v` is VERBOSE (its version flag is `-V`/`--version`): a bare
     # `pytest -v` is a whole-suite run and must reach the pytest rules.
