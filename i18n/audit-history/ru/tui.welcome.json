@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "tui.welcome",
+  "history_sha256": "b332789d13385525a872d7d1424f1a0207708955e94cc9672bf9e77d00e4fcb0",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "tui.welcome",
+      "source_sha256": "3a5101cd1034ce7399c5be624efdc45a25f8d7c8689b367b36b11924b99a4ada",
+      "context_sha256": "c78dfb16c0d07ee9fb5e839c641d97e7e75fc7c4bc1e3c1e75f664658fbf67aa",
+      "target_sha256": "1e68a0b20a4120e1c091f585d10daefd9f300bf6f5f1792c784ac2a52b721db3",
+      "changed_keys": [
+        "tui.welcome.tip.transcript_scroll"
+      ],
+      "translator": {
+        "agent": "coder/tui-scroll-keys — self-translated per manager instruction (2026-11-22)",
+        "session": "ed5662a9280c",
+        "session_kind": "lop session id",
+        "model": "radient/auto",
+        "model_kind": "configured session model; concrete upstream provider not exposed to this session",
+        "underlying_model": "unknown (not exposed)",
+        "date": "2026-11-22",
+        "fallback": "not exposed to this session; no provider switch was requested"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "86c5cf020f85",
+        "session_kind": "lop session id (delta re-audit under team lopdev)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model reported in this session's system header",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-22",
+        "fallback": "none observed; no provider switch during this audit",
+        "result": "passed",
+        "findings": 1,
+        "findings_by_severity": {
+          "BLOCKER": 0,
+          "MAJOR": 0,
+          "MINOR": 0,
+          "NIT": 1
+        },
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Independent delta re-audit at worktree HEAD 8704efd8e (round 2; round-1 audit was a different run at 94ecb8983). Whole namespace read at the new bytes against en source; source/context/target sha256 re-derived from disk and match the translator draft. Checked: meaning, native idiom, glossary + style-guide terms vs the locale's shipped catalogue usage, display-cell widths (rich cell_len, CJK double-width) vs sidecar maxCells (chip 20/10, hotkey label 24, help 72, legend 44, tip 57) and vs the namespace's widest existing row (no layout widening), literal keys (⌥J/K, alt+g/G), placeholder/ICU parity, key-set parity, NFC/controls/stray spaces, fr U+202F before ';', ur no manual bidi controls. R1 MINOR fixed: 'разговор'->'беседу', matching sibling tips key_new_session/key_resume (43/57). NITs (no change required): optional: key pair J/K could take the plural 'прокручивают' (carried). Note: en/tui.chrome.bindings.json was re-formatted (minified->pretty-printed, JSON-equal to the audited content) between rounds, so its source_sha256 moved dfe44861…->3189693e…; no wording change."
+    }
+  ]
+}

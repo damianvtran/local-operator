@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "wire.settings.keymap",
-  "history_sha256": "7985569284bccd4183d56e16232589aa8f36a2bfe01a36e2465180b432be22ac",
+  "history_sha256": "a44d06c626690b7da0ac96651caf3caa7b43feb3ccfd96b373f446270d514069",
   "entries": [
     {
       "locale": "ur",
@@ -40,6 +40,55 @@
       },
       "status": "passed",
       "note": "Round-1 locale-level verdict was `fail` because of a major in tui.chrome.remote_park (since fixed and delta re-audited clean of blocker/major); no blocker/major was located in this namespace, so this row passes on the round-1 audit. The per-namespace attribution of the major is derived by the coder from the key(s) the manager named, not from the auditor's per-namespace verdict. target_sha256 is the namespace file's SHA-256 at recording time; per the manager the file was not edited after this audit. Evidence is the translators' and auditors' own reports as relayed to the coder by the manager, not coder-invented output; verdict counts span all nine namespaces of the locale and are repeated in every row. Per-finding text lives in the audit reports and the PR thread (damianvtran/local-operator#3597); unresolved minors/nits are deferred, not fixed. Dates are the day the coder recorded the row."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings.keymap",
+      "source_sha256": "3736fadd1232b8ef4615e497d2149400f679f2dcbe4a9bf6da9542cb075ef088",
+      "context_sha256": "44a7abc7b091cc5a5ce6809d85d3574093df155cefde6d9a7f91a24e4bc04486",
+      "target_sha256": "db64fdbe13b2857fef4ece9a15bf453c0386f2fdf5d925354a27d9c7a9a60aa6",
+      "changed_keys": [
+        "wire.settings.keymap.transcript_up.label",
+        "wire.settings.keymap.transcript_up.help",
+        "wire.settings.keymap.transcript_down.label",
+        "wire.settings.keymap.transcript_down.help",
+        "wire.settings.keymap.transcript_half_up.label",
+        "wire.settings.keymap.transcript_half_up.help",
+        "wire.settings.keymap.transcript_half_down.label",
+        "wire.settings.keymap.transcript_half_down.help"
+      ],
+      "translator": {
+        "agent": "coder/tui-scroll-keys — self-translated per manager instruction (2026-11-22)",
+        "session": "ed5662a9280c",
+        "session_kind": "lop session id",
+        "model": "radient/auto",
+        "model_kind": "configured session model; concrete upstream provider not exposed to this session",
+        "underlying_model": "unknown (not exposed)",
+        "date": "2026-11-22",
+        "fallback": "not exposed to this session; no provider switch was requested"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "86c5cf020f85",
+        "session_kind": "lop session id (delta re-audit under team lopdev)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model reported in this session's system header",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-22",
+        "fallback": "none observed; no provider switch during this audit",
+        "result": "passed",
+        "findings": 1,
+        "findings_by_severity": {
+          "BLOCKER": 0,
+          "MAJOR": 0,
+          "MINOR": 0,
+          "NIT": 1
+        },
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Independent delta re-audit at worktree HEAD 8704efd8e (round 2; round-1 audit was a different run at 94ecb8983). Whole namespace read at the new bytes against en source; source/context/target sha256 re-derived from disk and match the translator draft. Checked: meaning, native idiom, glossary + style-guide terms vs the locale's shipped catalogue usage, display-cell widths (rich cell_len, CJK double-width) vs sidecar maxCells (chip 20/10, hotkey label 24, help 72, legend 44, tip 57) and vs the namespace's widest existing row (no layout widening), literal keys (⌥J/K, alt+g/G), placeholder/ICU parity, key-set parity, NFC/controls/stray spaces, fr U+202F before ';', ur no manual bidi controls. Namespace bytes unchanged since round 1 (no correction was requested or applied); round-1 verdict stands. NITs (no change required): help rows drop the 'composer' qualifier; no-focus-change meaning survives (carried). Note: en/tui.chrome.bindings.json was re-formatted (minified->pretty-printed, JSON-equal to the audited content) between rounds, so its source_sha256 moved dfe44861…->3189693e…; no wording change."
     }
   ]
 }

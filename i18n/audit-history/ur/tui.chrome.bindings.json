@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "tui.chrome.bindings",
-  "history_sha256": "847bb1fbb61f6769321961a275463000150c5b9f84e90edbfe70e01dd8396ba7",
+  "history_sha256": "2a352f28df374490f61c15c20738cf4823f8a8934c507025061bd13d72dd5e53",
   "entries": [
     {
       "locale": "ur",
@@ -73,6 +73,48 @@
       },
       "status": "passed",
       "note": "Round-2 audit of the remediated bytes (target_sha256 re-derived at write time): verdict clean-with-findings (0 blocker, 0 major, 1 minor, 0 nit), scoped to the remediation delta with unchanged rows carried from round 1. First-pass translator job f3c448236a08; remediation translator job 9798ef4ace3c. docs/I18N.md step 3 says high-visibility/safety copy needs a SECOND independent audit; the doc does not define whether a keys legend or notification banners are high-visibility. No such classification is claimed and no second-audit approval is manufactured: the round-2 audit is a second independent auditor instance but delta-scoped, so it is not a full second audit of the carried rows. Evidence is the translators' and auditors' own reports (their commands and outputs), not coder-invented output. Verdict counts cover the locale's two namespaces together (tui.chrome.bindings and tui.chrome.banners), not this namespace alone. Unresolved minors/nits are deferred, not fixed (counts only; the coder was not given per-finding text). "
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.chrome.bindings",
+      "source_sha256": "3189693e2963935f0eed13c2a61f73d07817bdea45be2385a6e61ea54b0d7887",
+      "context_sha256": "f6f50e8e607ccf45600b2e6d31b7290ed7267b75c1c061b4fda5deaa76a507bb",
+      "target_sha256": "1ba110a95148e9f15b9a34b7af33c66f70ab92c61ad0be4d48d40f49f937646e",
+      "changed_keys": [
+        "tui.chrome.bindings.legend_app_ctrl_home_end"
+      ],
+      "translator": {
+        "agent": "coder/tui-scroll-keys — self-translated per manager instruction (2026-11-22)",
+        "session": "ed5662a9280c",
+        "session_kind": "lop session id",
+        "model": "radient/auto",
+        "model_kind": "configured session model; concrete upstream provider not exposed to this session",
+        "underlying_model": "unknown (not exposed)",
+        "date": "2026-11-22",
+        "fallback": "not exposed to this session; no provider switch was requested"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "86c5cf020f85",
+        "session_kind": "lop session id (delta re-audit under team lopdev)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model reported in this session's system header",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-22",
+        "fallback": "none observed; no provider switch during this audit",
+        "result": "passed",
+        "findings": 1,
+        "findings_by_severity": {
+          "BLOCKER": 0,
+          "MAJOR": 0,
+          "MINOR": 0,
+          "NIT": 1
+        },
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Independent delta re-audit at worktree HEAD 8704efd8e (round 2; round-1 audit was a different run at 94ecb8983). Whole namespace read at the new bytes against en source; source/context/target sha256 re-derived from disk and match the translator draft. Checked: meaning, native idiom, glossary + style-guide terms vs the locale's shipped catalogue usage, display-cell widths (rich cell_len, CJK double-width) vs sidecar maxCells (chip 20/10, hotkey label 24, help 72, legend 44, tip 57) and vs the namespace's widest existing row (no layout widening), literal keys (⌥J/K, alt+g/G), placeholder/ICU parity, key-set parity, NFC/controls/stray spaces, fr U+202F before ';', ur no manual bidi controls. Namespace bytes unchanged since round 1 (no correction was requested or applied); round-1 verdict stands. NITs (no change required): '(alt+g/G)' LTR island at end of an RTL string renders correctly under FSI/PDI; 43/44 cells (carried). Note: en/tui.chrome.bindings.json was re-formatted (minified->pretty-printed, JSON-equal to the audited content) between rounds, so its source_sha256 moved dfe44861…->3189693e…; no wording change."
     }
   ]
 }
