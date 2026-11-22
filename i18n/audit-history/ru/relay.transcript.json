@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "relay.transcript",
-  "history_sha256": "31cd54193f6e87276cc3a16d81f2827a6189954f2d3f65a067f2a57d709bf315",
+  "history_sha256": "fbaaab4b25be1e6bb59a3893da6588a001516c3f1c356dd39af0a190b8ee45c7",
   "entries": [
     {
       "locale": "ru",
@@ -93,6 +93,31 @@
         "relay.transcript.bridge.more_messages"
       ],
       "note": "14 new keys relay.transcript.bridge.* (inbound Team Bridge card body states and untrusted frame on the phone web transcript, PR #4278). 13 keys copied verbatim from the audited tui.bridge_card.* translations. Audit round 1 (translation-auditor session 2d94a2642f45) failed zh-CN on F1, rooted in the English offline string (F2: the phone card has no close action), so en relay.transcript.bridge.offline changed to 'reopen the conversation to retry' and that key was retranslated (job 5ebb122944bf). Audit round 2 passed all 7 locales against this en hash, 0 blocker/major. Pre-existing keys unchanged and carry their prior passed audit; this row re-states the namespace against the new en hash."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.transcript",
+      "source_sha256": "64d6a705302bf40e0dae9fa76bd5d19d598948cca28cd2092e610a41dee0c571",
+      "translator": {
+        "agent": "coder role, lop subagent label relay-jtl-coder (session c2f4e7591c05; parent 13fa79f1eb37)",
+        "model": "radient/auto (selector `radient/auto`, model_id `auto`; served provider not disclosed to this subagent)",
+        "date": "2026-11-21"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent; lop task subagent under lopdev manager, session fb63f280b9c3)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-21",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "keys": [
+        "relay.transcript.jump.latest",
+        "relay.transcript.jump.latest_short"
+      ],
+      "note": "2 new keys relay.transcript.jump.{latest,latest_short} (jump-to-latest chip on the phone web transcript; en 'Jump to latest' / 'Latest'). Independent audit of the whole relay.transcript namespace for this locale at en sha 64d6a705…: key order, ICU placeholder parity, NFC and plural categories verified mechanically; 0 BLOCKER/MAJOR. Pre-existing keys unchanged and carry their prior passed audit. ru 'Перейти к последнему' / 'Последнее': passed. Infinitive label per ru guide; 'перейти к' matches TUI 'к первому запуску'. MINOR-1 (not blocking): 'к последнему' is a dangling adjective with no noun, so it could mean the last item rather than the newest message; 'Последнее' is then neuter nominative with no antecedent. Optional correction: jump.latest = 'Перейти к последнему сообщению' (30 chars, fits the >380px chip; reads as a natural lengthening of 'Последнее'). Out-of-diff, pre-existing: label.peer uses 'сеанса' where the glossary and every other ru surface say 'сессия'; not part of these keys, recorded only."
     }
   ]
 }

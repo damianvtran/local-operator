@@ -38,5 +38,7 @@
   "relay.transcript.bridge.not_member": "Ya no formas parte de esta conversación",
   "relay.transcript.bridge.offline": "No se pudo conectar con Radient — vuelve a abrir la conversación para reintentar",
   "relay.transcript.bridge.deleted": "Este mensaje se eliminó",
-  "relay.transcript.bridge.more_messages": "{count, plural, one {# mensaje más en esta tarjeta} many {# de mensajes más en esta tarjeta} other {# mensajes más en esta tarjeta}}"
+  "relay.transcript.bridge.more_messages": "{count, plural, one {# mensaje más en esta tarjeta} many {# de mensajes más en esta tarjeta} other {# mensajes más en esta tarjeta}}",
+  "relay.transcript.jump.latest": "Ir a lo último",
+  "relay.transcript.jump.latest_short": "Lo último"
 }

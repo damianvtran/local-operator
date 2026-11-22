@@ -38,5 +38,7 @@
   "relay.transcript.bridge.not_member": "Bạn không còn tham gia cuộc trò chuyện này",
   "relay.transcript.bridge.offline": "Không thể kết nối Radient — mở lại cuộc trò chuyện để thử lại",
   "relay.transcript.bridge.deleted": "Tin nhắn này đã bị xóa",
-  "relay.transcript.bridge.more_messages": "{count, plural, other {Còn # tin nhắn khác trong thẻ này}}"
+  "relay.transcript.bridge.more_messages": "{count, plural, other {Còn # tin nhắn khác trong thẻ này}}",
+  "relay.transcript.jump.latest": "Đến tin mới nhất",
+  "relay.transcript.jump.latest_short": "Mới nhất"
 }

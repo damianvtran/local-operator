@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "relay.transcript",
-  "history_sha256": "80cc5e32fcd205a2895e8e3d92caadff5b23383906bcd9a378b35fe5c6a6f45c",
+  "history_sha256": "2b977d63db5821d329c655f707f011618f7c0c09e4bf24216d4c1d65cb1a4403",
   "entries": [
     {
       "locale": "ur",
@@ -93,6 +93,31 @@
         "relay.transcript.bridge.more_messages"
       ],
       "note": "14 new keys relay.transcript.bridge.* (inbound Team Bridge card body states and untrusted frame on the phone web transcript, PR #4278). 13 keys copied verbatim from the audited tui.bridge_card.* translations. Audit round 1 (translation-auditor session 2d94a2642f45) failed zh-CN on F1, rooted in the English offline string (F2: the phone card has no close action), so en relay.transcript.bridge.offline changed to 'reopen the conversation to retry' and that key was retranslated (job 5ebb122944bf). Audit round 2 passed all 7 locales against this en hash, 0 blocker/major. One ur nit deferred, no change. Pre-existing keys unchanged and carry their prior passed audit; this row re-states the namespace against the new en hash."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.transcript",
+      "source_sha256": "64d6a705302bf40e0dae9fa76bd5d19d598948cca28cd2092e610a41dee0c571",
+      "translator": {
+        "agent": "coder role, lop subagent label relay-jtl-coder (session c2f4e7591c05; parent 13fa79f1eb37)",
+        "model": "radient/auto (selector `radient/auto`, model_id `auto`; served provider not disclosed to this subagent)",
+        "date": "2026-11-21"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent; lop task subagent under lopdev manager, session fb63f280b9c3)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-21",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "keys": [
+        "relay.transcript.jump.latest",
+        "relay.transcript.jump.latest_short"
+      ],
+      "note": "2 new keys relay.transcript.jump.{latest,latest_short} (jump-to-latest chip on the phone web transcript; en 'Jump to latest' / 'Latest'). Independent audit of the whole relay.transcript namespace for this locale at en sha 64d6a705…: key order, ICU placeholder parity, NFC and plural categories verified mechanically; 0 BLOCKER/MAJOR. Pre-existing keys unchanged and carry their prior passed audit. ur 'تازہ ترین پیغام پر جائیں' / 'تازہ ترین': passed, 0 findings. Respectful imperative per ur guide; 'پر جائیں' matches shipped TUI 'پر جائیں'; 'تازہ ترین' matches shipped welcome/hub_links wording; label.messages 'پیغامات' consistent. RTL sanity: both strings are pure Arabic-script, no Latin, digits, placeholders or manual bidi controls (checked mechanically: no U+200E/F, U+202A-E, U+2066-9), so the render layer's FSI/PDI isolation needs nothing. The down arrow is drawn outside the string: the UI must place it with logical properties (inline-start of the label in dir=rtl) — a client layout point, not a string defect; no rendered RTL evidence was reviewed in this audit."
     }
   ]
 }
