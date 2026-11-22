@@ -74,7 +74,8 @@ async def test_explicit_ask_queue_owns_admission(tmp_path, monkeypatch, verdict:
         retry = await execute_ask("retry", args, None, None, context)
         receipt = result.model_dump_json().lower()
         assert len(records) == 1, (
-            f"first_events={len(first_events)} first_hidden={(result.details or {}).get('ask_gate')} "
+            f"first_events={len(first_events)} "
+            f"first_hidden={(result.details or {}).get('ask_gate')} "
             f"retry_status={(retry.details or {}).get('status')} fork_calls={len(fork_calls)}"
         )
         record = records[0]
