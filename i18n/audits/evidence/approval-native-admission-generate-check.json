@@ -1,0 +1,10 @@
+{
+  "command": [
+    "/Users/damian/local-operator/.venv/bin/python",
+    "scripts/i18n/generate.py",
+    "--check"
+  ],
+  "returncode": 0,
+  "stdout": "generate.py --check: 200 artifact(s) byte-identical\n",
+  "stderr": ""
+}

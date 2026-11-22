@@ -1,0 +1,591 @@
+{
+  "accepted_namespaces": 1496,
+  "cases": [
+    {
+      "locale": "fr",
+      "key": "shell_environment.mode",
+      "size": [
+        120,
+        36
+      ],
+      "pane": "agents",
+      "first_equal_settled": false,
+      "config_unchanged": true,
+      "choices": [
+        {
+          "value": "inherit",
+          "label": "inherit",
+          "description": "votre environnement, comme aujourd’hui (par défaut)",
+          "paint": "    › ● inherit  (par défaut)  votre environnement, comme aujourd’hui (par défaut)"
+        },
+        {
+          "value": "allowlist",
+          "label": "allowlist",
+          "description": "l’ensemble sûr plus les listes ci-dessous, rien d’autre",
+          "paint": "      ○ allowlist  l’ensemble sûr plus les listes ci-dessous, rien d’autre"
+        }
+      ],
+      "label": "Environnement du shell de l’agent",
+      "detail": "non enregistré avant enter   shell_environment.mode",
+      "list_width": 80,
+      "detail_width": 114,
+      "region": "Region(x=1, y=1, width=118, height=29)",
+      "virtual": "Size(width=116, height=27)",
+      "before_prefix": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-fr-shell_environment.mode.expanded",
+      "retained_after_svg": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-shell_environment.mode.expanded.svg",
+      "retained_after_sha256": "5ae34fa4cf3fb03f1e267e3ef4f5dfadd9dc36ed004ba9ebd804477ae6d45437",
+      "retained_after_source": {
+        "locale": "fr",
+        "key": "shell_environment.mode",
+        "stage": "after",
+        "label": "Environnement du shell de l’agent",
+        "help": "« hériter » laisse une commande exécutée par l’agent voir votre environnement (gh, aws, npm gardent leurs tokens). « liste d’autorisation » ne transmet que PATH/HOME/SHELL/TERM/USER/LOGNAME plus les deux listes à côté de ce réglage : la clé du fournisseur avec laquelle cette session a été lancée n’est donc pas transmise à une commande écrite par le modèle. Lu une fois par session : la modification prend effet au prochain lancement.",
+        "summary": "  › Environnement du shell de l’… inherit ▸",
+        "default": "",
+        "detail": "« hériter » laisse une commande exécutée par l’agent voir votre environnement (gh, aws, npm gardent leurs tokens)…",
+        "width": 80,
+        "detail_width": 114,
+        "pane_display": true,
+        "first_equal_settled": true,
+        "choices": [
+          {
+            "value": "inherit",
+            "label": "hériter",
+            "description": "votre environnement, comme aujourd’hui (par défaut)",
+            "paint": "    › ● hériter  (par défaut)  votre environnement, comme aujourd’hui (par défaut)"
+          },
+          {
+            "value": "allowlist",
+            "label": "liste d’autorisation",
+            "description": "l’ensemble sûr plus les listes ci-dessous, rien d’autre",
+            "paint": "      ○ liste d’autorisation  l’ensemble sûr plus les listes ci-dessous, rien d’autre"
+          }
+        ],
+        "tab_state": {
+          "focused": "SettingsView(classes='settings-view')",
+          "detail": "« hériter » laisse une commande exécutée par l’agent voir votre environnement (gh, aws, npm gardent leurs tokens)…"
+        },
+        "pane": "fournisseurs\n  aucun connecté — /login <pro…\n\néquipes  agents  (←→)\n  aucune équipe configurée\n  /team les liste et attache\n\n  lecture seule",
+        "config_unchanged": true
+      }
+    },
+    {
+      "locale": "zh-CN",
+      "key": "shell_environment.mode",
+      "size": [
+        120,
+        36
+      ],
+      "pane": "teams",
+      "first_equal_settled": true,
+      "config_unchanged": true,
+      "choices": [
+        {
+          "value": "inherit",
+          "label": "inherit",
+          "description": "你的环境，同现状（默认）",
+          "paint": "    › ● inherit  （默认）  你的环境，同现状（默认）"
+        },
+        {
+          "value": "allowlist",
+          "label": "allowlist",
+          "description": "安全集加下方列表，别无其他",
+          "paint": "      ○ allowlist  安全集加下方列表，别无其他"
+        }
+      ],
+      "label": "智能体shell环境",
+      "detail": "按enter后才会保存   shell_environment.mode",
+      "list_width": 80,
+      "detail_width": 114,
+      "region": "Region(x=1, y=1, width=118, height=29)",
+      "virtual": "Size(width=116, height=27)",
+      "before_prefix": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-zh-CN-shell_environment.mode.expanded",
+      "retained_after_svg": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-zh-CN-shell_environment.mode.expanded.svg",
+      "retained_after_sha256": "66d54dd3ab1e949b6089733fa401d602076ba799ec0d89b3660f0cf66534f6ed",
+      "retained_after_source": {
+        "locale": "zh-CN",
+        "key": "shell_environment.mode",
+        "stage": "after",
+        "label": "智能体shell环境",
+        "help": "“继承”让智能体运行的命令看到你的环境（gh、aws、npm保留其令牌）。“允许列表”只传递PATH/HOME/SHELL/TERM/USER/LOGNAME，加上旁边这两个列表，因此本会话启动时用的提供商密钥不会交给模型编写的命令。每个会话只读取一次：修改后下次启动才生效。",
+        "summary": "  › 智能体shell环境               inherit ▸",
+        "default": "",
+        "detail": "“继承”让智能体运行的命令看到你的环境（gh、aws、npm保留其令牌）。“允许列表”只传递PATH/HOME/SHELL/TERM/USER/LOGNAME…",
+        "width": 80,
+        "detail_width": 114,
+        "pane_display": true,
+        "first_equal_settled": true,
+        "choices": [
+          {
+            "value": "inherit",
+            "label": "继承",
+            "description": "你的环境，同现状（默认）",
+            "paint": "    › ● 继承  （默认）  你的环境，同现状（默认）"
+          },
+          {
+            "value": "allowlist",
+            "label": "允许列表",
+            "description": "安全集加下方列表，别无其他",
+            "paint": "      ○ 允许列表  安全集加下方列表，别无其他"
+          }
+        ],
+        "tab_state": {
+          "focused": "SettingsView(classes='settings-view')",
+          "detail": "“继承”让智能体运行的命令看到你的环境（gh、aws、npm保留其令牌）。“允许列表”只传递PATH/HOME/SHELL/TERM/USER/LOGNAME…"
+        },
+        "pane": "提供商\n  未登录任何提供商 — /login <p…\n\n团队  智能体  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  ……另有8项\n\n  只读",
+        "config_unchanged": true
+      }
+    },
+    {
+      "locale": "hi",
+      "key": "shell_environment.mode",
+      "size": [
+        120,
+        36
+      ],
+      "pane": "agents",
+      "first_equal_settled": true,
+      "config_unchanged": true,
+      "choices": [
+        {
+          "value": "inherit",
+          "label": "inherit",
+          "description": "आपका एनवायरनमेंट, अब जैसा है वैसा ही (डिफ़ॉल्ट)",
+          "paint": "    › ● inherit  (डिफ़ॉल्ट)  आपका एनवायरनमेंट, अब जैसा है वैसा ही (डिफ़ॉल्ट)"
+        },
+        {
+          "value": "allowlist",
+          "label": "allowlist",
+          "description": "सुरक्षित सेट और नीचे की सूचियाँ, और कुछ नहीं",
+          "paint": "      ○ allowlist  सुरक्षित सेट और नीचे की सूचियाँ, और कुछ नहीं"
+        }
+      ],
+      "label": "एजेंट शेल एनवायरनमेंट",
+      "detail": "enter दबाने तक नहीं सहेजा जाएगा   shell_environment.mode",
+      "list_width": 80,
+      "detail_width": 114,
+      "region": "Region(x=1, y=1, width=118, height=29)",
+      "virtual": "Size(width=116, height=27)",
+      "before_prefix": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-hi-shell_environment.mode.expanded",
+      "retained_after_svg": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-shell_environment.mode.expanded.svg",
+      "retained_after_sha256": "f240320d4a6a993a1569841c0574acc2d3a3c1bbf241d8e82b872c190d75392d",
+      "retained_after_source": {
+        "locale": "hi",
+        "key": "shell_environment.mode",
+        "stage": "after",
+        "label": "एजेंट शेल एनवायरनमेंट",
+        "help": "'मौजूदा परिवेश' मोड में एजेंट के चलाए कमांड को आपका परिवेश मिलता है (gh, aws, npm अपने टोकन रखते हैं)। 'अनुमति-सूची' सिर्फ़ PATH/HOME/SHELL/TERM/USER/LOGNAME और इसके पास की दोनों सूचियाँ भेजता है, इसलिए जिस प्रोवाइडर कुंजी से यह सत्र शुरू हुआ, वह मॉडल के लिखे कमांड को नहीं दी जाती। हर सत्र में एक बार पढ़ा जाता है: बदलाव अगले लॉन्च पर लागू होगा।",
+        "summary": "  › एजेंट शेल एनवायरनमेंट               inherit ▸",
+        "default": "",
+        "detail": "'मौजूदा परिवेश' मोड में एजेंट के चलाए कमांड को आपका परिवेश मिलता है (gh, aws, npm अपने टोकन रखते हैं)। 'अनुमति-सूची' सिर्फ़ PATH/HOME/SHELL/TERM/U…",
+        "width": 80,
+        "detail_width": 114,
+        "pane_display": true,
+        "first_equal_settled": true,
+        "choices": [
+          {
+            "value": "inherit",
+            "label": "मौजूदा परिवेश",
+            "description": "आपका एनवायरनमेंट, अब जैसा है वैसा ही (डिफ़ॉल्ट)",
+            "paint": "    › ● मौजूदा परिवेश  (डिफ़ॉल्ट)  आपका एनवायरनमेंट, अब जैसा है वैसा ही (डिफ़ॉल्ट)"
+          },
+          {
+            "value": "allowlist",
+            "label": "अनुमति-सूची",
+            "description": "सुरक्षित सेट और नीचे की सूचियाँ, और कुछ नहीं",
+            "paint": "      ○ अनुमति-सूची  सुरक्षित सेट और नीचे की सूचियाँ, और कुछ नहीं"
+          }
+        ],
+        "tab_state": {
+          "focused": "SettingsView(classes='settings-view')",
+          "detail": "'मौजूदा परिवेश' मोड में एजेंट के चलाए कमांड को आपका परिवेश मिलता है (gh, aws, npm अपने टोकन रखते हैं)। 'अनुमति-सूची' सिर्फ़ PATH/HOME/SHELL/TERM/U…"
+        },
+        "pane": "प्रोवाइडर\n  किसी में लॉग इन नहीं — /login <prov…\n\nटीमें  एजेंट  (←→)\n  कोई टीम कॉन्फ़िगर नहीं है\n  /team से सूची देखें और जोड़ें\n\n  केवल पढ़ने योग्य",
+        "config_unchanged": true
+      }
+    },
+    {
+      "locale": "ur",
+      "key": "shell_environment.mode",
+      "size": [
+        120,
+        36
+      ],
+      "pane": "teams",
+      "first_equal_settled": true,
+      "config_unchanged": true,
+      "choices": [
+        {
+          "value": "inherit",
+          "label": "inherit",
+          "description": "آپ کا ماحول، جیسا آج (ڈیفالٹ)",
+          "paint": "    › ● inherit⁧  (ڈیفالٹ)⁩  آپ کا ماحول، جیسا آج (ڈیفالٹ)"
+        },
+        {
+          "value": "allowlist",
+          "label": "allowlist",
+          "description": "محفوظ سیٹ اور نیچے کی فہرستیں، اور کچھ نہیں",
+          "paint": "      ○ allowlist  محفوظ سیٹ اور نیچے کی فہرستیں، اور کچھ نہیں"
+        }
+      ],
+      "label": "ایجنٹ شیل ماحول",
+      "detail": "⁧⁦enter⁩ دبانے تک محفوظ نہیں⁩   shell_environment.mode",
+      "list_width": 80,
+      "detail_width": 114,
+      "region": "Region(x=1, y=1, width=118, height=29)",
+      "virtual": "Size(width=116, height=27)",
+      "before_prefix": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-ur-shell_environment.mode.expanded",
+      "retained_after_svg": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-shell_environment.mode.expanded.svg",
+      "retained_after_sha256": "fada636028daf5a2ba87f71ee6a1e41328eca17da486cee2ab0083765606d945",
+      "retained_after_source": {
+        "locale": "ur",
+        "key": "shell_environment.mode",
+        "stage": "after",
+        "label": "ایجنٹ شیل ماحول",
+        "help": "'موجودہ ماحول اپنائیں' ایجنٹ کی چلائی ہوئی کمانڈ کو آپ کے ماحول تک رسائی دیتا ہے (gh، aws، npm اپنے ٹوکنز رکھتے ہیں)۔ 'اجازت کی فہرست' صرف PATH/HOME/SHELL/TERM/USER/LOGNAME اور ساتھ کی دو فہرستیں دیتا ہے، اس لیے سیشن شروع کرتے وقت استعمال ہونے والی پرووائیڈر کلید ماڈل کی لکھی کمانڈ کو نہیں ملتی۔ فی سیشن ایک بار پڑھا جاتا ہے: تبدیلی اگلے آغاز پر لاگو ہوتی ہے۔",
+        "summary": "  › ایجنٹ شیل ماحول               inherit ▸",
+        "default": "",
+        "detail": "'موجودہ ماحول اپنائیں' ایجنٹ کی چلائی ہوئی کمانڈ کو آپ کے ماحول تک رسائی دیتا ہے (gh، aws، npm اپنے ٹوکنز رکھتے ہ…",
+        "width": 80,
+        "detail_width": 114,
+        "pane_display": true,
+        "first_equal_settled": true,
+        "choices": [
+          {
+            "value": "inherit",
+            "label": "موجودہ ماحول اپنائیں",
+            "description": "آپ کا ماحول، جیسا آج (ڈیفالٹ)",
+            "paint": "    › ● موجودہ ماحول اپنائیں⁧  (ڈیفالٹ)⁩  آپ کا ماحول، جیسا آج (ڈیفالٹ)"
+          },
+          {
+            "value": "allowlist",
+            "label": "اجازت کی فہرست",
+            "description": "محفوظ سیٹ اور نیچے کی فہرستیں، اور کچھ نہیں",
+            "paint": "      ○ اجازت کی فہرست  محفوظ سیٹ اور نیچے کی فہرستیں، اور کچھ نہیں"
+          }
+        ],
+        "tab_state": {
+          "focused": "SettingsView(classes='settings-view')",
+          "detail": "'موجودہ ماحول اپنائیں' ایجنٹ کی چلائی ہوئی کمانڈ کو آپ کے ماحول تک رسائی دیتا ہے (gh، aws، npm اپنے ٹوکنز رکھتے ہ…"
+        },
+        "pane": "⁧پرووائیڈرز⁩\n  ⁧کوئی لاگ ان نہیں — ⁦/login <p⁩⁩…\n\n⁧ٹیمیں⁩  ⁧ایجنٹس⁩  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  ⁧… 8 مزید⁩\n\n⁧  صرف پڑھنے کے لیے⁩",
+        "config_unchanged": true
+      }
+    },
+    {
+      "locale": "es",
+      "key": "shell_environment.mode",
+      "size": [
+        120,
+        36
+      ],
+      "pane": "agents",
+      "first_equal_settled": true,
+      "config_unchanged": true,
+      "choices": [
+        {
+          "value": "inherit",
+          "label": "inherit",
+          "description": "tu entorno, como hasta ahora (predeterminado)",
+          "paint": "    › ● inherit  (predeterminado)  tu entorno, como hasta ahora (predeterminado)"
+        },
+        {
+          "value": "allowlist",
+          "label": "allowlist",
+          "description": "el conjunto seguro más las listas de abajo, nada más",
+          "paint": "      ○ allowlist  el conjunto seguro más las listas de abajo, nada más"
+        }
+      ],
+      "label": "Entorno del shell del agente",
+      "detail": "sin guardar hasta enter   shell_environment.mode",
+      "list_width": 80,
+      "detail_width": 114,
+      "region": "Region(x=1, y=1, width=118, height=29)",
+      "virtual": "Size(width=116, height=27)",
+      "before_prefix": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-es-shell_environment.mode.expanded",
+      "retained_after_svg": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-es-shell_environment.mode.expanded.svg",
+      "retained_after_sha256": "83f1b1b744979a64c50eeeb0269f57b06e6b3bd48c083a5f44e5714d966eb36d",
+      "retained_after_source": {
+        "locale": "es",
+        "key": "shell_environment.mode",
+        "stage": "after",
+        "label": "Entorno del shell del agente",
+        "help": "“heredar” (`inherit`) deja que un comando que ejecuta el agente vea tu entorno (gh, aws y npm conservan sus tokens). “lista de permitidos” (`allowlist`) solo pasa PATH/HOME/SHELL/TERM/USER/LOGNAME más las dos listas que acompañan a este ajuste, así que la clave del proveedor con la que se lanzó esta sesión no se entrega a ningún comando que escriba el modelo. Se lee una vez por sesión: el cambio surte efecto en el siguiente arranque.",
+        "summary": "  › Entorno del shell del agente  inherit ▸",
+        "default": "",
+        "detail": "“heredar” (`inherit`) deja que un comando que ejecuta el agente vea tu entorno (gh, aws y npm conservan sus token…",
+        "width": 80,
+        "detail_width": 114,
+        "pane_display": true,
+        "first_equal_settled": true,
+        "choices": [
+          {
+            "value": "inherit",
+            "label": "heredar",
+            "description": "tu entorno, como hasta ahora (predeterminado)",
+            "paint": "    › ● heredar  (predeterminado)  tu entorno, como hasta ahora (predeterminado)"
+          },
+          {
+            "value": "allowlist",
+            "label": "lista de permitidos",
+            "description": "el conjunto seguro más las listas de abajo, nada más",
+            "paint": "      ○ lista de permitidos  el conjunto seguro más las listas de abajo, nada más"
+          }
+        ],
+        "tab_state": {
+          "focused": "SettingsView(classes='settings-view')",
+          "detail": "“heredar” (`inherit`) deja que un comando que ejecuta el agente vea tu entorno (gh, aws y npm conservan sus token…"
+        },
+        "pane": "proveedores\n  ninguno conectado — /login <…\n\nequipos  agentes  (←→)\n  no hay equipos configurados\n  /team los lista y los asocia\n\n  solo lectura",
+        "config_unchanged": true
+      }
+    },
+    {
+      "locale": "ru",
+      "key": "shell_environment.mode",
+      "size": [
+        120,
+        36
+      ],
+      "pane": "teams",
+      "first_equal_settled": true,
+      "config_unchanged": true,
+      "choices": [
+        {
+          "value": "inherit",
+          "label": "inherit",
+          "description": "ваше окружение, как сейчас (по умолчанию)",
+          "paint": "    › ● inherit  (по умолчанию)  ваше окружение, как сейчас (по умолчанию)"
+        },
+        {
+          "value": "allowlist",
+          "label": "allowlist",
+          "description": "безопасный набор плюс списки ниже, и ничего больше",
+          "paint": "      ○ allowlist  безопасный набор плюс списки ниже, и ничего больше"
+        }
+      ],
+      "label": "Окружение shell агента",
+      "detail": "сохранится только по enter   shell_environment.mode",
+      "list_width": 80,
+      "detail_width": 114,
+      "region": "Region(x=1, y=1, width=118, height=29)",
+      "virtual": "Size(width=116, height=27)",
+      "before_prefix": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-ru-shell_environment.mode.expanded",
+      "retained_after_svg": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ru-shell_environment.mode.expanded.svg",
+      "retained_after_sha256": "61ae9b03c823f8f9351e707994567379931b2abf5b72e3f9e2f55349a6d74221",
+      "retained_after_source": {
+        "locale": "ru",
+        "key": "shell_environment.mode",
+        "stage": "after",
+        "label": "Окружение shell агента",
+        "help": "«Наследовать»: командам, запускаемым агентом, доступно ваше окружение (gh, aws, npm сохраняют свои токены). «Список разрешений»: передаются только PATH/HOME/SHELL/TERM/USER/LOGNAME и два списка рядом с этой настройкой, поэтому ключ провайдера, с которым запущена сессия, не попадает в команду, написанную моделью. Настройка читается один раз за сессию: изменение вступит в силу при следующем запуске.",
+        "summary": "  › Окружение shell агента        inherit ▸",
+        "default": "",
+        "detail": "«Наследовать»: командам, запускаемым агентом, доступно ваше окружение (gh, aws, npm сохраняют свои токены). «Спис…",
+        "width": 80,
+        "detail_width": 114,
+        "pane_display": true,
+        "first_equal_settled": true,
+        "choices": [
+          {
+            "value": "inherit",
+            "label": "наследовать",
+            "description": "ваше окружение, как сейчас (по умолчанию)",
+            "paint": "    › ● наследовать  (по умолчанию)  ваше окружение, как сейчас (по умолчанию)"
+          },
+          {
+            "value": "allowlist",
+            "label": "список разрешений",
+            "description": "безопасный набор плюс списки ниже, и ничего больше",
+            "paint": "      ○ список разрешений  безопасный набор плюс списки ниже, и ничего больше"
+          }
+        ],
+        "tab_state": {
+          "focused": "SettingsView(classes='settings-view')",
+          "detail": "«Наследовать»: командам, запускаемым агентом, доступно ваше окружение (gh, aws, npm сохраняют свои токены). «Спис…"
+        },
+        "pane": "провайдеры\n  вход не выполнен — /login <p…\n\nкоманды  агенты  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  … ещё 8\n\n  только чтение",
+        "config_unchanged": true
+      }
+    },
+    {
+      "locale": "vi",
+      "key": "shell_environment.mode",
+      "size": [
+        120,
+        36
+      ],
+      "pane": "agents",
+      "first_equal_settled": true,
+      "config_unchanged": true,
+      "choices": [
+        {
+          "value": "inherit",
+          "label": "inherit",
+          "description": "môi trường của bạn, như hiện nay (mặc định)",
+          "paint": "    › ● inherit  (mặc định)  môi trường của bạn, như hiện nay (mặc định)"
+        },
+        {
+          "value": "allowlist",
+          "label": "allowlist",
+          "description": "bộ an toàn cộng các danh sách bên dưới, không gì khác",
+          "paint": "      ○ allowlist  bộ an toàn cộng các danh sách bên dưới, không gì khác"
+        }
+      ],
+      "label": "Môi trường shell của tác nhân",
+      "detail": "chỉ lưu khi nhấn enter   shell_environment.mode",
+      "list_width": 80,
+      "detail_width": 114,
+      "region": "Region(x=1, y=1, width=118, height=29)",
+      "virtual": "Size(width=116, height=27)",
+      "before_prefix": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-vi-shell_environment.mode.expanded",
+      "retained_after_svg": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-vi-shell_environment.mode.expanded.svg",
+      "retained_after_sha256": "bb6e7faee7c4740d894b4f4c71bfd1b291ddbde0310c1fd968a37b6905b02c8b",
+      "retained_after_source": {
+        "locale": "vi",
+        "key": "shell_environment.mode",
+        "stage": "after",
+        "label": "Môi trường shell của tác nhân",
+        "help": "“Kế thừa” cho phép lệnh do tác nhân chạy truy cập môi trường của bạn (gh, aws, npm giữ các token của chúng). “Danh sách cho phép” chỉ truyền PATH/HOME/SHELL/TERM/USER/LOGNAME cùng hai danh sách bên cạnh, nên khóa nhà cung cấp dùng để khởi chạy phiên không bị truyền cho lệnh do mô hình viết. Thiết lập được đọc một lần mỗi phiên: thay đổi có hiệu lực từ lần khởi chạy kế tiếp.",
+        "summary": "  › Môi trường shell của tác nhân inherit ▸",
+        "default": "",
+        "detail": "“Kế thừa” cho phép lệnh do tác nhân chạy truy cập môi trường của bạn (gh, aws, npm giữ các token của chúng). “Dan…",
+        "width": 80,
+        "detail_width": 114,
+        "pane_display": true,
+        "first_equal_settled": true,
+        "choices": [
+          {
+            "value": "inherit",
+            "label": "Kế thừa",
+            "description": "môi trường của bạn, như hiện nay (mặc định)",
+            "paint": "    › ● Kế thừa  (mặc định)  môi trường của bạn, như hiện nay (mặc định)"
+          },
+          {
+            "value": "allowlist",
+            "label": "Danh sách cho phép",
+            "description": "bộ an toàn cộng các danh sách bên dưới, không gì khác",
+            "paint": "      ○ Danh sách cho phép  bộ an toàn cộng các danh sách bên dưới, không gì khác"
+          }
+        ],
+        "tab_state": {
+          "focused": "SettingsView(classes='settings-view')",
+          "detail": "“Kế thừa” cho phép lệnh do tác nhân chạy truy cập môi trường của bạn (gh, aws, npm giữ các token của chúng). “Dan…"
+        },
+        "pane": "nhà cung cấp\n  chưa đăng nhập — /login <pro…\n\nnhóm  tác nhân  (←→)\n  chưa cấu hình nhóm nào\n  /team để liệt kê và gắn\n\n  chỉ đọc",
+        "config_unchanged": true
+      }
+    },
+    {
+      "locale": "hi",
+      "key": "providers.openrouter.enforce_distillable_text",
+      "size": [
+        120,
+        36
+      ],
+      "pane": "teams",
+      "first_equal_settled": true,
+      "config_unchanged": true,
+      "choices": [
+        {
+          "value": "",
+          "label": "default",
+          "description": "कोई प्राथमिकता नहीं भेजी जाती",
+          "paint": "      ○ default  (डिफ़ॉल्ट)  कोई प्राथमिकता नहीं भेजी जाती"
+        },
+        {
+          "value": "true",
+          "label": "true",
+          "description": "सिर्फ़ distillable-text endpoint",
+          "paint": "    › ● true  सिर्फ़ distillable-text endpoint"
+        }
+      ],
+      "label": "distillable टेक्स्ट",
+      "detail": "'true': सिर्फ़ ऐसे endpoint जिनका टेक्स्ट आउटपुट distill किया जा सके। 'default': कुछ नहीं भेजा जाता। · enter दबाने तक नहीं सहेजा जाएगा",
+      "list_width": 80,
+      "detail_width": 114,
+      "region": "Region(x=1, y=1, width=118, height=29)",
+      "virtual": "Size(width=116, height=27)",
+      "before_prefix": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-hi-providers.openrouter.enforce_distillable_text.expanded",
+      "retained_after_svg": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-providers.openrouter.enforce_distillable_text.expanded.svg",
+      "retained_after_sha256": "a7a3947cfc32272f37010db9e212ec66142ea8789cb5bd954ec682d123f33d29",
+      "retained_after_source": {
+        "locale": "hi",
+        "key": "providers.openrouter.enforce_distillable_text",
+        "stage": "after",
+        "label": "डिस्टिलेशन योग्य टेक्स्ट",
+        "help": "'हाँ': सिर्फ़ ऐसे endpoint जिनके टेक्स्ट आउटपुट से मॉडल डिस्टिलेशन की अनुमति हो। 'डिफ़ॉल्ट': कुछ नहीं भेजा जाता।",
+        "summary": "  › डिस्टिलेशन योग्य टेक्स्ट               true ▸",
+        "default": "डिफ़ॉल्ट: —",
+        "detail": "'हाँ': सिर्फ़ ऐसे endpoint जिनके टेक्स्ट आउटपुट से मॉडल डिस्टिलेशन की अनुमति हो। 'डिफ़ॉल्ट': कुछ नहीं भेजा जाता। · डिफ़ॉल्ट: —",
+        "width": 80,
+        "detail_width": 114,
+        "pane_display": true,
+        "first_equal_settled": true,
+        "choices": [
+          {
+            "value": "",
+            "label": "डिफ़ॉल्ट",
+            "description": "कोई प्राथमिकता नहीं भेजी जाती",
+            "paint": "      ○ डिफ़ॉल्ट  (डिफ़ॉल्ट)  कोई प्राथमिकता नहीं भेजी जाती"
+          },
+          {
+            "value": "true",
+            "label": "हाँ",
+            "description": "सिर्फ़ ऐसे endpoint जिनके टेक्स्ट से मॉडल डिस्टिलेशन की अनुमति हो",
+            "paint": "    › ● हाँ  सिर्फ़ ऐसे endpoint जिनके टेक्स्ट से मॉडल डिस्टिलेशन की अनुमति हो"
+          }
+        ],
+        "tab_state": {
+          "focused": "SettingsView(classes='settings-view')",
+          "detail": "'हाँ': सिर्फ़ ऐसे endpoint जिनके टेक्स्ट आउटपुट से मॉडल डिस्टिलेशन की अनुमति हो। 'डिफ़ॉल्ट': कुछ नहीं भेजा जाता। · डिफ़ॉल्ट: —"
+        },
+        "pane": "प्रोवाइडर\n  किसी में लॉग इन नहीं — /login <prov…\n\nटीमें  एजेंट  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  … 8 और\n\n  केवल पढ़ने योग्य",
+        "config_unchanged": true
+      }
+    },
+    {
+      "locale": "fr",
+      "key": "team_bridge.session",
+      "size": [
+        100,
+        30
+      ],
+      "pane": "agents",
+      "first_equal_settled": true,
+      "config_unchanged": true,
+      "choices": [],
+      "label": "Session CoS",
+      "detail": "Session pouvant être réveillée à l’arrivée de nouveaux messages ; vide = badge uniquement.",
+      "list_width": 60,
+      "detail_width": 94,
+      "region": "Region(x=1, y=1, width=98, height=23)",
+      "virtual": "Size(width=96, height=21)",
+      "before_prefix": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-fr-compact-team_bridge.session-100x30.settled",
+      "retained_after_svg": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-compact-team_bridge.session-100x30.settled.svg",
+      "retained_after_sha256": "e6134538a6690f4ba256e8cbc4c58685cc5245994b6fac1fab471dbcd504d914",
+      "retained_after_source": {
+        "locale": "fr",
+        "key": "team_bridge.session",
+        "compact": true,
+        "size": [
+          100,
+          30
+        ],
+        "source_label": "Session de la cheffe de cabinet",
+        "source_label_cells": 31,
+        "help": "Session pouvant être réveillée à l’arrivée de nouveaux messages ; vide = badge uniquement.",
+        "detail": "Session pouvant être réveillée à l’arrivée de nouveaux messages ; vide = badge uniquement.",
+        "list_width": 60,
+        "detail_width": 94,
+        "region": "Region(x=1, y=1, width=98, height=23)",
+        "virtual": "Size(width=96, height=21)",
+        "pane_display": true,
+        "first_equal_settled": true,
+        "paint": "Modèle                            nouv. sessions\n    Fournisseur par défaut        —\n    Modèle par défaut             —\n    Effort de raisonnement par d… —\nProtocole de connexion            prise d’effet : immédiat\n    Utiliser le contexte OpenAI…  activé\n    Surface d’API OpenAI          responses\n    Cache 1 h d’Anthropic au-del… 150000\n    TTL 1 h sous-agents Anthropic 0\n    Région Amazon Bedrock         —\n    Authentification Bedrock      —\nRoutage OpenRouter                prise d’effet : immédiat\n    affinité de cache             activé\n    politique de routage          —\n    ordre des hôtes               —\n    hôtes autorisés               —\n    hôtes ignorés                 —\n    replis                        —\n    paramètres requis             —\n    collecte de données           —\n    rétention nulle               —\n    texte distillable             true\n    quantifications               —\n    prix max                      —\n    débit min (tok/s)             0.0\n    latence max (s)               0.0\n    retirer un hôte lent (tok/s)  0.0\nBasculement et réessais           prise d’effet : immédiat\n    Réessayer les appels en échec activé\n    Réessais max                  10\n    Délai de base (ms)            500\n    Réessais de connectivité      15\n    Plafond d’espacement de conn… 60000\n    Repli de modèle               activé\n    Repli selon l’utilisation     désactivé\n    politique de choix du compte  reset-soonest\n    ancien choix selon l’usage    activé\n    Réserve d’utilisation (%)     10\n    Cascade de basculement        0 chaîne\n      aucune cascade configurée\n    + ajouter une chaîne\n    Repli de l’enfant épinglé     cross-family\nApparence                         prise d’effet : immédiat\n    Thème                         dark\n    Animation de reflet           activé\n    Narration en cours de tour    activé\n    Raisonnement du modèle en di… désactivé\n    Filet en marge de l’assistant activé\n    Lignes d’action confortables  désactivé\n    Glyphes Nerd Font             auto\n    Marqueurs de titre            désactivé\n    Titre du terminal             activé\n    Images intégrées              activé\n    Notifications de bureau       activé\n    Noms de session dans les not… activé\n    Format des heures de réveil   12h\n    Langue                        fr\n    Dock des sous-agents          full\n    Masquer le trafic entre sess… désactivé\n    Marquer la réponse du tour    désactivé\n    Bandeau d’état                activé\n    Chevron du prompt             activé\n    Bandeau : modèle              activé\n    Bandeau : répertoire de trav… activé\n    Bandeau : contexte            activé\n    Bandeau : débit de décodage   activé\n    Bandeau : coût de session     activé\n    Bandeau : temps écoulé        activé\n    Bandeau : commande d’état     —\n    Bandeau : cadence d’exécution 30\n    Barre latérale des sessions   désactivé\n    Position de la barre latérale left\n    Couche sous-agents de la bar… désactivé\nSon des notifications             prise d’effet : immédiat\n    Jouer un son                  activé\n    Son                           soft-pulse\n    Volume                        70\nRaccourcis clavier                prise d’effet : immédiat\n    Nouvelle session              ctrl+n\n    Reprendre une session         ctrl+s\n    Envoi rapide                  cmd+alt+shift+space\n    Appuyer pour parler           Right-Option (hold)\n    Démarrer l’enregistrement     cmd+shift+s\nApprobations                      prise d’effet : immédiat\n    Mode d’approbation des outils auto\nStockage des sessions             relancement\n    Enregistrement auto de la co… désactivé\nVos conversations                 relancement\n    Nettoyage des sessions        désactivé\n    ↳ sessions max                0\n    ↳ jours d’inactivité max      0\n    ↳ octets totaux max           0\n    ↳ supprimer les vides         désactivé\n    Supprimer les conversations…  30\nCompression des transcriptions    relancement\n    Compresser les transcriptions activé\n    ↳ compresser après (jours)    30\nScratchpad                        prise d’effet : immédiat\n    Plafond scratchpad (octets)   268435456\nTravail délégué                   relancement\n    Nettoyage du travail délégué  activé\n    ↳ supprimer après (heures)    48\nSous-agents                       prise d’effet : immédiat\n    Tâches d’arrière-plan max     15\n    Alléger les connaissances de… activé\n    Profondeur max d’équipes imb… 3\n    Qui choisit le modèle d’un s… operator\n    Modèle de sous-agent : lo     —\n    Modèle de sous-agent : med    —\n    Modèle de sous-agent : hi     —\nSuggestions intelligentes         nouv. sessions\n    Suggestions intelligentes     activé\n    ↳ fournisseur                 auto\n    ↳ modèle                      —\n    ↳ délai (ms)                  1500\n    ↳ budget d’attente (ms)       50\n    ↳ caractères d’état max       6000\n    ↳ candidats max               12\n    ↳ recommandations max         3\nRadient Saver (bêta)              prise d’effet : immédiat\n    Radient Saver (bêta)          off\nMises en avant                    nouv. sessions\n    Mises en avant                activé\n    ↳ fichiers                    activé\n    ↳ graphiques                  activé\n    ↳ modèle des graphiques       auto\n    ↳ tours max                   2\n    ↳ tokens de sortie max        6000\n    ↳ limite de temps (s)         90\n    ↳ plafond de coût ($)         1.0\n    ↳ fichiers affichés           4\n    ↳ ne jamais lister sous       —\nSurveillances                     nouv. sessions\n    Intervalle par défaut (s)     60\n    Max par session               8\n    Délai d’exécution (ms)        120000\n    Plafond de l’instantané (car… 32768\n    Lignes de delta max           12\n    Budget de delta (caractères)  1200\n    État du classifieur (caractè… 1200\n    Désactiver après échecs cons… 5\n    Livraisons par heure          12\n    Ignorer le bruit des horodat… activé\nRuntime                           prise d’effet : immédiat\n    Continuer après /resume       activé\n    Garder les conversations fer… 300\n    Conversations chaudes max     4\n    Délai des questions en votre… 24\nCompactage                        prise d’effet : immédiat\n    Compactage                    activé\n    Stratégie                     auto\n    Seuil (% de la fenêtre)       0.8\n    Seuil (tokens)                400000\n    Conserver les tokens récents  20000\n    Continuer après le compactage activé\n    Compactage en cours de tour   activé\n    Compactage en veille          activé\n    Seuil en veille (tokens)      200000\n    Croissance min. en veille (t… 60000\n    Rejeu à la reprise            full\n    Limite de taille de requête…  24000000\n    Déclencheur de taille de req… 16000000\nFork                              prise d’effet : immédiat\n    Où un fork s’ouvre            switch\n    Où il s’ouvre sous cmux       workspace\nOutils web                        prise d’effet : immédiat\n    Recherche web                 activé\n    Récupération web              activé\nRecherche web                     prise d’effet : immédiat\n    Équilibrage de charge         round_robin\n    Fournisseurs                  duckduckgo, tavily\n    Fournisseurs exclus           —\n    Délai (s)                     20.0\n    Endpoint SearXNG              —\n    Preuves par page DeepSeek     désactivé\n    Lire depuis la recherche      activé\nRécupération web                  prise d’effet : immédiat\n    Délai (s)                     20.0\n    Plafond de téléchargement (o… 5242880\n    Redirections max              5\n    TTL du cache (s)              900\n    Autoriser les adresses privé… désactivé\n    Moteur de rendu HTML          auto\n    Enrichir avant l’extraction   activé\n    Tentatives par maillon        3\n    Réessai avec profil de navig… activé\nOutils                            prise d’effet : immédiat\n    Interpréteur Bash             —\n    Journaliser les envois non a… désactivé\n    Bloquer les recherches non b… activé\n    …refuser plutôt qu’avertir    activé\n    …élaguer les arborescences v… activé\n    Charger à la demande les sch… activé\nGarde-fous                        prise d’effet : immédiat\n    Règles de garde-fou           activé\n    Revoir suppressions critiques désactivé\n    Délai de vérification (s)     20.0\n    Dossier des règles            —\nHooks                             prise d’effet : immédiat\n    Hooks natifs                  désactivé\n    Transférer les hooks de Clau… désactivé\n    Transférer les hooks de Codex désactivé\nLimite de mémoire des commandes   prise d’effet : immédiat\n    Limite de mémoire des comman… activé\n    Source du plafond             auto\n    Plafond manuel (Mo)           0\n    Seuil d’avertissement         0.8\nFile d’attente des tâches lourdes prise d’effet : immédiat\n    File d’attente des tâches lo… activé\nBudget des requêtes shell         prise d’effet : immédiat\n    Budget des requêtes shell     activé\n    …arrêter plutôt qu’avertir    activé\n    Budget (secondes)             60\nShell de l’agent                  relancement\n    Environnement du shell de l’… inherit\n    …ajouts à la liste d’autoris… —\n    …retirés dans les deux modes  —\nServeurs locaux                   nouv. sessions\n    endpoint LM Studio            http://localhost:1234/v1\n    surcharges de modèle pour LM… {}\n    endpoint Ollama               http://localhost:11434/v1\n    surcharges de modèle pour Ol… {}\n    endpoint vLLM                 http://localhost:8000/v1\n    surcharges de modèle pour vL… {}\n    endpoint llama.cpp            http://localhost:8080/v1\n    surcharges de modèle pour ll… {}\n    endpoint OpenAI-compatible    —\n    surcharges de modèle pour Op… {}\nCapacité de la console            prise d’effet : immédiat\n    Plafond de terminaux actifs   128\n    Terminaux d’agents par conve… 8\n    Emplacements réservés aux te… 16\nApplication de bureau             prise d’effet : immédiat\n    commande de lancement         —\n    cache des fichiers distants…  1073741824\nAccès téléphone                   prise d’effet : immédiat\n    Reconnecter l’accès téléphon… activé\n    Envoyer au téléphone quand j… 120\nAperçus de fichiers               prise d’effet : immédiat\n    Racines d’aperçus supplément… —\nRéseau maillé                     relancement\n    Synchronisation entre pairs   activé\n    Portées à synchroniser        global, session, team, ag…\n    Pairs exclus de la mémoire    —\n    Adresse d’écoute              0.0.0.0\n    Port du maillage              4097\n    Endpoints annoncés            —\n    Taille d’audit par génération 8388608\n    Générations d’audit conservé… 5\n    Plafond d’âge d’audit (jours) 90.0\n    Handshakes simultanés         8\n    Période de calme de synchron… 30.0\n    Intervalle de vérification d… 15.0\n    Durée de vie du login emprun… 900.0\n    Maintien du login emprunté,…  86400.0\n    Dépôts GitHub                 —\nMises à jour du maillage          prise d’effet : immédiat\n    Propager le maillage après u… auto\nDéplacements de session           prise d’effet : immédiat\n    Plafond des fichiers de trav… 268435456\n    Dossiers pouvant recevoir de… ~\nMises à jour                      prise d’effet : immédiat\n    Purge anciennes installations activé\n    Inutilisées conservées        2\nCalcul distant                    prise d’effet : immédiat\n    Calcul distant                désactivé\nAida                              prise d’effet : immédiat\n    Cheffe de cabinet activée     activé\n    Nom affiché                   Aida\n    Heure du point quotidien      08:30\n    Intervalle des points (h)     0\n    Cadence en pause              désactivé\n    Points supplémentaires / jour 2\n    Écart minimal (minutes)       90\n    Intervalle de rappel d’intég… 14\nBibliothécaire                    prise d’effet : immédiat\n    Bibliothécaire activé         activé\n    Nom affiché                   Librarian\n    Heure de la passe quotidienne 03:30\n    Passe quotidienne en pause    désactivé\n    Passes supplémentaires / jour 1\n    Écart minimal (minutes)       720\nAgent Hub                         prise d’effet : immédiat\n    Mises à jour auto des liens…  activé\n    Mise à jour auto des équipes  activé\n    Intervalle de vérification (… 15\nAgents                            relancement\n    Mise à jour auto des rôles i… activé\nProjets                           prise d’effet : immédiat\n    Périmé après (heures)         4\nDéclencheurs de réveil            prise d’effet : immédiat\n    Activé                        activé\n    Réveils de point max par jour 6\n    Écart minimal (minutes)       60\n    Déclencheur de projets périm… activé\nClasse proactive                  prise d’effet : immédiat\n    Attente de patience par défa… 300000\n    Facteur d’espacement de pati… 3\n    Tentatives max de patience    3\n    TTL du cycle de patience (ms) 7200000\n    Attentes en suspens par sess… 4\nVoix                              prise d’effet : immédiat\n    Genre de la voix              auto\n    Tonalité                      warm\n    Expressivité                  medium\n    Rythme                        1.0\n    Langue                        auto\n    Accent                        —\n    Instructions de diction       Speak aloud and pay atten…\n    Nettoyage de la transcription auto\n    fournisseur vocal             auto\nMode vocal                        prise d’effet : immédiat\n    réponse parlée la plus longue 800\nMessages entre agents             prise d’effet : immédiat\n    Activé sur cette machine      désactivé\n  › Session de la cheffe de cabi… —\n    Retenir les demandes de tâche activé\n    Plafond de filtrage / heure   400\n    Plafond non adressés / heure  350\n    Plafond de bavardage / heure  300\n    Plafond d’expéditeur / heure  200\n    Modèle de filtrage            —\nRetirées                          prise d’effet : jamais\n    Longueur de conversation      100\n    Longueur du détail            15\n    Historique max d’apprentissa… 50\n    Avis des suggestions intelli… activé\nMémoire                           prise d’effet : immédiat\n    Mémoire par portée            activé\n    Capture au compactage         activé\n    Localisateurs comme contexte  désactivé\n    Suggestions de rappel         activé\nQuestions                         prise d’effet : immédiat\n    Questions expirées visibles   7d",
+        "config_unchanged": true
+      }
+    }
+  ]
+}

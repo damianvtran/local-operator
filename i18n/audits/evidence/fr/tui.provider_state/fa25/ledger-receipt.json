@@ -1,0 +1,33 @@
+{
+  "locale": "fr",
+  "namespace": "tui.provider_state",
+  "source_sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "e0c1b7382197",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host model-switch notice before authoring: temporary fallback from anthropic/claude-opus-5-5 due to provider failure: quota",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "25fe1758fc50",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-22",
+    "independent_from_translator_session": "e0c1b7382197",
+    "actual_model_source": "Host model-switch notice: quota fallback before audit execution and linguistic assessment",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "result": "passed",
+    "findings": 0
+  },
+  "status": "passed",
+  "note": "French A only; 5 keys; 0 blocker/major; F-A1 minor fit risk pending styled integration. Record: i18n/audits/evidence/fr/tui.provider_state/fa25/record.json"
+}

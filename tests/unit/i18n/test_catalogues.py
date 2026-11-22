@@ -50,6 +50,9 @@ def test_shipped_wire_namespaces_exist() -> None:
     # audit chain, and so a disposition cannot silently drop a shipped wave.
     assert catalogues.locales() == ("en", "es", "fr", "hi", "ru", "ur", "vi", "zh-CN")
     assert {name for name in catalogues.namespaces("en") if name.startswith("wire.")} == {
+        # Agent badges are now fully audited in every supported locale; pin
+        # this single admitted namespace without admitting future wire slices.
+        "wire.agent_badges",
         "wire.errors",
         "wire.errors.agents",
         "wire.errors.auth",

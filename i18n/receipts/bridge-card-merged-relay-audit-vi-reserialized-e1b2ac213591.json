@@ -1,0 +1,109 @@
+{
+  "schema": 1,
+  "receipt_kind": "bridge-card-merged-relay-audit",
+  "instance": "e1b2ac213591",
+  "date": "2026-11-22",
+  "repository": "local-operator",
+  "pr_url": "https://github.com/damianvtran/local-operator/pull/4408",
+  "role": "Independent Vietnamese semantic/delta audit; no translation or implementation changes",
+  "head": "9be06fc428a0f5f9617a87d762f59c1b0ffbd8a8",
+  "base": "f815ea7b74fe06e13266bef583e15293fbce7532",
+  "namespace": "relay.transcript",
+  "locale": "vi",
+  "auditor": {
+    "agent": "audit-vi (lopdev reviewer)",
+    "session": "e1b2ac213591",
+    "model": "openai/gpt-6.2-sol",
+    "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.2-sol (provider quota failure before semantic audit)",
+    "date": "2026-11-22",
+    "result": "passed",
+    "findings": [],
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "source_sha256": "87a3e3d62fddefb9212eeba2d1981e15ebf532237c5034d56f464ab47dde0af1",
+  "target_sha256": "6e87ba40b3326c796be1958cf85f17b383d0060ccbf733c918440d27cad8683a",
+  "keys_reviewed": [
+    "relay.transcript.bridge.held",
+    "relay.transcript.bridge.offline",
+    "relay.transcript.bridge.thread_reply",
+    "relay.transcript.jump.latest",
+    "relay.transcript.jump.latest_short"
+  ],
+  "keys_differing_from_origin_main": [
+    "relay.transcript.bridge.held",
+    "relay.transcript.bridge.offline",
+    "relay.transcript.bridge.thread_reply"
+  ],
+  "scope_note": "All 43 English/Vietnamese pairs inspected; fresh semantic attestation for the three delta keys only. Both jump labels were specifically re-verified in context; they and the other 38 unchanged values are byte-identical to their prior-audited origin/main values (JSON string literal bytes, not file indentation). All 40 retain their prior audits; no new independent approval for retained values. No native-speaker claim, no rendered-fit or activation approval, and no runtime testing. Underlying review unchanged; delta vs the previously attested bytes is whitespace-only (tab -> 2-space re-serialization). Verified parsed-JSON equality.",
+  "checks": {
+    "key_and_placeholder_parity": "43/43 exactly, no duplicate keys; balanced ICU braces, same argument names and types; vi uses the expected other-only plural arms and retains select branches and # markers.",
+    "target_delta_coverage": "3 new/changed value bytes; 40 retained value bytes including both jump labels.",
+    "NFC": "All vi values are NFC.",
+    "bidi_controls": "No manual direction controls or other Unicode format/control characters; no escaped entities.",
+    "semantics": "External/untrusted framing is distinct from moderation. Pending and pre-screening states make no claim of a moderation decision; refusal is explicitly by moderation."
+  },
+  "namespaces": {
+    "relay.transcript": {
+      "status": "passed",
+      "sha256": {
+        "en": "87a3e3d62fddefb9212eeba2d1981e15ebf532237c5034d56f464ab47dde0af1",
+        "vi": "6e87ba40b3326c796be1958cf85f17b383d0060ccbf733c918440d27cad8683a"
+      },
+      "source_path": "local_operator/i18n/catalogues/en/relay.transcript.json",
+      "context_path": "local_operator/i18n/catalogues/en/relay.transcript.context.json",
+      "context_sha256": "01ff23b016d5ae640c5bf4a3b2050e2abbfd9950078ea60e32c6f95609868c49",
+      "locales": {
+        "vi": {
+          "target_path": "local_operator/i18n/catalogues/vi/relay.transcript.json",
+          "keys_reviewed": [
+            "relay.transcript.bridge.held",
+            "relay.transcript.bridge.offline",
+            "relay.transcript.bridge.thread_reply",
+            "relay.transcript.jump.latest",
+            "relay.transcript.jump.latest_short"
+          ],
+          "reviewed_values": {
+            "relay.transcript.bridge.held": {
+              "english": "Held for review",
+              "target": "Đang được giữ lại để xem xét",
+              "note": "Explicitly held for review rather than still being delivered; assigns no blame or final decision."
+            },
+            "relay.transcript.bridge.offline": {
+              "english": "Couldn't reach Radient — retrying",
+              "target": "Không thể kết nối Radient — đang thử lại",
+              "note": "Says Radient could not be reached and a retry is in progress; no user action implied."
+            },
+            "relay.transcript.bridge.thread_reply": {
+              "english": "Thread reply",
+              "target": "Trả lời trong luồng",
+              "note": "Identifies a reply within a thread, read with the timestamp as a context marker."
+            },
+            "relay.transcript.jump.latest": {
+              "english": "Jump to latest",
+              "target": "Đến tin mới nhất",
+              "note": "Natural imperative for navigating to the newest message; no extra arrow. Exact value bytes retained from origin/main."
+            },
+            "relay.transcript.jump.latest_short": {
+              "english": "Latest",
+              "target": "Mới nhất",
+              "note": "Natural short form of the same navigation label. Exact value bytes retained from origin/main."
+            }
+          }
+        }
+      },
+      "findings": []
+    }
+  },
+  "style_inputs": {
+    "repository": "local-operator",
+    "glossary_path": "i18n/glossary.md",
+    "glossary_sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "style_guides": {
+      "vi": {
+        "path": "i18n/style-guides/vi.md",
+        "sha256": "99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51"
+      }
+    }
+  }
+}

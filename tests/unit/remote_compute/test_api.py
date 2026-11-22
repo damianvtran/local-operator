@@ -30,9 +30,20 @@ from local_operator.network.types import MemberRecord, NetworkRecord
 from local_operator.providers.auth_store import AuthStore
 from local_operator.remote_compute import api as api_module
 from local_operator.remote_compute import records, resolve_network, tiers
-from local_operator.remote_compute.api import RemoteRuns, RunSubmitMetadata, build_spec
+from local_operator.remote_compute.api import (
+    LOGS_RETRY_ATTEMPTS,
+    LOGS_RETRY_CAP_SECONDS,
+    RemoteRuns,
+    RunSubmitMetadata,
+    build_spec,
+)
 from local_operator.remote_compute.client import RUNS_PATH, RemoteComputeClient
 from local_operator.remote_compute.defaults import DEFAULT_MAX_HOURS, DEFAULT_SIZE
+from local_operator.remote_compute.errors import (
+    CapacityUnavailable,
+    Conflict,
+    InvalidRequest,
+)
 from local_operator.remote_compute.repo import UNPARSEABLE_URL, RepoRef
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
@@ -405,3 +416,211 @@ def test_an_unknown_tier_is_refused_rather_than_rendered() -> None:
         tiers.tier_label("spot-market")
     with pytest.raises(ValueError):
         tiers.tier_options("nonsense")
+
+
+# ---------------------------------------------------------------------------
+# Tailing a run's logs: the stop rules, and the refusal that is not a retry
+# ---------------------------------------------------------------------------
+
+
+def _page(
+    *,
+    messages: tuple[str, ...] = (),
+    token: str | None = None,
+    status: str = "running",
+) -> httpx.Response:
+    """One log page, in the envelope the endpoint answers with."""
+    events = [{"timestamp": "2026-11-17T00:00:00Z", "message": text} for text in messages]
+    return httpx.Response(
+        200,
+        json={
+            "msg": "Logs",
+            "result": {"events": events, "next_token": token, "run_status": status},
+        },
+    )
+
+
+def _sleeper() -> tuple[list[float], Any]:
+    """A sleep seam that records what it was asked to wait, and waits nothing."""
+    waits: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        waits.append(seconds)
+
+    return waits, sleep
+
+
+async def _pages(library: RemoteRuns, sleep: Any, **kwargs: Any) -> list[Any]:
+    pages: list[Any] = []
+    async for page in library.follow_logs("run_1", sleep=sleep, **kwargs):
+        pages.append(page)
+    return pages
+
+
+@pytest.mark.asyncio
+async def test_the_stream_ends_on_an_empty_page_only_when_the_run_is_terminal(
+    credential: int, isolated_roots: Path
+) -> None:
+    """A terminal page WITH lines has more to read; an empty running page is "nothing yet".
+
+    The two arms of the contract's one stop rule, one cell each.
+    """
+    origin = _Origin(
+        _page(messages=("cloning",), token="tok-2"),
+        _page(token="tok-2"),
+        _page(token="tok-2", status="stopped"),
+    )
+    library, http = _library(origin, credential, isolated_roots)
+    waits, sleep = _sleeper()
+    async with http:
+        pages = await _pages(library, sleep)
+
+    assert [len(page.events) for page in pages] == [1, 0, 0]
+    assert pages[-1].run_status == "stopped"
+    assert pages[-1].terminal is True
+    # One wait: the empty page on a RUNNING run. The page with lines is followed
+    # at once, and the terminal page ends the stream before any wait.
+    assert waits == [1.0]
+    assert len(origin.requests) == 3
+
+
+@pytest.mark.asyncio
+async def test_two_empty_pages_with_an_unchanged_token_start_the_idle_backoff(
+    credential: int, isolated_roots: Path
+) -> None:
+    """An unchanged token across empty pages is \"caught up\", and the wait then doubles."""
+    origin = _Origin(
+        _page(token="tok-2"),
+        _page(token="tok-2"),
+        _page(token="tok-2"),
+        _page(token="tok-2"),
+        _page(token="tok-2"),
+        _page(token="tok-2", status="stopped"),
+    )
+    library, http = _library(origin, credential, isolated_roots)
+    waits, sleep = _sleeper()
+    async with http:
+        pages = await _pages(library, sleep)
+
+    assert len(pages) == 6
+    # The floor until the SECOND unchanged empty page (that is what "caught up"
+    # means), then the doubling: 1, 2, 4, and the ceiling holds it at 5.
+    assert waits == [1.0, 1.0, 1.0, 2.0, 4.0]
+    assert max(waits) <= 5.0
+
+
+@pytest.mark.asyncio
+async def test_an_empty_page_with_a_moving_token_is_followed_at_once(
+    credential: int, isolated_roots: Path
+) -> None:
+    """A changing token with no lines is the reader being behind, not being caught up."""
+    origin = _Origin(
+        _page(token="tok-2"),
+        _page(token="tok-3"),
+        _page(token="tok-3", status="stopped"),
+    )
+    library, http = _library(origin, credential, isolated_roots)
+    waits, sleep = _sleeper()
+    async with http:
+        await _pages(library, sleep)
+
+    assert waits == [1.0, 1.0]
+
+
+@pytest.mark.asyncio
+async def test_a_coded_not_configured_stops_without_a_retry(
+    credential: int, isolated_roots: Path
+) -> None:
+    """Logs are not readable on this deployment: one answer, no waiting."""
+    origin = _Origin(httpx.Response(503, json={"error": {"code": "not_configured"}}))
+    library, http = _library(origin, credential, isolated_roots)
+    waits, sleep = _sleeper()
+    async with http:
+        with pytest.raises(Conflict) as caught:
+            await _pages(library, sleep)
+
+    assert caught.value.code == "not_configured"
+    assert len(origin.requests) == 1
+    assert waits == []
+
+
+@pytest.mark.asyncio
+async def test_a_bad_token_is_a_refusal_not_a_retry(credential: int, isolated_roots: Path) -> None:
+    origin = _Origin(httpx.Response(400, json={"error": {"code": "invalid_request"}}))
+    library, http = _library(origin, credential, isolated_roots)
+    waits, sleep = _sleeper()
+    async with http:
+        with pytest.raises(InvalidRequest):
+            await _pages(library, sleep)
+
+    assert len(origin.requests) == 1
+    assert waits == []
+
+
+@pytest.mark.asyncio
+async def test_an_uncoded_503_is_retried_with_a_capped_backoff_and_then_given_up(
+    credential: int, isolated_roots: Path
+) -> None:
+    """The bound: five attempts, 1 + 2 + 4 + 8 seconds, then the refusal is raised."""
+    origin = _Origin(*[httpx.Response(503, json={}) for _ in range(LOGS_RETRY_ATTEMPTS)])
+    library, http = _library(origin, credential, isolated_roots)
+    waits, sleep = _sleeper()
+    async with http:
+        with pytest.raises(CapacityUnavailable) as caught:
+            await _pages(library, sleep)
+
+    assert caught.value.code is None
+    assert caught.value.status == 503
+    assert len(origin.requests) == LOGS_RETRY_ATTEMPTS
+    assert waits == [1.0, 2.0, 4.0, LOGS_RETRY_CAP_SECONDS]
+    assert sum(waits) <= 23.0
+
+
+@pytest.mark.asyncio
+async def test_a_retry_after_longer_than_the_cap_waits_only_the_cap(
+    credential: int, isolated_roots: Path
+) -> None:
+    """An hour-long Retry-After is the server saying stop; a live tail sleeps the cap."""
+    origin = _Origin(
+        httpx.Response(503, json={}, headers={"Retry-After": "3600"}),
+        _page(messages=("resumed",), token="tok-2"),
+        _page(token="tok-2", status="stopped"),
+    )
+    library, http = _library(origin, credential, isolated_roots)
+    waits, sleep = _sleeper()
+    async with http:
+        pages = await _pages(library, sleep)
+
+    assert waits == [LOGS_RETRY_CAP_SECONDS]
+    assert [event["message"] for page in pages for event in page.events] == ["resumed"]
+
+
+@pytest.mark.asyncio
+async def test_a_transient_failure_resets_once_a_page_arrives(
+    credential: int, isolated_roots: Path
+) -> None:
+    origin = _Origin(
+        httpx.Response(503, json={}),
+        _page(messages=("a",), token="tok-2"),
+        _page(messages=("b",), token="tok-3"),
+        _page(token="tok-3", status="stopped"),
+    )
+    library, http = _library(origin, credential, isolated_roots)
+    waits, sleep = _sleeper()
+    async with http:
+        pages = await _pages(library, sleep)
+
+    assert [event["message"] for page in pages for event in page.events] == ["a", "b"]
+    # One wait, for the failed attempt: a page with lines is followed at once.
+    assert waits == [1.0]
+
+
+@pytest.mark.asyncio
+async def test_the_page_size_reaches_the_wire(credential: int, isolated_roots: Path) -> None:
+    origin = _Origin(_page(status="stopped"))
+    library, http = _library(origin, credential, isolated_roots)
+    _waits, sleep = _sleeper()
+    async with http:
+        await _pages(library, sleep, limit=17)
+
+    assert origin.requests[0].url.params["limit"] == "17"

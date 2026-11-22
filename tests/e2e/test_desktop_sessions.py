@@ -766,6 +766,20 @@ async def test_a_bulk_read_receipt_clears_only_the_completions_it_was_given(
                 await new_session(),
                 await new_session(),
             )
+            # The production catalogue discovers the directory name as-is.
+            # Model a persisted full-hex name without assuming any old CLI minted it.
+            full_hex = "abcdef0123456789abcdef0123456789"
+            source = await new_session()
+            (root / "sessions" / source).rename(root / "sessions" / full_hex)
+            publish(full_hex, "anchor-full-hex")
+            catalogue = await client.get(path)
+            assert catalogue.status_code == 200, catalogue.text
+            rendered = next(
+                row for row in catalogue.json()["result"]["sessions"] if row["id"] == full_hex
+            )
+            assert rendered["attention"]["unseen"] is True
+            full_hex_token = rendered["attention"]["completion_token"]
+
             observed = {
                 settled: publish(settled, "anchor-settled"),
                 # Two completions for this conversation: the token the client was
@@ -783,6 +797,24 @@ async def test_a_bulk_read_receipt_clears_only_the_completions_it_was_given(
                 completions_before = conn.execute("SELECT * FROM completions ORDER BY 1").fetchall()
 
             absent = "0123456789ab"
+            refused = await client.post(
+                "/v1/desktop/attention/seen",
+                json={
+                    "items": [
+                        {"session_id": settled, "completion_token": observed[settled]},
+                        {"session_id": "../foreign", "completion_token": full_hex_token},
+                    ]
+                },
+            )
+            assert refused.status_code == 422, refused.text
+            assert refused.json()["detail"] == [
+                {
+                    "loc": ["body", "items", 1, "session_id"],
+                    "msg": "String should match pattern '^(?:[a-f0-9]{12}|[a-f0-9]{32})$'",
+                }
+            ]
+            assert store.state(f"session/{settled}")["unseen"] is True
+
             response = await client.post(
                 "/v1/desktop/attention/seen",
                 json={
@@ -791,6 +823,7 @@ async def test_a_bulk_read_receipt_clears_only_the_completions_it_was_given(
                         {"session_id": racing, "completion_token": observed[racing]},
                         {"session_id": delivered, "completion_token": observed[delivered]},
                         {"session_id": absent, "completion_token": str(uuid.uuid4())},
+                        {"session_id": full_hex, "completion_token": full_hex_token},
                     ]
                 },
             )
@@ -800,7 +833,7 @@ async def test_a_bulk_read_receipt_clears_only_the_completions_it_was_given(
             assert body["result"]["superseded"] == [racing]
             assert body["result"]["unknown"] == [absent]
             assert sorted(entry["conversation_id"] for entry in body["result"]["read"]) == sorted(
-                [f"session/{settled}", f"session/{delivered}"]
+                [f"session/{settled}", f"session/{delivered}", f"session/{full_hex}"]
             )
             for entry in body["result"]["read"]:
                 assert entry["unseen"] is False
@@ -811,6 +844,7 @@ async def test_a_bulk_read_receipt_clears_only_the_completions_it_was_given(
             # The store, read back through the same object every surface uses.
             assert store.state(f"session/{settled}")["unseen"] is False
             assert store.state(f"session/{delivered}")["unseen"] is False
+            assert store.state(f"session/{full_hex}")["unseen"] is False
             superseded_state = store.state(f"session/{racing}")
             assert superseded_state["unseen"] is True, "a superseded item was cleared"
             assert superseded_state["anchor_id"] == "anchor-racing-2"

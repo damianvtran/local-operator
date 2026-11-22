@@ -33,7 +33,9 @@ from local_operator.remote_compute import RunCreateRequest, RunSpec
 from local_operator.remote_compute import config as config_module
 from local_operator.remote_compute import resolve_network
 from local_operator.remote_compute.client import (
+    CAPACITY_PATH,
     KNOWN_RUN_STATUSES,
+    LOGS_PAGE_DEFAULT,
     MAX_IDEMPOTENCY_KEY_BYTES,
     RUNS_PATH,
     TERMINAL_RUN_STATUSES,
@@ -1227,3 +1229,360 @@ async def test_a_hostile_retry_after_is_capped_on_the_error(
         with pytest.raises(CapacityUnavailable) as caught:
             await client.create_run(request_for(), idempotency_key="k")
     assert caught.value.retry_after == RETRY_AFTER_MAX_S
+
+
+# ---------------------------------------------------------------------------
+# The run's logs and artifacts (M3c): the page shapes, and what is dropped
+# ---------------------------------------------------------------------------
+
+
+def _page(**overrides: Any) -> dict[str, Any]:
+    """A log page as the server answers it, inside the usual envelope."""
+    page: dict[str, Any] = {
+        "events": [{"timestamp": "2026-11-17T00:00:00Z", "message": "cloning"}],
+        "next_token": "tok-2",
+        "run_status": "running",
+    }
+    page.update(overrides)
+    return {"msg": "Logs", "result": page}
+
+
+def _artifacts(**overrides: Any) -> dict[str, Any]:
+    """An artifact listing as the server answers it."""
+    listing: dict[str, Any] = {
+        "run_status": "succeeded",
+        "artifacts": [
+            {
+                "name": "results.tar.gz",
+                "size_bytes": 42,
+                "url": "http://127.0.0.1:9/results.tar.gz?sig=abc",
+                "expires_at": "2026-11-17T00:05:00Z",
+            }
+        ],
+        "git": {"branch": "lop/run_1", "commit": "c0ffee", "bundle_present": True},
+    }
+    listing.update(overrides)
+    return {"msg": "Artifacts", "result": listing}
+
+
+@pytest.mark.asyncio
+async def test_a_log_page_carries_its_events_token_and_run_status(credential: int) -> None:
+    origin = _Origin(httpx.Response(200, json=_page()))
+    client, http = _client(origin, credential)
+    async with http:
+        page = await client.run_logs("run_1")
+
+    assert str(origin.requests[0].url).startswith(
+        DEFAULT_API_URL + RUNS_PATH + "/run_1/logs?limit=" + str(LOGS_PAGE_DEFAULT)
+    )
+    # No token on the first read: an absent token is a DIFFERENT request from an
+    # empty one, and the endpoint starts at the beginning only for the former.
+    assert "next_token" not in origin.requests[0].url.params
+    assert page.run_status == "running"
+    assert page.next_token == "tok-2"
+    assert list(page.events) == [{"timestamp": "2026-11-17T00:00:00Z", "message": "cloning"}]
+    assert page.empty is False
+    assert page.terminal is False
+
+
+@pytest.mark.asyncio
+async def test_the_token_is_forwarded_byte_for_byte(credential: int) -> None:
+    """Opaque means opaque: a normalised token addresses a page nobody meant."""
+    token = "tok" + "-2/+b=="
+    origin = _Origin(httpx.Response(200, json=_page(next_token=None)))
+    client, http = _client(origin, credential)
+    async with http:
+        await client.run_logs("run_1", next_token=token, limit=7)
+
+    assert origin.requests[0].url.params["next_token"] == token
+    assert origin.requests[0].url.params["limit"] == "7"
+
+
+@pytest.mark.asyncio
+async def test_a_blank_token_or_an_out_of_range_limit_never_reaches_the_wire(
+    credential: int,
+) -> None:
+    origin = _Origin()
+    client, http = _client(origin, credential)
+    async with http:
+        for token in ("", "   "):
+            with pytest.raises(ValueError):
+                await client.run_logs("run_1", next_token=token)
+        for limit in (0, -1, 1001, True, 2.5):
+            with pytest.raises(ValueError):
+                await client.run_logs("run_1", limit=limit)  # type: ignore[arg-type]
+    assert origin.requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_log_page_without_a_run_status_is_refused(credential: int) -> None:
+    """The stop rule needs the status; events alone cannot be acted on."""
+    origin = _Origin(httpx.Response(200, json=_page(run_status="")))
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(RemoteComputeError):
+            await client.run_logs("run_1")
+
+
+@pytest.mark.asyncio
+async def test_a_log_entry_without_a_message_is_refused(credential: int) -> None:
+    origin = _Origin(httpx.Response(200, json=_page(events=[{"timestamp": "now"}])))
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(RemoteComputeError):
+            await client.run_logs("run_1")
+
+
+@pytest.mark.asyncio
+async def test_a_log_entry_keeps_only_the_contract_keys(credential: int) -> None:
+    """A field the contract does not name is dropped, not republished to a panel."""
+    event = {"message": "hi", "timestamp": "now", "run_token": SECRET_BODY}
+    origin = _Origin(httpx.Response(200, json=_page(events=[event])))
+    client, http = _client(origin, credential)
+    async with http:
+        page = await client.run_logs("run_1")
+
+    assert list(page.events[0]) == ["timestamp", "message"]
+    assert SECRET_BODY not in json.dumps(list(page.events))
+
+
+@pytest.mark.asyncio
+async def test_a_coded_503_is_a_definite_refusal_to_retry(credential: int) -> None:
+    """``not_configured`` means logs are not readable here — not a transient hop."""
+    origin = _Origin(httpx.Response(503, json={"error": {"code": "not_configured"}}))
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(Conflict) as caught:
+            await client.run_logs("run_1")
+
+    assert caught.value.code == "not_configured"
+    assert caught.value.status == 503
+
+
+@pytest.mark.asyncio
+async def test_an_uncoded_503_is_capacity_unavailable_with_no_code(credential: int) -> None:
+    origin = _Origin(httpx.Response(503, json={}))
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(CapacityUnavailable) as caught:
+            await client.run_logs("run_1")
+
+    assert caught.value.code is None
+    assert caught.value.status == 503
+
+
+@pytest.mark.asyncio
+async def test_an_artifact_listing_is_typed_and_the_url_stays_out_of_its_shape(
+    credential: int,
+) -> None:
+    origin = _Origin(httpx.Response(200, json=_artifacts()))
+    client, http = _client(origin, credential)
+    async with http:
+        listing = await client.run_artifacts("run_1")
+
+    assert str(origin.requests[0].url) == DEFAULT_API_URL + RUNS_PATH + "/run_1/artifacts"
+    assert listing.run_status == "succeeded"
+    artifact = listing.artifact("results.tar.gz")
+    assert artifact is not None
+    assert artifact.size_bytes == 42
+    assert artifact.expires_at == "2026-11-17T00:05:00Z"
+    # The URL is carried for the download and nowhere else.
+    assert artifact.url.endswith("sig=abc")
+    assert "sig=abc" not in repr(artifact)
+    assert "url" not in artifact.to_json()
+    assert listing.artifact("probes.json") is None
+
+
+@pytest.mark.asyncio
+async def test_a_plaintext_artifact_url_on_a_public_host_is_refused(credential: int) -> None:
+    """The URL authorises its own GET: a host that cannot present TLS does not get it."""
+    rows = [
+        {
+            "name": "results.tar.gz",
+            "size_bytes": 1,
+            "url": "http://example.invalid/results.tar.gz?sig=abc",
+        }
+    ]
+    origin = _Origin(httpx.Response(200, json=_artifacts(artifacts=rows)))
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(RemoteComputeError):
+            await client.run_artifacts("run_1")
+
+
+@pytest.mark.asyncio
+async def test_the_git_summary_keeps_only_the_contract_keys(credential: int) -> None:
+    summary = {"branch": "lop/run_1", "commit": "c0ffee", "bundle_present": True, "pod": "internal"}
+    origin = _Origin(httpx.Response(200, json=_artifacts(git=summary)))
+    client, http = _client(origin, credential)
+    async with http:
+        listing = await client.run_artifacts("run_1")
+
+    assert listing.git == {"branch": "lop/run_1", "commit": "c0ffee", "bundle_present": True}
+
+
+@pytest.mark.asyncio
+async def test_an_artifact_with_a_boolean_size_is_refused(credential: int) -> None:
+    rows = [{"name": "results.tar.gz", "size_bytes": True, "url": "https://host/x?sig=1"}]
+    origin = _Origin(httpx.Response(200, json=_artifacts(artifacts=rows)))
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(RemoteComputeError):
+            await client.run_artifacts("run_1")
+
+
+# The tier vocabulary: the server's words, and the ids a surface matches
+# ---------------------------------------------------------------------------
+
+#: The server's ``detail`` is a free string map naming its own infrastructure. The
+#: values are SYNTHETIC because this repository is public.
+DETAIL = {
+    "cluster": "example-cluster",
+    "region": "example-region",
+    "task_definition": "example-task",
+}
+
+
+def _capacity_body(*rows: dict[str, Any]) -> dict[str, Any]:
+    """A capacity body as the REAL server answers it: one envelope around ``providers``."""
+    return {"msg": "ok", "result": {"providers": list(rows)}}
+
+
+@pytest.mark.asyncio
+async def test_capacity_maps_the_servers_providers_envelope_to_this_builds_tier(
+    credential: int,
+) -> None:
+    """The live contract: ``result["providers"]``, and ``fargate`` is ``cloud_run``.
+
+    Pinned to the shape the real server answered, not to a stand-in: a stand-in that
+    spelled ``tiers`` with ``cloud_run`` is how the reader and the server drifted.
+    """
+    origin = _Origin(
+        httpx.Response(
+            200, json=_capacity_body({"tier": "fargate", "ready": True, "detail": DETAIL})
+        )
+    )
+    client, http = _client(origin, credential)
+    async with http:
+        rows = await client.capacity()
+
+    assert rows == [{"tier": "cloud_run", "ready": True, "detail": DETAIL}]
+    assert str(origin.requests[0].url) == DEFAULT_API_URL + CAPACITY_PATH
+
+
+@pytest.mark.asyncio
+async def test_capacity_maps_the_dedicated_provider_word(credential: int) -> None:
+    """``kubernetes`` is the dedicated-workload tier, not a third tier."""
+    origin = _Origin(
+        httpx.Response(200, json=_capacity_body({"tier": "kubernetes", "ready": False}))
+    )
+    client, http = _client(origin, credential)
+    async with http:
+        rows = await client.capacity()
+
+    # ``ready`` and ``detail`` are the server's own values, passed through unmapped.
+    assert rows == [{"tier": "dedicated", "ready": False}]
+
+
+@pytest.mark.asyncio
+async def test_a_provider_tier_this_build_cannot_name_is_dropped(credential: int) -> None:
+    """An unknown word costs its row and nothing else: no guess, no crash."""
+    origin = _Origin(
+        httpx.Response(
+            200,
+            json=_capacity_body(
+                {"tier": "example-provider", "ready": True, "detail": DETAIL},
+                {"tier": "fargate", "ready": True, "detail": DETAIL},
+            ),
+        )
+    )
+    client, http = _client(origin, credential)
+    async with http:
+        rows = await client.capacity()
+
+    assert rows == [{"tier": "cloud_run", "ready": True, "detail": DETAIL}]
+
+
+@pytest.mark.asyncio
+async def test_the_old_tiers_spelling_is_not_a_capacity_page(credential: int) -> None:
+    """``tiers`` was this suite's own invention; the server never answered it."""
+    origin = _Origin(
+        httpx.Response(200, json={"msg": "ok", "result": {"tiers": [{"tier": "cloud_run"}]}})
+    )
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(RemoteComputeError):
+            await client.capacity()
+
+
+@pytest.mark.asyncio
+async def test_a_run_carrying_the_servers_tier_is_returned_with_this_builds_id(
+    credential: int,
+) -> None:
+    """A run row crosses the wire with the server's word too, and is mapped once."""
+    origin = _Origin(
+        httpx.Response(200, json=_read(_run("run_1", "running", tier="fargate"))),
+        httpx.Response(
+            200,
+            json={"msg": "Runs", "result": {"runs": [_run("run_1", "running", tier="fargate")]}},
+        ),
+    )
+    client, http = _client(origin, credential)
+    async with http:
+        read = await client.get_run("run_1")
+        listed = await client.list_runs()
+
+    assert read["tier"] == "cloud_run"
+    assert [row["tier"] for row in listed] == ["cloud_run"]
+
+
+@pytest.mark.asyncio
+async def test_a_run_with_a_tier_this_build_cannot_name_keeps_its_row(
+    credential: int,
+) -> None:
+    """The run is work in flight: an unnameable tier costs the FIELD, not the row."""
+    origin = _Origin(httpx.Response(200, json=_read(_run("run_1", "running", tier="example-tier"))))
+    client, http = _client(origin, credential)
+    async with http:
+        read = await client.get_run("run_1")
+
+    assert read == {"id": "run_1", "status": "running"}
+
+
+@pytest.mark.asyncio
+async def test_a_run_already_carrying_this_builds_id_keeps_it(credential: int) -> None:
+    """A server build that caught up to ours answers an id, not a word to translate.
+
+    ``cloud_run`` is not in the server's table and never needed to be: it is already
+    the id a surface matches, so passing it through is the absence of a translation.
+    Reading it as "cannot name" stripped the tier off the row silently.
+    """
+    origin = _Origin(
+        httpx.Response(200, json=_read(_run("run_1", "running", tier="cloud_run"))),
+        httpx.Response(
+            200,
+            json={"msg": "Runs", "result": {"runs": [_run("run_1", "running", tier="dedicated")]}},
+        ),
+    )
+    client, http = _client(origin, credential)
+    async with http:
+        read = await client.get_run("run_1")
+        listed = await client.list_runs()
+
+    assert read["tier"] == "cloud_run"
+    assert [row["tier"] for row in listed] == ["dedicated"]
+
+
+@pytest.mark.asyncio
+async def test_a_capacity_row_already_carrying_this_builds_id_is_kept(credential: int) -> None:
+    """The same pass-through on the capacity read: the tier was offered, so it shows."""
+    origin = _Origin(
+        httpx.Response(
+            200, json=_capacity_body({"tier": "cloud_run", "ready": True, "detail": DETAIL})
+        )
+    )
+    client, http = _client(origin, credential)
+    async with http:
+        rows = await client.capacity()
+
+    assert rows == [{"tier": "cloud_run", "ready": True, "detail": DETAIL}]

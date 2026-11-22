@@ -78,6 +78,8 @@ import gzip
 import hashlib
 import json
 import os
+import re
+import stat
 import sys
 import threading
 import time
@@ -166,6 +168,7 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "session_stream_opened",
         "session_stream_closed",
         "session_file_read_admitted",
+        "mentioned_file_read_admitted",
         "link_closed",
         "link_idle",
         # Host clock-gap diagnostics and coalesced scheduler failures: technical
@@ -561,6 +564,9 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "session_file_read_admitted": frozenset(
         {"reference", "admitted_bytes", "offset", "decision", "phase"}
     ),
+    "mentioned_file_read_admitted": frozenset(
+        {"schema", "operation", "binding", "read_binding", "source_stamp", "nonce"}
+    ),
     "link_closed": frozenset({"cause", "frames_in", "frames_out"}),
     "link_idle": frozenset({"last_seen_at", "missed_beats"}),
     "host_resumed": frozenset({"gap_s"}),
@@ -933,6 +939,7 @@ DURABLE_EVENTS: frozenset[str] = frozenset(
         # unattributable. Each independently authorized fetch is an admission,
         # not transport telemetry; ordinary frames remain unlogged/batched.
         "session_file_read_admitted",
+        "mentioned_file_read_admitted",
         # A moved session's working-set bytes leave this device only after this row
         # is on disk (``workset_move._audit_workset_serve``, design §8.3): an egress
         # an incident cannot reconstruct is the loss this table exists for.
@@ -1108,6 +1115,54 @@ class AuditEvent:
     #: :data:`ACTOR_KINDS`; a value outside it is stored as ``unknown``.
     actor_kind: str = "unknown"
     ts: float = field(default_factory=time.time)
+
+
+@dataclass(frozen=True, slots=True)
+class MentionedFileAuditIdentity:
+    """Closed P3 identity; JSON strings freeze nested context before rendering.
+
+    Binding contains only public identity/authority metadata and key digests,
+    never credential material or owner paths. The separate schema deliberately
+    does not inherit legacy detail truncation: losing any field denies admission.
+    ``establish`` covers the entire stamped source (size is stamp[4]); its
+    ReadBinding retains the first eventual response's exact requested span.
+    """
+
+    operation: str
+    binding_json: str
+    read_binding_json: str
+    source_stamp: tuple[int, ...]
+    nonce: str
+
+    def detail(self) -> dict[str, Any]:
+        if type(self.source_stamp) is not tuple:
+            raise ValueError("source stamp must be immutable")
+        detail = {
+            "schema": "lop.mentioned-file-read.v1",
+            "operation": self.operation,
+            "binding": json.loads(self.binding_json),
+            "read_binding": json.loads(self.read_binding_json),
+            "source_stamp": list(self.source_stamp),
+            "nonce": self.nonce,
+        }
+        if not _mentioned_file_detail_valid(detail):
+            raise ValueError("invalid mentioned-file audit identity")
+        return detail
+
+
+@dataclass(frozen=True, slots=True)
+class MentionedFileAdmissionReceipt:
+    """Exact persisted P3 row, not a capability to emit content.
+
+    The inode and row bytes are captured only after the sole rotating writer's
+    durability/readback boundary. B2 still owns revocation and socket release.
+    """
+
+    sequence: int
+    device: int
+    inode: int
+    record: bytes
+    generation: int
 
 
 class AuditLog:
@@ -1318,6 +1373,8 @@ class AuditLog:
         """
         if event.event not in self.DURABLE_EVENTS:
             raise ValueError("a required audit record must be a durable event")
+        if event.event == "mentioned_file_read_admitted":
+            raise ValueError("P3 requires record_mentioned_file_required and exact disk readback")
         with self._write_lock:
             if not self.admits_required():
                 return False
@@ -1369,6 +1426,104 @@ class AuditLog:
                 self._required_durable = False
                 self._required_file_detail = None
                 self._required_file_phase = "fetch"
+
+    def record_mentioned_file_required(
+        self, identity: MentionedFileAuditIdentity
+    ) -> MentionedFileAdmissionReceipt | None:
+        """Persist and READ BACK the exact P3 admission, under the sole writer lock.
+
+        Legacy S1 acknowledgements intentionally retain their historical contract.
+        An in-memory rendered line or a sequence counter cannot prove what reached
+        disk. Rotation may relocate the row: acknowledge that archive's inode,
+        never the new live file merely because its sequence is higher.
+        """
+        if type(identity) is not MentionedFileAuditIdentity:
+            return None
+        try:
+            detail = identity.detail()
+        except (ValueError, TypeError, KeyError):
+            return None
+        with self._write_lock:
+            if not self.admits_required():
+                return None
+            seq = self._seq + 1
+            self._required_seq = seq
+            self._required_line = None
+            self._required_path = None
+            self._required_identity = None
+            self._required_durable = False
+            event = AuditEvent(event="mentioned_file_read_admitted", detail=detail)
+            # Freeze independently: a render/sanitizer must not redefine the
+            # identity we intended to admit by mutating its input map in place.
+            expected_detail = json.loads(json.dumps(detail))
+            try:
+                self.record(event)
+                if (
+                    self.degraded
+                    or not self._required_durable
+                    or self._required_path is None
+                    or self._required_identity is None
+                    or self._required_line is None
+                ):
+                    return None
+                row = json.loads(self._required_line)
+                if (
+                    row.get("schema") != SCHEMA
+                    or type(row.get("seq")) is not int
+                    or row["seq"] != seq
+                    or row.get("event") != event.event
+                    or row.get("detail") != expected_detail
+                    or not _mentioned_file_detail_valid(row.get("detail"))
+                ):
+                    return None
+                expected = self._required_line.encode("utf-8")
+                path = self._required_path
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                with os.fdopen(fd, "rb") as handle:
+                    info = os.fstat(handle.fileno())
+                    if (
+                        not stat.S_ISREG(info.st_mode)
+                        or info.st_nlink != 1
+                        or (info.st_dev, info.st_ino) != self._required_identity
+                    ):
+                        return None
+                    if path.name.endswith(_ROTATION_MARKER):
+                        with gzip.GzipFile(fileobj=handle, mode="rb") as archive:
+                            exact = _p3_persisted_row_matches(archive, expected, seq)
+                    else:
+                        exact = _p3_persisted_row_matches(handle, expected, seq)
+                    after = os.fstat(handle.fileno())
+                    named = path.stat(follow_symlinks=False)
+                    if (named.st_dev, named.st_ino) != self._required_identity:
+                        return None
+                    if not exact or (
+                        info.st_dev,
+                        info.st_ino,
+                        info.st_size,
+                        info.st_mtime_ns,
+                        info.st_ctime_ns,
+                    ) != (
+                        after.st_dev,
+                        after.st_ino,
+                        after.st_size,
+                        after.st_mtime_ns,
+                        after.st_ctime_ns,
+                    ):
+                        return None
+                generation = (
+                    int(path.name.rsplit(".", 2)[-2]) if path.name.endswith(_ROTATION_MARKER) else 0
+                )
+                return MentionedFileAdmissionReceipt(
+                    seq, info.st_dev, info.st_ino, expected, generation
+                )
+            except (OSError, ValueError, TypeError, EOFError):
+                return None
+            finally:
+                self._required_seq = None
+                self._required_line = None
+                self._required_path = None
+                self._required_identity = None
+                self._required_durable = False
 
     def record(self, event: AuditEvent) -> None:
         """Append one event. Never raises: a lost record is worse than a dropped key.
@@ -1748,6 +1903,125 @@ class AuditLog:
 # ---------------------------------------------------------------------------
 
 
+def _p3_persisted_row_matches(lines: Any, expected: bytes, seq: int) -> bool:
+    """One exact persisted row at this sequence, not a coexistence test.
+
+    A duplicated/substituted row with the same sequence cannot stand beside the
+    intended one and still produce an acknowledgement. Stream generations rather
+    than loading the rotating log into memory.
+    """
+    found = 0
+    for line in lines:
+        row = json.loads(line)
+        if type(row) is not dict:
+            return False
+        if row.get("seq") == seq:
+            if type(row["seq"]) is not int or line != expected:
+                return False
+            found += 1
+    return found == 1
+
+
+def _mentioned_file_detail_valid(detail: Any) -> bool:
+    """Validate the separate closed P3 schema without coercion or truncation."""
+    if type(detail) is not dict or set(detail) != {
+        "schema",
+        "operation",
+        "binding",
+        "read_binding",
+        "source_stamp",
+        "nonce",
+    }:
+        return False
+    binding = detail["binding"]
+    read = detail["read_binding"]
+    binding_keys = {
+        "subject_issuer",
+        "subject_id",
+        "owner_key_digest",
+        "requester_key_digest",
+        "native_account_digest",
+        "anchor_digest",
+        "owner_admission_digest",
+        "requester_admission_digest",
+        "association",
+        "authority_epoch",
+        "generation",
+        "journal_revision",
+        "deny_generation",
+        "evidence_digest",
+        "relay_instance",
+    }
+    read_keys = {
+        "owner_key_digest",
+        "network_id",
+        "network_epoch",
+        "link_id",
+        "transcript_hash",
+        "request_id",
+        "session_id",
+        "source_row_id",
+        "provenance_id",
+        "proof_digest",
+        "file_version",
+        "phase",
+        "offset",
+        "length",
+        "transfer_nonce",
+    }
+    if (
+        detail["schema"] != "lop.mentioned-file-read.v1"
+        or detail["operation"] not in {"establish", "stat", "fetch", "verify", "resume"}
+        or type(binding) is not dict
+        or set(binding) != binding_keys
+        or type(read) is not dict
+        or set(read) != read_keys
+        or type(detail["source_stamp"]) is not list
+        or len(detail["source_stamp"]) != 7
+        or any(type(v) is not int for v in detail["source_stamp"])
+        # POSIX timestamps may precede the epoch. Preserve the exact signed
+        # ctime/mtime rather than inventing a new file-age admission policy.
+        or any(detail["source_stamp"][i] < 0 for i in (0, 1, 4, 6))
+        or detail["source_stamp"][5] != 1
+        or not stat.S_ISREG(detail["source_stamp"][6])
+        or type(detail["nonce"]) is not str
+        or re.fullmatch(r"[a-f0-9]{32}", detail["nonce"]) is None
+    ):
+        return False
+    integer_keys = {
+        "generation",
+        "journal_revision",
+        "deny_generation",
+        "network_epoch",
+        "offset",
+        "length",
+    }
+    for key, value in {**binding, **read}.items():
+        if key in integer_keys:
+            if type(value) is not int or value < 0:
+                return False
+        elif type(value) is not str or not value or any(ord(c) < 32 for c in value):
+            return False
+        if key.endswith("_digest") and (
+            type(value) is not str or not re.fullmatch(r"sha256:[a-f0-9]{64}", value)
+        ):
+            return False
+    return (
+        binding["generation"] > 0
+        and read["network_epoch"] > 0
+        and binding["owner_key_digest"] == read["owner_key_digest"]
+        and read["phase"] in {"stat", "fetch", "verify", "resume"}
+        and (detail["operation"] == "establish" or detail["operation"] == read["phase"])
+        and re.fullmatch(r"[a-f0-9]{64}", read["transcript_hash"]) is not None
+        and re.fullmatch(r"[a-f0-9]{32}", read["transfer_nonce"]) is not None
+        and (
+            read["file_version"] == "establish:" + detail["nonce"]
+            if detail["operation"] == "establish"
+            else re.fullmatch(r"sealed:sha256:[a-f0-9]{64}", read["file_version"]) is not None
+        )
+    )
+
+
 def _file_read_detail_valid(detail: Any, phase: str) -> bool:
     """Closed planned-read variants, not Python's coercive numeric equality.
 
@@ -1839,6 +2113,10 @@ def _sanitize_detail(event: str, detail: dict[str, Any]) -> dict[str, Any]:
     key, and the whitelist exists to bound what a record can say rather than to
     make an emitter's typo fatal at runtime.
     """
+    if event == "mentioned_file_read_admitted":
+        # P3's closed structured identity must survive byte-for-byte. Legacy
+        # telemetry caps/sanitization cannot silently drop an authority field.
+        return json.loads(json.dumps(detail)) if _mentioned_file_detail_valid(detail) else {}
     if event == "session_file_read_admitted":
         # This event's variants are closed: never drop an extra/invalid phase
         # into a valid-looking legacy fetch row. Required callers reject {}.

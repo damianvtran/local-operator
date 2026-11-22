@@ -1,0 +1,7 @@
+{
+  "tui.provider_state.logged_in": "已登录",
+  "tui.provider_state.env_key": "环境密钥",
+  "tui.provider_state.needs_login": "需登录",
+  "tui.provider_state.local_ready": "服务器已配置",
+  "tui.provider_state.local_unconfigured": "请配置服务器"
+}

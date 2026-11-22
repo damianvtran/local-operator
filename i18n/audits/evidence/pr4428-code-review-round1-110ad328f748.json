@@ -1,0 +1,31 @@
+{
+  "pr": "https://github.com/damianvtran/local-operator/pull/4428",
+  "reviewer_session": "110ad328f748",
+  "model": "openai/gpt-6.1-sol",
+  "fallback": "From anthropic/claude-opus-5-5 due to provider quota failure, before substantive review",
+  "round": 1,
+  "scope": "fa4fb006319718935477ffae732cab76708062fe..ccb3c388b2b55674496c728d5374383583f03185",
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-settings-leftovers",
+  "source_identity": "/Users/damian/local-operator/.worktrees/i18n-settings-leftovers/local_operator/__init__.py",
+  "isolation": "env -i HOME=<reviewer scratch>/reviewer-home LOCAL_OPERATOR_CONFIG_DIR=<reviewer scratch>/reviewer-home/.local-operator PATH=<inherited PATH> TERM=xterm-256color PYTHONPATH=<worktree>; primary repo .venv/bin/python; git/gh only outside redirected HOME",
+  "targeted_command": "python -m pytest -n 0 -o addopts='' tests/unit/i18n/test_tui_settings_view_chrome_slice.py tests/unit/tui/test_settings_view.py -k 'enum_summary or enum_label or localized_enum_browsing' -q -p no:cacheprovider",
+  "targeted_actual_output": "17 passed, 591 deselected, 5 warnings in 4.92s",
+  "independent_probe": {
+    "method": "For all registered ENUM choices across en/fr/es/zh-CN/ru/vi/ur/hi, compare summary and picker helpers with independent render_record plus localized_display; autonyms use technical_display, unkeyed technical choices retain spelling. Compare raw output separately. After warming each locale, patch catalogues.load_catalogue to raise and repaint static enum choices; assert Setting identities unchanged. Check synthetic int 1 versus bool True and removed-choice fallback.",
+    "enum_choice_locale_cases": 1392,
+    "dynamic_setting_locale_cases": 24,
+    "actual_english_source_fallback_cases": 0,
+    "warm_no_catalogue_io": "PASS",
+    "typed_collision_and_removed_choice": "PASS",
+    "note": "Synthetic-root targeted regression separately proves actual English-fallback provenance; English wording in translated catalogues is not a source-locale fallback."
+  },
+  "original_symptom_control": {
+    "method": "git show base source in normal HOME piped to isolated Python; AST-extract and execute only base _render_value in head namespace, compare French result with head and registered label",
+    "actual_output": {"locale": "fr", "base_default_label": "ask", "head_default_label": "demander", "registered_label": "demander", "wire_value": "ask"}
+  },
+  "diff_check": "PASS",
+  "live_pr_head": "ccb3c388b2b55674496c728d5374383583f03185",
+  "findings": [],
+  "verdict": "clean — terminal",
+  "limits": "Code review and targeted real-OperatorApp run_test regressions only. No independent screenshots, native shaping claim, HTTP server/auth run, full suite, browser/Electron, merge gate or release. No dev server started."
+}

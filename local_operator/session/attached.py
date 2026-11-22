@@ -1701,6 +1701,7 @@ class AttachedSession:
         # later phase for the same id must always pass.
         self._live_message_phase: dict[str, int] = {}
         self._handlers: list[EventHandler] = []
+        self._event_observers: list[EventHandler] = []
         #: In-flight owner switch requests (``_switch_on_owner``), held so the
         #: tasks are not collected before their notice is delivered.
         self._switch_tasks: set[asyncio.Task[None]] = set()
@@ -1708,6 +1709,9 @@ class AttachedSession:
         # otherwise a fast owner can stream between factory return and app
         # adoption and the first visible delta vanishes.
         self._buffered_events: list[AgentEvent[Any]] = []
+        # Older buffered frames can already have reached observers while waiting
+        # for a caller. Only the new sync frames still need observer delivery.
+        self._pending_observer_ids: set[int] = set()
         self._ready_for_events = False
         self._approval_handler: ApprovalGate | None = None
         #: Where a REFUSED gate reply goes when the host has a surface for it
@@ -4361,37 +4365,73 @@ class AttachedSession:
         never by a caller-supplied name.
         """
         self._ask_proof_at_send = False
+        async with self._ask_control_client() as client:
+            # No await before frame construction: report the proof carried by
+            # THIS connection, never a stale display client's authority.
+            self._ask_proof_at_send = self._client_proof_held(client)
+            method = getattr(client, name)
+            if tail:
+                return await method(ask_id, *tail)
+            # THIS facade is a person's local surface (the desktop app's backend, the
+            # attached pane, the CLI), so it opts its client into presenting the
+            # operator-capability proof; the runtime then stamps a trusted surface
+            # only if that proof holds (``asks/surfaces``).
+            operator = operator_ask_kwargs(method)
+            if name in ("ask_respond", "ask_revise"):
+                body = {
+                    str(key): [str(item) for item in (values or ())]
+                    for key, values in (answers or {}).items()
+                }
+                if images:
+                    return await method(
+                        ask_id, body, by=by, images=[dict(i) for i in images], **operator
+                    )
+                return await method(ask_id, body, by=by, **operator)
+            if name == "ask_dismiss" and reason:
+                return await method(ask_id, by=by, reason=reason, **operator)
+            return await method(ask_id, by=by, **operator)
+
+    @asynccontextmanager
+    async def _ask_control_client(self) -> AsyncIterator[AttachClient]:
+        """Yield a control connection without making durable asks depend on paint.
+
+        A live older owner can exceed the canonical snapshot's socket limit.
+        Durable ask IDs still resolve atomically there, and the existing attach
+        protocol supports a projection-only handshake. Keep this connection
+        separate from the facade's display client: installing a partial client
+        there would falsely claim that its epoch and history were synchronized.
+        Authentication, identity checks and operator proofs remain AttachClient's.
+        Cold sessions and remote owners retain their normal engage/bind path.
+        """
+        if self._surface == "desktop" and self._owner.placement.is_local:
+            record, _ = await asyncio.to_thread(self._owner.locate)
+            if record is not None:
+                client = self._owner.make_client(
+                    lambda _projection: None,
+                    lambda _reason: None,
+                    surface=self._surface,
+                    frontend_state=False,
+                )
+                try:
+                    try:
+                        await self._connect_client(
+                            client,
+                            record,
+                            deadline=time.monotonic() + DESKTOP_CONTROL_ATTACH_S,
+                        )
+                    except TimeoutError:
+                        raise await self._refusal_while_reconnecting(
+                            self._unavailable_reason()
+                        ) from None
+                    yield client
+                finally:
+                    client.close()
+                return
         await self._ensure_bound()
         client = self._client
         if client is None or not client.connected:
-            # ``_ensure_bound`` returns quietly while a recovery owns the dial,
-            # so this is the ask answer that lands mid-reconnect. Nothing was
-            # sent; the owner's liveness decides busy vs gone.
             raise await self._refusal_while_reconnecting(self._unavailable_reason())
-        # No await between this read and the client method building its frame,
-        # so the proof reported is the one this connection presents (R1-m2).
-        self._ask_proof_at_send = self._client_proof_held(client)
-        method = getattr(client, name)
-        if tail:
-            return await method(ask_id, *tail)
-        # THIS facade is a person's local surface (the desktop app's backend, the
-        # attached pane, the CLI), so it opts its client into presenting the
-        # operator-capability proof; the runtime then stamps a trusted surface
-        # only if that proof holds (``asks/surfaces``).
-        operator = operator_ask_kwargs(method)
-        if name in ("ask_respond", "ask_revise"):
-            body = {
-                str(key): [str(item) for item in (values or ())]
-                for key, values in (answers or {}).items()
-            }
-            if images:
-                return await method(
-                    ask_id, body, by=by, images=[dict(i) for i in images], **operator
-                )
-            return await method(ask_id, body, by=by, **operator)
-        if name == "ask_dismiss" and reason:
-            return await method(ask_id, by=by, reason=reason, **operator)
-        return await method(ask_id, by=by, **operator)
+        yield client
 
     def move_will_wait(self) -> bool:
         """Whether :meth:`set_working_directory` is about to make the user wait.
@@ -7475,6 +7515,7 @@ class AttachedSession:
         ):
             insert_at += 1
         self._buffered_events[insert_at:insert_at] = seeded
+        self._pending_observer_ids.update(map(id, seeded))
         self._ready_for_events = True
         self._runtime_ready.set()
         self._drain_buffered_events()
@@ -7855,12 +7896,26 @@ class AttachedSession:
             self._live_history[message_id] = message
 
     def _drain_buffered_events(self) -> None:
-        """Deliver buffered sync frames once both ordering and a subscriber exist."""
-        if not self._ready_for_events or not self._handlers or not self._buffered_events:
+        """Release ordered sync frames without taking the caller's replay for observers."""
+        if not self._ready_for_events:
+            return
+        if self._pending_observer_ids:
+            pending, self._pending_observer_ids = self._pending_observer_ids, set()
+            observers = list(self._event_observers)
+            if observers:
+                # Late observers replay for themselves, and must not join a
+                # flush in progress. Honor unsubscriptions between frames.
+                for event in tuple(self._buffered_events):
+                    if id(event) in pending:
+                        self._notify_event_handlers(
+                            [handler for handler in observers if handler in self._event_observers],
+                            event,
+                        )
+        if not self._handlers or not self._buffered_events:
             return
         buffered, self._buffered_events = self._buffered_events, []
         for event in buffered:
-            self._emit_or_buffer(event)
+            self._emit_or_buffer(event, notify_observers=False)
 
     def _on_frontend_sync(self, data: dict[str, Any]) -> None:
         future = self._frontend_future
@@ -8189,17 +8244,23 @@ class AttachedSession:
             message = getattr(event, "message", None)
             message_id = str(getattr(message, "id", "") or "")
             if message_id and message_id in self._history_ids:
+                self._pending_observer_ids.discard(id(event))
                 continue
             kept.append(event)
         self._buffered_events = kept
 
-    def _emit_or_buffer(self, event: AgentEvent[Any]) -> None:
+    def _emit_or_buffer(self, event: AgentEvent[Any], *, notify_observers: bool = True) -> None:
         if not self._ready_for_events or not self._handlers:
             self._buffered_events.append(event)
+            if notify_observers:
+                if self._ready_for_events:
+                    self._notify_event_handlers(self._event_observers, event)
+                else:
+                    self._pending_observer_ids.add(id(event))
             return
-        self._deliver(event)
+        self._deliver(event, notify_observers=notify_observers)
 
-    def _deliver(self, event: AgentEvent[Any]) -> None:
+    def _deliver(self, event: AgentEvent[Any], *, notify_observers: bool = True) -> None:
         """Hand ``event`` to every subscribed handler now, buffering nothing.
 
         With NO subscriber the event is DROPPED, not parked — that is the
@@ -8208,7 +8269,13 @@ class AttachedSession:
         LATER runtime's turn (see ``_end_turn_locally``), and parking the event
         for a future subscriber recreates exactly that hazard one seam over.
         """
-        for handler in list(self._handlers):
+        if notify_observers:
+            self._notify_event_handlers(self._event_observers, event)
+        self._notify_event_handlers(self._handlers, event)
+
+    @staticmethod
+    def _notify_event_handlers(handlers: list[EventHandler], event: AgentEvent[Any]) -> None:
+        for handler in list(handlers):
             result = handler(event)
             if inspect.isawaitable(result):
                 asyncio.create_task(_await_handler(result))
@@ -12108,6 +12175,24 @@ class AttachedSession:
         def unsubscribe() -> None:
             if handler in self._handlers:
                 self._handlers.remove(handler)
+
+        return unsubscribe
+
+    def _observe_events(self, handler: EventHandler) -> Callable[[], None]:
+        """Tap current backlog and new frames without becoming the first consumer.
+
+        Unseeded sync arrivals wait for their final order. The caller still
+        owns the replay; draining it must not notify observers again.
+        """
+        self._event_observers.append(handler)
+        for event in tuple(self._buffered_events):
+            if id(event) not in self._pending_observer_ids:
+                self._notify_event_handlers([handler], event)
+
+        def unsubscribe() -> None:
+            if handler in self._event_observers:
+                # Delete an in-memory callback by index, not a filesystem entry.
+                del self._event_observers[self._event_observers.index(handler)]
 
         return unsubscribe
 

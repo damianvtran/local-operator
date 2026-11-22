@@ -1,0 +1,1636 @@
+{
+  "schema": "approval-full-repair-author/v1",
+  "locale": "zh-CN",
+  "namespace": "wire.settings",
+  "created_at": "2026-11-22T02:34:49.683660+00:00",
+  "author": {
+    "role": "fresh translator; not zh-CN A or B auditor",
+    "session_id": "811ce9672eb0",
+    "actual_serving_model": "openai/gpt-6.1-sol",
+    "provenance": "Explicit host model-switch notice before any translation authoring",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "reason": "provider failure: quota"
+    },
+    "self_audit": false
+  },
+  "head": "90009effa833836ce4471e99d90d3b6438de7f60",
+  "head_frozen": true,
+  "round": "1 repair authoring",
+  "allocation": "one-locale LLM author repair <=45 min; no audit",
+  "target": "local_operator/i18n/catalogues/zh-CN/wire.settings.json",
+  "source_provenance": {
+    "current_English_envelope": "i18n/audits/evidence/approval-full-inputs/Englishvoiceconstant-full-en-approved-capture.json",
+    "envelope_sha256": "c17b1262dc76d312cfa21313bd0d1414e2b4132d9900265119d4c1d8d9c237f6",
+    "English_before_sha256": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+    "English_after_sha256": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+    "context_before_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+    "context_after_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+    "context_entries": 104,
+    "target_approved_capture": "/Users/damian/.local-operator/sessions/6448acb16e8d/scratchpad/approval-full-zh-CN-A-approved-capture.json",
+    "target_original_hash_manifest": "i18n/audits/evidence/approval-full-artifact-manifest.json",
+    "target_original_hash_verified_before_first_edit": true,
+    "source_attributed_ledger": "i18n/audits/evidence/approval-full-deduplicated-ledger.json",
+    "root_adjudication": "i18n/audits/evidence/approval-full-root-adjudication.json",
+    "priority": "New English 90009 source overrides old-H ledger wording for medium description."
+  },
+  "counts": {
+    "namespace_keys_before": 895,
+    "namespace_keys_after": 895,
+    "changed_keys": 50,
+    "changed_labels": 32,
+    "changed_help": 17,
+    "changed_descriptions": 1,
+    "accepted_major_union_fixed": 32,
+    "accepted_major_union_remaining_authoring": 0,
+    "minor_inherited_deferred": 17,
+    "added_keys": 0,
+    "removed_keys": 0,
+    "diff_added_lines": 50,
+    "diff_removed_lines": 50
+  },
+  "hashes": {
+    "target_before_sha256": "8d44389ff7b4b19be7fde38015eecb50caac7555a771ad6cc52fb1820d489f5a",
+    "target_after_sha256": "c17c1cf7e60d836a2e15bfdb341977ceab0ff15d4c62cfa92e7f03b8ed2e53ba"
+  },
+  "accepted_major_dispositions": [
+    {
+      "id": "I18N-WS-E6C2188A81F3",
+      "key": "wire.settings.bash_memory_mode.choice.auto.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-001",
+        "B-ZH-M01.01"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          5150
+        ],
+        "setting_key": "bash.memory.mode",
+        "choice_value": "auto",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-802B8268724D",
+      "key": "wire.settings.bash_memory_mode.choice.manual.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-002",
+        "B-ZH-M01.02"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          5155
+        ],
+        "setting_key": "bash.memory.mode",
+        "choice_value": "manual",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-803C522C3F62",
+      "key": "wire.settings.classification_vendor.choice.auto.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-003",
+        "B-ZH-M01.03"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          4043
+        ],
+        "setting_key": "classification.vendor",
+        "choice_value": "auto",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-240C498CA1C1",
+      "key": "wire.settings.compaction_strategy.choice.auto.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-004",
+        "B-ZH-M01.04"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          4517
+        ],
+        "setting_key": "compaction.strategy",
+        "choice_value": "auto",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-CDE402D4ABB5",
+      "key": "wire.settings.display_nerd_icons.choice.none.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-005",
+        "B-ZH-M01.05"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2820
+        ],
+        "setting_key": "display.nerd_icons",
+        "choice_value": null,
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-C4D3DE320B13",
+      "key": "wire.settings.model_effort.choice.unset.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-006",
+        "B-ZH-M01.06"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          1657
+        ],
+        "setting_key": null,
+        "choice_value": "",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-66D2D9CC6848",
+      "key": "wire.settings.network_rollout_on_update.choice.auto.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-007",
+        "B-ZH-M01.07"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          5690
+        ],
+        "setting_key": "network.rollout_on_update",
+        "choice_value": "auto",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-A447EE040B38",
+      "key": "wire.settings.network_rollout_on_update.choice.off.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-008",
+        "B-ZH-M01.08"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          5695
+        ],
+        "setting_key": "network.rollout_on_update",
+        "choice_value": "off",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-513A71CB406C",
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-009",
+        "B-ZH-M01.09"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2324
+        ],
+        "setting_key": "providers.openrouter.allow_fallbacks",
+        "choice_value": "false",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-32DB6C298E5C",
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-010",
+        "B-ZH-M01.10"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2319
+        ],
+        "setting_key": "providers.openrouter.allow_fallbacks",
+        "choice_value": "",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-DD21D2852FC7",
+      "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-011",
+        "B-ZH-M01.11"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2369
+        ],
+        "setting_key": "providers.openrouter.data_collection",
+        "choice_value": "allow",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-961F6FF2DA51",
+      "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-012",
+        "B-ZH-M01.12"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2374
+        ],
+        "setting_key": "providers.openrouter.data_collection",
+        "choice_value": "deny",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-EAD73985D2C9",
+      "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-013",
+        "B-ZH-M01.13"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2364
+        ],
+        "setting_key": "providers.openrouter.data_collection",
+        "choice_value": "",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-378BA7328B99",
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-014",
+        "B-ZH-M01.14"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2423
+        ],
+        "setting_key": "providers.openrouter.enforce_distillable_text",
+        "choice_value": "true",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-CD06C73F8E78",
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-015",
+        "B-ZH-M01.15"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2418
+        ],
+        "setting_key": "providers.openrouter.enforce_distillable_text",
+        "choice_value": "",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-2B7797E9A40D",
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-016",
+        "B-ZH-M01.16"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2348
+        ],
+        "setting_key": "providers.openrouter.require_parameters",
+        "choice_value": "true",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-653D8954B431",
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-017",
+        "B-ZH-M01.17"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2343
+        ],
+        "setting_key": "providers.openrouter.require_parameters",
+        "choice_value": "",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-8DDA7C4D87CB",
+      "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-018",
+        "B-ZH-M01.18"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2228
+        ],
+        "setting_key": "providers.openrouter.sort",
+        "choice_value": "",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-3DE117B6A717",
+      "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-019",
+        "B-ZH-M01.19"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2401
+        ],
+        "setting_key": "providers.openrouter.zdr",
+        "choice_value": "true",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-A73734B5D1A9",
+      "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-020",
+        "B-ZH-M01.20"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2396
+        ],
+        "setting_key": "providers.openrouter.zdr",
+        "choice_value": "",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-B7F88E3953BA",
+      "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-021",
+        "B-ZH-M01.21"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          5278
+        ],
+        "setting_key": "shell_environment.mode",
+        "choice_value": "allowlist",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-3CD94E41B2B7",
+      "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-022",
+        "B-ZH-M01.22"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          5273
+        ],
+        "setting_key": "shell_environment.mode",
+        "choice_value": "inherit",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-2E0C22F21B6C",
+      "key": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-023",
+        "B-ZH-M01.23"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          6402
+        ],
+        "setting_key": "speech.transcription.cleanup",
+        "choice_value": "auto",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-F8A25CCB46D7",
+      "key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-024",
+        "B-ZH-M01.24"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          6412
+        ],
+        "setting_key": "speech.transcription.cleanup",
+        "choice_value": "client",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-B66F879551DE",
+      "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-025",
+        "B-ZH-M01.25"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          6417
+        ],
+        "setting_key": "speech.transcription.cleanup",
+        "choice_value": "off",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-9F37CDCBD6ED",
+      "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-026",
+        "B-ZH-M01.26"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          6407
+        ],
+        "setting_key": "speech.transcription.cleanup",
+        "choice_value": "provider",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-FA7340FF8D3C",
+      "key": "wire.settings.speech_voice_gender.choice.auto.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-027",
+        "B-ZH-M01.27"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          6257
+        ],
+        "setting_key": "speech.voice.gender",
+        "choice_value": "auto",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-C3F93F5552D5",
+      "key": "wire.settings.speech_voice_gender.choice.female.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-028",
+        "B-ZH-M01.28"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          6262
+        ],
+        "setting_key": "speech.voice.gender",
+        "choice_value": "female",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-6E07BEFC2F49",
+      "key": "wire.settings.speech_voice_gender.choice.male.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-029",
+        "B-ZH-M01.29"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          6267
+        ],
+        "setting_key": "speech.voice.gender",
+        "choice_value": "male",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-7AB27EDC4AA9",
+      "key": "wire.settings.web_fetch_render_backend.choice.auto.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-030",
+        "B-ZH-M01.30"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          4905
+        ],
+        "setting_key": "web_fetch.render_backend",
+        "choice_value": "auto",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-21B6A15BD737",
+      "key": "wire.settings.web_search_strategy.choice.ordered.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-031",
+        "B-ZH-M01.31"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          4722
+        ],
+        "setting_key": "web_search.strategy",
+        "choice_value": "ordered",
+        "choice_value_verified_from_ast": true
+      }
+    },
+    {
+      "id": "I18N-WS-3886CD8B7B42",
+      "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+      "status": "fixed by author; pending independent audit",
+      "auditor_original_ids": [
+        "T-ZH-A-032",
+        "B-ZH-M01.32"
+      ],
+      "source_usage": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          4717
+        ],
+        "setting_key": "web_search.strategy",
+        "choice_value": "round_robin",
+        "choice_value_verified_from_ast": true
+      }
+    }
+  ],
+  "rejected_majors": [],
+  "remaining_major_author_blockers": [],
+  "medium_checkpoint": {
+    "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+    "source_new": "Standard vocal delivery.",
+    "old_native": "当前固定使用的值。",
+    "decision": "Meaning repair required: the old Chinese describes a fixed value, not standard vocal delivery. New 标准语音表达。 describes the usual vocal delivery without claiming a fixed value, price, date or invariant voice. Context is the unchanged medium expressiveness explanation."
+  },
+  "changes": [
+    {
+      "key": "wire.settings.bash_memory_mode.choice.auto.label",
+      "before_approved": "auto",
+      "after_authored": "自动",
+      "backtranslation": "Automatic",
+      "scope": "accepted major union",
+      "english_source": "auto"
+    },
+    {
+      "key": "wire.settings.bash_memory_mode.choice.manual.label",
+      "before_approved": "manual",
+      "after_authored": "手动",
+      "backtranslation": "Manual",
+      "scope": "accepted major union",
+      "english_source": "manual"
+    },
+    {
+      "key": "wire.settings.classification_vendor.choice.auto.label",
+      "before_approved": "auto",
+      "after_authored": "自动",
+      "backtranslation": "Automatic",
+      "scope": "accepted major union",
+      "english_source": "auto"
+    },
+    {
+      "key": "wire.settings.compaction_strategy.choice.auto.label",
+      "before_approved": "auto",
+      "after_authored": "自动",
+      "backtranslation": "Automatic",
+      "scope": "accepted major union",
+      "english_source": "auto"
+    },
+    {
+      "key": "wire.settings.display_nerd_icons.choice.none.label",
+      "before_approved": "auto",
+      "after_authored": "自动",
+      "backtranslation": "Automatic",
+      "scope": "accepted major union",
+      "english_source": "auto"
+    },
+    {
+      "key": "wire.settings.model_effort.choice.unset.label",
+      "before_approved": "auto",
+      "after_authored": "自动",
+      "backtranslation": "Automatic",
+      "scope": "accepted major union",
+      "english_source": "auto"
+    },
+    {
+      "key": "wire.settings.network_rollout_on_update.choice.auto.label",
+      "before_approved": "auto",
+      "after_authored": "自动",
+      "backtranslation": "Automatic",
+      "scope": "accepted major union",
+      "english_source": "auto"
+    },
+    {
+      "key": "wire.settings.network_rollout_on_update.choice.off.label",
+      "before_approved": "off",
+      "after_authored": "关闭",
+      "backtranslation": "Off",
+      "scope": "accepted major union",
+      "english_source": "off"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+      "before_approved": "false",
+      "after_authored": "否",
+      "backtranslation": "No / false",
+      "scope": "accepted major union",
+      "english_source": "false"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+      "before_approved": "default",
+      "after_authored": "默认",
+      "backtranslation": "Default",
+      "scope": "accepted major union",
+      "english_source": "default"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "before_approved": "allow",
+      "after_authored": "允许",
+      "backtranslation": "Allow",
+      "scope": "accepted major union",
+      "english_source": "allow"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "before_approved": "deny",
+      "after_authored": "禁止",
+      "backtranslation": "Disallow",
+      "scope": "accepted major union",
+      "english_source": "deny"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+      "before_approved": "default",
+      "after_authored": "默认",
+      "backtranslation": "Default",
+      "scope": "accepted major union",
+      "english_source": "default"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+      "before_approved": "true",
+      "after_authored": "是",
+      "backtranslation": "Yes / true",
+      "scope": "accepted major union",
+      "english_source": "true"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+      "before_approved": "default",
+      "after_authored": "默认",
+      "backtranslation": "Default",
+      "scope": "accepted major union",
+      "english_source": "default"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+      "before_approved": "true",
+      "after_authored": "是",
+      "backtranslation": "Yes / true",
+      "scope": "accepted major union",
+      "english_source": "true"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+      "before_approved": "default",
+      "after_authored": "默认",
+      "backtranslation": "Default",
+      "scope": "accepted major union",
+      "english_source": "default"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+      "before_approved": "default",
+      "after_authored": "默认",
+      "backtranslation": "Default",
+      "scope": "accepted major union",
+      "english_source": "default"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+      "before_approved": "true",
+      "after_authored": "是",
+      "backtranslation": "Yes / true",
+      "scope": "accepted major union",
+      "english_source": "true"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+      "before_approved": "default",
+      "after_authored": "默认",
+      "backtranslation": "Default",
+      "scope": "accepted major union",
+      "english_source": "default"
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "before_approved": "allowlist",
+      "after_authored": "允许列表",
+      "backtranslation": "Allowlist",
+      "scope": "accepted major union",
+      "english_source": "allowlist"
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+      "before_approved": "inherit",
+      "after_authored": "继承",
+      "backtranslation": "Inherit",
+      "scope": "accepted major union",
+      "english_source": "inherit"
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+      "before_approved": "auto",
+      "after_authored": "自动",
+      "backtranslation": "Automatic",
+      "scope": "accepted major union",
+      "english_source": "auto"
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+      "before_approved": "client",
+      "after_authored": "客户端",
+      "backtranslation": "Client",
+      "scope": "accepted major union",
+      "english_source": "client"
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+      "before_approved": "off",
+      "after_authored": "关闭",
+      "backtranslation": "Off",
+      "scope": "accepted major union",
+      "english_source": "off"
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+      "before_approved": "provider",
+      "after_authored": "提供商",
+      "backtranslation": "Provider",
+      "scope": "accepted major union",
+      "english_source": "provider"
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.auto.label",
+      "before_approved": "auto",
+      "after_authored": "自动",
+      "backtranslation": "Automatic",
+      "scope": "accepted major union",
+      "english_source": "auto"
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.female.label",
+      "before_approved": "female",
+      "after_authored": "女声",
+      "backtranslation": "Female voice",
+      "scope": "accepted major union",
+      "english_source": "female"
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.male.label",
+      "before_approved": "male",
+      "after_authored": "男声",
+      "backtranslation": "Male voice",
+      "scope": "accepted major union",
+      "english_source": "male"
+    },
+    {
+      "key": "wire.settings.web_fetch_render_backend.choice.auto.label",
+      "before_approved": "auto",
+      "after_authored": "自动",
+      "backtranslation": "Automatic",
+      "scope": "accepted major union",
+      "english_source": "auto"
+    },
+    {
+      "key": "wire.settings.web_search_strategy.choice.ordered.label",
+      "before_approved": "ordered",
+      "after_authored": "按顺序",
+      "backtranslation": "In order",
+      "scope": "accepted major union",
+      "english_source": "ordered"
+    },
+    {
+      "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+      "before_approved": "round_robin",
+      "after_authored": "轮询",
+      "backtranslation": "Round robin",
+      "scope": "accepted major union",
+      "english_source": "round_robin"
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+      "before_approved": "当前固定使用的值。",
+      "after_authored": "标准语音表达。",
+      "backtranslation": "Standard vocal expression/delivery.",
+      "scope": "new English medium meaning checkpoint",
+      "english_source": "Standard vocal delivery."
+    },
+    {
+      "key": "wire.settings.bash_memory_mode.help",
+      "before_approved": "'auto'根据本设备当前空闲内存推导上限，机器繁忙时会自行收紧。'manual'则固定为下方的数值。",
+      "after_authored": "“自动”根据本设备当前空闲内存推导上限，机器繁忙时会自行收紧。“手动”则固定为下方的数值。",
+      "backtranslation": "Automatic derives a ceiling from the memory currently free on this device and tightens it when the machine is busy. Manual fixes it to the number below.",
+      "scope": "paired display-label help reference",
+      "english_source": "'auto' derives the ceiling from the memory this device has free right now, so it tightens on its own when the machine is busy. 'manual' pins it to the number below."
+    },
+    {
+      "key": "wire.settings.bash_memory_limit_mb.help",
+      "before_approved": "选中'manual'时使用的上限。0表示改用自动上限，因此保持为0不会禁用防护。",
+      "after_authored": "选中上方的“手动”时使用的上限。0表示改用自动上限，因此保持为0不会禁用防护。",
+      "backtranslation": "The ceiling used when Manual is selected above. Zero uses the automatic ceiling instead and never disables the protection.",
+      "scope": "paired display-label help reference",
+      "english_source": "The ceiling when 'manual' is selected above. 0 means use the auto ceiling instead, so leaving this at 0 never disables the guard."
+    },
+    {
+      "key": "wire.settings.classification_vendor.help",
+      "before_approved": "需开启智能提示。固定一个环节；auto优先Radient。",
+      "after_authored": "需开启智能提示。固定一个环节；“自动”优先选择Radient。",
+      "backtranslation": "Recommendations must be enabled. Pin one leg; Automatic prefers Radient.",
+      "scope": "paired display-label help reference",
+      "english_source": "Needs recommendations on. Pin one leg; auto prefers Radient."
+    },
+    {
+      "key": "wire.settings.compaction_strategy.help",
+      "before_approved": "使用哪种压缩机制。auto按模型选择。",
+      "after_authored": "使用哪种压缩机制。“自动”按模型选择。",
+      "backtranslation": "Which compaction mechanism to use. Automatic selects by model.",
+      "scope": "paired display-label help reference",
+      "english_source": "Which mechanism compacts. Auto picks per model."
+    },
+    {
+      "key": "wire.settings.display_nerd_icons.help",
+      "before_approved": "展开的工具行图标。auto读取终端模拟器的标记。",
+      "after_authored": "展开的工具行图标。“自动”读取终端模拟器的标记。",
+      "backtranslation": "Expanded tool-row icons. Automatic reads the terminal emulator markers.",
+      "scope": "paired display-label help reference",
+      "english_source": "Expanded tool-row icons. Auto reads the terminal emulator's markers."
+    },
+    {
+      "key": "wire.settings.network_rollout_on_update.help",
+      "before_approved": "`lop update`在此安装较新构建后，请本设备的mesh成员也移到该构建：一次一个、各自等待空闲、绝不强制。关：只有`lop network update`会滚动。未向本设备授予`update`的成员会被跳过，并附上在那里授予的补救办法。",
+      "after_authored": "`lop update`在此安装较新构建后，请本设备网状网络中的成员也移到该构建：一次一个、各自等待空闲、绝不强制。“关闭”：只有`lop network update`会滚动升级。未向本设备授予`update`的成员会被跳过，并提示需在该成员上授予此权限。",
+      "backtranslation": "After lop update installs a newer build here, ask members in this device’s mesh to move to that build one at a time, each waiting for idle, never forced. Off means only lop network update performs a rolling upgrade. Skip members that have not granted this device update, with guidance to grant that permission on the member.",
+      "scope": "paired display-label help reference",
+      "english_source": "After `lop update` installs a newer build here, ask this device's mesh members to move to it: one at a time, each waiting for idle, never forced. Off: only `lop network update` rolls. A member that has not granted this device `update` is skipped, with the remedy to grant it there."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.help",
+      "before_approved": "'default'不发送任何内容（首选主机失败时，OpenRouter会切换到另一台主机）；'false'则宁可失败，也不切换到你的偏好之外的主机。",
+      "after_authored": "“默认”不发送任何内容（首选主机失败时，OpenRouter会切换到另一台主机）；“否”则宁可失败，也不切换到你的偏好之外的主机。",
+      "backtranslation": "Default sends nothing; OpenRouter switches hosts if the preferred one fails. No instead fails rather than switching to a host outside your preferences.",
+      "scope": "paired display-label help reference",
+      "english_source": "'default' sends nothing (OpenRouter falls through to another host when the preferred one fails); 'false' fails rather than fall through to a host outside your preferences."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.help",
+      "before_approved": "'deny'排除可能用你的提示词训练或留存的主机。'default'不发送偏好（OpenRouter默认：allow）。",
+      "after_authored": "“禁止”排除可能用你的提示词训练或留存提示词的主机。“默认”不发送偏好（OpenRouter默认：允许）。",
+      "backtranslation": "Disallow excludes hosts that might train on or retain your prompts. Default sends no preference; OpenRouter’s default is Allow.",
+      "scope": "paired display-label help reference",
+      "english_source": "'deny' excludes hosts that may train on or retain your prompts. 'default' sends no preference (OpenRouter's default: allow)."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.help",
+      "before_approved": "'true'：仅限文本输出可被蒸馏的endpoint。'default'：不发送任何内容。",
+      "after_authored": "“是”：仅限文本输出可被蒸馏的endpoint。“默认”：不发送任何内容。",
+      "backtranslation": "Yes limits selection to endpoints whose text output may be distilled. Default sends nothing.",
+      "scope": "paired display-label help reference",
+      "english_source": "'true': restrict to endpoints whose text output may be distilled. 'default': nothing sent."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.help",
+      "before_approved": "'true'仅限支持你发送的每个参数（工具、结构化输出）的主机；'default'则任由OpenRouter静默丢弃不支持的参数。",
+      "after_authored": "“是”仅限支持你发送的每个参数（工具、结构化输出）的主机；“默认”则允许OpenRouter静默丢弃不支持的参数。",
+      "backtranslation": "Yes restricts to hosts supporting every parameter you send, including tools and structured output. Default allows OpenRouter to silently discard unsupported parameters.",
+      "scope": "paired display-label help reference",
+      "english_source": "'true' restricts to hosts that support every parameter you send (tools, structured output); 'default' lets OpenRouter silently drop unsupported ones."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.help",
+      "before_approved": "OpenRouter如何为本次调用给主机排序。可能路由离开持有热提示词缓存的主机（长对话上会冷启动）；'default'完全不发送偏好。",
+      "after_authored": "OpenRouter如何为本次调用给主机排序。可能路由离开持有热提示词缓存的主机（长对话上会冷启动）；“默认”完全不发送偏好。",
+      "backtranslation": "How OpenRouter ranks hosts for this call. Routing may leave the host with your warm prompt cache, causing cold starts on long conversations. Default sends no preference.",
+      "scope": "paired display-label help reference",
+      "english_source": "How OpenRouter ranks hosts for this call. May route away from the host holding your warm prompt cache (a cold start on long conversations); 'default' sends no preference at all."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.help",
+      "before_approved": "'true'：仅限零数据留存的endpoint。'default'：不发送任何内容。",
+      "after_authored": "“是”：仅限零数据留存的endpoint。“默认”：不发送任何内容。",
+      "backtranslation": "Yes restricts to zero-data-retention endpoints. Default sends nothing.",
+      "scope": "paired display-label help reference",
+      "english_source": "'true': restrict to zero-data-retention endpoints. 'default': nothing sent."
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.help",
+      "before_approved": "'inherit'让智能体运行的命令看到你的环境（gh、aws、npm保持其令牌）。'allowlist'只传递PATH/HOME/SHELL/TERM/USER/LOGNAME，加上旁边这两个列表，因此本会话启动时用的提供商密钥不会交给模型编写的命令。每个会话只读取一次：修改后下次启动才生效。",
+      "after_authored": "“继承”让智能体运行的命令看到你的环境（gh、aws、npm保留其令牌）。“允许列表”只传递PATH/HOME/SHELL/TERM/USER/LOGNAME，加上旁边这两个列表，因此本会话启动时用的提供商密钥不会交给模型编写的命令。每个会话只读取一次：修改后下次启动才生效。",
+      "backtranslation": "Inherit exposes your environment to agent-run commands, retaining gh/aws/npm authentication tokens. Allowlist passes PATH/HOME/SHELL/TERM/USER/LOGNAME plus the two adjacent lists, so the session’s provider key is not passed to model-written commands. Read once per session; changes take effect at the next launch.",
+      "scope": "paired display-label help reference",
+      "english_source": "'inherit' lets a command the agent runs see your environment (gh, aws, npm keep their tokens). 'allowlist' passes only PATH/HOME/SHELL/TERM/USER/LOGNAME plus the two lists beside this, so the provider key this session launched with is not handed to a command the model writes. Read once per session: changing it takes effect at the next launch."
+    },
+    {
+      "key": "wire.settings.shell_environment_inherit.help",
+      "before_approved": "留空则只有安全集。allowlist模式在安全集之外额外保留的名称——例如需要继续解析$(lop secret get NAME)的shell所用的LOCAL_OPERATOR_CONFIG_DIR，或LANG。inherit模式下无效。",
+      "after_authored": "留空则只有安全集。“允许列表”模式在安全集之外额外保留的名称——例如需要继续解析$(lop secret get NAME)的命令行环境所用的LOCAL_OPERATOR_CONFIG_DIR，或LANG。“继承”模式下无效。",
+      "backtranslation": "Empty means only the safe set. Allowlist mode retains these names in addition to that set, such as LOCAL_OPERATOR_CONFIG_DIR for a shell environment that must resolve $(lop secret get NAME), or LANG. No effect in Inherit mode.",
+      "scope": "paired display-label help reference",
+      "english_source": "Empty = the safe set alone. Names the allowlist mode keeps ON TOP of the safe set — e.g. LOCAL_OPERATOR_CONFIG_DIR for a shell that must still resolve $(lop secret get NAME), or LANG. Inert in inherit mode."
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.help",
+      "before_approved": "听写如何移除语气词和非语音提示。auto在提供商支持时使用原生清理，否则使用保守的客户端规则；provider和client各自仅使用其中一种机制；off保留逐字转录。单次请求中的`cleanup`字段仍优先。",
+      "after_authored": "听写如何移除语气词和非语音提示。“自动”在提供商支持时使用原生清理，否则使用保守的客户端规则；“提供商”和“客户端”各自仅使用其中一种机制；“关闭”保留逐字转录。单次请求中的`cleanup`字段仍优先。",
+      "backtranslation": "How dictation removes fillers and non-speech cues. Automatic uses native provider cleanup where available, otherwise conservative client rules. Provider and Client each use only one mechanism. Off retains verbatim transcription. The per-request cleanup field still takes priority.",
+      "scope": "paired display-label help reference",
+      "english_source": "How dictation strips filler words and non-speech cues. auto uses the provider's native cleanup where available and the conservative client rules elsewhere; provider and client each use only one of the two mechanisms; off keeps the verbatim transcript. A per-request `cleanup` field still wins."
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.help",
+      "before_approved": "auto按智能体选择；固定值会覆盖分类器。",
+      "after_authored": "“自动”按智能体选择；固定值会覆盖分类器。",
+      "backtranslation": "Automatic selects per agent; a fixed value overrides the classifier.",
+      "scope": "paired display-label help reference",
+      "english_source": "auto picks per agent; a fixed value overrides the classifier."
+    },
+    {
+      "key": "wire.settings.web_fetch_render_backend.help",
+      "before_approved": "安装[fetch] extra后，auto会使用markdownify。",
+      "after_authored": "安装[fetch] extra后，“自动”会使用markdownify。",
+      "backtranslation": "Automatic uses markdownify when the [fetch] pip extra is installed.",
+      "scope": "paired display-label help reference",
+      "english_source": "Auto uses markdownify when the [fetch] extra is installed."
+    }
+  ],
+  "glossary_choices": {
+    "new_invented_terms": [],
+    "display_only_modes": "auto 自动; manual 手动; off 关闭; default 默认; true 是; false 否; allow 允许; deny 禁止; allowlist 允许列表; inherit 继承; ordered 按顺序; round_robin 轮询. Only labels and display-label references change, never Choice.value or configuration syntax.",
+    "voice_gender": "female 女声; male 男声 (voice gender context, consistent with existing descriptions).",
+    "auth_vs_LLM_tokens": "shell_environment_mode.help concerns gh/aws/npm credentials: 令牌 retained. LLM token wording is untouched and stays token per zh-CN style guide.",
+    "endpoint_kept": {
+      "exact_glossary": "i18n/glossary.md §§Wave-2 kept-English set (all locales), lines 118-127: endpoint (Latin, undeclined).",
+      "individual_usage": [
+        "providers_openrouter_enforce_distillable_text.help describes provider API endpoints whose text output may be distilled.",
+        "providers_openrouter_zdr.help describes zero-data-retention provider API endpoints."
+      ],
+      "surrounding_prose": "Chinese; no ordinary enum exemption."
+    },
+    "extra_kept": {
+      "exact_glossary": "i18n/glossary.md lines 118-127: extra (pip extras), all locales; zh-CN cannot contradict.",
+      "individual_usage": "web_fetch_render_backend.help names installation of the [fetch] pip extra; markdownify is the package name."
+    },
+    "mesh": "网状网络 in paired rollout help; update permission identifier remains `update`.",
+    "commands_brands_identifiers": "Radient, OpenRouter, markdownify, gh/aws/npm, PATH/HOME/SHELL/TERM/USER/LOGNAME, LOCAL_OPERATOR_CONFIG_DIR, LANG, $(lop secret get NAME), `cleanup`, `update`, `lop update`, `lop network update`, [fetch] preserved."
+  },
+  "invariants": {
+    "key_order_and_formatting_preserved": true,
+    "all_bytes_outside_50_exact_JSON_value_replacements_preserved": "Reversing only the 50 replacements in memory reproduces original manifest SHA256 exactly.",
+    "placeholders_ICU": {
+      "maps_parsed": 3,
+      "messages_parsed": 2685,
+      "changed_argument_structure_equal": true,
+      "changed_plural_selectors_preserved": true,
+      "changed_keys_with_arguments": 0,
+      "zh_CLDR_other_only_positive_control": true,
+      "malformed_brace_negative_controls": [
+        {
+          "input": "{broken",
+          "result": "rejected",
+          "error": "expected ',' or '}' after argument name 'broken' (at offset 7 of '{broken')"
+        },
+        {
+          "input": "stray }",
+          "result": "rejected",
+          "error": "unmatched '}' (at offset 6 of 'stray }')"
+        },
+        {
+          "input": "{count, plural, other {#}",
+          "result": "rejected",
+          "error": "expected a word (at offset 25 of '{count, plural, other {#}')"
+        }
+      ],
+      "control_boundary": "An initial missing-other control parsed: selector completeness is a semantic gate, not parser syntax. Replaced it with a genuinely malformed missing-brace control; no production parser change.",
+      "no_changed_value_has_bidi_controls": true,
+      "changed_values_NFC": true,
+      "literal_backticks_and_numbers_preserved": true,
+      "shell_command_and_environment_names_preserved": true
+    },
+    "RTL": "zh-CN is LTR; no RTL catalogue or isolation code edited; no bidi controls introduced. Urdu visual/RTL validation is not this lane.",
+    "CLDR": "Existing parser accepts all three 895-key maps; changed plural structures unchanged. Chinese other-only positive control accepted. No CLDR generated data edited.",
+    "pseudo": "No pseudo or generated files changed; pseudo generation/rendering deliberately not rerun while head is frozen. Root integration owns that proof.",
+    "approval_labels_retained": {
+      "wire.settings.tool_approval_mode.choice.ask.label": "询问",
+      "wire.settings.tool_approval_mode.choice.auto.label": "自动"
+    },
+    "no_public_copy_reader_calls": true,
+    "no_raw_catalogue_prose_dump": true,
+    "catalogue_inputs": "Approved cached public-copy envelopes and source-attributed ledger only; raw locale read only for exact-byte patching and metadata checks.",
+    "author_write_set": [
+      "local_operator/i18n/catalogues/zh-CN/wire.settings.json",
+      "i18n/audits/evidence/approval-full-repair-author-zh-CN.json"
+    ],
+    "other_locale_concurrency": "Six other disjoint locale catalogue diffs observed; not modified or attributed to this author.",
+    "code_English_context_histories_unchanged": "At final check git diff --name-only contains only seven wire.settings locale catalogues, no code, English, contexts, histories or generated files. No stage/commit/push performed."
+  },
+  "mechanical_evidence": {
+    "scratch_file": "/Users/damian/.local-operator/sessions/811ce9672eb0/scratchpad/zh-CN-mechanical-repair-evidence.json",
+    "parser_source": "local_operator/i18n/runtime.py lines 1-327, existing pure parser and structure helpers; AST-isolated to avoid application imports",
+    "parser_source_sha256": "50b11f4266c77f0eb74b65c9feb308530e15b06152564a865f84abbb58c757d5",
+    "diff_check": "git diff --check -- local_operator/i18n/catalogues/zh-CN/wire.settings.json: exit 0",
+    "width_method": "Unicode combining + East_Asian_Width W/F=2; static only",
+    "width": [
+      {
+        "key": "wire.settings.bash_memory_mode.choice.auto.label",
+        "en_cells": 4,
+        "zh_cells": 4,
+        "ratio": 1.0,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.bash_memory_mode.choice.manual.label",
+        "en_cells": 6,
+        "zh_cells": 4,
+        "ratio": 0.667,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.classification_vendor.choice.auto.label",
+        "en_cells": 4,
+        "zh_cells": 4,
+        "ratio": 1.0,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.compaction_strategy.choice.auto.label",
+        "en_cells": 4,
+        "zh_cells": 4,
+        "ratio": 1.0,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.display_nerd_icons.choice.none.label",
+        "en_cells": 4,
+        "zh_cells": 4,
+        "ratio": 1.0,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.model_effort.choice.unset.label",
+        "en_cells": 4,
+        "zh_cells": 4,
+        "ratio": 1.0,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.network_rollout_on_update.choice.auto.label",
+        "en_cells": 4,
+        "zh_cells": 4,
+        "ratio": 1.0,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.network_rollout_on_update.choice.off.label",
+        "en_cells": 3,
+        "zh_cells": 4,
+        "ratio": 1.333,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+        "en_cells": 5,
+        "zh_cells": 2,
+        "ratio": 0.4,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+        "en_cells": 7,
+        "zh_cells": 4,
+        "ratio": 0.571,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+        "en_cells": 5,
+        "zh_cells": 4,
+        "ratio": 0.8,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+        "en_cells": 4,
+        "zh_cells": 4,
+        "ratio": 1.0,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+        "en_cells": 7,
+        "zh_cells": 4,
+        "ratio": 0.571,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+        "en_cells": 4,
+        "zh_cells": 2,
+        "ratio": 0.5,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+        "en_cells": 7,
+        "zh_cells": 4,
+        "ratio": 0.571,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+        "en_cells": 4,
+        "zh_cells": 2,
+        "ratio": 0.5,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+        "en_cells": 7,
+        "zh_cells": 4,
+        "ratio": 0.571,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+        "en_cells": 7,
+        "zh_cells": 4,
+        "ratio": 0.571,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+        "en_cells": 4,
+        "zh_cells": 2,
+        "ratio": 0.5,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+        "en_cells": 7,
+        "zh_cells": 4,
+        "ratio": 0.571,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+        "en_cells": 9,
+        "zh_cells": 8,
+        "ratio": 0.889,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+        "en_cells": 7,
+        "zh_cells": 4,
+        "ratio": 0.571,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+        "en_cells": 4,
+        "zh_cells": 4,
+        "ratio": 1.0,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+        "en_cells": 6,
+        "zh_cells": 6,
+        "ratio": 1.0,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+        "en_cells": 3,
+        "zh_cells": 4,
+        "ratio": 1.333,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+        "en_cells": 8,
+        "zh_cells": 6,
+        "ratio": 0.75,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.speech_voice_gender.choice.auto.label",
+        "en_cells": 4,
+        "zh_cells": 4,
+        "ratio": 1.0,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.speech_voice_gender.choice.female.label",
+        "en_cells": 6,
+        "zh_cells": 4,
+        "ratio": 0.667,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.speech_voice_gender.choice.male.label",
+        "en_cells": 4,
+        "zh_cells": 4,
+        "ratio": 1.0,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.web_fetch_render_backend.choice.auto.label",
+        "en_cells": 4,
+        "zh_cells": 4,
+        "ratio": 1.0,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.web_search_strategy.choice.ordered.label",
+        "en_cells": 7,
+        "zh_cells": 6,
+        "ratio": 0.857,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+        "en_cells": 11,
+        "zh_cells": 4,
+        "ratio": 0.364,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+        "en_cells": 24,
+        "zh_cells": 14,
+        "ratio": 0.583,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.bash_memory_mode.help",
+        "en_cells": 164,
+        "zh_cells": 86,
+        "ratio": 0.524,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.bash_memory_limit_mb.help",
+        "en_cells": 129,
+        "zh_cells": 74,
+        "ratio": 0.574,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.classification_vendor.help",
+        "en_cells": 60,
+        "zh_cells": 53,
+        "ratio": 0.883,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.compaction_strategy.help",
+        "en_cells": 47,
+        "zh_cells": 36,
+        "ratio": 0.766,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.display_nerd_icons.help",
+        "en_cells": 68,
+        "zh_cells": 46,
+        "ratio": 0.676,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.network_rollout_on_update.help",
+        "en_cells": 281,
+        "zh_cells": 216,
+        "ratio": 0.769,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_allow_fallbacks.help",
+        "en_cells": 171,
+        "zh_cells": 116,
+        "ratio": 0.678,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_data_collection.help",
+        "en_cells": 124,
+        "zh_cells": 92,
+        "ratio": 0.742,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.help",
+        "en_cells": 90,
+        "zh_cells": 62,
+        "ratio": 0.689,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_require_parameters.help",
+        "en_cells": 149,
+        "zh_cells": 100,
+        "ratio": 0.671,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_sort.help",
+        "en_cells": 177,
+        "zh_cells": 114,
+        "ratio": 0.644,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_zdr.help",
+        "en_cells": 75,
+        "zh_cells": 56,
+        "ratio": 0.747,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.shell_environment_mode.help",
+        "en_cells": 344,
+        "zh_cells": 231,
+        "ratio": 0.672,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.shell_environment_inherit.help",
+        "en_cells": 206,
+        "zh_cells": 169,
+        "ratio": 0.82,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.speech_transcription_cleanup.help",
+        "en_cells": 293,
+        "zh_cells": 187,
+        "ratio": 0.638,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.speech_voice_gender.help",
+        "en_cells": 61,
+        "zh_cells": 40,
+        "ratio": 0.656,
+        "maxCells": null,
+        "rendered": false
+      },
+      {
+        "key": "wire.settings.web_fetch_render_backend.help",
+        "en_cells": 58,
+        "zh_cells": 46,
+        "ratio": 0.793,
+        "maxCells": null,
+        "rendered": false
+      }
+    ]
+  },
+  "width_risks": [
+    {
+      "key": "wire.settings.network_rollout_on_update.choice.off.label",
+      "en_cells": 3,
+      "zh_cells": 4,
+      "ratio": 1.333,
+      "maxCells": null,
+      "rendered": false,
+      "classification": "static relative expansion only, not observed clipping; 关闭 is shortest natural matching label"
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+      "en_cells": 3,
+      "zh_cells": 4,
+      "ratio": 1.333,
+      "maxCells": null,
+      "rendered": false,
+      "classification": "static relative expansion only, not observed clipping; 关闭 is shortest natural matching label"
+    }
+  ],
+  "deferred_minors": [
+    {
+      "id": "I18N-WS-279E3003F300",
+      "key": "wire.settings.aida_cadence_at.help",
+      "reason": "Outside accepted major/direct-help-neighbor authoring scope; inherited style, semantic minor or width-only finding retained for root, not silently rejected."
+    },
+    {
+      "id": "I18N-WS-D2B39ABCACB2",
+      "key": "wire.settings.compaction_resume_replay.choice.card.description",
+      "reason": "Outside accepted major/direct-help-neighbor authoring scope; inherited style, semantic minor or width-only finding retained for root, not silently rejected."
+    },
+    {
+      "id": "I18N-WS-3709651CD4F2",
+      "key": "wire.settings.compaction_resume_replay.choice.full.description",
+      "reason": "Outside accepted major/direct-help-neighbor authoring scope; inherited style, semantic minor or width-only finding retained for root, not silently rejected."
+    },
+    {
+      "id": "I18N-WS-095C42DE4A3A",
+      "key": "wire.settings.compaction_resume_replay.help",
+      "reason": "Outside accepted major/direct-help-neighbor authoring scope; inherited style, semantic minor or width-only finding retained for root, not silently rejected."
+    },
+    {
+      "id": "I18N-WS-93EB04D1BC4D",
+      "key": "wire.settings.fork_cmux_placement.choice.surface.label",
+      "reason": "Outside accepted major/direct-help-neighbor authoring scope; inherited style, semantic minor or width-only finding retained for root, not silently rejected."
+    },
+    {
+      "id": "I18N-WS-30736341A5D8",
+      "key": "wire.settings.fork_cmux_placement.help",
+      "reason": "Outside accepted major/direct-help-neighbor authoring scope; inherited style, semantic minor or width-only finding retained for root, not silently rejected."
+    },
+    {
+      "id": "I18N-WS-502F92C0DCA9",
+      "key": "wire.settings.mesh_move_working_set_max_bytes.label",
+      "reason": "Outside accepted major/direct-help-neighbor authoring scope; inherited style, semantic minor or width-only finding retained for root, not silently rejected."
+    },
+    {
+      "id": "I18N-WS-BDB852BCA5C5",
+      "key": "wire.settings.monitor_classifymaxchars.help",
+      "reason": "Outside accepted major/direct-help-neighbor authoring scope; inherited style, semantic minor or width-only finding retained for root, not silently rejected."
+    },
+    {
+      "id": "I18N-WS-EF9537807420",
+      "key": "wire.settings.network_credentials_offline_hold_s.label",
+      "reason": "Outside accepted major/direct-help-neighbor authoring scope; inherited style, semantic minor or width-only finding retained for root, not silently rejected."
+    },
+    {
+      "id": "I18N-WS-E4DC12CBA5EC",
+      "key": "wire.settings.retry_enabled.help",
+      "reason": "Outside accepted major/direct-help-neighbor authoring scope; inherited style, semantic minor or width-only finding retained for root, not silently rejected."
+    },
+    {
+      "id": "I18N-WS-7403A0421E69",
+      "key": "wire.settings.retry_fallbackchains.help",
+      "reason": "Outside accepted major/direct-help-neighbor authoring scope; inherited style, semantic minor or width-only finding retained for root, not silently rejected."
+    },
+    {
+      "id": "I18N-WS-CF5957DAA180",
+      "key": "wire.settings.retry_usagereservepercent.help",
+      "reason": "Outside accepted major/direct-help-neighbor authoring scope; inherited style, semantic minor or width-only finding retained for root, not silently rejected."
+    },
+    {
+      "id": "I18N-WS-1406CC10A091",
+      "key": "wire.settings.speech_voice_instructions.help",
+      "reason": "Outside accepted major/direct-help-neighbor authoring scope; inherited style, semantic minor or width-only finding retained for root, not silently rejected."
+    },
+    {
+      "id": "I18N-WS-B459089265A0",
+      "key": "wire.settings.speech_voice_tone.help",
+      "reason": "Outside accepted major/direct-help-neighbor authoring scope; inherited style, semantic minor or width-only finding retained for root, not silently rejected."
+    },
+    {
+      "id": "I18N-WS-060F4F9DA2FC",
+      "key": "wire.settings.supplements_maxfeatured.help",
+      "reason": "Outside accepted major/direct-help-neighbor authoring scope; inherited style, semantic minor or width-only finding retained for root, not silently rejected."
+    },
+    {
+      "id": "I18N-WS-EED64BE5C06E",
+      "key": "wire.settings.team_bridge_session.label",
+      "reason": "Outside accepted major/direct-help-neighbor authoring scope; inherited style, semantic minor or width-only finding retained for root, not silently rejected."
+    },
+    {
+      "id": "I18N-WS-3919FF1D7675",
+      "key": "wire.settings.wakes_triggers_project_staleness_enabled.help",
+      "reason": "Outside accepted major/direct-help-neighbor authoring scope; inherited style, semantic minor or width-only finding retained for root, not silently rejected."
+    }
+  ],
+  "unverified": [
+    "Independent A/B audit and retained-record integration",
+    "Real rendered choice-row fit, app/native QA, design/UX approval",
+    "Pseudo/runtime/generated integration checks; reserved for root after all seven authors"
+  ],
+  "clearance": "AUTHOR REPAIR ONLY. No self-audit, native fluency clearance, rendered-fit claim, independent approval or shipping claim."
+}

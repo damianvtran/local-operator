@@ -1,0 +1,38 @@
+{
+  "locale": "vi",
+  "namespace": "tui.provider_state",
+  "source_sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912",
+  "translator": {
+    "agent": "i18n-translator / provider-state-vi-author",
+    "session": "5644d4838456",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": false,
+    "actual_model_source": "Explicit host/user model-switch message: openai/gpt-6.1-sol replaces anthropic/claude-opus-5-5 due to provider failure: quota",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "date": "2026-11-22"
+  },
+  "auditor": {
+    "agent": "i18n-auditor / provider-state-vi-audit-A",
+    "session": "6640da3c0b72",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "translator_session": "5644d4838456",
+    "actual_model_source": "Explicit host model-switch message: openai/gpt-6.1-sol replacing anthropic/claude-opus-5-5; per-response serving telemetry unavailable, identity not independently measured",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "date": "2026-11-22",
+    "result": "passed",
+    "findings": 0
+  },
+  "status": "passed",
+  "note": "Independent A lexical audit, all 5 keys; zero blocker/major. Record: i18n/audits/evidence/vi/tui.provider_state/a6640/record.json. Actual fallback GPT-6.1-sol; host notice, telemetry unavailable. No UI/eligibility clearance."
+}

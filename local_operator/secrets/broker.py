@@ -1123,33 +1123,40 @@ class SecretBroker:
             granting_terminal=granting_terminal,
             caps=_declared_caps(request.get("caps")),
         )
-        with self._lock:
-            previous = self._sessions.get(identity.pid)
-            # Re-registration by the same pid replaces rather than adds, so a
-            # session that reconnects cannot consume a second slot.
-            if previous is None and len(self._sessions) >= MAX_SESSIONS:
-                over_capacity = True
-            else:
-                over_capacity = False
-                self._sessions[identity.pid] = session
-                self._last_activity = time.monotonic()
-        if over_capacity:
-            # R4: registrations used to be free AND unbounded, so 64 of them
-            # exhausted the worker budget and wedged the broker for every
-            # legitimate caller — a denial of the operator's whole credential
-            # set. Refuse loudly and audit it instead of closing the connection
-            # silently, so the cause is in the chain rather than invisible.
-            reason = f"the broker already holds {MAX_SESSIONS} registered sessions"
-            self._audit_denial(identity, "register", reason)
-            self._reply_error(connection, "unavailable", reason)
-            return False
-        if previous is not None:
-            self._close_quietly(previous.connection)
-        self._audit(identity, "register", "allow")
-        # `pid` lets the client tell, when this channel later closes, whether a
-        # DIFFERENT broker took over (re-register) or this one revoked it (do
-        # not fight a revocation). Extra fields are ignored by older clients.
-        send_frame(connection, {"ok": True, "registered": identity.pid, "pid": os.getpid()})
+        # Reserve the channel's first frame BEFORE publishing it: a descendant
+        # can find the session as soon as it enters _sessions, and its notifier
+        # uses this same lock. Locking only send_frame leaves that earlier race
+        # open. Take the session lock outside _lock, and release _lock before
+        # audit/socket work; never wait on a published session's writer while
+        # holding the broker lock (the watcher also needs the broker lock).
+        with session.write_lock:
+            with self._lock:
+                previous = self._sessions.get(identity.pid)
+                # Re-registration by the same pid replaces rather than adds, so a
+                # session that reconnects cannot consume a second slot.
+                if previous is None and len(self._sessions) >= MAX_SESSIONS:
+                    over_capacity = True
+                else:
+                    over_capacity = False
+                    self._sessions[identity.pid] = session
+                    self._last_activity = time.monotonic()
+            if over_capacity:
+                # R4: registrations used to be free AND unbounded, so 64 of them
+                # exhausted the worker budget and wedged the broker for every
+                # legitimate caller — a denial of the operator's whole credential
+                # set. Refuse loudly and audit it instead of closing the connection
+                # silently, so the cause is in the chain rather than invisible.
+                reason = f"the broker already holds {MAX_SESSIONS} registered sessions"
+                self._audit_denial(identity, "register", reason)
+                self._reply_error(connection, "unavailable", reason)
+                return False
+            if previous is not None:
+                self._close_quietly(previous.connection)
+            self._audit(identity, "register", "allow")
+            # `pid` lets the client tell, when this channel later closes, whether a
+            # DIFFERENT broker took over (re-register) or this one revoked it (do
+            # not fight a revocation). Extra fields are ignored by older clients.
+            send_frame(connection, {"ok": True, "registered": identity.pid, "pid": os.getpid()})
 
         watcher = threading.Thread(
             target=self._watch_session,

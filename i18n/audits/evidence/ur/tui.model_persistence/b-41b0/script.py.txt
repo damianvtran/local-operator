@@ -1,0 +1,52 @@
+from pathlib import Path
+import sys,json,hashlib,re,unicodedata,importlib.util,io
+from collections import Counter
+from unittest.mock import patch
+from rich.console import Console
+from rich.text import Text
+from local_operator.i18n import catalogues,runtime
+ROOT=Path('/Users/damian/local-operator/.worktrees/i18n-model-persist-notice'); NS='tui.model_persistence'
+print('PYTHON',sys.executable)
+for m in (catalogues,runtime):
+ print('MODULE',m.__file__); assert Path(m.__file__).is_relative_to(ROOT)
+paths={l:ROOT/f'local_operator/i18n/catalogues/{l}/{NS}.json' for l in ('en','ur')}; paths['context']=ROOT/f'local_operator/i18n/catalogues/en/{NS}.context.json'
+expected={'en':'4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff','context':'b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc','ur':'0e00e1ee1715d3ec8ad8d07440984da33fcb05336a35ceefbd32a87180a3e5f9'}
+hashes={k:hashlib.sha256(p.read_bytes()).hexdigest() for k,p in paths.items()}; assert hashes==expected; print('BEFORE_HASHES',hashes)
+spec=importlib.util.spec_from_file_location('scoped_check',ROOT/'scripts/i18n/check.py'); check=importlib.util.module_from_spec(spec); sys.modules[spec.name]=check; spec.loader.exec_module(check)
+en=catalogues.load_catalogue('en',NS); ur=catalogues.load_catalogue('ur',NS); ctx=json.loads(paths['context'].read_text()); assert len(en)==len(ur)==4 and list(en)==list(ur)==list(ctx)
+load=catalogues.load_catalogue
+with patch.object(catalogues,'namespaces',lambda locale:(NS,)),patch.object(catalogues,'locales',lambda:('en','ur')):
+ problems=check.check_catalogues(); print('OFFICIAL_SCOPED_CHECK',problems); assert not problems
+ missing=dict(ur); missing.pop(next(iter(missing)))
+ with patch.object(catalogues,'load_catalogue',lambda locale,namespace:missing if locale=='ur' else load(locale,namespace)):
+  p=check.check_catalogues(); print('NEGATIVE_MISSING_KEY',p); assert any('missing key' in x for x in p)
+ bad=dict(ur); bad[NS+'.with_model']=bad[NS+'.with_model'].replace('{label}','{wrong}')
+ with patch.object(catalogues,'load_catalogue',lambda locale,namespace:bad if locale=='ur' else load(locale,namespace)):
+  p=check.check_catalogues(); print('NEGATIVE_ARGUMENT',p); assert any('arguments' in x for x in p)
+for k,v in ur.items():
+ args=runtime.message_arguments(v); assert check.arguments_match(runtime.message_arguments(en[k]),args); assert all(t=='simple' for n,t in args)
+ assert not runtime.plural_selectors(v) and not runtime.plural_arguments(v)
+ assert Counter(re.findall(r'\{(\w+)\}',v))==Counter(re.findall(r'\{(\w+)\}',en[k]))
+ assert v==unicodedata.normalize('NFC',v)
+ assert not any(unicodedata.bidirectional(c) in ('LRE','RLE','LRO','RLO','PDF','LRI','RLI','FSI','PDI') or ord(c) in (0x200e,0x200f,0x61c) for c in v)
+ for tok in ('/model default','/model saved','/settings'): assert v.count(tok)==en[k].count(tok)
+ assert re.findall(r'`[^`]*`|</?\w+[^>]*>|--[\w-]+',v)==re.findall(r'`[^`]*`|</?\w+[^>]*>|--[\w-]+',en[k])
+ print('KEY_PASS',k,'args',args,'plural/select=0','maxCells',ctx[k].get('maxCells'),'maxChars',ctx[k].get('maxChars'))
+# Synthetic expansion only: not a shipped pseudo locale. Protect all commands/arguments.
+def pseudo(s):
+ return ''.join(x if re.fullmatch(r'/model default|/model saved|/settings|\{\w+\}',x) else '['+x+x+']' for x in re.split(r'(/model default|/model saved|/settings|\{\w+\})',s) if x)
+for loc,cat in [('en',en),('ur',ur)]:
+ for k,v in cat.items():
+  p=pseudo(v); assert runtime.message_arguments(p)==runtime.message_arguments(v)
+  for tok in ('/model default','/model saved','/settings'): assert p.count(tok)==v.count(tok)
+ print('PSEUDO_PROTECTED_PASS',loc)
+ for family,keys in [('ordinary',('persist','saved','settings')),('setup-missing',('persist','settings')),('sole-settings',('settings',))]:
+  routes=' · '.join(runtime.render_message(cat[NS+'.'+k],{},loc) for k in keys)
+  for label in ('openai/gpt-6','anthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-0123456789'):
+   result=runtime.render_message(cat[NS+'.with_model'],{'label':label,'routes':routes},loc); assert result.count(label)==result.count(routes)==1
+   print('PLAIN_RICH_INPUT',loc,family,repr(result))
+   for width in (80,100,120):
+    out=io.StringIO(); c=Console(width=width,file=out,color_system=None,force_terminal=False); c.print(Text(result)); print('PLAIN_RICH_FRAME',loc,family,'width',width,'label_chars',len(label),repr(out.getvalue()))
+    lines=Text(result).wrap(c,width); print('GEOMETRY', [x.cell_len for x in lines])
+assert hashes=={k:hashlib.sha256(p.read_bytes()).hexdigest() for k,p in paths.items()}; print('AFTER_HASHES',hashes)
+print('PASS scoped only; plain Rich is NOT styled NoticeBlock/native font/shaping/bidi proof; no all-width/no-wrap guarantee; no eligibility/release approval')

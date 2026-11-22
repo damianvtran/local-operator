@@ -80,6 +80,7 @@ from local_operator.server.routes import (
     desktop_projects,
     desktop_quota,
     desktop_radient,
+    desktop_remote_compute,
     desktop_runtimes,
     desktop_session_files,
     desktop_sessions,
@@ -1299,6 +1300,28 @@ async def standalone_browser_write_gate(request: Request, call_next):
 async def desktop_validation_error(request: Request, error: RequestValidationError):
     # Pydantic includes the rejected INPUT in its default 422 response. SecretStr
     # protects model dumps, not failures before a model was constructed.
+    if request.url.path == "/v1/desktop/attention/seen" and request.method == "POST":
+        # A client needs to know which item blocked the whole receipt batch.
+        # Only include known schema locations: an extra key in `loc`, `input`,
+        # and JSON-decoder context can contain caller data.
+        issues = []
+        for issue in error.errors():
+            location: list[str | int] = []
+            for part in issue["loc"]:
+                if not isinstance(part, int) and part not in (
+                    "body",
+                    "items",
+                    "session_id",
+                    "completion_token",
+                ):
+                    break
+                location.append(part)
+            if issue["type"] == "json_invalid":
+                continue
+            issues.append({"loc": location, "msg": issue["msg"]})
+            break  # One diagnostic suffices; don't amplify a 500-item failure.
+        if issues:
+            return JSONResponse(status_code=422, content={"detail": issues})
     if request.url.path.startswith(
         ("/v1/auth/", "/v1/settings", "/v1/mcp", "/v1/desktop/", "/v1/notification-sounds")
     ) or (desktop_posture().enabled and _legacy_desktop_gated(request.url.path, request.method)):
@@ -1466,6 +1489,15 @@ app.include_router(desktop_notifications.router)
 # desktop family rather than beside `desktop_profiles` because the preference
 # is renderer state, not a session or catalogue surface.
 app.include_router(desktop_preferences.router)
+# The RADIENT REMOTE COMPUTE surface (``features.remote_compute``): the device
+# dropdown's Radient group, the runs panel and the three writes. Registered last in
+# the desktop family for the reason every block above gives — FastAPI matches in
+# declaration order — and its templates collide with nothing declared earlier:
+# ``/v1/desktop/remote-compute`` is a literal path, its ``/runs`` child and
+# ``/runs/{id}[/cancel]`` children sit under that literal, and no block above
+# declares that prefix. The prefix is what keeps it off the sessions router's
+# ``/v1/desktop/{...}`` family, of which there is none.
+app.include_router(desktop_remote_compute.router)
 # Notification sounds (`features.notification_sounds`): the built-in and custom
 # sound list, rendered audio, and add/rename/remove of the user's own sounds.
 # Its own `/v1/notification-sounds` prefix shares nothing with the desktop

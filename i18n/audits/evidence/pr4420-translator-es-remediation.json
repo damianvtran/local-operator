@@ -1,0 +1,698 @@
+{
+  "locale": "es",
+  "namespace": "tui.info",
+  "stage": "LLM authoring remediation only; not independent native audit or ship clearance",
+  "agent": "translator/info-remediate-es",
+  "session": "d7ad5e38f7b6",
+  "actual_model": "openai/gpt-6.1-sol",
+  "fallback_from": "anthropic/claude-opus-5-5",
+  "fallback_reason": "provider failure: quota; actual host switch notice",
+  "source_sha256": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+  "context_sha256": "aee21715fca769227b3bda5b500a5e81e51763cf86817f741baff8b1a5ef0ae7",
+  "target_before_sha256": "cd9603eaf49a117499f1680092b9f42ef695ad1b7219cbe3107ede40ef96eb09",
+  "target_after_sha256": "6d7db1f3fe45f99f638cbd51bdc304e5412cd3f548733df8b6d347fefc1ce327",
+  "key_count": 277,
+  "changed_keys": [
+    "tui.info.agents.unreported_full",
+    "tui.info.agents.unreported_short",
+    "tui.info.agents.unreported_suffix",
+    "tui.info.agents.retained_full",
+    "tui.info.export.build_age",
+    "tui.info.export.uptime",
+    "tui.info.export.trajectories_unreported",
+    "tui.info.export.session_counts",
+    "tui.info.export.mobile",
+    "tui.info.state.stale"
+  ],
+  "unchanged_values": 267,
+  "formatting": "Exact line replacements only; key order unchanged",
+  "source_authority": "i18n/audits/evidence/pr4420-source-remediation-fc9fd773c06f.json",
+  "native_findings_authority": "i18n/audits/evidence/pr4420-initial-native-es-r1.json",
+  "addressed": {
+    "ES1": "Four no informaron -> sin datos; number-neutral unavailable-report wording",
+    "ES2": "Two retained qualifiers moved inside settled plural branches for singular agreement",
+    "ES3": "Export relé del teléfono matches existing environment label",
+    "new_context_stale": "sin datos recientes incorrectly implies heartbeat freshness; proceso inexistente means OS process absent"
+  },
+  "choices": {
+    "build_age": "antigüedad / desconocida (feminine)",
+    "uptime": "tiempo activo / desconocido (masculine)",
+    "unreported": "sin datos; no falsely plural reporting verb",
+    "settled": "finalizado (conservado) / finalizados (conservados)",
+    "technical": "Existing es glossary kept runtime, git, wheel, identifiers and commands untouched; no new English exemptions",
+    "tree_deeper": "Unchanged en niveles inferiores counts items via plural #, not levels",
+    "bound_held": "Unchanged límite excedido; sigue activo does not assert hung or dead",
+    "fleet_lower_bound": "Unchanged conjunto total wording; independent auditor should recheck explicit trajectory qualification under clarified context"
+  },
+  "mechanical": {
+    "interpreter": "/Users/damian/local-operator/.venv/bin/python",
+    "pythonpath": "/Users/damian/local-operator/.worktrees/i18n-info-readout",
+    "scope": "Only 10 changed es keys, no whole-catalogue gate",
+    "signatures_selects_skeletons_cldr": "PASS",
+    "authored_bidi_controls": "none",
+    "render_cases": 152,
+    "pseudo_expanded_ast_cases": 152,
+    "missing_arg_rejections": 15,
+    "cldr": {
+      "0": "other",
+      "1": "one",
+      "2": "other",
+      "5": "other",
+      "11": "other",
+      "21": "other",
+      "1000": "other",
+      "1000000": "many"
+    },
+    "whole_field_missing_known_zero": "PASS: stable unmeasured; localized unknown gender; zero remains zero",
+    "none_contract": "Source receipt specifies caller maps None to unmeasured; no App/code execution here",
+    "details": [
+      {
+        "key": "tui.info.agents.unreported_full",
+        "signatures": [
+          [
+            "subagents_unreported",
+            "simple"
+          ],
+          [
+            "runtimes",
+            "plural"
+          ]
+        ],
+        "selects": [],
+        "cases": [
+          {
+            "params": {
+              "subagents_unreported": "0",
+              "runtimes": 0
+            },
+            "output": "0 de 0 runtimes sin datos"
+          },
+          {
+            "params": {
+              "subagents_unreported": "1",
+              "runtimes": 1
+            },
+            "output": "1 de 1 runtime sin datos"
+          },
+          {
+            "params": {
+              "subagents_unreported": "2",
+              "runtimes": 2
+            },
+            "output": "2 de 2 runtimes sin datos"
+          }
+        ]
+      },
+      {
+        "key": "tui.info.agents.unreported_short",
+        "signatures": [
+          [
+            "subagents_unreported",
+            "simple"
+          ]
+        ],
+        "selects": [],
+        "cases": [
+          {
+            "params": {
+              "subagents_unreported": "0"
+            },
+            "output": "0 sin datos"
+          },
+          {
+            "params": {
+              "subagents_unreported": "1"
+            },
+            "output": "1 sin datos"
+          },
+          {
+            "params": {
+              "subagents_unreported": "2"
+            },
+            "output": "2 sin datos"
+          }
+        ]
+      },
+      {
+        "key": "tui.info.agents.unreported_suffix",
+        "signatures": [
+          [
+            "subagents_unreported",
+            "simple"
+          ]
+        ],
+        "selects": [],
+        "cases": [
+          {
+            "params": {
+              "subagents_unreported": "0"
+            },
+            "output": " · 0 sin datos"
+          },
+          {
+            "params": {
+              "subagents_unreported": "1"
+            },
+            "output": " · 1 sin datos"
+          },
+          {
+            "params": {
+              "subagents_unreported": "2"
+            },
+            "output": " · 2 sin datos"
+          }
+        ]
+      },
+      {
+        "key": "tui.info.agents.retained_full",
+        "signatures": [
+          [
+            "settled",
+            "plural"
+          ]
+        ],
+        "selects": [],
+        "cases": [
+          {
+            "params": {
+              "settled": 0
+            },
+            "output": "0 finalizados (conservados)"
+          },
+          {
+            "params": {
+              "settled": 1
+            },
+            "output": "1 finalizado (conservado)"
+          },
+          {
+            "params": {
+              "settled": 2
+            },
+            "output": "2 finalizados (conservados)"
+          }
+        ]
+      },
+      {
+        "key": "tui.info.export.build_age",
+        "signatures": [
+          [
+            "build_age_s",
+            "select"
+          ]
+        ],
+        "selects": [
+          [
+            "build_age_s",
+            null,
+            [
+              "unmeasured",
+              "other"
+            ]
+          ]
+        ],
+        "cases": [
+          {
+            "params": {
+              "build_age_s": "unmeasured"
+            },
+            "output": "  antigüedad        desconocida"
+          },
+          {
+            "params": {
+              "build_age_s": "other"
+            },
+            "output": "  antigüedad        other"
+          },
+          {
+            "params": {
+              "build_age_s": "unmeasured"
+            },
+            "output": "  antigüedad        desconocida"
+          },
+          {
+            "params": {
+              "build_age_s": "other"
+            },
+            "output": "  antigüedad        other"
+          },
+          {
+            "params": {
+              "build_age_s": "unmeasured"
+            },
+            "output": "  antigüedad        desconocida"
+          },
+          {
+            "params": {
+              "build_age_s": "other"
+            },
+            "output": "  antigüedad        other"
+          }
+        ]
+      },
+      {
+        "key": "tui.info.export.uptime",
+        "signatures": [
+          [
+            "uptime_s",
+            "select"
+          ]
+        ],
+        "selects": [
+          [
+            "uptime_s",
+            null,
+            [
+              "unmeasured",
+              "other"
+            ]
+          ]
+        ],
+        "cases": [
+          {
+            "params": {
+              "uptime_s": "unmeasured"
+            },
+            "output": "  tiempo activo     desconocido"
+          },
+          {
+            "params": {
+              "uptime_s": "other"
+            },
+            "output": "  tiempo activo     other"
+          },
+          {
+            "params": {
+              "uptime_s": "unmeasured"
+            },
+            "output": "  tiempo activo     desconocido"
+          },
+          {
+            "params": {
+              "uptime_s": "other"
+            },
+            "output": "  tiempo activo     other"
+          },
+          {
+            "params": {
+              "uptime_s": "unmeasured"
+            },
+            "output": "  tiempo activo     desconocido"
+          },
+          {
+            "params": {
+              "uptime_s": "other"
+            },
+            "output": "  tiempo activo     other"
+          }
+        ]
+      },
+      {
+        "key": "tui.info.export.trajectories_unreported",
+        "signatures": [
+          [
+            "subagents_unreported",
+            "simple"
+          ],
+          [
+            "sessions_live_sessions_wedged",
+            "plural"
+          ]
+        ],
+        "selects": [],
+        "cases": [
+          {
+            "params": {
+              "subagents_unreported": "0",
+              "sessions_live_sessions_wedged": 0
+            },
+            "output": "  trayectorias      — (0 de 0 runtimes sin datos)"
+          },
+          {
+            "params": {
+              "subagents_unreported": "1",
+              "sessions_live_sessions_wedged": 1
+            },
+            "output": "  trayectorias      — (1 de 1 runtime sin datos)"
+          },
+          {
+            "params": {
+              "subagents_unreported": "2",
+              "sessions_live_sessions_wedged": 2
+            },
+            "output": "  trayectorias      — (2 de 2 runtimes sin datos)"
+          }
+        ]
+      },
+      {
+        "key": "tui.info.export.session_counts",
+        "signatures": [
+          [
+            "running",
+            "plural"
+          ],
+          [
+            "queued",
+            "plural"
+          ],
+          [
+            "settled",
+            "plural"
+          ]
+        ],
+        "selects": [],
+        "cases": [
+          {
+            "params": {
+              "running": 0,
+              "queued": 0,
+              "settled": 0
+            },
+            "output": "  esta sesión       0 en ejecución · 0 en cola · 0 finalizados (conservados)"
+          },
+          {
+            "params": {
+              "running": 1,
+              "queued": 1,
+              "settled": 1
+            },
+            "output": "  esta sesión       1 en ejecución · 1 en cola · 1 finalizado (conservado)"
+          },
+          {
+            "params": {
+              "running": 2,
+              "queued": 2,
+              "settled": 2
+            },
+            "output": "  esta sesión       2 en ejecución · 2 en cola · 2 finalizados (conservados)"
+          }
+        ]
+      },
+      {
+        "key": "tui.info.export.mobile",
+        "signatures": [
+          [
+            "has_mobile_installed",
+            "select"
+          ],
+          [
+            "has_mobile_healthy",
+            "select"
+          ],
+          [
+            "has_env_mobile_installed_and_env_mobile_port",
+            "select"
+          ],
+          [
+            "mobile_port",
+            "simple"
+          ]
+        ],
+        "selects": [
+          [
+            "has_mobile_installed",
+            null,
+            [
+              "yes",
+              "other"
+            ]
+          ],
+          [
+            "has_mobile_healthy",
+            null,
+            [
+              "yes",
+              "other"
+            ]
+          ],
+          [
+            "has_env_mobile_installed_and_env_mobile_port",
+            null,
+            [
+              "yes",
+              "other"
+            ]
+          ]
+        ],
+        "cases": [
+          {
+            "params": {
+              "has_mobile_installed": "yes",
+              "has_mobile_healthy": "yes",
+              "has_env_mobile_installed_and_env_mobile_port": "yes",
+              "mobile_port": "VALOR"
+            },
+            "output": "  relé del teléfono instalado · funciona correctamente · puerto VALOR"
+          },
+          {
+            "params": {
+              "has_mobile_installed": "yes",
+              "has_mobile_healthy": "yes",
+              "has_env_mobile_installed_and_env_mobile_port": "other",
+              "mobile_port": "VALOR"
+            },
+            "output": "  relé del teléfono instalado · funciona correctamente"
+          },
+          {
+            "params": {
+              "has_mobile_installed": "yes",
+              "has_mobile_healthy": "other",
+              "has_env_mobile_installed_and_env_mobile_port": "yes",
+              "mobile_port": "VALOR"
+            },
+            "output": "  relé del teléfono instalado · puerto VALOR"
+          },
+          {
+            "params": {
+              "has_mobile_installed": "yes",
+              "has_mobile_healthy": "other",
+              "has_env_mobile_installed_and_env_mobile_port": "other",
+              "mobile_port": "VALOR"
+            },
+            "output": "  relé del teléfono instalado"
+          },
+          {
+            "params": {
+              "has_mobile_installed": "other",
+              "has_mobile_healthy": "yes",
+              "has_env_mobile_installed_and_env_mobile_port": "yes",
+              "mobile_port": "VALOR"
+            },
+            "output": "  relé del teléfono no instalado · funciona correctamente · puerto VALOR"
+          },
+          {
+            "params": {
+              "has_mobile_installed": "other",
+              "has_mobile_healthy": "yes",
+              "has_env_mobile_installed_and_env_mobile_port": "other",
+              "mobile_port": "VALOR"
+            },
+            "output": "  relé del teléfono no instalado · funciona correctamente"
+          },
+          {
+            "params": {
+              "has_mobile_installed": "other",
+              "has_mobile_healthy": "other",
+              "has_env_mobile_installed_and_env_mobile_port": "yes",
+              "mobile_port": "VALOR"
+            },
+            "output": "  relé del teléfono no instalado · puerto VALOR"
+          },
+          {
+            "params": {
+              "has_mobile_installed": "other",
+              "has_mobile_healthy": "other",
+              "has_env_mobile_installed_and_env_mobile_port": "other",
+              "mobile_port": "VALOR"
+            },
+            "output": "  relé del teléfono no instalado"
+          },
+          {
+            "params": {
+              "has_mobile_installed": "yes",
+              "has_mobile_healthy": "yes",
+              "has_env_mobile_installed_and_env_mobile_port": "yes",
+              "mobile_port": "VALOR"
+            },
+            "output": "  relé del teléfono instalado · funciona correctamente · puerto VALOR"
+          },
+          {
+            "params": {
+              "has_mobile_installed": "yes",
+              "has_mobile_healthy": "yes",
+              "has_env_mobile_installed_and_env_mobile_port": "other",
+              "mobile_port": "VALOR"
+            },
+            "output": "  relé del teléfono instalado · funciona correctamente"
+          },
+          {
+            "params": {
+              "has_mobile_installed": "yes",
+              "has_mobile_healthy": "other",
+              "has_env_mobile_installed_and_env_mobile_port": "yes",
+              "mobile_port": "VALOR"
+            },
+            "output": "  relé del teléfono instalado · puerto VALOR"
+          },
+          {
+            "params": {
+              "has_mobile_installed": "yes",
+              "has_mobile_healthy": "other",
+              "has_env_mobile_installed_and_env_mobile_port": "other",
+              "mobile_port": "VALOR"
+            },
+            "output": "  relé del teléfono instalado"
+          },
+          {
+            "params": {
+              "has_mobile_installed": "other",
+              "has_mobile_healthy": "yes",
+              "has_env_mobile_installed_and_env_mobile_port": "yes",
+              "mobile_port": "VALOR"
+            },
+            "output": "  relé del teléfono no instalado · funciona correctamente · puerto VALOR"
+          },
+          {
+            "params": {
+              "has_mobile_installed": "other",
+              "has_mobile_healthy": "yes",
+              "has_env_mobile_installed_and_env_mobile_port": "other",
+              "mobile_port": "VALOR"
+            },
+            "output": "  relé del teléfono no instalado · funciona correctamente"
+          },
+          {
+            "params": {
+              "has_mobile_installed": "other",
+              "has_mobile_healthy": "other",
+              "has_env_mobile_installed_and_env_mobile_port": "yes",
+              "mobile_port": "VALOR"
+            },
+            "output": "  relé del teléfono no instalado · puerto VALOR"
+          },
+          {
+            "params": {
+              "has_mobile_installed": "other",
+              "has_mobile_healthy": "other",
+              "has_env_mobile_installed_and_env_mobile_port": "other",
+              "mobile_port": "VALOR"
+            },
+            "output": "  relé del teléfono no instalado"
+          },
+          {
+            "params": {
+              "has_mobile_installed": "yes",
+              "has_mobile_healthy": "yes",
+              "has_env_mobile_installed_and_env_mobile_port": "yes",
+              "mobile_port": "VALOR"
+            },
+            "output": "  relé del teléfono instalado · funciona correctamente · puerto VALOR"
+          },
+          {
+            "params": {
+              "has_mobile_installed": "yes",
+              "has_mobile_healthy": "yes",
+              "has_env_mobile_installed_and_env_mobile_port": "other",
+              "mobile_port": "VALOR"
+            },
+            "output": "  relé del teléfono instalado · funciona correctamente"
+          },
+          {
+            "params": {
+              "has_mobile_installed": "yes",
+              "has_mobile_healthy": "other",
+              "has_env_mobile_installed_and_env_mobile_port": "yes",
+              "mobile_port": "VALOR"
+            },
+            "output": "  relé del teléfono instalado · puerto VALOR"
+          },
+          {
+            "params": {
+              "has_mobile_installed": "yes",
+              "has_mobile_healthy": "other",
+              "has_env_mobile_installed_and_env_mobile_port": "other",
+              "mobile_port": "VALOR"
+            },
+            "output": "  relé del teléfono instalado"
+          },
+          {
+            "params": {
+              "has_mobile_installed": "other",
+              "has_mobile_healthy": "yes",
+              "has_env_mobile_installed_and_env_mobile_port": "yes",
+              "mobile_port": "VALOR"
+            },
+            "output": "  relé del teléfono no instalado · funciona correctamente · puerto VALOR"
+          },
+          {
+            "params": {
+              "has_mobile_installed": "other",
+              "has_mobile_healthy": "yes",
+              "has_env_mobile_installed_and_env_mobile_port": "other",
+              "mobile_port": "VALOR"
+            },
+            "output": "  relé del teléfono no instalado · funciona correctamente"
+          },
+          {
+            "params": {
+              "has_mobile_installed": "other",
+              "has_mobile_healthy": "other",
+              "has_env_mobile_installed_and_env_mobile_port": "yes",
+              "mobile_port": "VALOR"
+            },
+            "output": "  relé del teléfono no instalado · puerto VALOR"
+          },
+          {
+            "params": {
+              "has_mobile_installed": "other",
+              "has_mobile_healthy": "other",
+              "has_env_mobile_installed_and_env_mobile_port": "other",
+              "mobile_port": "VALOR"
+            },
+            "output": "  relé del teléfono no instalado"
+          }
+        ]
+      },
+      {
+        "key": "tui.info.state.stale",
+        "signatures": [],
+        "selects": [],
+        "cases": [
+          {
+            "params": {},
+            "output": "proceso inexistente"
+          },
+          {
+            "params": {},
+            "output": "proceso inexistente"
+          },
+          {
+            "params": {},
+            "output": "proceso inexistente"
+          }
+        ]
+      }
+    ]
+  },
+  "width_risks": {
+    "source": "Initial ES audit; retained, not measured anew",
+    "keys": [
+      "tui.info.label.log_dir",
+      "tui.info.label.subagent_capacity",
+      "tui.info.label.working_dir"
+    ],
+    "decision": "No unproven fit-only shortening; rendered layout not exercised. Export relay line unbounded."
+  },
+  "not_run": [
+    "pytest",
+    "App",
+    "browser",
+    "native or rendered visuals",
+    "build",
+    "whole check",
+    "generation",
+    "independent translation audit",
+    "ledger append",
+    "commit/stage/push/rebase"
+  ]
+}

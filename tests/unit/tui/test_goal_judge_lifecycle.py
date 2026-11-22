@@ -27,6 +27,7 @@ import pytest
 
 from local_operator.session.errors import TurnInFlight
 from local_operator.session.goal_judge import (
+    GOAL_JUDGE_FAILURES,
     MAX_GOAL_CONTINUATIONS,
     STALLED_BREAKER_NOTICE,
     STALLED_BREAKER_REASON,
@@ -48,10 +49,11 @@ ACHIEVED = "VERDICT: ACHIEVED\nthe work is done"
 UNREADABLE = "I think it is probably done, maybe?"
 
 
-def _armed(verdicts: list[str] | None = None) -> GoalSession:
+def _armed(verdicts: list[str] | None = None, *, due: bool = False) -> GoalSession:
     """A fake holding a REAL armed record, with the judge's answers scripted."""
     session = GoalSession()
     session.arm_goal(GOAL)
+    session.goal_recovery_due = lambda: due  # type: ignore[attr-defined]
     session.judge_verdicts = list(verdicts if verdicts is not None else [ACHIEVED])
     return session
 
@@ -161,6 +163,11 @@ async def test_a_follower_terminal_never_judges(monkeypatch: pytest.MonkeyPatch)
     """
     session = _armed()
     session.runtime_locality = "this-machine"  # type: ignore[misc]
+
+    def owner_only(_session: GoalSession) -> bool:
+        pytest.fail("the viewer must not even look up owner-side recovery eligibility")
+
+    monkeypatch.setattr(GoalSession, "goal_recovery_due", property(owner_only), raising=False)
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
         await _boot_settled(pilot, app, session)
@@ -356,15 +363,9 @@ def _stall_notices(app) -> list[str]:
 
 @pytest.mark.asyncio
 async def test_a_stall_is_announced_once_and_names_the_breaker() -> None:
-    """Design round 1, D2 on THIS host: the TUI announced the state nowhere.
-
-    Three unreadable verdicts are enough to fire the breaker inside ONE run —
-    each strike admits a fail-safe continuation, which the fake serial advances
-    so the chain keeps going (`test_three_consecutive_unreadable_verdicts_stall_
-    the_goal` pins that policy) — and the state must then reach the transcript,
-    naming the breaker rather than the cap.
-    """
-    session = _armed([UNREADABLE] * 4)
+    """The final reviewer strike announces the breaker on this host too."""
+    session = _armed([UNREADABLE])
+    session.note_goal_judge(failures=GOAL_JUDGE_FAILURES - 1)
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
         await _boot_settled(pilot, app, session)
@@ -409,7 +410,8 @@ async def test_the_stall_is_not_announced_again_by_a_later_frame() -> None:
     The state after is asserted as well: the silence above is the guard working,
     not the second frame failing to run.
     """
-    session = _armed([UNREADABLE] * 4)
+    session = _armed([UNREADABLE])
+    session.note_goal_judge(failures=GOAL_JUDGE_FAILURES - 1)
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
         await _boot_settled(pilot, app, session)
@@ -481,7 +483,7 @@ async def test_a_restored_continuation_re_arms_at_boot_without_a_typed_turn() ->
     the judge, which is the app-reopened case the operator asked for. Reproduced
     before the fix as `judge_calls after boot = 0`, no prompt admitted.
     """
-    session = _armed([CONTINUE, ACHIEVED])
+    session = _armed([CONTINUE, ACHIEVED], due=True)
     # The exact restored shape: a continuation was in flight when the terminal
     # closed, so the record reads `continuing` with a spent streak.
     session.note_goal_judge(state="continuing", verdict="continue", run=2)
@@ -503,14 +505,8 @@ async def test_a_restored_continuation_re_arms_at_boot_without_a_typed_turn() ->
 
 
 @pytest.mark.asyncio
-async def test_a_restored_waiting_goal_is_not_re_armed_at_boot() -> None:
-    """RULINGS R3's other half: checkpoint state is not an instruction to spend.
-
-    A `waiting` goal had nothing in flight when the app closed, so a restart is
-    not a reason to judge it — it re-arms on the next real turn end like any
-    other. Paired with the test above so the guard cannot be satisfied by
-    re-arming unconditionally.
-    """
+async def test_a_recent_waiting_goal_is_not_re_armed_at_boot() -> None:
+    """Boot is not a shortcut around the cooldown."""
     session = _armed([ACHIEVED])
     session.note_goal_judge(state="waiting")
     app = OperatorApp(lambda: _factory(session))

@@ -1,0 +1,441 @@
+{
+  "locale": "vi",
+  "namespace": "tui.info",
+  "key_count": 277,
+  "changed_keys": [
+    "tui.info.status.bound_held",
+    "tui.info.latest.behind_short",
+    "tui.info.not_answering_clause.no_rows",
+    "tui.info.not_answering_clause.remedy_one",
+    "tui.info.not_answering_clause.remedy_many",
+    "tui.info.not_answering_clause.full",
+    "tui.info.tree_lines.deeper",
+    "tui.info.export.build_age",
+    "tui.info.export.uptime",
+    "tui.info.state.stale"
+  ],
+  "source_sha256": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+  "context_sha256": "aee21715fca769227b3bda5b500a5e81e51763cf86817f741baff8b1a5ef0ae7",
+  "target_before_sha256": "a61a967b3abbd7250f4fc220d5a806957abb843a09633784165297f243fa3174",
+  "target_sha256": "7e0f97d45840a223868d89907d4d5da6010931b1fd486ab399728a0a091ab15b",
+  "renders": 32,
+  "negative_controls": [
+    {
+      "message": "tui.info.not_answering_clause.no_rows",
+      "missing": "count",
+      "result": "MessageFormatError"
+    },
+    {
+      "message": "tui.info.not_answering_clause.remedy_one",
+      "missing": "pid",
+      "result": "MessageFormatError"
+    },
+    {
+      "message": "tui.info.not_answering_clause.full",
+      "missing": "count",
+      "result": "MessageFormatError"
+    },
+    {
+      "message": "tui.info.not_answering_clause.full",
+      "missing": "age",
+      "result": "MessageFormatError"
+    },
+    {
+      "message": "tui.info.not_answering_clause.full",
+      "missing": "pids",
+      "result": "MessageFormatError"
+    },
+    {
+      "message": "tui.info.not_answering_clause.full",
+      "missing": "remedy",
+      "result": "MessageFormatError"
+    },
+    {
+      "message": "tui.info.tree_lines.deeper",
+      "missing": "deeper",
+      "result": "MessageFormatError"
+    },
+    {
+      "message": "tui.info.export.build_age",
+      "missing": "build_age_s",
+      "result": "MessageFormatError"
+    },
+    {
+      "message": "tui.info.export.uptime",
+      "missing": "uptime_s",
+      "result": "MessageFormatError"
+    }
+  ],
+  "results": [
+    {
+      "message": "tui.info.status.bound_held",
+      "parameters": {},
+      "text": "quá hạn, chưa xác nhận hồi phục"
+    },
+    {
+      "message": "tui.info.latest.behind_short",
+      "parameters": {},
+      "text": "bản cũ"
+    },
+    {
+      "message": "tui.info.not_answering_clause.no_rows",
+      "parameters": {
+        "count": 0
+      },
+      "text": "0 phiên không phản hồi; số liệu tính đến tín hiệu hoạt động gần nhất của từng phiên"
+    },
+    {
+      "message": "tui.info.not_answering_clause.no_rows",
+      "parameters": {
+        "count": 1
+      },
+      "text": "1 phiên không phản hồi; số liệu tính đến tín hiệu hoạt động gần nhất của từng phiên"
+    },
+    {
+      "message": "tui.info.not_answering_clause.no_rows",
+      "parameters": {
+        "count": 2
+      },
+      "text": "2 phiên không phản hồi; số liệu tính đến tín hiệu hoạt động gần nhất của từng phiên"
+    },
+    {
+      "message": "tui.info.not_answering_clause.no_rows",
+      "parameters": {
+        "count": 5
+      },
+      "text": "5 phiên không phản hồi; số liệu tính đến tín hiệu hoạt động gần nhất của từng phiên"
+    },
+    {
+      "message": "tui.info.not_answering_clause.no_rows",
+      "parameters": {
+        "count": 11
+      },
+      "text": "11 phiên không phản hồi; số liệu tính đến tín hiệu hoạt động gần nhất của từng phiên"
+    },
+    {
+      "message": "tui.info.not_answering_clause.no_rows",
+      "parameters": {
+        "count": 21
+      },
+      "text": "21 phiên không phản hồi; số liệu tính đến tín hiệu hoạt động gần nhất của từng phiên"
+    },
+    {
+      "message": "tui.info.not_answering_clause.no_rows",
+      "parameters": {
+        "count": 1000
+      },
+      "text": "1.000 phiên không phản hồi; số liệu tính đến tín hiệu hoạt động gần nhất của từng phiên"
+    },
+    {
+      "message": "tui.info.not_answering_clause.remedy_one",
+      "parameters": {
+        "pid": "12345"
+      },
+      "text": "'lop stop --pid 12345' yêu cầu dừng và gửi tín hiệu nếu không phản hồi; '/stop 12345' trên màn hình này cũng vậy. Nếu tiến trình chủ vẫn gửi tín hiệu hoạt động nhưng không phản hồi, 'lop stop --pid 12345 --force' dừng tiến trình bằng tín hiệu, bỏ lượt đang xử lý"
+    },
+    {
+      "message": "tui.info.not_answering_clause.remedy_many",
+      "parameters": {},
+      "text": "Chạy 'lop stop --pid N' cho từng pid ở trên để yêu cầu dừng và gửi tín hiệu nếu không phản hồi; '/stop N' trên màn hình này cũng vậy. Nếu tiến trình chủ vẫn gửi tín hiệu hoạt động nhưng không phản hồi, 'lop stop --pid N --force' dừng tiến trình bằng tín hiệu, bỏ lượt đang xử lý"
+    },
+    {
+      "message": "tui.info.not_answering_clause.full",
+      "parameters": {
+        "count": 0,
+        "age": "DURATION",
+        "pids": "12345",
+        "remedy": "REMEDY"
+      },
+      "text": "0 phiên không phản hồi — tín hiệu hoạt động gần nhất của runtime DURATION trước (pid 12345); số liệu tính đến tín hiệu tương ứng. REMEDY"
+    },
+    {
+      "message": "tui.info.not_answering_clause.full",
+      "parameters": {
+        "count": 1,
+        "age": "DURATION",
+        "pids": "12345",
+        "remedy": "REMEDY"
+      },
+      "text": "1 phiên không phản hồi — tín hiệu hoạt động gần nhất của runtime DURATION trước (pid 12345); số liệu tính đến tín hiệu tương ứng. REMEDY"
+    },
+    {
+      "message": "tui.info.not_answering_clause.full",
+      "parameters": {
+        "count": 2,
+        "age": "DURATION",
+        "pids": "12345",
+        "remedy": "REMEDY"
+      },
+      "text": "2 phiên không phản hồi — tín hiệu hoạt động gần nhất của runtime DURATION trước (pid 12345); số liệu tính đến tín hiệu tương ứng. REMEDY"
+    },
+    {
+      "message": "tui.info.not_answering_clause.full",
+      "parameters": {
+        "count": 5,
+        "age": "DURATION",
+        "pids": "12345",
+        "remedy": "REMEDY"
+      },
+      "text": "5 phiên không phản hồi — tín hiệu hoạt động gần nhất của runtime DURATION trước (pid 12345); số liệu tính đến tín hiệu tương ứng. REMEDY"
+    },
+    {
+      "message": "tui.info.not_answering_clause.full",
+      "parameters": {
+        "count": 11,
+        "age": "DURATION",
+        "pids": "12345",
+        "remedy": "REMEDY"
+      },
+      "text": "11 phiên không phản hồi — tín hiệu hoạt động gần nhất của runtime DURATION trước (pid 12345); số liệu tính đến tín hiệu tương ứng. REMEDY"
+    },
+    {
+      "message": "tui.info.not_answering_clause.full",
+      "parameters": {
+        "count": 21,
+        "age": "DURATION",
+        "pids": "12345",
+        "remedy": "REMEDY"
+      },
+      "text": "21 phiên không phản hồi — tín hiệu hoạt động gần nhất của runtime DURATION trước (pid 12345); số liệu tính đến tín hiệu tương ứng. REMEDY"
+    },
+    {
+      "message": "tui.info.not_answering_clause.full",
+      "parameters": {
+        "count": 1000,
+        "age": "DURATION",
+        "pids": "12345",
+        "remedy": "REMEDY"
+      },
+      "text": "1.000 phiên không phản hồi — tín hiệu hoạt động gần nhất của runtime DURATION trước (pid 12345); số liệu tính đến tín hiệu tương ứng. REMEDY"
+    },
+    {
+      "message": "tui.info.tree_lines.deeper",
+      "parameters": {
+        "deeper": 0
+      },
+      "text": "  + 0 tác nhân ở tầng sâu hơn"
+    },
+    {
+      "message": "tui.info.tree_lines.deeper",
+      "parameters": {
+        "deeper": 1
+      },
+      "text": "  + 1 tác nhân ở tầng sâu hơn"
+    },
+    {
+      "message": "tui.info.tree_lines.deeper",
+      "parameters": {
+        "deeper": 2
+      },
+      "text": "  + 2 tác nhân ở tầng sâu hơn"
+    },
+    {
+      "message": "tui.info.tree_lines.deeper",
+      "parameters": {
+        "deeper": 5
+      },
+      "text": "  + 5 tác nhân ở tầng sâu hơn"
+    },
+    {
+      "message": "tui.info.tree_lines.deeper",
+      "parameters": {
+        "deeper": 11
+      },
+      "text": "  + 11 tác nhân ở tầng sâu hơn"
+    },
+    {
+      "message": "tui.info.tree_lines.deeper",
+      "parameters": {
+        "deeper": 21
+      },
+      "text": "  + 21 tác nhân ở tầng sâu hơn"
+    },
+    {
+      "message": "tui.info.tree_lines.deeper",
+      "parameters": {
+        "deeper": 1000
+      },
+      "text": "  + 1.000 tác nhân ở tầng sâu hơn"
+    },
+    {
+      "message": "tui.info.export.build_age",
+      "parameters": {
+        "build_age_s": "unmeasured"
+      },
+      "text": "  tuổi bản dựng     chưa rõ"
+    },
+    {
+      "message": "tui.info.export.build_age",
+      "parameters": {
+        "build_age_s": "0 giây"
+      },
+      "text": "  tuổi bản dựng     0 giây"
+    },
+    {
+      "message": "tui.info.export.build_age",
+      "parameters": {
+        "build_age_s": "21 phút"
+      },
+      "text": "  tuổi bản dựng     21 phút"
+    },
+    {
+      "message": "tui.info.export.uptime",
+      "parameters": {
+        "uptime_s": "unmeasured"
+      },
+      "text": "  thời gian đã chạy chưa rõ"
+    },
+    {
+      "message": "tui.info.export.uptime",
+      "parameters": {
+        "uptime_s": "0 giây"
+      },
+      "text": "  thời gian đã chạy 0 giây"
+    },
+    {
+      "message": "tui.info.export.uptime",
+      "parameters": {
+        "uptime_s": "21 phút"
+      },
+      "text": "  thời gian đã chạy 21 phút"
+    },
+    {
+      "message": "tui.info.state.stale",
+      "parameters": {},
+      "text": "tiến trình không còn"
+    }
+  ],
+  "CLDR": [
+    "other"
+  ],
+  "parser_signature_select_skeleton_NFC_no_authored_bidi": "PASS",
+  "pseudo": "AST text expansion with production walker; interpolation and branch structure preserved; not rendered-frame evidence",
+  "unrelated_values_exact": true,
+  "stage": "Translator authorship remediation only; independent native audit still required",
+  "head": "8f1e45a3a98ca9f8b7312b6707c36e21b758966d",
+  "date": "2026-11-21",
+  "agent": "info-remediate-vi / translator",
+  "session": "25413fcdc8db",
+  "actual_model": "openai/gpt-6.1-sol",
+  "fallback_from": "anthropic/claude-opus-5-5",
+  "model_identity_source": "Host model-switch notice: provider failure quota; actual served fallback, not requested model header",
+  "lane": "fix, translation-only; budget <=20 min",
+  "finding_authority": "i18n/audits/evidence/pr4420-initial-native-vi-r1.json",
+  "source_contract": "i18n/audits/evidence/pr4420-source-remediation-fc9fd773c06f.json",
+  "files_written": [
+    "local_operator/i18n/catalogues/vi/tui.info.json",
+    "i18n/audits/evidence/pr4420-translator-vi-remediation.json"
+  ],
+  "formatting_and_unrelated_lines_byte_identical": true,
+  "unchanged_values_count": 267,
+  "key_order_preserved": true,
+  "new_keys": [],
+  "removed_keys": [],
+  "finding_dispositions": {
+    "VI-01": "Applied four native heartbeat proposals: tín hiệu hoạt động; runtime kept under explicit style exception. Commands, flags, PIDs and placeholders unchanged.",
+    "VI-02": "Applied tuổi bản dựng, incorporated into both branches of new whole-field select.",
+    "VI-03": "Applied explicit tác nhân noun; deeper counts hidden descendant agents, not levels.",
+    "VI-04": "Applied bản cũ; no effective-model edit. Parent corrected original shorthand.",
+    "new_select_contracts": "Both whole-field selects preserve unmeasured/other and same original argument interpolation in other. Missing value chưa rõ means unknown, never zero; existing known uptime label preserved.",
+    "new_context_stale": "Existing dữ liệu cũ incorrectly described stale data; corrected tiến trình không còn because new context explicitly says OS PID gone, not heartbeat expiry.",
+    "new_context_bound_held": "Existing còn treo risks asserting hung; corrected quá hạn, chưa xác nhận hồi phục to retain exceeded bound and uncertainty pending proven recovery. Concrete mismatch in newly changed context, not an unrelated proactive audit."
+  },
+  "glossary_choices": {
+    "heartbeat": "tín hiệu hoạt động; no binding English exception",
+    "build_age": "tuổi bản dựng",
+    "uptime": "thời gian đã chạy; preserved established wording",
+    "unmeasured": "chưa rõ (selector itself untouched and not rendered)",
+    "hidden_descendants": "tác nhân ở tầng sâu hơn",
+    "behind_short": "bản cũ",
+    "bound_held": "quá hạn, chưa xác nhận hồi phục",
+    "stale_dead_pid": "tiến trình không còn"
+  },
+  "named_kept_English_exceptions": {
+    "runtime": "i18n/style-guides/vi.md lines75–77: explicit accepted developer-register borrowing; label Runtime unchanged",
+    "cache": "i18n/style-guides/vi.md lines23–25: explicit kept-English list; unchanged",
+    "script": "i18n/style-guides/vi.md lines23–25: explicit kept-English list; unchanged",
+    "commands_identifiers_products": "Glossary section1 preserves lop, command/flag literals, PID/model IDs/paths and product names; no permission for surrounding English prose"
+  },
+  "controls_command": "env -i HOME=\"$LOCAL_OPERATOR_SCRATCHPAD/isolated-home\" LOCAL_OPERATOR_CONFIG_DIR=\"$LOCAL_OPERATOR_SCRATCHPAD/isolated-config\" LOCAL_OPERATOR_SCRATCHPAD=\"$LOCAL_OPERATOR_SCRATCHPAD\" PATH=\"$PATH\" PYTHONPATH=/Users/damian/local-operator/.worktrees/i18n-info-readout TERM=xterm-256color /Users/damian/local-operator/.venv/bin/python \"$LOCAL_OPERATOR_SCRATCHPAD/check_vi_remediation.py\"",
+  "actual_python": "Primary repository .venv Python3.12.13; worktree source via PYTHONPATH",
+  "actual_mechanical_output_path": "/Users/damian/.local-operator/sessions/25413fcdc8db/scratchpad/vi-mechanical-output.txt",
+  "mechanical_script_path": "/Users/damian/.local-operator/sessions/25413fcdc8db/scratchpad/check_vi_remediation.py",
+  "git_diff_check": "PASS, exit0",
+  "count_controls": [
+    0,
+    1,
+    2,
+    5,
+    11,
+    21,
+    1000
+  ],
+  "missing_argument_controls": 9,
+  "renamed_argument_controls": "PASS for all 6 changed messages with arguments",
+  "authored_bidi_controls": 0,
+  "locale_direction": "LTR vi; no RTL shaping claim",
+  "width_risks": {
+    "changed_labels": [
+      "tui.info.status.bound_held",
+      "tui.info.tree_lines.deeper"
+    ],
+    "expanded_prose": [
+      "tui.info.not_answering_clause.no_rows",
+      "tui.info.not_answering_clause.full",
+      "tui.info.not_answering_clause.remedy_one",
+      "tui.info.not_answering_clause.remedy_many"
+    ],
+    "reason": "Native wording is longer; no semantic truncation. Actual app geometry/frame fit unverified. Retain original report 28 growth-risk rows as historical triage, not current fit proof. behind_short is shortened by accepted idiom."
+  },
+  "not_run": [
+    "pytest, app/TUI real flow, browser, native frames, build, whole-catalogue checks, whole suites, generation, new dependencies",
+    "Independent translation audit/native clearance",
+    "Commit, stage, push, rebase, PR/comment/ledger/allowance writes"
+  ],
+  "discrepancies_resolved": [
+    "Original per-locale brief incorrectly requested effective-model change; actual VI-04 is behind_short, per initial JSON and parent correction. Effective-model values unchanged."
+  ],
+  "receipt_not_a_passed_native_audit": true,
+  "changed_render_cell_lengths": [
+    {
+      "message": "tui.info.status.bound_held",
+      "max_sample_cells": 31
+    },
+    {
+      "message": "tui.info.latest.behind_short",
+      "max_sample_cells": 6
+    },
+    {
+      "message": "tui.info.not_answering_clause.no_rows",
+      "max_sample_cells": 87
+    },
+    {
+      "message": "tui.info.not_answering_clause.remedy_one",
+      "max_sample_cells": 262
+    },
+    {
+      "message": "tui.info.not_answering_clause.remedy_many",
+      "max_sample_cells": 278
+    },
+    {
+      "message": "tui.info.not_answering_clause.full",
+      "max_sample_cells": 140
+    },
+    {
+      "message": "tui.info.tree_lines.deeper",
+      "max_sample_cells": 33
+    },
+    {
+      "message": "tui.info.export.build_age",
+      "max_sample_cells": 27
+    },
+    {
+      "message": "tui.info.export.uptime",
+      "max_sample_cells": 27
+    },
+    {
+      "message": "tui.info.state.stale",
+      "max_sample_cells": 20
+    }
+  ]
+}

@@ -1,0 +1,66 @@
+import os,sys,json,hashlib,re,unicodedata,io
+from pathlib import Path
+from unittest.mock import patch
+from rich.console import Console
+from rich.text import Text
+from rich.cells import cell_len
+from local_operator.i18n import catalogues,runtime,messages
+from scripts.i18n import check,ledger
+root=Path.cwd(); ns='tui.model_persistence'; out=root/'i18n/audits/evidence/vi/tui.model_persistence/vib674'
+paths={'en':f'local_operator/i18n/catalogues/en/{ns}.json','context':f'local_operator/i18n/catalogues/en/{ns}.context.json','vi':f'local_operator/i18n/catalogues/vi/{ns}.json','style':'i18n/style-guides/vi.md','glossary':'i18n/glossary.md'}
+hashfile=lambda p:hashlib.sha256(Path(p).read_bytes()).hexdigest()
+before={k:hashfile(p) for k,p in paths.items()}
+expected=['4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff','b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc','d6b5f00ab0a25ea2596879299e5cda07b5b5bb66bf8ea8bc9081f503719cf505']
+assert list(before.values())[:3]==expected
+print('COMMAND: primary .venv/bin/python script.py.txt; isolated HOME/config, PYTHONPATH=worktree; no CMUX inherited')
+assert not any(k.startswith('CMUX_') for k in os.environ)
+print('INTERPRETER',sys.executable,'RUNTIME',runtime.__file__,'CHECKER',check.__file__)
+assert Path(runtime.__file__).is_relative_to(root)
+en=catalogues.load_catalogue('en',ns); vi=catalogues.load_catalogue('vi',ns)
+assert len(en)==len(vi)==4 and list(en)==list(vi)
+with patch.object(catalogues,'locales',return_value=('en','vi')),patch.object(catalogues,'namespaces',return_value=(ns,)):
+    problems=check.check_catalogues()
+print('OFFICIAL scoped check_catalogues en/vi namespace + context + ICU:',problems);assert not problems
+# Use the real checker against in-memory negative fixtures; never mutate catalogues.
+orig=catalogues.load_catalogue
+for name,changed in [('missing_key',dict(list(vi.items())[1:])),('renamed_arg',{**vi,ns+'.with_model':vi[ns+'.with_model'].replace('{label}','{wrong}')})]:
+    def fixture(locale,namespace):return changed if locale=='vi' else orig(locale,namespace)
+    with patch.object(catalogues,'locales',return_value=('en','vi')),patch.object(catalogues,'namespaces',return_value=(ns,)),patch.object(catalogues,'load_catalogue',side_effect=fixture):p=check.check_catalogues()
+    print('NEGATIVE',name,p);assert p
+for key in en:
+    a=runtime.message_arguments(en[key]);b=runtime.message_arguments(vi[key]);assert a==b
+    assert not runtime.plural_selectors(vi[key]) and not re.search(r',\s*(plural|select|selectordinal)\s*,',en[key]+vi[key])
+    assert unicodedata.is_normalized('NFC',vi[key]);print('KEY',key,'ARGS',b,'CELLS',cell_len(vi[key]),'plural/select=0 NFC=PASS')
+for suffix,token in [('persist','/model default'),('settings','/settings'),('saved','/model saved')]:assert vi[ns+'.'+suffix].count(token)==1
+for arg in ('label','routes'):
+    assert vi[ns+'.with_model'].count('{'+arg+'}')==1
+    try:runtime.render_message(vi[ns+'.with_model'],{k:'x' for k in ('label','routes') if k!=arg},'vi')
+    except runtime.MessageFormatError as e:print('NEGATIVE missing_arg',arg,type(e).__name__,str(e))
+    else:raise AssertionError(arg)
+unknown=ns+'.not_a_key';assert messages.render(unknown,{},locale='vi')==unknown;print('UNKNOWN ID passes through:',unknown)
+# Protected-token pseudo control expands human copy only.
+protect=re.compile(r'/model default|/model saved|/settings|\{label\}|\{routes\}')
+for key,s in en.items():
+    tokens=protect.findall(s);parts=protect.split(s);pseudo='';matches=list(protect.finditer(s))
+    for i,part in enumerate(parts):
+        pseudo+=''.join(c*2 if c.isalpha() else c for c in part)
+        if i<len(matches):pseudo+=matches[i].group()
+    assert protect.findall(pseudo)==tokens;assert runtime.message_arguments(pseudo)==runtime.message_arguments(s)
+print('PROTECTED PSEUDO PASS')
+for loc,cat in [('en',en),('vi',vi)]:
+ for label in ('p/m','provider/opaque-model-2026-11-22-long-identifier-0123456789'):
+  for state in ('ordinary','missing_model','hosting_deadend'):
+   names={'ordinary':['persist','saved','settings'],'missing_model':['persist','settings'],'hosting_deadend':['settings']}[state]
+   routes=' · '.join(runtime.render_message(cat[ns+'.'+n],{},loc) for n in names)
+   text=runtime.render_message(cat[ns+'.with_model'],{'label':label,'routes':routes},loc)
+   assert text.count(label)==1 and text.count(routes)==1
+   for width in (80,100,120):
+    stream=io.StringIO();c=Console(file=stream,width=width,color_system=None,force_terminal=False)
+    c.print(Text(text),soft_wrap=False);rendered=stream.getvalue();lines=rendered.splitlines()
+    assert all(cell_len(line)<=width for line in lines)
+    print('PLAIN_RICH',loc,state,'label',len(label),'width',width,'lines',len(lines),'max',max(map(cell_len,lines)))
+    print(rendered,end='')
+print('NO maxCells/maxChars in sidecar; plain Rich wrap only, NOT styled NoticeBlock/native/font geometry or real transcript families')
+after={k:hashfile(p) for k,p in paths.items()};assert before==after
+print('IMMUTABLE before/after',json.dumps(after,sort_keys=True))
+print('ALL SCOPED CHECKS PASS')

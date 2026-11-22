@@ -1,0 +1,67 @@
+"""Independent B: narrow official catalogue checker + ICU/plain Rich controls only.
+This script deliberately restricts enumeration, not validation. Negatives mutate
+only in-memory loader results; no catalogue or audit-history writes occur.
+Pseudo wrapping is a synthetic expansion control, not app/layout evidence.
+"""
+import hashlib, json, os, re, sys, unicodedata
+from pathlib import Path
+from unittest.mock import patch
+from rich.cells import cell_len
+from rich.text import Text
+from local_operator.i18n import catalogues, runtime
+from scripts.i18n import check
+ROOT = Path.cwd()
+NS = 'tui.provider_state'
+print('python', sys.executable)
+print('HOME', os.environ['HOME'])
+print('CONFIG', os.environ['LOCAL_OPERATOR_CONFIG_DIR'])
+assert not any(k.startswith('CMUX_') for k in os.environ)
+for module in (catalogues, runtime, check):
+    print('module', module.__name__, module.__file__)
+    assert Path(module.__file__).resolve().is_relative_to(ROOT)
+expected_hashes = {'en':'113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912', 'context':'67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be', 'vi':'74e6607520947d1910479a85be916e8fa3e0efa6104230d19cef8d74a3aa4867'}
+paths = {'en':f'local_operator/i18n/catalogues/en/{NS}.json','context':f'local_operator/i18n/catalogues/en/{NS}.context.json','vi':f'local_operator/i18n/catalogues/vi/{NS}.json'}
+for name, path in paths.items():
+    digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    print('input', name, path, digest)
+    assert digest == expected_hashes[name]
+load = catalogues.load_catalogue
+en, vi = load('en', NS), load('vi', NS)
+context = catalogues.context('en', NS)
+keys = [NS+'.'+s for s in ('logged_in','env_key','needs_login','local_ready','local_unconfigured')]
+assert list(en) == list(vi) == list(context) == keys
+with patch.object(catalogues, 'namespaces', lambda locale: (NS,)), patch.object(catalogues, 'locales', lambda: ('en', 'vi')):
+    problems = check.check_catalogues()
+    print('official scoped check_catalogues', json.dumps(problems))
+    assert problems == []
+    missing = dict(vi); del missing[keys[0]]
+    with patch.object(catalogues, 'load_catalogue', lambda locale, ns: missing if locale == 'vi' else load(locale, ns)):
+        failures = check.check_catalogues()
+        print('NEGATIVE missing key', json.dumps(failures))
+        assert any('missing key' in p for p in failures)
+    extra = dict(vi); extra[keys[1]] += ' {unexpected}'
+    with patch.object(catalogues, 'load_catalogue', lambda locale, ns: extra if locale == 'vi' else load(locale, ns)):
+        failures = check.check_catalogues()
+        print('NEGATIVE added argument', json.dumps(failures))
+        assert any('arguments' in p for p in failures)
+    assert check.check_catalogues() == []
+    print('restored official scoped checker PASS')
+protected = re.compile(r'`[^`]*`|</?[^>]+>|--[A-Za-z][\w-]*|\b(?:API|CLI|TUI|JSON|YAML|HTTP|URL|lop)\b')
+for key in keys:
+    source, target = en[key], vi[key]
+    for locale, text in (('en', source), ('vi', target)):
+        assert runtime.message_arguments(text) == ()
+        assert runtime.plural_selectors(text) == ()
+        assert runtime.render_message(text, {}, locale) == text
+        assert unicodedata.normalize('NFC', text) == text
+        assert not any(unicodedata.category(c) == 'Cf' for c in text)
+        assert Text.from_markup(text).plain == text
+    assert protected.findall(source) == protected.findall(target) == []
+    pseudo = '⟦' + source + ' ' + ('~' * max(1, len(source)//3)) + '⟧'
+    assert runtime.message_arguments(pseudo) == ()
+    assert runtime.render_message(pseudo, {}, 'en') == pseudo
+    assert cell_len(pseudo) > cell_len(source)
+    assert not any(k in context[key] for k in ('maxCells', 'maxChars'))
+    print(json.dumps({'key':key,'en':source,'vi':target,'args':0,'plural_select':0,'NFC':True,'protected_tokens':0,'english_cells':cell_len(source),'vi_plain_Rich_cells':cell_len(target),'pseudo':pseudo,'pseudo_cells':cell_len(pseudo)}, ensure_ascii=False))
+print('PASS: five ordered keys; official scoped catalogue/context/ICU validation; negative controls; NFC/protected tokens; exact ICU rendering; synthetic pseudo expansion; plain Rich widths with English controls')
+print('NOT VERIFIED: styled integration, application UI, native fonts, actual geometry, eligibility or release')

@@ -1,0 +1,26 @@
+{
+  "tool_call_id": "call_8799b65487fb460f905c9aa51315b269:0229704f963a4803b7e8da3e70204806",
+  "tool_name": "read_public_copy",
+  "content": [
+    {
+      "type": "text",
+      "text": "{\n \"tui.editor_readonly.hint\": \"केवल पढ़ने के लिए · {key} लौटें\"\n}"
+    }
+  ],
+  "details": {
+    "path": "local_operator/i18n/catalogues/hi/tui.editor_readonly.json",
+    "key": "tui.editor_readonly.hint",
+    "public_copy": true,
+    "policy": "docs/security/redaction-policy.md",
+    "audit_log": "/Users/damian/.local-operator/audit/public-copy-reads.jsonl",
+    "sha256": "eed451f224aec89332799d8c8985ad6175f2ded129e0e2969b5b123200bfc39e",
+    "repository_root": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer",
+    "repository": "damianvtran/local-operator",
+    "repository_verified": true,
+    "commit": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+    "checkout_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967"
+  },
+  "duration_s": 4.383682999992743,
+  "is_error": false,
+  "useless": false
+}

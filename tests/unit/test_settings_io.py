@@ -2988,7 +2988,11 @@ class TestConfigEditQualifiesALoosening:
         code = config_edit_command(argparse.Namespace(key="tool_approval_mode", value="ask"))
         out = capsys.readouterr().out
         assert code == 0, out
-        assert "Successfully updated tool_approval_mode to ask" in out, out
+        # PR #4435 intentionally revised the reviewed English display label
+        # (also pinned in wire_settings_en_golden.json), not the machine token.
+        # Keep the golden's full slot guard; only those reviewed copy values move.
+        assert "Successfully updated tool_approval_mode to Ask" in out, out
+        assert ConfigManager(tmp_path).get_config_value("tool_approval_mode") == "ask"
         assert "Running sessions are unchanged" not in out, out
 
 

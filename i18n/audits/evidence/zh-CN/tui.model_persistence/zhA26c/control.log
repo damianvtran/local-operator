@@ -1,0 +1,11 @@
+PUBLIC_RENDER_PASS tui.model_persistence.persist RenderedMessage(text='/model default将当前模型保存为新会话的默认模型', source_locale='zh-CN')
+PUBLIC_RENDER_PASS tui.model_persistence.settings RenderedMessage(text='/settings也可修改新会话的默认模型', source_locale='zh-CN')
+PUBLIC_RENDER_PASS tui.model_persistence.saved RenderedMessage(text='/model saved将本会话切换至已保存的默认模型', source_locale='zh-CN')
+PUBLIC_RENDER_PASS tui.model_persistence.with_model RenderedMessage(text='模型：p/m — 已本地化的完整子句', source_locale='zh-CN')
+EN_SAME_CODE_CONTROL 3 80 ['model: p/m — /model default saves this for new sessions · switch to the boot ', 'default with /model saved · /settings edits the boot default too']
+EN_SAME_CODE_CONTROL 3 100 ['model: p/m — /model default saves this for new sessions · switch to the boot default with /model ', 'saved · /settings edits the boot default too']
+EN_SAME_CODE_CONTROL 3 120 ['model: p/m — /model default saves this for new sessions · switch to the boot default with /model saved · /settings edits', 'the boot default too']
+EN_SAME_CODE_CONTROL 80 80 ['model: ', 'provider-name/opaque-model-2026-11-22-long-identifier-abcdefghijklmnopqrstuvwxyz', '— /model default saves this for new sessions · switch to the boot default with ', '/model saved · /settings edits the boot default too']
+EN_SAME_CODE_CONTROL 80 100 ['model: provider-name/opaque-model-2026-11-22-long-identifier-abcdefghijklmnopqrstuvwxyz — /model ', 'default saves this for new sessions · switch to the boot default with /model saved · /settings edits', 'the boot default too']
+EN_SAME_CODE_CONTROL 80 120 ['model: provider-name/opaque-model-2026-11-22-long-identifier-abcdefghijklmnopqrstuvwxyz — /model default saves this for ', 'new sessions · switch to the boot default with /model saved · /settings edits the boot default too']
+PASS: public renderer all4; NFC; no bidi controls/added markup. EN same-code wrapping controls recorded. No native integration assertion.

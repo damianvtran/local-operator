@@ -1,0 +1,37 @@
+{
+  "record_reference": "record.json",
+  "source_transcript": "/Users/damian/.local-operator/sessions/520071768802/transcript.jsonl",
+  "telemetry_fields_only_no_conversation_content": true,
+  "served_response_samples": [
+    {
+      "transcript_line": 59,
+      "event_type": "message",
+      "provider": "openai",
+      "model_id": "gpt-6.1-sol"
+    },
+    {
+      "transcript_line": 62,
+      "event_type": "message",
+      "provider": "openai",
+      "model_id": "gpt-6.1-sol"
+    },
+    {
+      "transcript_line": 66,
+      "event_type": "message",
+      "provider": "openai",
+      "model_id": "gpt-6.1-sol"
+    }
+  ],
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "520071768802",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Fresh served-response transcript payload.usage.provider/model_id, extracted during this task; see provenance.json",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota; model-switch notice before authoring"
+    },
+    "independent_from_translator_session": false
+  }
+}

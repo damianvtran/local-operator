@@ -1,0 +1,79 @@
+{
+  "locale": "fr",
+  "purpose": "LLM translation authorship receipt only; not an independent safety audit or native-speaker approval",
+  "session_id": "e2ef41ac5bb7",
+  "agent": "approval-labels-author-fr (translator)",
+  "actual_author_model": "openai/gpt-6.1-sol",
+  "host_reported_fallback": {
+    "from": "anthropic/claude-opus-5-5",
+    "to": "openai/gpt-6.1-sol",
+    "reason": "provider failure: quota",
+    "timing": "before authoring any new label values"
+  },
+  "frozen_head": "69b7e09c9b56924a7fefe561e283a73045b0a845",
+  "target_path": "local_operator/i18n/catalogues/fr/wire.settings.json",
+  "scope": [
+    "wire.settings.tool_approval_mode.choice.ask.label",
+    "wire.settings.tool_approval_mode.choice.auto.label"
+  ],
+  "inputs": {
+    "approved_capture": "i18n/audits/evidence/approval-choice-input-cache.json",
+    "pin_sidecar": "i18n/audits/evidence/approval-choice-source-pin.json",
+    "english_source_sha256": "298fc1100cb10bfa34909aa245307a735dad318f456e5bbfb5337fbcdb1e8962",
+    "english_context_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+    "verification": "French original full-file hash, selected-map canonical hash and selected values matched capture and sidecar; English source/context full-file hashes matched sidecar; both cached contexts matched the source context subset; frozen HEAD matched. Derived here with Python assertions before authoring.",
+    "style_sources": ["i18n/style-guides/fr.md", "i18n/glossary.md sections 1-2"],
+    "glossary_note": "An unrelated Hindi glossary footnote was redacted by the reader; it was not decoded, recovered or used. French relevant entries were readable."
+  },
+  "hashes": {
+    "target_before_sha256": "7067ac12bb803902e580de79671c11a134a6890a26b98f34610d4a1be9613076",
+    "target_after_sha256": "8a6fcb21ed6799b4ff69f52d8f61bf70256b40f2bc10e7d9ee72dd799f8f8876",
+    "selected_before_canonical_sha256": "b86281ff6fa8c5d681c71c7cba9af3fcc8159b519f99a8c872f6bb84a13abb4f",
+    "selected_after_canonical_sha256": "9ad27d98138bfcb771e92b1df923fa1acb17ac375bb4f28324d5c6edbfa73476",
+    "canonicalization": "UTF-8 JSON, ensure_ascii=False, sort_keys=True, separators=(',', ':')"
+  },
+  "labels": [
+    {
+      "key": "wire.settings.tool_approval_mode.choice.ask.label",
+      "before": "demander",
+      "after": "demander",
+      "disposition": "RETAINED unchanged",
+      "authorship": "Pre-existing bytes; original author/model unknown from supplied capture. Not claimed as newly authored by this translator.",
+      "back_translation": "ask",
+      "rationale": "Idiomatic French infinitive for the prompting mode. The French style guide uses infinitive action labels and permits lowercase compact fragments. Retaining this word does not add a promise to prompt for every tool."
+    },
+    {
+      "key": "wire.settings.tool_approval_mode.choice.auto.label",
+      "before": "auto",
+      "after": "automatique",
+      "disposition": "CHANGED; newly authored by this session's actual model",
+      "back_translation": "automatic",
+      "rationale": "Standard French adjective for a mode. Full form clearly reads as human-facing copy rather than a config enum. Lowercase matches the retained neighboring compact label and is allowed by fr style section Formality & tone. French auto is a valid abbreviation (style Width rules), but no tight maxCells budget is declared in these contexts, so the explicit full form is preferable here. Neither this adjective nor the retained label confers permission or promises bypass of approval gates."
+    }
+  ],
+  "authoring_controls": {
+    "catalogue_key_count_before": 895,
+    "catalogue_key_count_after": 895,
+    "scoped_key_count": 2,
+    "changed_key_count": 1,
+    "retained_key_count": 1,
+    "all_other_key_values_unchanged": true,
+    "key_order_preserved": true,
+    "formatting_preserved": "Byte-for-byte equality against original after exactly one literal value replacement, verified by hash-backed reconstruction after kernel eviction.",
+    "icu_parser": "local_operator.i18n.runtime.parse_message, message_arguments, plural_selectors; both target labels and English sources have zero arguments and zero selectors",
+    "placeholders": "none in source or target; unchanged",
+    "plurals": "N/A",
+    "nfc": true,
+    "authored_bidi_controls": 0,
+    "punctuation": "No punctuation in either scoped label",
+    "width": [
+      {"label": "demander", "cells": 8, "english_cells": 3, "synthetic_literal_pseudo": "[demander~~~]", "synthetic_pseudo_cells": 13},
+      {"label": "automatique", "cells": 11, "english_cells": 9, "synthetic_literal_pseudo": "[automatique~~~~]", "synthetic_pseudo_cells": 17}
+    ],
+    "width_method": "rich.cells.cell_len; synthetic literal-only wrapper and 30% tilde expansion, not product rendering",
+    "overflow_risks": "demander is 8 cells versus Ask at 3; automatique is 11 versus Automatic at 9. No declared maxCells in approved contexts; both need real-fit verification by the parent lanes. Retained demander is the larger relative expansion.",
+    "terms_invented": [],
+    "wire_values_and_gates": "Untouched; only one French label value changed. No source adapter, config, English, other locale, ledger, generation, staging, commit or push changes."
+  },
+  "remaining_verification": "Two independent safety auditors per locale on the parent's common committed candidate remain pending. No self-audit/native approval claimed. Actual UI fit unverified; browser, native and full-suite execution excluded from this authoring task."
+}

@@ -1,0 +1,7 @@
+{
+  "tui.provider_state.logged_in": "connecté",
+  "tui.provider_state.env_key": "clé d’environnement",
+  "tui.provider_state.needs_login": "connexion requise",
+  "tui.provider_state.local_ready": "serveur configuré",
+  "tui.provider_state.local_unconfigured": "configurer le serveur"
+}

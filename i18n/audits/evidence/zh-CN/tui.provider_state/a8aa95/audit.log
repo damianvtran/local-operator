@@ -1,0 +1,74 @@
+COMMAND: env -i HOME=<session-scratch>/audit-home VALIDATION_HOME=<same> LOCAL_OPERATOR_CONFIG_DIR=<home>/.local-operator PATH=<inherited> PYTHONPATH=<audited-worktree> TERM=xterm-256color /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/zh-CN/tui.provider_state/a8aa95/script.py.txt
+MODULE /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/__init__.py
+CHECKER /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/scripts/i18n/check.py
+PYTHON /Users/damian/local-operator/.venv/bin/python
+HOME /Users/damian/.local-operator/sessions/8aa95e755693/scratchpad/audit-home
+CONFIG /Users/damian/.local-operator/sessions/8aa95e755693/scratchpad/audit-home/.local-operator
+Isolation checked; env isolation is NOT a network sandbox claim
+FROZEN local_operator/i18n/catalogues/en/tui.provider_state.json 113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912
+FROZEN local_operator/i18n/catalogues/en/tui.provider_state.context.json 67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be
+FROZEN local_operator/i18n/catalogues/zh-CN/tui.provider_state.json ba73193e56b6b01a584418c0b8a392ee01af2c810789229f576895fbc978a5f1
+OFFICIAL check.check_catalogues scoped en/zh-CN+tui.provider_state: []
+KEY tui.provider_state.logged_in args=0 plural/select=0 NFC=ok protected_tokens=0 en_cells=9 zh_cells=6 text=已登录
+KEY tui.provider_state.env_key args=0 plural/select=0 NFC=ok protected_tokens=0 en_cells=7 zh_cells=8 text=环境密钥
+KEY tui.provider_state.needs_login args=0 plural/select=0 NFC=ok protected_tokens=0 en_cells=11 zh_cells=6 text=需登录
+KEY tui.provider_state.local_ready args=0 plural/select=0 NFC=ok protected_tokens=0 en_cells=17 zh_cells=12 text=服务器已配置
+KEY tui.provider_state.local_unconfigured args=0 plural/select=0 NFC=ok protected_tokens=0 en_cells=16 zh_cells=12 text=请配置服务器
+ORDERED KEYS ["tui.provider_state.logged_in", "tui.provider_state.env_key", "tui.provider_state.needs_login", "tui.provider_state.local_ready", "tui.provider_state.local_unconfigured"]
+OFFICIAL render_message and render_record en/zh-CN: 10/10 exact values and provenance
+WIDTH en logged_in pane=31 id=openrouter segment=17 raw=9 fitted=9 truncated=False rich='openrouter  logged in'
+PSEUDO synthetic expansion en logged_in before=23 after=17 segment=17
+WIDTH en env_key pane=31 id=openrouter segment=17 raw=7 fitted=7 truncated=False rich='openrouter  env key'
+PSEUDO synthetic expansion en env_key before=19 after=17 segment=17
+WIDTH en needs_login pane=31 id=openrouter segment=17 raw=11 fitted=11 truncated=False rich='openrouter  needs login'
+PSEUDO synthetic expansion en needs_login before=27 after=17 segment=17
+WIDTH en local_ready pane=31 id=openrouter segment=17 raw=17 fitted=17 truncated=False rich='openrouter  configured server'
+PSEUDO synthetic expansion en local_ready before=39 after=17 segment=17
+WIDTH en local_unconfigured pane=31 id=openrouter segment=17 raw=16 fitted=16 truncated=False rich='openrouter  configure server'
+PSEUDO synthetic expansion en local_unconfigured before=37 after=17 segment=17
+WIDTH en logged_in pane=31 id=synthetic-long-id segment=10 raw=9 fitted=9 truncated=False rich='synthetic-long-id  logged in'
+PSEUDO synthetic expansion en logged_in before=23 after=10 segment=10
+WIDTH en env_key pane=31 id=synthetic-long-id segment=10 raw=7 fitted=7 truncated=False rich='synthetic-long-id  env key'
+PSEUDO synthetic expansion en env_key before=19 after=10 segment=10
+WIDTH en needs_login pane=31 id=synthetic-long-id segment=10 raw=11 fitted=10 truncated=True rich='synthetic-long-id  needs log…'
+PSEUDO synthetic expansion en needs_login before=27 after=10 segment=10
+WIDTH en local_ready pane=31 id=synthetic-long-id segment=10 raw=17 fitted=10 truncated=True rich='synthetic-long-id  configure…'
+PSEUDO synthetic expansion en local_ready before=39 after=10 segment=10
+WIDTH en local_unconfigured pane=31 id=synthetic-long-id segment=10 raw=16 fitted=10 truncated=True rich='synthetic-long-id  configure…'
+PSEUDO synthetic expansion en local_unconfigured before=37 after=10 segment=10
+WIDTH zh-CN logged_in pane=31 id=openrouter segment=17 raw=6 fitted=6 truncated=False rich='openrouter  已登录'
+PSEUDO synthetic expansion zh-CN logged_in before=17 after=17 segment=17
+WIDTH zh-CN env_key pane=31 id=openrouter segment=17 raw=8 fitted=8 truncated=False rich='openrouter  环境密钥'
+PSEUDO synthetic expansion zh-CN env_key before=21 after=17 segment=17
+WIDTH zh-CN needs_login pane=31 id=openrouter segment=17 raw=6 fitted=6 truncated=False rich='openrouter  需登录'
+PSEUDO synthetic expansion zh-CN needs_login before=17 after=17 segment=17
+WIDTH zh-CN local_ready pane=31 id=openrouter segment=17 raw=12 fitted=12 truncated=False rich='openrouter  服务器已配置'
+PSEUDO synthetic expansion zh-CN local_ready before=29 after=17 segment=17
+WIDTH zh-CN local_unconfigured pane=31 id=openrouter segment=17 raw=12 fitted=12 truncated=False rich='openrouter  请配置服务器'
+PSEUDO synthetic expansion zh-CN local_unconfigured before=29 after=17 segment=17
+WIDTH zh-CN logged_in pane=31 id=synthetic-long-id segment=10 raw=6 fitted=6 truncated=False rich='synthetic-long-id  已登录'
+PSEUDO synthetic expansion zh-CN logged_in before=17 after=10 segment=10
+WIDTH zh-CN env_key pane=31 id=synthetic-long-id segment=10 raw=8 fitted=8 truncated=False rich='synthetic-long-id  环境密钥'
+PSEUDO synthetic expansion zh-CN env_key before=21 after=10 segment=10
+WIDTH zh-CN needs_login pane=31 id=synthetic-long-id segment=10 raw=6 fitted=6 truncated=False rich='synthetic-long-id  需登录'
+PSEUDO synthetic expansion zh-CN needs_login before=17 after=10 segment=10
+WIDTH zh-CN local_ready pane=31 id=synthetic-long-id segment=10 raw=12 fitted=10 truncated=True rich='synthetic-long-id  服务器已 …'
+PSEUDO synthetic expansion zh-CN local_ready before=29 after=10 segment=10
+WIDTH zh-CN local_unconfigured pane=31 id=synthetic-long-id segment=10 raw=12 fitted=10 truncated=True rich='synthetic-long-id  请配置服 …'
+PSEUDO synthetic expansion zh-CN local_unconfigured before=29 after=10 segment=10
+PASS: independent A mechanical checks; linguistic verdict separately in report.md
+NOT PROVEN: SettingsView integration, native fonts, global UI, network isolation, release eligibility
+NEGATIVE CONTROL missing-key REJECTED ["zh-CN/tui.provider_state: missing key 'tui.provider_state.logged_in'"]
+NEGATIVE CONTROL added-argument REJECTED ["zh-CN/tui.provider_state: tui.provider_state.logged_in: arguments (('unexpected', 'simple'),) != en's (): en has 0 argument(s), translation has 1"]
+AFTER_SHA256 local_operator/i18n/catalogues/en/tui.provider_state.json 113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912
+AFTER_SHA256 local_operator/i18n/catalogues/en/tui.provider_state.context.json 67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be
+AFTER_SHA256 local_operator/i18n/catalogues/zh-CN/tui.provider_state.json ba73193e56b6b01a584418c0b8a392ee01af2c810789229f576895fbc978a5f1
+AFTER_SHA256 local_operator/i18n/catalogues/zh-CN/tui.provider_state.json ba73193e56b6b01a584418c0b8a392ee01af2c810789229f576895fbc978a5f1
+PASS: negative controls and unchanged file hashes
+EXIT_CODE=0
+
+COMMAND: isolated primary Python scripts/i18n/ledger.py history-sha --locale zh-CN --namespace tui.provider_state
+EXPECTED_HISTORY_SHA=4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+COMMAND: isolated primary Python scripts/i18n/ledger.py append --receipt i18n/audits/evidence/zh-CN/tui.provider_state/a8aa95/ledger-receipt.json --expected-history-sha 4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945 --dry-run
+i18n/audit-history/zh-CN/tui.provider_state.json
+LEDGER_DRY_RUN_EXIT=0

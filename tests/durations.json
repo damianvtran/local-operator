@@ -3686,6 +3686,8 @@
   "tests/unit/network/test_membership_change_push.py": 60.827,
   "tests/unit/network/test_membership_convergence.py": 33.209,
   "tests/unit/network/test_memory_link.py": 8.503,
+  "tests/unit/network/test_mentioned_file_read.py": 22.492,
+  "tests/unit/network/test_mentioned_file_read_audit.py": 1.0,
   "tests/unit/network/test_mesh_file_pull.py": 17.567,
   "tests/unit/network/test_mesh_first_contact.py": 8.118,
   "tests/unit/network/test_mesh_origin.py": 3.898,

@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "receipt_kind": "translation-only; independent audit pending",
+  "instance": "e896d2db9139",
+  "date": "2026-11-21",
+  "translator": {
+    "agent": "i18n-translator (lopdev translation pass)",
+    "session": "e896d2db9139",
+    "model": "openai/gpt-6.1-sol",
+    "fallback": "anthropic/claude-opus-5-5 → openai/gpt-6.1-sol; provider quota failure"
+  },
+  "status": "translated-awaiting-independent-audit",
+  "scope_note": "Only listed bridge-card keys semantically reviewed; unchanged keys are not re-certified. No auditor result, native speaker claim, rendered fit or activation approval.",
+  "style_inputs": {
+    "repository": "local-operator",
+    "revision": "ebe4a4103ae2bee8cfc369450a72c79778721e5a",
+    "glossary_sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "style_sha256": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5"
+  },
+  "namespaces": {
+    "tui.bridge_card": {
+      "keys_translated_reviewed": [
+        "tui.bridge_card.body.held",
+        "tui.bridge_card.body.offline",
+        "tui.bridge_card.body.pending",
+        "tui.bridge_card.context.dm",
+        "tui.bridge_card.context.channel",
+        "tui.bridge_card.context.group",
+        "tui.bridge_card.context.thread_reply"
+      ],
+      "source_path": "local_operator/i18n/catalogues/en/tui.bridge_card.json",
+      "target_path": "local_operator/i18n/catalogues/ru/tui.bridge_card.json",
+      "context_path": "local_operator/i18n/catalogues/en/tui.bridge_card.context.json",
+      "sha256": {
+        "en": "ce30b56df340bed5983e447aecc4fa5832b900eb5860f6aade93181891ac4301",
+        "ru": "0b9c77ca709295d21f762f0cc4906ac3546fb75b6160b5fdd88174ac4bd4edb7",
+        "context": "84136da42444ba8296fccf1b1e8ca6e4b542c1571172d3d3ffd896f0795a3c2d"
+      },
+      "mechanical_checks": {
+        "namespace_key_parity": true,
+        "scoped_placeholder_parity": true,
+        "scoped_nfc": true,
+        "scoped_no_bidi_controls": true
+      }
+    },
+    "relay.transcript": {
+      "keys_translated_reviewed": [
+        "relay.transcript.bridge.held",
+        "relay.transcript.bridge.offline",
+        "relay.transcript.bridge.pending",
+        "relay.transcript.bridge.thread_reply"
+      ],
+      "source_path": "local_operator/i18n/catalogues/en/relay.transcript.json",
+      "target_path": "local_operator/i18n/catalogues/ru/relay.transcript.json",
+      "context_path": "local_operator/i18n/catalogues/en/relay.transcript.context.json",
+      "sha256": {
+        "en": "6aec043147ea745a29dd76cb62b973fbd8422036e373be727a78b5b2953adcd1",
+        "ru": "d8e256260c12189301ca89925a6cf4b83d7814881eb3c6632850d9cec320e90c",
+        "context": "280ccffe8db55d84f73730530afbb32da2ce7425b33eb0c98ce0525ed252c2f4"
+      },
+      "mechanical_checks": {
+        "namespace_key_parity": true,
+        "scoped_placeholder_parity": true,
+        "scoped_nfc": true,
+        "scoped_no_bidi_controls": true
+      }
+    }
+  }
+}

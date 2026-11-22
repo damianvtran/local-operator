@@ -349,6 +349,36 @@ returns a local hit before any peer fetch
 That existing local-copy path is not a grant to request fresh owner bytes and
 must not be turned into a mandatory mesh round trip by this proposal.
 
+### Dormant B1 implementation boundary
+
+`network/mentioned_file_read.py` supplies only the owner-process audit → snapshot
+→ seal → immutable preparation prerequisite. It has **no production caller,
+handler, route, tool/CLI registration, wire projection or send method**. Existing
+S1 PAD/digest serving and Files' outside-session denial are unchanged. B2's
+actual cross-process mutator/socket-release fence and C's Files/preview/download
+integration remain prerequisites; outside-PAD serving is still OFF.
+
+The sole rotating `AuditLog` has a separate closed `mentioned_file_read_admitted`
+schema and typed receipt, acknowledged only after append, file/directory fsync
+and exact persisted-row readback on the actual live/archive inode. Legacy
+`session_file_read_admitted` detail and acknowledgement semantics remain intact.
+Each establishment has an owner-generated nonce and a distinct typed marker,
+never a usable sealed version. A private session-owned snapshot is streamed and
+read back against its chunk manifest before sealing. Each new establishment
+gets a new directory and commitment even when its content digest repeats.
+The durable exact seal binds its initial receipt, source/proof, nonce and first
+final ReadBinding. Each subsequent preparation, including stat/verify/resume,
+refreshes P1/P2 and commits its own exact pre-content admission; intersecting
+chunks are verified before slicing the very bytes retained in the response.
+
+This adds no authority or history/backfill path. Current source/parent identity,
+ctime, sensitivity and relocated-config exclusions still govern every operation;
+a snapshot never preserves a deleted/replaced/reclassified source's authority.
+It reuses S1 acceptance rules and `FILE_CHUNK_BYTES`, with no new cap/TTL or eager
+sweeper. Pending/torn state has no recovery-to-positive API and remains under
+normal owning-session retention. Synthetic fixtures do not establish native
+presence, real transport safety or security/QA approval.
+
 ## 6. Threats, replay and live revocation
 
 | Case | Required refusal/behavior |

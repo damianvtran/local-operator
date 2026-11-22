@@ -1,0 +1,527 @@
+{
+  "schema": "approval-native-admission-private-transport/v1",
+  "integrator": {
+    "session": "c792e32f4cbd",
+    "model": "openai/gpt-6.1-sol",
+    "fallback": "Host quota fallback from anthropic/claude-opus-5-5",
+    "semantic_role": "none; transport and mechanical binding only"
+  },
+  "candidate_base": "e1c00f8c6bc4c06f2519c63d0ac406e31628dcf8",
+  "namespace": "wire.settings",
+  "source_sha256": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+  "context_raw_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+  "admitted_single_rows": 7,
+  "coverage_per_locale": {
+    "zh-CN": {
+      "fresh_per_A_and_per_B": 55,
+      "retained_per_A_and_per_B": 840,
+      "distinct_keys_per_auditor": 895,
+      "target_raw_sha256": "c17c1cf7e60d836a2e15bfdb341977ceab0ff15d4c62cfa92e7f03b8ed2e53ba",
+      "primary_raw": {
+        "path": "i18n/audits/evidence/approval-repair-r2-originals/zh-A.json",
+        "sha256": "857122c0a9a2694131a9a47e819f84612861e5caeb5cf4621bfee99a50e7a726"
+      },
+      "second_raw": {
+        "path": "i18n/audits/evidence/approval-repair-r2-originals/zh-B.json",
+        "sha256": "58ef1782be215667c4a77f9af03afe52f83efdd5b075cdc4eb4d2ece649cc5fa"
+      }
+    },
+    "fr": {
+      "fresh_per_A_and_per_B": 40,
+      "retained_per_A_and_per_B": 855,
+      "distinct_keys_per_auditor": 895,
+      "target_raw_sha256": "e093d4481ac0d477c86b562ff8ab1f59c2a00e948fddce1b3f34c1da73064ffa",
+      "primary_raw": {
+        "path": "i18n/audits/evidence/approval-repair-r2-originals/fr-A.json",
+        "sha256": "7cf0718177880cf515076fbb1798fddc21614fcd9f4242164a48b286561d0fa3"
+      },
+      "second_raw": {
+        "path": "i18n/audits/evidence/approval-repair-r2-originals/fr-B.json",
+        "sha256": "6aa8034ab21b3acef0244b6a560aafbd6041ab9ba92fae84cc49c00409579bcc"
+      }
+    },
+    "ru": {
+      "fresh_per_A_and_per_B": 54,
+      "retained_per_A_and_per_B": 841,
+      "distinct_keys_per_auditor": 895,
+      "target_raw_sha256": "5c50edd1aa20e5755f5704f95835117852dd9e0e39b222ce421bf6c47f003651",
+      "primary_raw": {
+        "path": "i18n/audits/evidence/approval-repair-r2-originals/ru-A.json",
+        "sha256": "13c66554a633a761fe33da6b48c93f8d5f0ecd30db47ed78f392d19636c38f7a"
+      },
+      "second_raw": {
+        "path": "i18n/audits/evidence/approval-repair-r2-originals/ru-B.json",
+        "sha256": "c1c916440ba7989e27988042c449b2d129a40d8b3371f2060cfa418c843611de"
+      }
+    },
+    "hi": {
+      "fresh_per_A_and_per_B": 80,
+      "retained_per_A_and_per_B": 815,
+      "distinct_keys_per_auditor": 895,
+      "target_raw_sha256": "b030c730c0f8a179773b082a8e907d4487e8cf31a590714b62bab51614a5c30a",
+      "primary_raw": {
+        "path": "i18n/audits/evidence/approval-repair-r2-originals/hi-A.json",
+        "sha256": "a58762cd180e8ed17c317641e15e345318a965bc03fc62c684db2e4ac9c26e37"
+      },
+      "second_raw": {
+        "path": "i18n/audits/evidence/approval-repair-r2-originals/hi-B.json",
+        "sha256": "3b76370ea1c6816c2e89fbb8a2afcc8189faf1a03bd458ba991642633e6285b7"
+      }
+    },
+    "ur": {
+      "fresh_per_A_and_per_B": 89,
+      "retained_per_A_and_per_B": 806,
+      "distinct_keys_per_auditor": 895,
+      "target_raw_sha256": "66c856c3c9ab823665241301511c50286e4dae574a0dd617d0c764a43d99331b",
+      "primary_raw": {
+        "path": "i18n/audits/evidence/approval-repair-r2-originals/ur-A.json",
+        "sha256": "eb6f8ab7775afde03ca6c379c524717d94dfa4fe6f38f7a24a931d0b6eeaf1e2"
+      },
+      "second_raw": {
+        "path": "i18n/audits/evidence/approval-repair-r2-originals/ur-B.json",
+        "sha256": "d5c1fcedc8d79efff2e17784aea581ceff4f65fd50d4cb639591a6fce9302f51"
+      }
+    },
+    "es": {
+      "fresh_per_A_and_per_B": 7,
+      "retained_per_A_and_per_B": 888,
+      "distinct_keys_per_auditor": 895,
+      "target_raw_sha256": "36132ff7f31a6a42c941661fb983f8b14b54954bdaf54f268f8f69eb9672c52b",
+      "primary_raw": {
+        "path": "i18n/audits/evidence/approval-repair-r3-originals/approval-repair-audit-es-A-r3.json",
+        "sha256": "11efd126b5ea1acd53e517e511e0009302e55ccdb6828ce7df7c7539204f875c"
+      },
+      "second_raw": {
+        "path": "i18n/audits/evidence/approval-repair-r3-originals/approval-repair-audit-es-B-r3.json",
+        "sha256": "d56400ac74d33e26f4360a1457a6cae2fd2fd23f5c39de69541a103c548ac74c"
+      }
+    },
+    "vi": {
+      "fresh_per_A_and_per_B": 4,
+      "retained_per_A_and_per_B": 891,
+      "distinct_keys_per_auditor": 895,
+      "target_raw_sha256": "100fc2ccedd6bc0def2837912b4332d9b0438c1f0dc5451e072d37bf94e1e964",
+      "primary_raw": {
+        "path": "i18n/audits/evidence/approval-repair-r3-originals/approval-repair-audit-vi-A-r3.json",
+        "sha256": "2f3f5716a1f3a4e4645ecf3279e96441ed78734cc390c081d3943ac991758f64"
+      },
+      "second_raw": {
+        "path": "i18n/audits/evidence/approval-repair-r3-originals/approval-repair-audit-vi-B-r3.json",
+        "sha256": "a4603af62f86a24a3e94b3e3fbf518ae47841a010792bf290111de1a7e553a5a"
+      }
+    }
+  },
+  "history": {
+    "prior_prefixes_preserved": true,
+    "unknown_extensions_exact_roundtrip": true,
+    "entry_counts_before_after": {
+      "zh-CN": [
+        36,
+        37
+      ],
+      "fr": [
+        36,
+        37
+      ],
+      "ru": [
+        37,
+        38
+      ],
+      "hi": [
+        36,
+        37
+      ],
+      "ur": [
+        36,
+        37
+      ],
+      "es": [
+        36,
+        37
+      ],
+      "vi": [
+        36,
+        37
+      ]
+    },
+    "immutable_snapshot_hashes": {
+      "i18n/ledger.json": "0ed4ff281b22cdd686ef054e02e52fe618930ef2257af4f902bba2a0cf1e4302",
+      "i18n/audit-history.json": "44fe5f621ae21998bee501eaa61bdf06c39344a30288b16d0a9c1b0bdc36cfe7",
+      "i18n/ledger/es.json": "6f40498349b429bca7a037c8b0b6a66094117ed5c6fd0e0c5b5a99c6f0943543",
+      "i18n/ledger/fr.json": "72e0a8239fe73918272cbbae7ad6d0457bea7ac5baa465d972de384c15f2000e",
+      "i18n/ledger/hi.json": "522a59194ba372caa6c764814b3ac11f23200c7e8119d533395d9451d334cdff",
+      "i18n/ledger/ru.json": "d576798f24da068b3af8ceb561711e3505484a87995c612ecd58623ff31beb87",
+      "i18n/ledger/ur.json": "90638fece4e0efa7b747488552fd867dd23e19deede0c9feac68840aa7c64e2e",
+      "i18n/ledger/vi.json": "e5c66b163d57db89e3be6936b9ff255f8c2487d9d9d40e3881895582d64cb168",
+      "i18n/ledger/zh-CN.json": "96c03adb0482d3e02a74f91a4ac677570ce3f1d66a4ee0fa28b0168a315839d6"
+    },
+    "export_entry_count": 2864,
+    "export_sha256": "fffe5fbe90eccdc9c693c9ce33c28e2f9484d1114464c356cb50046a30acde32",
+    "export_scratch_path": "/Users/damian/.local-operator/sessions/c792e32f4cbd/scratchpad/admission-current-ledger.json"
+  },
+  "binding_verification": {
+    "top_per_key_hash_comparisons": 39260,
+    "original_raw_UTF8_string_hash_comparisons": 3678,
+    "unmatched_hashes_after_reproducing_actual_encoding": 0,
+    "fresh_records": 658,
+    "fresh_context_objects_compared": 171,
+    "coverage_partitions_verified": 14,
+    "author_session_exclusions": [
+      "08046d0f2aac",
+      "0b83e6902e55",
+      "22f04bc8ec0d",
+      "811ce9672eb0",
+      "a81f7a3e8d73",
+      "abee2a135156",
+      "bbd6a68c6d69",
+      "c1a5d7b1fa3c",
+      "c8c42578bc8c"
+    ],
+    "authors": [
+      {
+        "path": "i18n/audits/evidence/approval-full-repair-author-es.json",
+        "sha256": "95c0f03c1634def1fe04055d4aa6c6a89e48fd933b0cf40feb8cb2bf1080017b",
+        "locale": "es",
+        "author_identity_original_fields": {
+          "author": {
+            "role": "translator",
+            "session": "22f04bc8ec0d",
+            "model": "openai/gpt-6.1-sol",
+            "provenance": "Explicit model-switch host notice in this run: anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol due provider quota failure; all repair values authored after fallback."
+          }
+        },
+        "scope_reference": "/changes"
+      },
+      {
+        "path": "i18n/audits/evidence/approval-full-repair-author-fr.json",
+        "sha256": "821078ec3cb3049f640f735a7f6f6c5d9dd3e9c71c32ef35f55cc9d903496cd3",
+        "locale": "fr",
+        "author_identity_original_fields": {
+          "agent": {
+            "role": "translator",
+            "session": "a81f7a3e8d73",
+            "actual_model": "openai/gpt-6.1-sol",
+            "fallback": "Explicit host model-switch card from anthropic/claude-opus-5-5: provider failure quota; authoring here uses fallback."
+          }
+        },
+        "scope_reference": "/changed_keys"
+      },
+      {
+        "path": "i18n/audits/evidence/approval-full-repair-author-hi.json",
+        "sha256": "93ec90337da294b8c1c94f644e1db34782d3250d079f49e6e9ed06fa4d588835",
+        "locale": "hi",
+        "author_identity_original_fields": {
+          "author": {
+            "agent": "translator / settings-major-repair-hi",
+            "session": "0b83e6902e55",
+            "actual_model": "openai/gpt-6.1-sol",
+            "fallback": "Host explicitly switched from anthropic/claude-opus-5-5 due to provider quota before authoring; exact serving-model identifier comes from that host switch notice, not original header.",
+            "date": "2026-11-22T02:36:50.212611+00:00"
+          }
+        },
+        "scope_reference": "/changes"
+      },
+      {
+        "path": "i18n/audits/evidence/approval-full-repair-author-ru.json",
+        "sha256": "f349d1e1afeb08f7ea0c4572e5849f610ad6d9e7813db32652ccd623fedec49d",
+        "locale": "ru",
+        "author_identity_original_fields": {
+          "session": "c1a5d7b1fa3c",
+          "agent": "translator/settings-major-repair-ru",
+          "model": "openai/gpt-6.1-sol",
+          "model_provenance": "Host model-switch event: temporary fallback from anthropic/claude-opus-5-5 due to provider quota; translation authored after that event. No model change requested by author."
+        },
+        "scope_reference": "/changes"
+      },
+      {
+        "path": "i18n/audits/evidence/approval-full-repair-author-ur.json",
+        "sha256": "b15ca4c149313ee0398503e3b20f8804515282b9c593fc21cd514ba037fc9afc",
+        "locale": "ur",
+        "author_identity_original_fields": {
+          "author": {
+            "role": "translator",
+            "session_id": "c8c42578bc8c",
+            "actual_authoring_model": "openai/gpt-6.1-sol",
+            "initial_model": "anthropic/claude-opus-5-5",
+            "fallback": "Explicit host model-switch card: provider failure: quota. All native authoring and mechanical verification performed after this switch. No serving identity inferred from a resumed header.",
+            "not_auditors": [
+              "A0628",
+              "B28a4"
+            ],
+            "date_utc": "2026-11-22T02:39:12.595636+00:00"
+          }
+        },
+        "scope_reference": "/changes"
+      },
+      {
+        "path": "i18n/audits/evidence/approval-full-repair-author-vi.json",
+        "sha256": "7c358c8f59db53587b32179f3f54a7b91d09b92c320c2c841dfc6e3be69d78f0",
+        "locale": "vi",
+        "author_identity_original_fields": {
+          "session": "08046d0f2aac",
+          "agent": "translator settings-major-repair-vi",
+          "actual_model": "openai/gpt-6.1-sol"
+        },
+        "scope_reference": "/changed_keys"
+      },
+      {
+        "path": "i18n/audits/evidence/approval-full-repair-author-zh-CN.json",
+        "sha256": "b127c6661562b3a772139ed20ad2df38a2120a7727c71dae20f322093981054f",
+        "locale": "zh-CN",
+        "author_identity_original_fields": {
+          "author": {
+            "role": "fresh translator; not zh-CN A or B auditor",
+            "session_id": "811ce9672eb0",
+            "actual_serving_model": "openai/gpt-6.1-sol",
+            "provenance": "Explicit host model-switch notice before any translation authoring",
+            "fallback": {
+              "from": "anthropic/claude-opus-5-5",
+              "reason": "provider failure: quota"
+            },
+            "self_audit": false
+          }
+        },
+        "scope_reference": "/changes"
+      },
+      {
+        "path": "i18n/audits/evidence/approval-repair-r3-author-es.json",
+        "sha256": "ab08a0f810bdff3acc453f8da01119bab6f7fe445393153b7f9d5149aa9bb9ad",
+        "locale": "es",
+        "author_identity_original_fields": {
+          "agent_id": "bbd6a68c6d69",
+          "author_model": "openai/gpt-6.1-sol",
+          "fallback": {
+            "used": true,
+            "reason": "host model-switch notice: provider failure: quota",
+            "serving_identity": "host-attested; no independent serving-provider verification"
+          }
+        },
+        "scope_reference": "/changed_keys"
+      },
+      {
+        "path": "i18n/audits/evidence/approval-repair-r3-author-vi.json",
+        "sha256": "8ea9955f5a2958d4d585ef795878f57b0c210b63e5036a2b2c30a6007bfddd79",
+        "locale": "vi",
+        "author_identity_original_fields": {
+          "agent": {
+            "role": "translator",
+            "session_id": "abee2a135156",
+            "actual_model": "openai/gpt-6.1-sol",
+            "requested_model": "anthropic/claude-opus-5-5",
+            "fallback": "Host model-switch message: provider failure quota, before authoring",
+            "serving_identity": "host-attested model; backend serving instance otherwise unknown"
+          }
+        },
+        "scope_reference": "/changed_keys"
+      }
+    ],
+    "raw_evidence_portable_aliases": [
+      {
+        "original_path": "/Users/damian/.local-operator/sessions/0be89bc16927/scratchpad/Englishvoiceconstant-full-en-approved-capture.json",
+        "sha256": "c17b1262dc76d312cfa21313bd0d1414e2b4132d9900265119d4c1d8d9c237f6",
+        "preserved_path": "i18n/audits/evidence/approval-full-inputs/Englishvoiceconstant-full-en-approved-capture.json"
+      },
+      {
+        "original_path": "/Users/damian/.local-operator/sessions/119c681eb085/scratchpad/ru-r2-derived-controls.json",
+        "sha256": "04bf5c115fecfbbb604da6ed98fda5ecca98abc25222a4dafde842e0a9b4fd54",
+        "preserved_path": "i18n/audits/evidence/approval-repair-r2-referenced-support/119c681eb085-ru-r2-derived-controls.json"
+      },
+      {
+        "original_path": "/Users/damian/.local-operator/sessions/1898eabd4159/scratchpad/approval-repair-audit-es-B-r2.json",
+        "sha256": "af116da3d3ee3b3d8b6d0bf798f725ee50639470fbc5cffe52d7cd87a581f1bb",
+        "preserved_path": "i18n/audits/evidence/approval-repair-r2-originals/es-B.json"
+      },
+      {
+        "original_path": "/Users/damian/.local-operator/sessions/46477cf7eb33/scratchpad/audit-checks.json",
+        "sha256": "a3cbb5efaf373559bdad5109caf07c09ffc8c1903533b39ddd524b68446d134a",
+        "preserved_path": "i18n/audits/evidence/approval-repair-r2-referenced-support/46477cf7eb33-audit-checks.json"
+      },
+      {
+        "original_path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-full-ur-A-original.json",
+        "sha256": "aa7b06e7e8bc644b545c6e67ceb69c0668b0a1ba8c0b31996e36de59f91b1f2e",
+        "preserved_path": "i18n/audits/evidence/approval-full-ur-A-original.json"
+      },
+      {
+        "original_path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-full-ur-B-completed-original.json",
+        "sha256": "02d5d916f1b0b633ec537fb9d44dfca774278dcfe6330e81407595d0928b9ea2",
+        "preserved_path": "i18n/audits/evidence/approval-full-ur-B-completed-original.json"
+      },
+      {
+        "original_path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-full-ur-B-original.json",
+        "sha256": "0da17ff84bc19726461c72d63a4b4c2a6147f3a8f1f8aa11c5114caf291fe429",
+        "preserved_path": "i18n/audits/evidence/approval-full-ur-B-original.json"
+      },
+      {
+        "original_path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-full-vi-A-original.json",
+        "sha256": "e8b01da98da13e3dd13920082996c326fc9cef187dc7e611e5e2b28139df7fe9",
+        "preserved_path": "i18n/audits/evidence/approval-full-vi-A-original.json"
+      },
+      {
+        "original_path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-full-vi-B-original.json",
+        "sha256": "216f6ddc816932cf7d933311f191f2f3235d2ea732bb74d14a67ffe476aaedf2",
+        "preserved_path": "i18n/audits/evidence/approval-full-vi-B-original.json"
+      },
+      {
+        "original_path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-repair-private-freeze-sourcebinding.json",
+        "sha256": "db1fd63d4e0e453c940942c66e8b617f50217bc938a868eed30d76293d3278fc",
+        "preserved_path": "i18n/audits/evidence/approval-repair-private-freeze-sourcebinding.json"
+      },
+      {
+        "original_path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-repair-r2-originals/es-A.json",
+        "sha256": "b6124224ca10a08c1b60130752af8244b87e5b61bb17922924cab454d70ac8b7",
+        "preserved_path": "i18n/audits/evidence/approval-repair-r2-originals/es-A.json"
+      },
+      {
+        "original_path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-repair-r2-originals/es-B.json",
+        "sha256": "af116da3d3ee3b3d8b6d0bf798f725ee50639470fbc5cffe52d7cd87a581f1bb",
+        "preserved_path": "i18n/audits/evidence/approval-repair-r2-originals/es-B.json"
+      },
+      {
+        "original_path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-repair-r2-originals/vi-A.json",
+        "sha256": "ee52cb63498d3f353e30aa650284d0166dcfa240649c1d290f3ab5dfe4a32134",
+        "preserved_path": "i18n/audits/evidence/approval-repair-r2-originals/vi-A.json"
+      },
+      {
+        "original_path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-repair-r2-originals/vi-B.json",
+        "sha256": "f4080d71e211a1812fab58bf0fe7060c8f2cfc03537ad79981e3a1c2217a540a",
+        "preserved_path": "i18n/audits/evidence/approval-repair-r2-originals/vi-B.json"
+      },
+      {
+        "original_path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-repair-r3-K2-source-binding.json",
+        "sha256": "e6fd243ec7a9c29b5b93555f646b8aac3d336b6d70904c8412ae2f51346afd1d",
+        "preserved_path": "i18n/audits/evidence/approval-repair-r3-K2-source-binding.json"
+      },
+      {
+        "original_path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-repair-r3-frozen-transition-matrix.json",
+        "sha256": "9710eecefb1c36f8a6e85fd3c23e3da9e933b3dc83e4bd534723631b470455ff",
+        "preserved_path": "i18n/audits/evidence/approval-repair-r3-frozen-transition-matrix.json"
+      },
+      {
+        "original_path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-repair-r3-postauthor-inputs/es-approved-envelope.json",
+        "sha256": "4a19391b248248b90df7778e0c885769cf90d8bdc5aa1efb69a6daeb87917886",
+        "preserved_path": "i18n/audits/evidence/approval-repair-r3-postauthor-inputs/es-approved-envelope.json"
+      },
+      {
+        "original_path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-repair-r3-postauthor-inputs/manifest.json",
+        "sha256": "2d1ae84852bd98cbed9329f24b3cc6c36afff0058750576f407357a8ff789d76",
+        "preserved_path": "i18n/audits/evidence/approval-repair-r3-postauthor-inputs/manifest.json"
+      },
+      {
+        "original_path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-repair-r3-postauthor-inputs/vi-approved-envelope.json",
+        "sha256": "09b9926dbdf120e9a049ed171522656312a2d9720e3e6db8e035f2a67c95946f",
+        "preserved_path": "i18n/audits/evidence/approval-repair-r3-postauthor-inputs/vi-approved-envelope.json"
+      },
+      {
+        "original_path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-repair-r3-readerbrief.json",
+        "sha256": "f04cbb514cc210c2254e4becda86edc81b0a46f4a9672e4329ef9d8b0e6a6951",
+        "preserved_path": "i18n/audits/evidence/approval-repair-r3-readerbrief.json"
+      },
+      {
+        "original_path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-repair-root-ready-readerbrief.json",
+        "sha256": "e06649f101e397c32acd49b83cdc816209687d86c0f491fcafa12be03f9adf29",
+        "preserved_path": "i18n/audits/evidence/approval-repair-root-ready-readerbrief.json"
+      },
+      {
+        "original_path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/local_operator/i18n/catalogues/en/wire.settings.context.json",
+        "sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+        "preserved_path": "local_operator/i18n/catalogues/en/wire.settings.context.json"
+      }
+    ],
+    "existing_relative_raw_refs_verified": 63
+  },
+  "eligibility": {
+    "before_generated_artifact": [
+      "en",
+      "fr",
+      "es",
+      "zh-CN",
+      "ru",
+      "vi",
+      "ur",
+      "hi"
+    ],
+    "before_generator_computed": [
+      "en"
+    ],
+    "after_generator_computed": [
+      "en",
+      "fr",
+      "es",
+      "zh-CN",
+      "ru",
+      "vi",
+      "ur",
+      "hi"
+    ],
+    "shipped_file_sha256_before": "e8316253e6fb242bc838122d26f7bb7d419ccb654edf199c4f22172349e1567d",
+    "shipped_file_sha256_after": "e8316253e6fb242bc838122d26f7bb7d419ccb654edf199c4f22172349e1567d",
+    "security_held_before": [],
+    "security_held_after": [],
+    "new_locales": [],
+    "meaning": "Restore source-fresh audit readiness only to the baseline shipped eight. No public shipping or rendered/native-fit clearance."
+  },
+  "commands": {
+    "git_diff_cached_check": {
+      "exit": 2,
+      "actual_stdout": "i18n/audits/evidence/approval-full-deduplicated-ledger.md:3480: new blank line at EOF.",
+      "disposition": "Preserved original manager-owned evidence bytes; not normalized or altered. No product whitespace finding."
+    },
+    "generate": {
+      "exit": 0,
+      "artifacts_written": 200,
+      "generated_content_delta_files": []
+    },
+    "generate_check": {
+      "exit": 0,
+      "actual_stdout": "generate.py --check: 200 artifact(s) byte-identical\n"
+    },
+    "strict_actual_base_check": {
+      "exit": 1,
+      "status": "BLOCKED: actual origin/main audit suffixes absent already at K2, not waived",
+      "missing_suffixes": [
+        "i18n/audit-history/es/wire.remote_compute.json",
+        "i18n/audit-history/fr/wire.remote_compute.json",
+        "i18n/audit-history/hi/wire.remote_compute.json",
+        "i18n/audit-history/ru/wire.remote_compute.json",
+        "i18n/audit-history/ur/wire.remote_compute.json",
+        "i18n/audit-history/vi/wire.remote_compute.json",
+        "i18n/audit-history/zh-CN/wire.remote_compute.json"
+      ],
+      "added_upstream_commit": "9d66ec24c6ca",
+      "origin_main_ref": "3833938787f68f0532efd9ee1942c97b45aedc27"
+    },
+    "fork_scope_only": {
+      "exit": 0,
+      "base": "fa4fb006319718935477ffae732cab76708062fe",
+      "meaning": "change-scope diagnostic only, NOT strict-base PASS"
+    },
+    "negative_stale_history": {
+      "exit": 2,
+      "actual_stderr": "ledger.py: stale expected history for zh-CN/wire.settings\n",
+      "file_unchanged": true
+    },
+    "wrong_source_readiness_negative": {
+      "exit": 0,
+      "actual_stdout": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/local_operator/__init__.py\n{\"positive_shipped\": [\"en\", \"fr\", \"es\", \"zh-CN\", \"ru\", \"vi\", \"ur\", \"hi\"], \"wrong_source_shipped\": [\"en\", \"es\", \"zh-CN\", \"ru\", \"vi\", \"ur\", \"hi\"], \"security_held\": []}\n",
+      "scope": "in-memory counterfactual through actual _shipped_locales; no authoritative file edited"
+    }
+  },
+  "raw_original_counts": {
+    "R1": 21,
+    "R2": 14,
+    "R3": 4
+  },
+  "known79_original_evidence_bytes": 27780641,
+  "prior_79_preserved": true,
+  "pending": [
+    "strict actual-base convergence",
+    "independent real-app QA and native rendered fit",
+    "whole-interface no ordinary English validation",
+    "pushed-head code/design/UX reviews",
+    "CI",
+    "publication",
+    "merge",
+    "release"
+  ],
+  "no_network_or_publish_actions": true
+}

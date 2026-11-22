@@ -2551,6 +2551,8 @@ class ToolContext(BaseModel):
     # exactly this field, and its absence is what keeps the tool out of a
     # session that has no bridge. Stays None until the session lane wires it.
     bridge_runtime: Any | None = Field(default=None, exclude=True, repr=False)
+    # Host identity frozen for this dispatch context, not a model argument.
+    bridge_session_agent_display: str | None = Field(default=None, exclude=True, repr=False)
     # The path a READER resolved, reported by the reader itself the instant it
     # resolved it: ``(resolved_path, resolvable)``. Installed by the loop for the
     # duration of ONE call -- the recorder it holds is bound to that call's own id

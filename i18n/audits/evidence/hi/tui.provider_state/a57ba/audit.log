@@ -1,0 +1,26 @@
+COMMAND: ['/Users/damian/local-operator/.venv/bin/python', '/Users/damian/local-operator/.worktrees/i18n-provider-state-labels/i18n/audits/evidence/hi/tui.provider_state/a57ba/script.py.txt']
+interpreter /Users/damian/local-operator/.venv/bin/python
+module local_operator.i18n.catalogues /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/i18n/catalogues.py
+module local_operator.i18n.runtime /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/i18n/runtime.py
+module scripts.i18n.check /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/scripts/i18n/check.py
+isolated_HOME /Users/damian/.local-operator/sessions/57ba373043b9/scratchpad/hiA-_fap1x9u config /Users/damian/.local-operator/sessions/57ba373043b9/scratchpad/hiA-_fap1x9u/.local-operator
+OFFICIAL_SCOPED_BASELINE []
+MISSING_KEY_NEGATIVE ["hi/tui.provider_state: missing key 'tui.provider_state.logged_in'"]
+ADDED_ARGUMENT_NEGATIVE ["hi/tui.provider_state: tui.provider_state.logged_in: arguments (('extra', 'simple'),) != en's (): en has 0 argument(s), translation has 1"]
+CLDR Hindi ['one', 'other']
+ROW en tui.provider_state.logged_in "logged in" args=0 plural=0 select=0 NFC=PASS protected=0 plain/Rich=PASS synthetic_pseudo=PASS cell_len=9
+ROW hi tui.provider_state.logged_in "लॉग इन है" args=0 plural=0 select=0 NFC=PASS protected=0 plain/Rich=PASS synthetic_pseudo=PASS cell_len=7
+ROW en tui.provider_state.env_key "env key" args=0 plural=0 select=0 NFC=PASS protected=0 plain/Rich=PASS synthetic_pseudo=PASS cell_len=7
+ROW hi tui.provider_state.env_key "परिवेश चर से कुंजी" args=0 plural=0 select=0 NFC=PASS protected=0 plain/Rich=PASS synthetic_pseudo=PASS cell_len=12
+ROW en tui.provider_state.needs_login "needs login" args=0 plural=0 select=0 NFC=PASS protected=0 plain/Rich=PASS synthetic_pseudo=PASS cell_len=11
+ROW hi tui.provider_state.needs_login "लॉग इन ज़रूरी" args=0 plural=0 select=0 NFC=PASS protected=0 plain/Rich=PASS synthetic_pseudo=PASS cell_len=9
+ROW en tui.provider_state.local_ready "configured server" args=0 plural=0 select=0 NFC=PASS protected=0 plain/Rich=PASS synthetic_pseudo=PASS cell_len=17
+ROW hi tui.provider_state.local_ready "सर्वर कॉन्फ़िगर है" args=0 plural=0 select=0 NFC=PASS protected=0 plain/Rich=PASS synthetic_pseudo=PASS cell_len=12
+ROW en tui.provider_state.local_unconfigured "configure server" args=0 plural=0 select=0 NFC=PASS protected=0 plain/Rich=PASS synthetic_pseudo=PASS cell_len=16
+ROW hi tui.provider_state.local_unconfigured "सर्वर कॉन्फ़िगर करें" args=0 plural=0 select=0 NFC=PASS protected=0 plain/Rich=PASS synthetic_pseudo=PASS cell_len=13
+PASS: 5 ordered keys; official scoped catalogue/context/ICU checks; two discriminating negatives; 10 English/Hindi literal render controls
+LIMIT: widths synthetic, not native glyph/geometry clearance; no producer wiring, whole UI, admission, second audit, release or seven-pair root validation
+
+STDERR:
+
+EXIT_CODE: 0

@@ -10945,15 +10945,13 @@ def _monitor_rows() -> "list[dict[str, Any]]":
 
     Reads the derived index rather than each transcript: the index exists
     exactly so this question can be answered without opening every session,
-    and it is rewritten on every persist and every open, so a stale row
-    self-heals rather than needing a repair path here (the ``_wake_rows``
-    rule). Health rides the row: ``disabled``/``disabled_reason`` and the
-    failure count are written by the same sync that rewrites the index, so a
-    disabled monitor cannot be invisible on this surface (§11.3).
+    and it is rewritten on every persist and every open. Overlay counters
+    because a quiet tick advances the clock and health without rewriting the
+    index or notifying the session.
     """
     import time as _time
 
-    from local_operator.monitors.store import is_held, read_index
+    from local_operator.monitors.store import effective_rows, is_held, read_index
     from local_operator.paths import config_dir
 
     root = config_dir()
@@ -10966,25 +10964,16 @@ def _monitor_rows() -> "list[dict[str, Any]]":
         # Aida engine for them — and ``is_held`` is the store's own spelling
         # for it, so this listing and the cleanup guards cannot disagree.
         dormant = is_held(entry)
-        for raw in entry.get("monitors") or ():
-            if not isinstance(raw, dict):
-                continue
+        for raw in effective_rows(root, session_id, entry):
             due = raw.get("next_due_at")
             due = due if isinstance(due, int) and not isinstance(due, bool) else None
             last = raw.get("last_check_at")
             last = last if isinstance(last, int) and not isinstance(last, bool) else 0
             rows.append(
                 {
-                    # THE INDEX ROW IS THE BASE (QA round 1, Q1). This listing used
-                    # to re-list the health fields by hand, and a hand-written list
-                    # can only ever be one change behind: it dropped ``failing`` and
-                    # ``empty_checks`` the moment they were added, so `lop monitor
-                    # status` kept printing "nothing has changed (confirm the call
-                    # observes what you expect)" for a watch that had been failing on
-                    # every tick — the incident's own sentence, in the one reader
-                    # that had the row in hand. Spreading it means any field added to
-                    # the index reaches every surface that shares
-                    # ``store.health_hint`` instead of reaching all but this one.
+                    # Forward the effective row: hand-selecting its fields here
+                    # previously dropped ``failing`` and ``empty_checks`` from
+                    # the CLI's shared health hint.
                     **raw,
                     "session_id": session_id,
                     "cwd": entry.get("cwd") or "",
@@ -11006,7 +10995,7 @@ def _monitor_rows() -> "list[dict[str, Any]]":
                     "unavailable_since": raw.get("unavailable_since") or 0,
                     "last_error": raw.get("last_error") or "",
                     # The blind state and the suppression counts: ``health_hint``
-                    # renders from the INDEX row, so a listing that dropped
+                    # renders from the status row, so a listing that dropped
                     # them could only ever say "nothing has changed" for a
                     # watch that was suppressing changes or comparing a
                     # truncated result.

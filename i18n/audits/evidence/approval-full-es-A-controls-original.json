@@ -1,0 +1,65 @@
+{
+  "runtime": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/local_operator/i18n/runtime.py",
+  "keys": 895,
+  "parse_and_structure_errors": [],
+  "argument_keys": [
+    [
+      "wire.settings.local_providers.base_url.label",
+      [
+        [
+          "name",
+          "simple"
+        ]
+      ]
+    ],
+    [
+      "wire.settings.local_providers.models.label",
+      [
+        [
+          "name",
+          "simple"
+        ]
+      ]
+    ]
+  ],
+  "plural_keys": [],
+  "missing_argument_checks": [
+    [
+      "wire.settings.local_providers.base_url.label",
+      "rejects missing arguments"
+    ],
+    [
+      "wire.settings.local_providers.models.label",
+      "rejects missing arguments"
+    ]
+  ],
+  "non_NFC": [],
+  "bidi_controls": [],
+  "over_declared_budget": [],
+  "new_labels": [
+    {
+      "key": "wire.settings.tool_approval_mode.choice.ask.label",
+      "en": "Ask",
+      "es": "preguntar",
+      "en_cells": 3,
+      "es_cells": 9,
+      "ast": [
+        "_Text"
+      ],
+      "literal_pseudo": "[preguntar~~~]",
+      "literal_pseudobidi": "⁧preguntar⁩"
+    },
+    {
+      "key": "wire.settings.tool_approval_mode.choice.auto.label",
+      "en": "Automatic",
+      "es": "automático",
+      "en_cells": 9,
+      "es_cells": 10,
+      "ast": [
+        "_Text"
+      ],
+      "literal_pseudo": "[automático~~~]",
+      "literal_pseudobidi": "⁧automático⁩"
+    }
+  ]
+}

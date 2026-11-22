@@ -149,6 +149,7 @@ from local_operator.i18n.keys import tui_app as _x
 from local_operator.i18n.keys import tui_asks as _ask_keys
 from local_operator.i18n.keys import tui_boot_prompt as _boot_prompt_keys
 from local_operator.i18n.keys import tui_library
+from local_operator.i18n.keys import tui_model_persistence as _model_persistence_keys
 from local_operator.i18n.keys import tui_notification_kinds as _kind_keys
 from local_operator.i18n.keys import tui_projects as _pc
 from local_operator.i18n.keys import tui_projects_edit as _pe
@@ -162,7 +163,7 @@ from local_operator.i18n.keys import tui_update as _upd
 from local_operator.i18n.keys import tui_welcome
 from local_operator.i18n.keys import wire_language_receipts as _lang_keys
 from local_operator.i18n.messages import Msg
-from local_operator.i18n.text import register_refresh, tr
+from local_operator.i18n.text import active_locale, register_refresh, tr
 from local_operator.logger import current_log_file
 
 # The `/mcp` verb helpers live with the verbs they serve, so the terminal and
@@ -261,7 +262,7 @@ from local_operator.tui.ask_open_policy import (
     read_queue,
 )
 from local_operator.tui.autocomplete import ArgumentChoice, SlashCommand
-from local_operator.tui.bridge_card_body import card_body_loader
+from local_operator.tui.bridge_card_body import card_body_loader, card_conversation
 from local_operator.tui.command_palette import (
     OperatorCommandPalette,
     OperatorCommandProvider,
@@ -360,6 +361,7 @@ from local_operator.tui.notify import (
     remote_park_banner,
     remote_park_card,
 )
+from local_operator.tui.provider_state import ProviderStateRow, provider_state_label
 from local_operator.tui.quota_notice import await_prewarm, start_prewarm
 from local_operator.tui.session_catalog import CatalogEntry, SidebarSettings
 from local_operator.tui.session_drafts import SessionDraftStore
@@ -439,7 +441,6 @@ from local_operator.tui.widgets.command_picker import (
 from local_operator.tui.widgets.copy_picker import CopyPickerScreen
 from local_operator.tui.widgets.editor import (
     ASIDE_PLACEHOLDER,
-    READ_ONLY_PLACEHOLDER,
     SHELL_PLACEHOLDER,
     ArgumentHighlightChanged,
     ArgumentQueryOpened,
@@ -466,6 +467,7 @@ from local_operator.tui.widgets.editor import (
     StopRequested,
     credential_payloads,
     expand_pastes,
+    read_only_placeholder,
     resolve_markers,
     substitute_credentials,
 )
@@ -490,7 +492,7 @@ from local_operator.tui.widgets.library_view import (
     LibraryViewLibrarianRequested,
 )
 from local_operator.tui.widgets.link_picker import LinkPickerScreen
-from local_operator.tui.widgets.model_picker import ModelRow
+from local_operator.tui.widgets.model_picker import PERSIST_CLAUSE_MARKER, ModelRow
 from local_operator.tui.widgets.move_picker import MovePickerScreen
 from local_operator.tui.widgets.move_workset_confirm import MoveWorkingSetConfirmScreen
 from local_operator.tui.widgets.network_panel import NetworkCommandRequested
@@ -724,6 +726,7 @@ _te_projects = tr("tui.projects")
 if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from pathlib import Path
 
+    from local_operator.agent_profiles import AgentFacts
     from local_operator.herdr import HerdrReporter
     from local_operator.info.collect import LiveState
     from local_operator.multiplexer import SessionBroadcast
@@ -7006,6 +7009,7 @@ class OperatorApp(App[None]):
         # The count has no event to hang off (see JOB_POLL_INTERVAL_S).
         self.set_interval(JOB_POLL_INTERVAL_S, self._poll_subagents)
         self.set_interval(1.0, self._poll_completion_attention)
+        self.set_interval(JOB_POLL_INTERVAL_S, self._poll_goal_recovery)
         self.set_interval(TEMPORARY_BAND_TICK_S, self._tick_temporary_band)
         self.set_interval(TERMINAL_LIFECYCLE_CHECK_S, self._check_terminal_frontend)
         # Prime the reader observation while mount still owns a known-live
@@ -12984,6 +12988,7 @@ class OperatorApp(App[None]):
         # The count has no event to hang off (see JOB_POLL_INTERVAL_S).
         self.set_interval(JOB_POLL_INTERVAL_S, self._poll_subagents)
         self.set_interval(1.0, self._poll_completion_attention)
+        self.set_interval(JOB_POLL_INTERVAL_S, self._poll_goal_recovery)
         self.set_interval(TEMPORARY_BAND_TICK_S, self._tick_temporary_band)
         self.set_interval(TERMINAL_LIFECYCLE_CHECK_S, self._check_terminal_frontend)
         # Prime the reader observation while mount still owns a known-live
@@ -14706,27 +14711,8 @@ class OperatorApp(App[None]):
         self._report_degraded_attach(session)
         self._submit_boot_prompt(session)
         self._submit_aida_prompt(session)
-        # TRIGGER 3, on the other owning host: a goal whose continuation was in
-        # flight when this terminal closed is re-engaged ONCE, here, where the
-        # restored record is readable and the session is current.
-        #
-        # Why this host needed its own wiring rather than inheriting the
-        # runtime's: `GoalJudge.rearm_on_resume` was called from exactly one
-        # place (`ServingSessionHandle.rearm_goal_judge`, wired once per boot in
-        # `server.py`), and the TUI builds its own driver whose ONLY caller was
-        # the turn-end hook. So a local session killed mid-continuation reopened
-        # with the goal reading `active` and the judge reading `continuing` and
-        # nothing to re-engage it until the user happened to type — the
-        # "silently sitting inert" case, in exactly the app-reopened shape the
-        # operator named (agent review round 1, MAJOR-1; reproduced: `judge_calls
-        # after boot = 0`, no prompt admitted).
-        #
-        # Once per BOOT and not per adoption: a sidebar switch re-adopts, and the
-        # record's state has moved on by then in every settled case — this is the
-        # restart prologue the runtime runs, not a rule about focus. The driver's
-        # own guard (RULINGS R3) refuses anything but `continuing`/`judging`, and
-        # its in-flight claim refuses a second run, so a re-arm that lands on a
-        # goal nothing was spending on is a no-op by construction.
+        # Only the local owner can spend; an attached TUI leaves retries to
+        # the runtime, including on boot.
         self._rearm_goal_judge_on_boot(session)
         # Bring the runtime up NOW rather than on the first keystroke. A cold
         # viewer can only paint what it reads off disk — the cwd and the
@@ -22717,8 +22703,9 @@ class OperatorApp(App[None]):
         routed ``/agent`` must send the same rows: a session with no TUI had
         only the ``noop`` the terminal's own resolver drew, so the phone's sheet
         offered ``/agent`` and the tap delivered nothing (review round 1,
-        R1-2/U2). This method stays as the app's seam — the settings pane and the
-        picker read it — and is a delegate rather than a copy.
+        R1-2/U2). This stays as the app's legacy string seam for listings and
+        the picker. Settings instead retains unrendered facts from that same
+        enumeration so a language repaint never needs to reread the registry.
         """
         session = self._session
         registry = getattr(session, "agent_registry", None) if session is not None else None
@@ -29818,7 +29805,7 @@ class OperatorApp(App[None]):
         state that genuinely changes what Enter does has one place to go.
         """
         if editor.read_only:
-            return READ_ONLY_PLACEHOLDER
+            return read_only_placeholder()
         if self._aside_is_open():
             return ASIDE_PLACEHOLDER
         if editor.shell_mode:
@@ -41426,7 +41413,7 @@ class OperatorApp(App[None]):
         view.load(
             teams=self._settings_team_rows(),
             agents=self._settings_agent_rows(),
-            providers=self._settings_provider_rows(),
+            provider_states=self._settings_provider_rows(),
             provider_catalogue=self._settings_provider_catalogue(),
             model_catalogue=self._settings_model_catalogue(),
         )
@@ -41479,36 +41466,41 @@ class OperatorApp(App[None]):
             logger.debug("settings: team rows unavailable", exc_info=True)
         return rows
 
-    def _settings_agent_rows(self) -> list[tuple[str, str, str]]:
+    def _settings_agent_rows(self) -> list[tuple[str, AgentFacts, str]]:
         """Agents as ``(display, facts, summary)`` for the settings pane.
 
-        The SAME shape ``_settings_team_rows`` returns, so the pane renders
-        both listings through one row renderer rather than carrying a second
-        layout for a second registry. The display form is UNBOUNDED here
+        Keep stable agent facts in this in-process snapshot: settings resolves
+        labels at paint time on language switches, without registry I/O. Teams
+        retain their legacy string adapter and the shared row layout.
+        The display form is UNBOUNDED here
         (mirroring the team pane): the pane truncates cells itself and the
         composed form is what a reader compares against the picker. Never
         raises: a broken registry renders as an empty list, and a settings
         page that crashed on a bad row would be unreachable exactly when it is
         needed.
         """
-        rows: list[tuple[str, str, str]] = []
+        from local_operator.agent_profiles import agent_listing_facts
+
+        rows: list[tuple[str, AgentFacts, str]] = []
         try:
-            for name, label, facts, summary in self._agent_profile_rows():
+            session = self._session
+            registry = getattr(session, "agent_registry", None) if session is not None else None
+            for name, label, facts, summary in agent_listing_facts(registry):
                 rows.append((self._agent_display_form(name, label), facts, summary))
         except Exception:  # noqa: BLE001 — a bad registry must not break the page
             logger.debug("settings: agent rows unavailable", exc_info=True)
         return rows
 
-    def _settings_provider_rows(self) -> list[tuple[str, str]]:
-        """Logged-in providers as ``(id, state)`` for the settings pane.
+    def _settings_provider_rows(self) -> list[ProviderStateRow]:
+        """Logged-in providers as immutable coded rows for the settings pane.
 
         The states come from the controller's ONE view (``view_rows``, through
-        :data:`_VIEW_STATE_COPY`) rather than a locally-invented vocabulary, so
+        the presentation resolver) rather than a locally-invented vocabulary, so
         this pane, ``/provider``, the ``/login`` picker and the desktop's census
         keep describing one situation with one set of words — the drift this
         surface already records having had.
         """
-        rows: list[tuple[str, str]] = []
+        rows: list[ProviderStateRow] = []
         providers = self._providers
         if providers is None:
             return rows
@@ -41522,7 +41514,7 @@ class OperatorApp(App[None]):
                     # the narrower "who am I logged in as", which is the half
                     # that bears on which default model will work.
                     continue
-                rows.append((definition.id, _VIEW_STATE_COPY[row.state]))
+                rows.append(ProviderStateRow(definition.id, row.state))
         except Exception:  # noqa: BLE001 — never crash the page on a store read
             logger.debug("settings: provider rows unavailable", exc_info=True)
         return rows
@@ -44534,7 +44526,9 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — a note is never worth a broken prompt
             logger.debug("the parked approval card could not be annotated", exc_info=True)
 
-    def _system_notice(self, body: str, kind: NoticeKind = "info") -> None:
+    def _system_notice(
+        self, body: str, kind: NoticeKind = "info", *, wrap_atoms: tuple[str, ...] = ()
+    ) -> None:
         """A notice about the HARNESS that leaves the empty state intact.
 
         Separate from :meth:`_notice` because the two answer different questions.
@@ -44550,10 +44544,15 @@ class OperatorApp(App[None]):
         (``NoticeFn``); a caller that must keep the block calls
         :meth:`_system_notice_block` instead.
         """
-        self._system_notice_block(body, kind)
+        self._system_notice_block(body, kind, wrap_atoms=wrap_atoms)
 
     def _system_notice_block(
-        self, body: str, kind: NoticeKind = "info", *, fold_width: int = 0
+        self,
+        body: str,
+        kind: NoticeKind = "info",
+        *,
+        fold_width: int = 0,
+        wrap_atoms: tuple[str, ...] = (),
     ) -> NoticeBlock:
         """The same notice, handing back the block it created.
 
@@ -44574,7 +44573,7 @@ class OperatorApp(App[None]):
         1, Q1 measured it on the real fixture: nine rows at ``[2,1,2,2,1,1,1,2,2]``
         with ``gap-above`` on all of them, then all 1 row with one gap.
         """
-        block = NoticeBlock(body, kind, fold_width=fold_width)
+        block = NoticeBlock(body, kind, fold_width=fold_width, wrap_atoms=wrap_atoms)
         # While the boot CARD is up the notice is part of a centred composition;
         # below the card threshold the input is a full-width bar and the spine is
         # the axis everything shares. `_append_block` recomputes the boot layout
@@ -47869,7 +47868,7 @@ class OperatorApp(App[None]):
         self._run_session_transition(self._boot_after_setup())
 
     def _footer_persist_hint(self) -> str:
-        """``PERSIST_HINT`` for the picker footer, or "" where it cannot be run.
+        """The persistence clause HANDLE for the picker footer, or "" where it cannot run.
 
         The footer's half of U12. The notice above the list stops naming
         `/model default` in the no-hosting and unknown-hosting setup variants
@@ -47890,12 +47889,29 @@ class OperatorApp(App[None]):
         whose launches it should govern" refusal. That case is pre-existing and
         outside #641's scope — recorded here rather than fixed so the next
         reader does not take the coupling for wider than it is.
+
+        THE RETURN VALUE IS A MARKER, NOT THE SENTENCE. The clause is copy with
+        an audited key in every shipped locale (``tui.model_persistence.persist``),
+        and this method's string is only ever handed to
+        ``ModelPicker.set_rows(status=…)``, whose consumer is the WIDGET's paint.
+        The app composes the status when it populates the list; the footer is
+        repainted later on events the app never sees (a resize, a scroll, a
+        keystroke, a locale move), so an English sentence baked in here kept
+        painting English after a language switch — the last authored-English
+        surface behind a localized interface. The marker defers the resolution to
+        that paint, in the active locale; see ``model_picker.PERSIST_CLAUSE_MARKER``.
+
+        ``PERSIST_HINT`` is untouched and still the ENGLISH adapter for the legacy
+        CLI/help/receipt consumers (the catalogue's own note names them), and
+        ``PERSIST_HINT_PREFIX`` still recognises a string that carries it. Neither
+        is fed to, nor fed by, this marker: the prefix parser never sees the
+        marker or a translated clause.
         """
         if self._setup_state and not self._model_missing_for:
             return ""
-        return PERSIST_HINT
+        return PERSIST_CLAUSE_MARKER
 
-    def _persist_hint_notice(self) -> str:
+    def _persist_hint_notice(self, *, label: str | None = None) -> str:
         """The line a bare ``/model`` prints above the list.
 
         It says the one thing the picker cannot: that a pick is session-scoped
@@ -47914,6 +47930,17 @@ class OperatorApp(App[None]):
         names is one the user has to already know), and that the default is
         also editable on the settings page, which is the discoverable route for
         a user who did not arrive with a command in mind.
+
+        THAT PARAGRAPH IS NOW HISTORY, AND STILL THE RIGHT REASON (the footer
+        localization slice). The picker footer no longer prints ``PERSIST_HINT``:
+        it prints ``tui.model_persistence.persist``, resolved at paint time from
+        the marker ``model_picker.PERSIST_CLAUSE_MARKER``, and in several shipped
+        locales that clause is LONGER than the English one. So the 43-cell
+        arithmetic below describes the English adapter this notice used to
+        duplicate, not today's footer row — and the conclusion stands unweakened:
+        the footer is a fixed-width row that truncates, the notice is the surface
+        that wraps, so the pair belongs here. ``PERSIST_HINT`` itself is unchanged
+        for the legacy CLI/help/receipt consumers.
 
         The measurement above is about the NOTICE's own last row and about
         command names spanning a fold — nothing stronger (QA round 1, Q1). An
@@ -48026,11 +48053,16 @@ class OperatorApp(App[None]):
         the primary next step it always was. Pinned by
         `test_the_model_notice_in_dead_end_setup_variants_names_only_settings`.
         """
-        session = self._session
-        label = session.model_label if session is not None else ""
-        # Named once: it is the one clause every variant below shares, and the
-        # wrap analysis above measured this exact string.
-        settings_clause = "/settings edits the boot default too"
+        if label is None:
+            session = self._session
+            label = session.model_label if session is not None else ""
+        # Resolve only this new opening, never historical transcript content.
+        # One locale snapshot keeps the clauses and their carrier consistent;
+        # the next opening follows a live language change without translating
+        # import-time PERSIST_HINT, which legacy CLI/footer parsers still own.
+        locale = active_locale()
+        settings_clause = _model_persistence_keys.settings().envelope(locale=locale)["text"]
+        persist_clause = _model_persistence_keys.persist().envelope(locale=locale)["text"]
         # `/model saved` sits at its clause's END, which is what removes the
         # split: as the clause's FIRST word it sat one word from the `·` seam
         # and broke across the fold at 4 of the 27 rendered label x width
@@ -48048,18 +48080,23 @@ class OperatorApp(App[None]):
         # naming an occasion to use it (UX review round 2, U6), and it measures
         # better on both width families, not worse: pristine C3 3 -> 2 and
         # non-empty C2 5 -> 3, with C1 and pristine C2 still 0.
-        saved_clause = "switch to the boot default with /model saved"
+        saved_clause = _model_persistence_keys.saved().envelope(locale=locale)["text"]
         if self._setup_state and not self._model_missing_for:
             # No hosting / unknown hosting: every `/model` route refuses here,
             # so the notice must not name one. `/settings` is the live escape.
             routes = settings_clause
         elif self._setup_state:
-            routes = f"{PERSIST_HINT} · {settings_clause}"
+            routes = f"{persist_clause} · {settings_clause}"
         else:
-            routes = f"{PERSIST_HINT} · {saved_clause} · {settings_clause}"
+            routes = f"{persist_clause} · {saved_clause} · {settings_clause}"
         if not label:
             return routes
-        return f"model: {label} — {routes}"
+        # The model label is an opaque machine identifier, not markup or copy.
+        # Keep it unchanged inside the existing plain-text notice envelope;
+        # dedup still compares rendered text and skips the pinned working tail.
+        return _model_persistence_keys.with_model(label=label, routes=routes).envelope(
+            locale=locale
+        )["text"]
 
     # -- reasoning effort ---------------------------------------------------
     def _effort_levels(self) -> tuple[str, ...]:
@@ -48837,16 +48874,17 @@ class OperatorApp(App[None]):
         # The composer's PAINTED placeholder is a property on the widget, not a
         # render-time lookup, so a locale move leaves it in the old language. It
         # is a SHARED channel (bang-mode, the aside, read-only, the credential
-        # prompt and the setup cue all write it), so only a composer still
-        # showing the RESTING invitation is repainted: comparing against the
-        # pre-switch resting text keeps another mode's placeholder untouched.
+        # prompt and the setup cue all write it). Repaint the read-only hint as
+        # well as the RESTING invitation: its keyed prose must follow a locale
+        # move even while the page owns focus. Other modes retain their copy;
+        # comparing the resting text avoids overwriting a credential prompt.
         try:
             composer = self.query_one(Editor)
         except Exception:  # noqa: BLE001 — not mounted yet (boot, teardown)
             composer = None
         resting_before = composer.resting_placeholder if composer is not None else ""
         i18n_text.set_active_locale(locale)
-        if composer is not None and composer.placeholder == resting_before:
+        if composer is not None and (composer.read_only or composer.placeholder == resting_before):
             composer.placeholder = self._composer_placeholder_for(composer)
         # The slash registry re-materialises its own descriptions in place (its
         # ``register_refresh`` hook), which reaches ``/help`` because that block
@@ -48857,6 +48895,18 @@ class OperatorApp(App[None]):
         # call, so the rows on screen repaint rather than waiting for the next
         # keystroke (QA round 1, Q1). Silent when no editor is mounted.
         self._refresh_offered_commands()
+        # The model picker's FOOTER is painted text too, and its persistence
+        # clause is resolved by the WIDGET at paint time
+        # (``model_picker.PERSIST_CLAUSE_MARKER``) rather than baked into the
+        # status the app hands it — so an open `/model` list has to be repainted
+        # here or it keeps the previous language until an unrelated event
+        # redraws it. `refresh_locale` re-renders only what the widget already
+        # holds: no catalogue read (that is ``_populate_model_picker``, which
+        # also dispatches the live-refresh worker) and no provider request, so a
+        # locale move still costs one paint.
+        picker = composer.model_picker if composer is not None else None
+        if picker is not None and picker.is_open():
+            picker.refresh_locale()
         # Localized transcript furniture is baked into finalized blocks just as
         # theme ink is. Reuse that same rebuild sweep so a locale move repaints
         # mounted rows at their CURRENT width, with no resize or stale cache.
@@ -48884,6 +48934,16 @@ class OperatorApp(App[None]):
         settings_view = self._settings_view
         if settings_view is not None:
             settings_view._repaint()
+        # /info owns painted Statics, not render-time lookups. Repaint the
+        # existing presentation through this shared command/config-watch hook:
+        # re-opening it would lose its snapshot/scroll and re-run costly probes.
+        # Walking the mounted stack also covers an InfoScreen under a modal;
+        # no process-global listener retains a dismissed presentation.
+        from local_operator.tui.widgets.info_panel import InfoScreen
+
+        for screen in self.screen_stack:
+            if isinstance(screen, InfoScreen):
+                screen._repaint()
 
     def _apply_theme(self, name: str, *, preview: bool = False) -> None:
         """Switch every rendering surface to ``name``, live.
@@ -49776,7 +49836,7 @@ class OperatorApp(App[None]):
         message worth reading.
 
         The states are the controller's ONE view (``view_rows``, through
-        :data:`_VIEW_STATE_COPY`), not a fourth vocabulary invented here, so
+        :func:`provider_state_label`), not a fourth vocabulary invented here, so
         `/model`, `/provider`, the settings pane and the `/login` picker keep
         describing one situation with one set of words.
         """
@@ -49796,10 +49856,10 @@ class OperatorApp(App[None]):
         # A provider the registry does not know is ``needs login``: no env var
         # resolves for it and no login flow exists, which is exactly what the
         # old per-provider derivation answered for an unknown id.
-        state = _VIEW_STATE_COPY[row.state] if row is not None else _VIEW_STATE_COPY["needs_login"]
-        if state == "needs login":
+        state_code = row.state if row is not None else "needs_login"
+        if state_code == "needs_login":
             return "", f"{provider} needs login — /login {provider}"
-        return f" · {provider} {state}", None
+        return f" · {provider} {provider_state_label(state_code)}", None
 
     # -- model picker -------------------------------------------------------
     def on_model_query_opened(self, message: ModelQueryOpened) -> None:
@@ -49845,7 +49905,11 @@ class OperatorApp(App[None]):
         must both print.
         """
         message.stop()
-        hint = self._persist_hint_notice()
+        # Snapshot opaque identity once for both text and layout metadata. An ID
+        # may itself contain command-looking text; never parse it out of copy.
+        session = self._session
+        label = session.model_label if session is not None else ""
+        hint = self._persist_hint_notice(label=label)
         transcript = self._transcript_view()
         blocks = transcript.blocks()
         pinned = transcript.pinned_tail()
@@ -49853,7 +49917,9 @@ class OperatorApp(App[None]):
         # mid-turn append actually lands.
         last = next((b for b in reversed(blocks) if b is not pinned), None)
         if not (isinstance(last, NoticeBlock) and last.text() == hint):
-            self._system_notice(hint)
+            self._system_notice(
+                hint, wrap_atoms=(label, "/model default", "/model saved", "/settings")
+            )
         self._populate_model_picker()
 
     def _open_model_picker(self) -> None:
@@ -50863,7 +50929,9 @@ class OperatorApp(App[None]):
             group=self._interaction.worker_group("loop"),
         )
 
-    async def _admit_goal_continuation(self, session: Any, text: str, echo: Any) -> None:
+    async def _admit_goal_continuation(
+        self, session: Any, text: str, echo: Any, *, current: Callable[[], bool]
+    ) -> None:
         """Admit ONE judge continuation, deferred until the session can take it.
 
         See :data:`_GOAL_CONTINUATION_ADMISSION_S` for why the wait is here at
@@ -50887,10 +50955,14 @@ class OperatorApp(App[None]):
         """
         from local_operator.session.errors import TurnInFlight
 
-        fields: dict[str, Any] = dict(echo.prompt_kwargs())
+        # Session excludes harness-injected rows from owner authority. Passing
+        # owner_typed=False would also label this local turn as remote human input.
+        fields = echo.prompt_kwargs()
 
         deadline = time.monotonic() + _GOAL_CONTINUATION_ADMISSION_S
         while True:
+            if not current():
+                raise RuntimeError("goal continuation no longer current")
             try:
                 await self._prompt_loop_turn(session, text, **fields)
                 return
@@ -51147,6 +51219,28 @@ class OperatorApp(App[None]):
             return answer or ""
 
         async def prompt(text: str) -> None:
+            from local_operator.harness.types import AgentEndEvent
+            from local_operator.session.errors import FirstTurnFailed
+
+            context = (record.goal_token, record.goal_turn_serial)
+
+            def current() -> bool:
+                return (
+                    self._interactions.get(id(session)) is source
+                    and not source.loop.running
+                    and record.goal_status == "active"
+                    and (record.goal_token, record.goal_turn_serial) == context
+                )
+
+            failure = ""
+
+            def observe(event: Any) -> None:
+                nonlocal failure
+                if isinstance(event, AgentEndEvent) and (event.error or event.aborted):
+                    failure = str(event.error or "goal continuation aborted")
+
+            subscribe = getattr(session, "subscribe", None)
+            unsubscribe = subscribe(observe) if callable(subscribe) else None
             source.turn.operation += 1
             if self._is_current(source) and self._status is not None:
                 self._status.update(streaming=True)
@@ -51160,7 +51254,9 @@ class OperatorApp(App[None]):
                 # `_prompt_loop_turn` — which prefers `prompt_and_wait`, so the
                 # driver AWAITS the terminal outcome and judges the turn it just
                 # admitted instead of correlating an event.
-                await self._admit_goal_continuation(session, text, echo)
+                await self._admit_goal_continuation(session, text, echo, current=current)
+                if failure:
+                    raise FirstTurnFailed(failure)
             except BaseException:
                 # A refused admission (a retiring session) never announces, so
                 # take the echo entry back out — otherwise it would swallow the
@@ -51171,6 +51267,9 @@ class OperatorApp(App[None]):
                 if self._is_current(source):
                     self._retire_turn_band(session)
                 raise
+            finally:
+                if callable(unsubscribe):
+                    unsubscribe()
             if self._is_current(source):
                 self._retire_turn_band(session)
 
@@ -51214,19 +51313,34 @@ class OperatorApp(App[None]):
             # The loop check is a CALLBACK over the interaction's own flag, so a
             # loop that ends re-enables this judge with no bookkeeping.
             loop_running=lambda: source.loop.running,
+            context_available=lambda: self._interactions.get(id(session)) is source,
+            recovery_idle=lambda: not getattr(session, "is_streaming", False),
         )
 
+    def _poll_goal_recovery(self) -> None:
+        for source in list(self._interactions.values()):
+            if source.session is not None:
+                self._rearm_goal_judge_on_boot(source.session)
+
     def _rearm_goal_judge_on_boot(self, session: SessionProtocol) -> None:
-        """Trigger 3 on this host: re-engage a judge that was in flight at close.
-
-        Called once per boot, after adoption, for the reasons stated at the call
-        site. Deferred to a worker rather than awaited: boot must not wait on a
-        provider call, and nothing here is the session's boot outcome.
-        """
-        from local_operator.session.goal_judge import owns_the_session
-
-        source = self._interaction
-        if session is None or not owns_the_session(session) or source.goal.judge_in_flight:
+        """Recover a due local goal when no turn or loop owns the session."""
+        source = self._interactions.get(id(session))
+        if source is None:
+            return
+        if (
+            source.goal.judge_in_flight
+            or source.loop.running
+            or getattr(session, "is_streaming", False)
+            or (lock := getattr(session, "_turn_lock", None)) is not None
+            and lock.locked()
+        ):
+            return
+        # Wake eligibility belongs to the goal's owner, not the attached viewer.
+        record = self._goal_record_for(session)
+        if record is None:
+            return
+        due = getattr(record, "goal_recovery_due", None)
+        if not callable(due) or not due():
             return
         source.goal.judge_in_flight = True
         try:
@@ -51772,7 +51886,7 @@ class OperatorApp(App[None]):
             items: list[tuple[str, str]] = []
             for definition in self._providers.login_providers():
                 # ONE state vocabulary, resolved in ONE place (the controller's
-                # ``view_rows``, rendered through ``_VIEW_STATE_COPY``). This
+                # ``view_rows``, rendered through ``provider_state_label``). This
                 # line, the ``/login`` picker, the settings pane and the
                 # desktop's census answer the same question on four surfaces,
                 # and two of them had already drifted: the picker said "needs
@@ -55230,13 +55344,13 @@ class OperatorApp(App[None]):
         """
         if row is None:
             return ""
-        return getattr(row, "state_detail", None) or _VIEW_STATE_COPY[row.state]
+        return getattr(row, "state_detail", None) or provider_state_label(row.state)
 
     def _login_choices(self) -> list[ArgumentChoice]:
         """Every loginable provider, with where the user stands on each.
 
         The states come from the controller's ONE view (``view_rows``) through
-        :data:`_VIEW_STATE_COPY`, so this list, ``/provider``, the settings pane
+        :func:`provider_state_label`, so this list, ``/provider``, the settings pane
         and the desktop's census render one fact from one derivation — the
         picker and ``/provider`` had drifted before ("needs login" against "—").
 
@@ -64267,6 +64381,7 @@ class OperatorApp(App[None]):
                     body_loader=card_body_loader(
                         getattr(self, "_session", None), message.message_id or ""
                     ),
+                    conversation=card_conversation(message.details),
                 )
             )
         else:
@@ -67254,28 +67369,6 @@ def _tree_listing(
 #: credential, the plural for a row removing several of ONE kind
 #: (``remove 2 oauth logins`` — the count a bare kind would hide).
 _CREDENTIAL_KINDS = {"oauth": ("oauth", "oauth logins"), "api_key": ("api key", "api keys")}
-
-
-#: The WORDS for the controller's machine states (``ProviderViewRow.state``,
-#: spelled :data:`local_operator.providers.controller.VIEW_STATES`).
-#:
-#: The machine state is ONE fact and is owned by the backend, which is what
-#: lets the desktop render it as its own copy and the census publish it as an
-#: enum; this table is the TUI's copy of it, kept here rather than derived from
-#: the enum so a wording change does not silently rewrite a wire contract.
-#:
-#: The five strings are exactly the ones the TUI printed before the enum existed
-#: (``_credential_state``), pinned by ``tests/unit/tui`` so a surface can never
-#: invent a sixth vocabulary. An unknown state is a ``KeyError`` on purpose: a
-#: row that renders as blank would read as "nothing to say" when it means "this
-#: app does not understand the backend".
-_VIEW_STATE_COPY: dict[str, str] = {
-    "logged_in": "logged in",
-    "env_key": "env key",
-    "needs_login": "needs login",
-    "local_ready": "configured server",
-    "local_unconfigured": "configure server",
-}
 
 
 #: Cells an identity may spend inside a `/logout` row's detail column.

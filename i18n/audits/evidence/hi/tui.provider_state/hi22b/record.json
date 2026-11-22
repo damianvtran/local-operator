@@ -1,0 +1,90 @@
+{
+  "locale": "hi",
+  "namespace": "tui.provider_state",
+  "audit_date": "2026-11-22",
+  "key_count": 5,
+  "audit_pass": "independent B",
+  "source_audit_revision": "2b924d84f0e663302fd93a7b36411ee6035576fe",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "7d0c5bb3f103",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "actual_model_source": "Host model-switch notice; no fresh served-response telemetry collected; not inferred from initial model header",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota",
+      "qualification": "host-reported, not telemetry-certified"
+    }
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "520071768802",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Fresh served-response transcript payload.usage.provider/model_id, extracted during this task; see provenance.json",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota; model-switch notice before authoring"
+    },
+    "independent_from_translator_session": false
+  },
+  "translator_identity_source": "i18n/audits/evidence/hi/tui.provider_state/hi22a/provenance.json",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.json",
+      "sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.context.json",
+      "sha256": "67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be"
+    },
+    "hi": {
+      "path": "local_operator/i18n/catalogues/hi/tui.provider_state.json",
+      "sha256": "6842f379ee5668e28c087ef764491411da67b5580ade695a03164975364da7b1"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/hi22b/report.md",
+      "sha256": "41b505f58a627f1d7bf79bde92fd22751ea1b9e29a95748a175d1e5c687ba390"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/hi22b/script.py.txt",
+      "sha256": "bea0fa6dfc984a42f224cfd8bcab6732873953892e4fdc382b84181124929403"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/hi22b/audit.log",
+      "sha256": "d9b9b17c1765105ce6e2ce4c8d78b2bf8d943298cb25c136665b5f8dfce9a624"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/hi22b/directledger-receipt.json",
+      "sha256": "af2b5a0be5b288b239986ca7f3fde5d74485553039363b8b301d489af5a83adf"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/hi22b/ledger-dry-run.log",
+      "sha256": "b815a1c11038c32c6f8b22658e5e06a86b09f8b9dc724861356da86399695f4f"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "findings_report": "i18n/audits/evidence/hi/tui.provider_state/hi22b/report.md",
+  "notes_kind": "audit_notes_not_execution_log",
+  "execution_log": "i18n/audits/evidence/hi/tui.provider_state/hi22b/audit.log",
+  "validation_exit_code": 0,
+  "ledger_applied": false,
+  "limitations": [
+    "Lexical B only",
+    "No native font or live UI evidence",
+    "Current producer still English",
+    "Model host-reported; no fresh served telemetry"
+  ],
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false,
+  "ledger_dry_run_exit_code": 0
+}

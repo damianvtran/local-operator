@@ -1,0 +1,69 @@
+"""Author remediation mechanical validation only; no independent audit or native proof."""
+from pathlib import Path
+from collections import Counter
+from unittest.mock import patch
+import hashlib, importlib.util, json, os, re, sys, unicodedata
+from local_operator.i18n import catalogues, runtime
+ROOT=Path('/Users/damian/local-operator/.worktrees/i18n-model-persist-notice')
+NS='tui.model_persistence'
+OLD={'tui.model_persistence.persist': '/model default से इस मॉडल को नए सत्रों के डिफ़ॉल्ट के रूप में सहेजें', 'tui.model_persistence.settings': '/settings से भी नए सत्रों का डिफ़ॉल्ट बदलें', 'tui.model_persistence.saved': '/model saved से इस सत्र में सहेजे गए डिफ़ॉल्ट पर जाएँ', 'tui.model_persistence.with_model': 'मॉडल: {label} — {routes}'}
+PROTECTED={'i18n/audits/evidence/hi/tui.model_persistence/B-a776/record.json': '4ede38b78183d6a0dd5e01c4299a53223b719adc11593601a3c14cfb699c98e0', 'i18n/audits/evidence/hi/tui.model_persistence/B-a776/report.md': '77d6afc960f430a4f585a24807ea19878994c23730a0c542f252f6b9dcebd11d', 'i18n/audits/evidence/hi/tui.model_persistence/B-a776/script.py.txt': '1c96bd9dd820612ab0345498b5eadc64c18e049141554e2d27994a120e91c471', 'i18n/audits/evidence/hi/tui.model_persistence/B-a776/audit.log': 'a744d9a0dcc16636846518f4b1274f66fd6b8fe3deea676f3999e8ea4f82720a', 'i18n/audits/evidence/hi/tui.model_persistence/B-a776/receipt.json': 'bc738b061d9f074e25dd8b88cff0c71f5f0a93447483aa30b9778f94d43672a3', 'i18n/audits/evidence/hi/tui.model_persistence/a29fd/record.json': 'bd327b9852c66e475741e92338c86662d6981029fb7b667196136d5ef43b2a25', 'i18n/audits/evidence/hi/tui.model_persistence/a29fd/report.md': 'a5a5c8786744195a289eb62293224c750856d538c8c4f1630bcc48f583a920f8', 'i18n/audits/evidence/hi/tui.model_persistence/a29fd/script.py.txt': 'dcd882715d2167ae43b95df4dd6a73c1bd98b832ee7aa8823256c18089ba4a37', 'i18n/audits/evidence/hi/tui.model_persistence/a29fd/audit.log': '210277cbb72e7f72b66101451ca08ac996d100c9cd033430a2146a288fd82445', 'i18n/audits/evidence/hi/tui.model_persistence/a29fd/receipt.json': '36e0e4c02cce4ad4fe9060344e5ac9861ec20f46e31027f805250ec27786f17d', 'i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/record.json': 'a5cee43a196c261c0896e7d5921f3c637a180330866cfb84a93316724969bd8e', 'i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/initial-attempt.log': 'fe2e1bb54cfd5d652f1d3d044895893430c5644577eb0d73ff0e4bdd5551aabb', 'i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/audit.log': '4ac41baf6debac4ed0523132656d89d6444d83516525f10483698fda65d22c60', 'i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/validator.py.txt': '0dc66292dabeba398d0c62464480d77bee1e82fdce73b03bcff7250ec675c485', 'i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/notes.md': '06e7324edd9edc13d76f35313d8df75528e388fc87958e96082d1e76c486b34c', 'i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/receipt.json': 'f4a261eeca3ae7078bdd8419425a85652511308ed79a0bd4420c0acba9d23287', 'i18n/audit-history/hi/tui.model_persistence.json': '51f168e3aff7e8bdded1e0374df86ed3f7f34b9f4142d528d84a9c1f8f23499c'}
+sha=lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+assert str(Path.home()).startswith('/Users/damian/.local-operator/sessions/fdf96049990f/scratchpad/')
+assert not any(k.startswith('CMUX_') for k in os.environ)
+assert os.environ['LOCAL_OPERATOR_CONFIG_DIR'].startswith(str(Path.home()))
+for mod in (catalogues,runtime):
+ assert Path(mod.__file__).resolve().is_relative_to(ROOT)
+ print('MODULE',mod.__name__,mod.__file__)
+print('ISOLATION PASS scratch HOME/config; CMUX absent')
+paths={x:ROOT/f'local_operator/i18n/catalogues/{x}/{NS}.json' for x in ('en','hi')}
+paths['context']=ROOT/f'local_operator/i18n/catalogues/en/{NS}.context.json'
+hashes={k:sha(v) for k,v in paths.items()}
+assert hashes['en']=='4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff'
+assert hashes['context']=='b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc'
+en=catalogues.load_catalogue('en',NS); hi=catalogues.load_catalogue('hi',NS); ctx=catalogues.context('en',NS)
+assert list(en)==list(hi)==list(ctx)==list(OLD) and len(hi)==4
+assert [k for k in hi if hi[k]!=OLD[k]]==[NS+'.saved']
+print('UNCHANGED OTHER THREE VALUES PASS', [k for k in hi if hi[k]==OLD[k]])
+spec=importlib.util.spec_from_file_location('scoped_check',ROOT/'scripts/i18n/check.py')
+check=importlib.util.module_from_spec(spec);sys.modules[spec.name]=check;spec.loader.exec_module(check)
+original_load=catalogues.load_catalogue
+with patch.object(catalogues,'locales',return_value=('en','hi')),patch.object(catalogues,'namespaces',return_value=(NS,)):
+ problems=check.check_catalogues()
+ assert problems==[],problems
+ print('OFFICIAL SCOPED CHECK',problems)
+ for name,mutate in [('missing-key',lambda d:d.pop(NS+'.saved')),('missing-arg',lambda d:d.update({NS+'.with_model':'मॉडल: {label}'}))]:
+  bad=dict(hi);mutate(bad)
+  def load(locale,namespace):return bad if locale=='hi' else original_load(locale,namespace)
+  with patch.object(catalogues,'load_catalogue',side_effect=load):
+   failures=check.check_catalogues();assert failures
+   print('NEGATIVE CHECK PASS',name,failures)
+controls=set(range(0x202a,0x202f))|set(range(0x2066,0x206a))|{0x200e,0x200f,0x061c}
+for k in hi:
+ assert unicodedata.normalize('NFC',hi[k])==hi[k]
+ assert not any(ord(c) in controls for c in hi[k])
+ assert catalogues.context_entry_problem(ctx[k]) is None
+ assert runtime.message_arguments(en[k])==runtime.message_arguments(hi[k])
+ assert Counter(re.findall(r'\{(\w+)\}',en[k]))==Counter(re.findall(r'\{(\w+)\}',hi[k]))
+ for v in (en[k],hi[k]):
+  assert runtime.plural_selectors(v)==()
+  assert not any(getattr(n,'kind',None) in ('plural','select','selectordinal') for n in runtime.parse_message(v))
+ for token in ('/model default','/model saved','/settings'):
+  assert en[k].count(token)==hi[k].count(token)==OLD[k].count(token)
+ print('KEY PASS',k,'NFC, commands, args, zero plural/select arms')
+for locale,data in [('en',en),('hi',hi)]:
+ routes=' · '.join(runtime.render_message(data[NS+'.'+s],{},locale) for s in ('persist','saved','settings'))
+ for label in ('openai/gpt-6','provider/opaque-model-20261122-{not_a_placeholder}[flag]--long-0123456789'):
+  text=runtime.render_message(data[NS+'.with_model'],{'label':label,'routes':routes},locale)
+  assert text.count(label)==text.count(routes)==1
+  print('RENDER',locale,repr(text))
+for missing in ('label','routes'):
+ args={'label':'provider/{opaque}','routes':'पहले से स्थानीयकृत {opaque} /settings'};args.pop(missing)
+ try:runtime.render_message(hi[NS+'.with_model'],args,'hi')
+ except runtime.MessageFormatError as exc:print('NEGATIVE RENDER PASS',missing,str(exc))
+ else:raise AssertionError('Missing arg accepted')
+for p,h in PROTECTED.items():assert sha(ROOT/p)==h,p
+print('HISTORY AND ORIGINAL EVIDENCE IMMUTABLE PASS',len(PROTECTED),'files')
+for k,p in paths.items():assert sha(p)==hashes[k]
+print('HASHES BEFORE-AFTER',json.dumps(hashes,sort_keys=True))
+print('PASS translated-remediation mechanical checks only; no self-audit/native/UI/release clearance')

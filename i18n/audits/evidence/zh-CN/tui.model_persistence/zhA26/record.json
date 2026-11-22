@@ -1,0 +1,55 @@
+{
+  "locale": "zh-CN",
+  "namespace": "tui.model_persistence",
+  "audit_date": "2026-11-22",
+  "key_count": 4,
+  "record_kind": "incomplete_independent_audit_attempt",
+  "source_audit_revision": "c40586cd0ae23ca25a6c82c26c4f867271c4e01f",
+  "auditor": {
+    "agent": "i18n-auditor / model-notice-zhCN-audit-A",
+    "session": "26adce0a0cfa",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "58dee179aac0",
+    "actual_model_source": "Explicit session model-switch message: provider failure quota, temporary fallback from anthropic/claude-opus-5-5",
+    "fallback_used": true,
+    "fallback_from": "anthropic/claude-opus-5-5"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.json",
+      "sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.context.json",
+      "sha256": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc"
+    },
+    "zh-CN": {
+      "path": "local_operator/i18n/catalogues/zh-CN/tui.model_persistence.json",
+      "sha256": "c9fb6447f1e19037cf40808089111d4980f5fd96d3e905d843f797230b9329b0"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.model_persistence/zhA26/report.md",
+      "sha256": "4285bdcbde433b77f1dea4e9dff2beba89046832d6cb53339825d13cac447528"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.model_persistence/zhA26/hash-check.log",
+      "sha256": "b8f10410106ae7bf46b68045b437f4ca72036bf385cb9823eddb900e6d346118"
+    }
+  ],
+  "artifact_roles": {
+    "report.md": "audit_notes_not_execution_log",
+    "hash-check.log": "actual_hash_check_execution_output"
+  },
+  "current_report_verdict": {
+    "status": "blocked",
+    "unresolved_blocker_major_count": null,
+    "finding_ids": [],
+    "reason": "Approved public-copy reader refuses uncommitted target; no completed target audit."
+  },
+  "ledger_receipt_produced": false,
+  "target_content_read": false,
+  "target_validator_executed": false,
+  "backdated": false
+}

@@ -16,9 +16,17 @@ text is :func:`tier_label`, which returns the keyed message.
 NEVER "radient spot". The capacity mode is a property of the run an operator is
 composing; it is not a branded product tier, and naming it as one implied a
 separate offering that does not exist.
+
+THE SERVER HAS ITS OWN WORDS, AND THIS IS WHERE THEY ARE TRANSLATED. The capacity
+read answers ``fargate``/``kubernetes`` — where the deployment runs the work — and
+that is not what a picker offers. :data:`SERVER_TIER_TO_TIER` is the ONE join
+between the two vocabularies; no caller compares a row against the server's word.
 """
 
 from __future__ import annotations
+
+from collections.abc import Mapping
+from types import MappingProxyType
 
 from local_operator.i18n.keys import wire_remote_compute as _wr
 from local_operator.i18n.messages import Msg
@@ -26,6 +34,25 @@ from local_operator.i18n.messages import Msg
 #: The tiers, in the order a picker shows them: on-demand first, because it is
 #: the default and the cheap one to reason about.
 TIERS: tuple[str, ...] = ("cloud_run", "dedicated")
+
+#: The SERVER's tier literal → this build's tier id.
+#:
+#: The server names capacity by WHERE the work runs — ``fargate`` is the on-demand
+#: tier (one task per run) and ``kubernetes`` the dedicated-workload one — while this
+#: build names it by what the operator CHOOSES, ``cloud_run``/``dedicated``. The two
+#: vocabularies meet only here: a surface that compared the server's word would paint
+#: a ready tier as unavailable, and a second table beside this one is how two surfaces
+#: come to label the same row differently.
+#:
+#: IMMUTABLE, so "the ONE join" holds by construction rather than by convention: a
+#: mutable module-level table is one ``[...] = ...`` away from a second vocabulary,
+#: and nothing would fail until two surfaces labelled the same row differently.
+SERVER_TIER_TO_TIER: Mapping[str, str] = MappingProxyType(
+    {
+        "fargate": "cloud_run",
+        "kubernetes": "dedicated",
+    }
+)
 
 #: The capacity choices offered UNDER :data:`TIERS` as opt-ins.
 #:
@@ -59,6 +86,27 @@ def tier_label(tier: str) -> Msg:
         raise ValueError(f"unknown remote-compute tier {tier!r}; the tiers are {TIERS}") from None
 
 
+def tier_from_server(wire: str) -> str | None:
+    """This build's id for a server tier literal; ``None`` when it names no tier.
+
+    AN ID THIS BUILD ALREADY USES IS RETURNED UNCHANGED. The wire carries the
+    server's vocabulary today, but a read is answered by whichever server build the
+    deployment runs, and one that has caught up to ours answers ``cloud_run`` or
+    ``dedicated``. That word is not a translation source — it is already the id —
+    and reading it as "cannot name" silently stripped the tier off every row that
+    carried it.
+
+    ``None``, never a guess for anything else: a tier this build has never heard of
+    is a contract change, and calling it ``cloud_run`` would offer the operator
+    capacity the server would not admit under that word. The caller drops what
+    carried it and logs the literal at debug, so a new server tier stays visible
+    without being mislabelled as one this build knows.
+    """
+    if wire in TIERS:
+        return wire
+    return SERVER_TIER_TO_TIER.get(wire)
+
+
 def option_label(option: str) -> Msg:
     """The keyed label for a capacity option under Dedicated."""
     try:
@@ -78,8 +126,10 @@ def tier_options(tier: str) -> tuple[str, ...]:
 
 __all__ = [
     "DEDICATED_OPTIONS",
+    "SERVER_TIER_TO_TIER",
     "TIERS",
     "option_label",
+    "tier_from_server",
     "tier_label",
     "tier_options",
 ]

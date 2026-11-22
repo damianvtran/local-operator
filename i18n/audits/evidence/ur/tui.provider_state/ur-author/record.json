@@ -1,0 +1,109 @@
+{
+  "schema": 1,
+  "record_kind": "translation_authoring_not_independent_audit",
+  "locale": "ur",
+  "namespace": "tui.provider_state",
+  "audit_date": "2026-11-22",
+  "date_source": "host current date; authoring date, not independent audit date",
+  "status": "translated",
+  "key_count": 5,
+  "source_revision": "a54ec02de48a94b68d6c3dc92e1307c97ea776ad",
+  "english_author_session": "93b7",
+  "translator": {
+    "agent": "i18n-translator",
+    "task": "provider-state-ur-author",
+    "session": "ab6b56b73e1e",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Fresh host-delivered model-switch notice in this session transcript: now running openai/gpt-6.1-sol (was anthropic/claude-opus-5-5), reason provider failure: quota.",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "provider_request_id": null,
+    "additional_served_telemetry": "not available; no configured-header inference",
+    "method": "native LLM reasoning; no translation API/SDK/MT service"
+  },
+  "auditor": {
+    "agent": null,
+    "session": null,
+    "model": null,
+    "independent_from_translator_session": null,
+    "actual_model_source": "not performed; this is an author bundle",
+    "status": "not_performed"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.json",
+      "sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.context.json",
+      "sha256": "67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/ur/tui.provider_state.json",
+      "sha256": "fe5cfd731a80eedd50d066bce968adf6ddec24311af418fdad46db7644aef437"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/ur.md",
+      "sha256": "7276e96210fe5f23fd82a39ae4cc0c88b2c1009d3a551d914efc3f61516eddc4"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ur/tui.provider_state/ur-author/notes.md",
+      "sha256": "faa78a566f7f84ef4cf9ebf3117419abc805df36f64e90ec4bdfd4b88f3a7e54"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.provider_state/ur-author/validator.py.txt",
+      "sha256": "01f4249b6909406b20ed0463d5a7b8c539d18294b9b93e303b43a50d360b667b"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.provider_state/ur-author/audit.log",
+      "sha256": "9a3e8a33d777bed7faaa5da1d0c872f8e548db1a61012230968dd1ca71fc3d8a"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "translated",
+    "unresolved_blocker_major_count": null,
+    "finding_ids": [],
+    "note": "Independent audit not performed; empty author finding list is not approval."
+  },
+  "validation": {
+    "kind": "scoped author mechanical validation, not self-audit",
+    "command": "cd /Users/damian/local-operator/.worktrees/i18n-provider-state-labels && mkdir -p \"$LOCAL_OPERATOR_SCRATCHPAD/ur-provider-home\" && env -i HOME=\"$LOCAL_OPERATOR_SCRATCHPAD/ur-provider-home\" LOCAL_OPERATOR_CONFIG_DIR=\"$LOCAL_OPERATOR_SCRATCHPAD/ur-provider-home/config\" PATH=\"$PATH\" TERM=xterm-256color PYTHONPATH=\"$PWD\" /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/ur/tui.provider_state/ur-author/validator.py.txt > i18n/audits/evidence/ur/tui.provider_state/ur-author/audit.log 2>&1",
+    "actual_exit_code": 0,
+    "official_entrypoint": "scripts.i18n.check.check_catalogues; only discovery scoped to en/ur and tui.provider_state",
+    "negative_controls": [
+      "missing key rejected",
+      "added ICU argument rejected"
+    ],
+    "argument_count_each": 0,
+    "plural_select_branches_each": 0,
+    "ur_cells_in_key_order": [
+      10,
+      23,
+      16,
+      18,
+      14
+    ],
+    "maxCells": null,
+    "illustrative_state_budget": 17,
+    "native_font_or_app_proof": false
+  },
+  "notes_classification": "audit_notes_not_execution_log",
+  "execution_log": "audit.log",
+  "native_choices_and_glossary_proposals": "notes.md",
+  "limitations": [
+    "Independent A/B audits pending manager commit of all targets",
+    "No native-font/style/bidi certification",
+    "No app startup or global catalogue/base checker",
+    "No consumer wiring, eligibility, generation or release claim"
+  ]
+}

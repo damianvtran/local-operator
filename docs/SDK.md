@@ -53,6 +53,25 @@ The event JSON projection for line-oriented consumers is
 `local_operator.headless_print.printable_event` — the same mapping `lop exec
 --json` prints. The SDK does not invent a second serialization.
 
+## Verbose diagnostics
+
+Set `verbose=True` to log tool calls, output validation, turn usage, and
+terminal status at `INFO`. The SDK does not configure logging for your app.
+For example, in a standalone script (using the `spec` and `roots` above):
+
+```python
+import logging
+
+logging.basicConfig()  # In an existing app, use its configured handlers.
+logging.getLogger("local_operator.sdk").setLevel(logging.INFO)
+
+async with open_session(spec, roots=roots, verbose=True) as session:
+    await session.prompt("Summarize the workspace.")
+```
+
+A tool status of `returned` means the tool did not report a tool-level error;
+it does not imply that a subprocess it ran exited successfully.
+
 ## Entry points
 
 | Entry point | What it does | Exec-parity reference |

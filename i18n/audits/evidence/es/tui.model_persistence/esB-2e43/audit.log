@@ -1,0 +1,405 @@
+COMMAND: env -i HOME=<session scratch>/esB-home LOCAL_OPERATOR_CONFIG_DIR=<session scratch>/esB-home/config PYTHONPATH=<worktree> primary .venv/bin/python <bundle>/script.py.txt
+python /Users/damian/local-operator/.venv/bin/python module /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/__init__.py checker /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/scripts/i18n/check.py
+isolated HOME /Users/damian/.local-operator/sessions/2e43efb61fa1/scratchpad/esB-home config /Users/damian/.local-operator/sessions/2e43efb61fa1/scratchpad/esB-home/config CMUX/LOP=0
+BEFORE en 4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff
+BEFORE context b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc
+BEFORE es 253fc1d487b648e6c778ac0f102ca5a49865dd8e223374ad31981f92ff97cce4
+KEY en tui.model_persistence.persist args () text /model default saves this for new sessions
+KEY en tui.model_persistence.settings args () text /settings edits the boot default too
+KEY en tui.model_persistence.saved args () text switch to the boot default with /model saved
+KEY en tui.model_persistence.with_model args (('label', 'simple'), ('routes', 'simple')) text model: {label} — {routes}
+KEY es tui.model_persistence.persist args () text /model default guarda este modelo para nuevas sesiones
+KEY es tui.model_persistence.settings args () text /settings también cambia el modelo de inicio predeterminado
+KEY es tui.model_persistence.saved args () text cambia al modelo de inicio predeterminado con /model saved
+KEY es tui.model_persistence.with_model args (('label', 'simple'), ('routes', 'simple')) text modelo: {label} — {routes}
+NEGATIVE missing key rejected by key-parity assertion
+NEGATIVE missing argument rejected MessageFormatError message argument 'routes' was not supplied (have: label)
+PASS scoped catalogue/context/ICU; ordered keys=4; plural/select=0; NFC; markup absent
+WRAP en pseudo False ordinary label 3 width 80 cells [77, 64] lone-final-command False
+model: x/y — /model default saves this for new sessions · switch to the boot 
+default with /model saved · /settings edits the boot default too
+WRAP en pseudo False ordinary label 3 width 100 cells [97, 44] lone-final-command False
+model: x/y — /model default saves this for new sessions · switch to the boot default with /model 
+saved · /settings edits the boot default too
+WRAP en pseudo False ordinary label 3 width 120 cells [120, 20] lone-final-command False
+model: x/y — /model default saves this for new sessions · switch to the boot default with /model saved · /settings edits
+the boot default too
+WRAP en pseudo False ordinary label 162 width 80 cells [7, 80, 80, 77, 56] lone-final-command False
+model: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc12
+3-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-e
+nd — /model default saves this for new sessions · switch to the boot default 
+with /model saved · /settings edits the boot default too
+WRAP en pseudo False ordinary label 162 width 100 cells [7, 100, 99, 94] lone-final-command False
+model: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc1
+23-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-end — /model default saves this for new 
+sessions · switch to the boot default with /model saved · /settings edits the boot default too
+WRAP en pseudo False ordinary label 162 width 120 cells [7, 120, 117, 56] lone-final-command False
+model: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc
+123-abc123-abc123-abc123-abc123-abc123-end — /model default saves this for new sessions · switch to the boot default 
+with /model saved · /settings edits the boot default too
+WRAP en pseudo False missing-model label 3 width 80 cells [78, 16] lone-final-command False
+model: x/y — /model default saves this for new sessions · /settings edits the 
+boot default too
+WRAP en pseudo False missing-model label 3 width 100 cells [94] lone-final-command False
+model: x/y — /model default saves this for new sessions · /settings edits the boot default too
+WRAP en pseudo False missing-model label 3 width 120 cells [94] lone-final-command False
+model: x/y — /model default saves this for new sessions · /settings edits the boot default too
+WRAP en pseudo False missing-model label 162 width 80 cells [7, 80, 80, 75, 11] lone-final-command False
+model: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc12
+3-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-e
+nd — /model default saves this for new sessions · /settings edits the boot 
+default too
+WRAP en pseudo False missing-model label 162 width 100 cells [7, 100, 99, 47] lone-final-command False
+model: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc1
+23-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-end — /model default saves this for new 
+sessions · /settings edits the boot default too
+WRAP en pseudo False missing-model label 162 width 120 cells [7, 120, 115, 11] lone-final-command False
+model: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc
+123-abc123-abc123-abc123-abc123-abc123-end — /model default saves this for new sessions · /settings edits the boot 
+default too
+WRAP en pseudo False absent-hosting label 3 width 80 cells [49] lone-final-command False
+model: x/y — /settings edits the boot default too
+WRAP en pseudo False absent-hosting label 3 width 100 cells [49] lone-final-command False
+model: x/y — /settings edits the boot default too
+WRAP en pseudo False absent-hosting label 3 width 120 cells [49] lone-final-command False
+model: x/y — /settings edits the boot default too
+WRAP en pseudo False absent-hosting label 162 width 80 cells [7, 80, 80, 41] lone-final-command False
+model: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc12
+3-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-e
+nd — /settings edits the boot default too
+WRAP en pseudo False absent-hosting label 162 width 100 cells [7, 100, 98, 3] lone-final-command False
+model: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc1
+23-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-end — /settings edits the boot default 
+too
+WRAP en pseudo False absent-hosting label 162 width 120 cells [7, 120, 81] lone-final-command False
+model: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc
+123-abc123-abc123-abc123-abc123-abc123-end — /settings edits the boot default too
+WRAP en pseudo False unknown-hosting label 3 width 80 cells [49] lone-final-command False
+model: x/y — /settings edits the boot default too
+WRAP en pseudo False unknown-hosting label 3 width 100 cells [49] lone-final-command False
+model: x/y — /settings edits the boot default too
+WRAP en pseudo False unknown-hosting label 3 width 120 cells [49] lone-final-command False
+model: x/y — /settings edits the boot default too
+WRAP en pseudo False unknown-hosting label 162 width 80 cells [7, 80, 80, 41] lone-final-command False
+model: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc12
+3-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-e
+nd — /settings edits the boot default too
+WRAP en pseudo False unknown-hosting label 162 width 100 cells [7, 100, 98, 3] lone-final-command False
+model: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc1
+23-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-end — /settings edits the boot default 
+too
+WRAP en pseudo False unknown-hosting label 162 width 120 cells [7, 120, 81] lone-final-command False
+model: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc
+123-abc123-abc123-abc123-abc123-abc123-end — /settings edits the boot default too
+DEAD-END en pseudo False /settings edits the boot default too
+WRAP en pseudo True ordinary label 3 width 80 cells [80, 74, 16] lone-final-command False
+moodeel: x/y — /model default saavees thiis foor neew seessiioons · swiitch too 
+thee boooot deefaauult wiith /model saved · /settings eediits thee boooot 
+deefaauult toooo
+WRAP en pseudo True ordinary label 3 width 100 cells [92, 78] lone-final-command False
+moodeel: x/y — /model default saavees thiis foor neew seessiioons · swiitch too thee boooot 
+deefaauult wiith /model saved · /settings eediits thee boooot deefaauult toooo
+WRAP en pseudo True ordinary label 3 width 120 cells [116, 54] lone-final-command False
+moodeel: x/y — /model default saavees thiis foor neew seessiioons · swiitch too thee boooot deefaauult wiith /model 
+saved · /settings eediits thee boooot deefaauult toooo
+WRAP en pseudo True ordinary label 162 width 80 cells [9, 80, 80, 75, 80, 5] lone-final-command False
+moodeel: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc12
+3-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-e
+nd — /model default saavees thiis foor neew seessiioons · swiitch too thee 
+boooot deefaauult wiith /model saved · /settings eediits thee boooot deefaauult 
+toooo
+WRAP en pseudo True ordinary label 162 width 100 cells [9, 100, 99, 98, 23] lone-final-command False
+moodeel: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc1
+23-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-end — /model default saavees thiis foor 
+neew seessiioons · swiitch too thee boooot deefaauult wiith /model saved · /settings eediits thee 
+boooot deefaauult toooo
+WRAP en pseudo True ordinary label 162 width 120 cells [9, 120, 115, 85] lone-final-command False
+moodeel: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc
+123-abc123-abc123-abc123-abc123-abc123-end — /model default saavees thiis foor neew seessiioons · swiitch too thee 
+boooot deefaauult wiith /model saved · /settings eediits thee boooot deefaauult toooo
+WRAP en pseudo True missing-model label 3 width 80 cells [78, 36] lone-final-command False
+moodeel: x/y — /model default saavees thiis foor neew seessiioons · /settings 
+eediits thee boooot deefaauult toooo
+WRAP en pseudo True missing-model label 3 width 100 cells [98, 16] lone-final-command False
+moodeel: x/y — /model default saavees thiis foor neew seessiioons · /settings eediits thee boooot 
+deefaauult toooo
+WRAP en pseudo True missing-model label 3 width 120 cells [114] lone-final-command False
+moodeel: x/y — /model default saavees thiis foor neew seessiioons · /settings eediits thee boooot deefaauult toooo
+WRAP en pseudo True missing-model label 162 width 80 cells [9, 80, 80, 80, 23] lone-final-command False
+moodeel: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc12
+3-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-e
+nd — /model default saavees thiis foor neew seessiioons · /settings eediits thee
+boooot deefaauult toooo
+WRAP en pseudo True missing-model label 162 width 100 cells [9, 100, 99, 65] lone-final-command False
+moodeel: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc1
+23-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-end — /model default saavees thiis foor 
+neew seessiioons · /settings eediits thee boooot deefaauult toooo
+WRAP en pseudo True missing-model label 162 width 120 cells [9, 120, 120, 23] lone-final-command False
+moodeel: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc
+123-abc123-abc123-abc123-abc123-abc123-end — /model default saavees thiis foor neew seessiioons · /settings eediits thee
+boooot deefaauult toooo
+WRAP en pseudo True absent-hosting label 3 width 80 cells [61] lone-final-command False
+moodeel: x/y — /settings eediits thee boooot deefaauult toooo
+WRAP en pseudo True absent-hosting label 3 width 100 cells [61] lone-final-command False
+moodeel: x/y — /settings eediits thee boooot deefaauult toooo
+WRAP en pseudo True absent-hosting label 3 width 120 cells [61] lone-final-command False
+moodeel: x/y — /settings eediits thee boooot deefaauult toooo
+WRAP en pseudo True absent-hosting label 162 width 80 cells [9, 80, 80, 51] lone-final-command False
+moodeel: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc12
+3-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-e
+nd — /settings eediits thee boooot deefaauult toooo
+WRAP en pseudo True absent-hosting label 162 width 100 cells [9, 100, 95, 16] lone-final-command False
+moodeel: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc1
+23-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-end — /settings eediits thee boooot 
+deefaauult toooo
+WRAP en pseudo True absent-hosting label 162 width 120 cells [9, 120, 91] lone-final-command False
+moodeel: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc
+123-abc123-abc123-abc123-abc123-abc123-end — /settings eediits thee boooot deefaauult toooo
+WRAP en pseudo True unknown-hosting label 3 width 80 cells [61] lone-final-command False
+moodeel: x/y — /settings eediits thee boooot deefaauult toooo
+WRAP en pseudo True unknown-hosting label 3 width 100 cells [61] lone-final-command False
+moodeel: x/y — /settings eediits thee boooot deefaauult toooo
+WRAP en pseudo True unknown-hosting label 3 width 120 cells [61] lone-final-command False
+moodeel: x/y — /settings eediits thee boooot deefaauult toooo
+WRAP en pseudo True unknown-hosting label 162 width 80 cells [9, 80, 80, 51] lone-final-command False
+moodeel: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc12
+3-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-e
+nd — /settings eediits thee boooot deefaauult toooo
+WRAP en pseudo True unknown-hosting label 162 width 100 cells [9, 100, 95, 16] lone-final-command False
+moodeel: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc1
+23-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-end — /settings eediits thee boooot 
+deefaauult toooo
+WRAP en pseudo True unknown-hosting label 162 width 120 cells [9, 120, 91] lone-final-command False
+moodeel: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc
+123-abc123-abc123-abc123-abc123-abc123-end — /settings eediits thee boooot deefaauult toooo
+DEAD-END en pseudo True /settings eediits thee boooot deefaauult toooo
+WRAP es pseudo False ordinary label 3 width 80 cells [80, 79, 31] lone-final-command False
+modelo: x/y — /model default guarda este modelo para nuevas sesiones · cambia al
+modelo de inicio predeterminado con /model saved · /settings también cambia el 
+modelo de inicio predeterminado
+WRAP es pseudo False ordinary label 3 width 100 cells [98, 93] lone-final-command False
+modelo: x/y — /model default guarda este modelo para nuevas sesiones · cambia al modelo de inicio 
+predeterminado con /model saved · /settings también cambia el modelo de inicio predeterminado
+WRAP es pseudo False ordinary label 3 width 120 cells [117, 74] lone-final-command False
+modelo: x/y — /model default guarda este modelo para nuevas sesiones · cambia al modelo de inicio predeterminado con 
+/model saved · /settings también cambia el modelo de inicio predeterminado
+WRAP es pseudo False ordinary label 162 width 80 cells [8, 80, 80, 79, 79, 24] lone-final-command False
+modelo: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc12
+3-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-e
+nd — /model default guarda este modelo para nuevas sesiones · cambia al modelo 
+de inicio predeterminado con /model saved · /settings también cambia el modelo 
+de inicio predeterminado
+WRAP es pseudo False ordinary label 162 width 100 cells [8, 100, 99, 94, 49] lone-final-command False
+modelo: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc1
+23-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-end — /model default guarda este modelo 
+para nuevas sesiones · cambia al modelo de inicio predeterminado con /model saved · /settings 
+también cambia el modelo de inicio predeterminado
+WRAP es pseudo False ordinary label 162 width 120 cells [8, 120, 119, 103] lone-final-command False
+modelo: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc
+123-abc123-abc123-abc123-abc123-abc123-end — /model default guarda este modelo para nuevas sesiones · cambia al modelo 
+de inicio predeterminado con /model saved · /settings también cambia el modelo de inicio predeterminado
+WRAP es pseudo False missing-model label 3 width 80 cells [80, 49] lone-final-command False
+modelo: x/y — /model default guarda este modelo para nuevas sesiones · /settings
+también cambia el modelo de inicio predeterminado
+WRAP es pseudo False missing-model label 3 width 100 cells [99, 31] lone-final-command False
+modelo: x/y — /model default guarda este modelo para nuevas sesiones · /settings también cambia el 
+modelo de inicio predeterminado
+WRAP es pseudo False missing-model label 3 width 120 cells [116, 14] lone-final-command False
+modelo: x/y — /model default guarda este modelo para nuevas sesiones · /settings también cambia el modelo de inicio 
+predeterminado
+WRAP es pseudo False missing-model label 162 width 80 cells [8, 80, 80, 80, 41] lone-final-command False
+modelo: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc12
+3-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-e
+nd — /model default guarda este modelo para nuevas sesiones · /settings también 
+cambia el modelo de inicio predeterminado
+WRAP es pseudo False missing-model label 162 width 100 cells [8, 100, 99, 82] lone-final-command False
+modelo: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc1
+23-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-end — /model default guarda este modelo 
+para nuevas sesiones · /settings también cambia el modelo de inicio predeterminado
+WRAP es pseudo False missing-model label 162 width 120 cells [8, 120, 120, 41] lone-final-command False
+modelo: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc
+123-abc123-abc123-abc123-abc123-abc123-end — /model default guarda este modelo para nuevas sesiones · /settings también 
+cambia el modelo de inicio predeterminado
+WRAP es pseudo False absent-hosting label 3 width 80 cells [73] lone-final-command False
+modelo: x/y — /settings también cambia el modelo de inicio predeterminado
+WRAP es pseudo False absent-hosting label 3 width 100 cells [73] lone-final-command False
+modelo: x/y — /settings también cambia el modelo de inicio predeterminado
+WRAP es pseudo False absent-hosting label 3 width 120 cells [73] lone-final-command False
+modelo: x/y — /settings también cambia el modelo de inicio predeterminado
+WRAP es pseudo False absent-hosting label 162 width 80 cells [8, 80, 80, 64] lone-final-command False
+modelo: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc12
+3-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-e
+nd — /settings también cambia el modelo de inicio predeterminado
+WRAP es pseudo False absent-hosting label 162 width 100 cells [8, 100, 100, 24] lone-final-command False
+modelo: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc1
+23-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-end — /settings también cambia el modelo 
+de inicio predeterminado
+WRAP es pseudo False absent-hosting label 162 width 120 cells [8, 120, 104] lone-final-command False
+modelo: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc
+123-abc123-abc123-abc123-abc123-abc123-end — /settings también cambia el modelo de inicio predeterminado
+WRAP es pseudo False unknown-hosting label 3 width 80 cells [73] lone-final-command False
+modelo: x/y — /settings también cambia el modelo de inicio predeterminado
+WRAP es pseudo False unknown-hosting label 3 width 100 cells [73] lone-final-command False
+modelo: x/y — /settings también cambia el modelo de inicio predeterminado
+WRAP es pseudo False unknown-hosting label 3 width 120 cells [73] lone-final-command False
+modelo: x/y — /settings también cambia el modelo de inicio predeterminado
+WRAP es pseudo False unknown-hosting label 162 width 80 cells [8, 80, 80, 64] lone-final-command False
+modelo: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc12
+3-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-e
+nd — /settings también cambia el modelo de inicio predeterminado
+WRAP es pseudo False unknown-hosting label 162 width 100 cells [8, 100, 100, 24] lone-final-command False
+modelo: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc1
+23-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-end — /settings también cambia el modelo 
+de inicio predeterminado
+WRAP es pseudo False unknown-hosting label 162 width 120 cells [8, 120, 104] lone-final-command False
+modelo: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc
+123-abc123-abc123-abc123-abc123-abc123-end — /settings también cambia el modelo de inicio predeterminado
+DEAD-END es pseudo False /settings también cambia el modelo de inicio predeterminado
+WRAP es pseudo True ordinary label 3 width 80 cells [76, 80, 75, 20] lone-final-command False
+moodeeloo: x/y — /model default guuaardaa eestee moodeeloo paaraa nuueevaas 
+seesiioonees · caambiiaa aal moodeeloo dee iiniiciioo preedeeteermiinaadoo coon 
+/model saved · /settings taambiiéén caambiiaa eel moodeeloo dee iiniiciioo 
+preedeeteermiinaadoo
+WRAP es pseudo True ordinary label 3 width 100 cells [100, 100, 49] lone-final-command False
+moodeeloo: x/y — /model default guuaardaa eestee moodeeloo paaraa nuueevaas seesiioonees · caambiiaa
+aal moodeeloo dee iiniiciioo preedeeteermiinaadoo coon /model saved · /settings taambiiéén caambiiaa
+eel moodeeloo dee iiniiciioo preedeeteermiinaadoo
+WRAP es pseudo True ordinary label 3 width 120 cells [119, 112, 20] lone-final-command False
+moodeeloo: x/y — /model default guuaardaa eestee moodeeloo paaraa nuueevaas seesiioonees · caambiiaa aal moodeeloo dee 
+iiniiciioo preedeeteermiinaadoo coon /model saved · /settings taambiiéén caambiiaa eel moodeeloo dee iiniiciioo 
+preedeeteermiinaadoo
+WRAP es pseudo True ordinary label 162 width 80 cells [11, 80, 80, 79, 80, 80] lone-final-command False
+moodeeloo: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc12
+3-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-e
+nd — /model default guuaardaa eestee moodeeloo paaraa nuueevaas seesiioonees · 
+caambiiaa aal moodeeloo dee iiniiciioo preedeeteermiinaadoo coon /model saved · 
+/settings taambiiéén caambiiaa eel moodeeloo dee iiniiciioo preedeeteermiinaadoo
+WRAP es pseudo True ordinary label 162 width 100 cells [11, 100, 97, 81, 100, 20] lone-final-command False
+moodeeloo: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc1
+23-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-end — /model default guuaardaa eestee 
+moodeeloo paaraa nuueevaas seesiioonees · caambiiaa aal moodeeloo dee iiniiciioo 
+preedeeteermiinaadoo coon /model saved · /settings taambiiéén caambiiaa eel moodeeloo dee iiniiciioo
+preedeeteermiinaadoo
+WRAP es pseudo True ordinary label 162 width 120 cells [11, 120, 119, 115, 45] lone-final-command False
+moodeeloo: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc
+123-abc123-abc123-abc123-abc123-abc123-end — /model default guuaardaa eestee moodeeloo paaraa nuueevaas seesiioonees · 
+caambiiaa aal moodeeloo dee iiniiciioo preedeeteermiinaadoo coon /model saved · /settings taambiiéén caambiiaa eel 
+moodeeloo dee iiniiciioo preedeeteermiinaadoo
+WRAP es pseudo True missing-model label 3 width 80 cells [76, 75, 20] lone-final-command False
+moodeeloo: x/y — /model default guuaardaa eestee moodeeloo paaraa nuueevaas 
+seesiioonees · /settings taambiiéén caambiiaa eel moodeeloo dee iiniiciioo 
+preedeeteermiinaadoo
+WRAP es pseudo True missing-model label 3 width 100 cells [100, 70] lone-final-command False
+moodeeloo: x/y — /model default guuaardaa eestee moodeeloo paaraa nuueevaas seesiioonees · /settings
+taambiiéén caambiiaa eel moodeeloo dee iiniiciioo preedeeteermiinaadoo
+WRAP es pseudo True missing-model label 3 width 120 cells [112, 59] lone-final-command False
+moodeeloo: x/y — /model default guuaardaa eestee moodeeloo paaraa nuueevaas seesiioonees · /settings taambiiéén 
+caambiiaa eel moodeeloo dee iiniiciioo preedeeteermiinaadoo
+WRAP es pseudo True missing-model label 162 width 80 cells [11, 80, 80, 79, 80] lone-final-command False
+moodeeloo: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc12
+3-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-e
+nd — /model default guuaardaa eestee moodeeloo paaraa nuueevaas seesiioonees · 
+/settings taambiiéén caambiiaa eel moodeeloo dee iiniiciioo preedeeteermiinaadoo
+WRAP es pseudo True missing-model label 162 width 100 cells [11, 100, 97, 91, 31] lone-final-command False
+moodeeloo: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc1
+23-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-end — /model default guuaardaa eestee 
+moodeeloo paaraa nuueevaas seesiioonees · /settings taambiiéén caambiiaa eel moodeeloo dee 
+iiniiciioo preedeeteermiinaadoo
+WRAP es pseudo True missing-model label 162 width 120 cells [11, 120, 119, 80] lone-final-command False
+moodeeloo: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc
+123-abc123-abc123-abc123-abc123-abc123-end — /model default guuaardaa eestee moodeeloo paaraa nuueevaas seesiioonees · 
+/settings taambiiéén caambiiaa eel moodeeloo dee iiniiciioo preedeeteermiinaadoo
+WRAP es pseudo True absent-hosting label 3 width 80 cells [77, 20] lone-final-command False
+moodeeloo: x/y — /settings taambiiéén caambiiaa eel moodeeloo dee iiniiciioo 
+preedeeteermiinaadoo
+WRAP es pseudo True absent-hosting label 3 width 100 cells [97] lone-final-command False
+moodeeloo: x/y — /settings taambiiéén caambiiaa eel moodeeloo dee iiniiciioo preedeeteermiinaadoo
+WRAP es pseudo True absent-hosting label 3 width 120 cells [97] lone-final-command False
+moodeeloo: x/y — /settings taambiiéén caambiiaa eel moodeeloo dee iiniiciioo preedeeteermiinaadoo
+WRAP es pseudo True absent-hosting label 162 width 80 cells [11, 80, 80, 65, 20] lone-final-command False
+moodeeloo: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc12
+3-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-e
+nd — /settings taambiiéén caambiiaa eel moodeeloo dee iiniiciioo 
+preedeeteermiinaadoo
+WRAP es pseudo True absent-hosting label 162 width 100 cells [11, 100, 100, 45] lone-final-command False
+moodeeloo: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc1
+23-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-end — /settings taambiiéén caambiiaa eel 
+moodeeloo dee iiniiciioo preedeeteermiinaadoo
+WRAP es pseudo True absent-hosting label 162 width 120 cells [11, 120, 105, 20] lone-final-command False
+moodeeloo: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc
+123-abc123-abc123-abc123-abc123-abc123-end — /settings taambiiéén caambiiaa eel moodeeloo dee iiniiciioo 
+preedeeteermiinaadoo
+WRAP es pseudo True unknown-hosting label 3 width 80 cells [77, 20] lone-final-command False
+moodeeloo: x/y — /settings taambiiéén caambiiaa eel moodeeloo dee iiniiciioo 
+preedeeteermiinaadoo
+WRAP es pseudo True unknown-hosting label 3 width 100 cells [97] lone-final-command False
+moodeeloo: x/y — /settings taambiiéén caambiiaa eel moodeeloo dee iiniiciioo preedeeteermiinaadoo
+WRAP es pseudo True unknown-hosting label 3 width 120 cells [97] lone-final-command False
+moodeeloo: x/y — /settings taambiiéén caambiiaa eel moodeeloo dee iiniiciioo preedeeteermiinaadoo
+WRAP es pseudo True unknown-hosting label 162 width 80 cells [11, 80, 80, 65, 20] lone-final-command False
+moodeeloo: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc12
+3-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-e
+nd — /settings taambiiéén caambiiaa eel moodeeloo dee iiniiciioo 
+preedeeteermiinaadoo
+WRAP es pseudo True unknown-hosting label 162 width 100 cells [11, 100, 100, 45] lone-final-command False
+moodeeloo: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc1
+23-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-end — /settings taambiiéén caambiiaa eel 
+moodeeloo dee iiniiciioo preedeeteermiinaadoo
+WRAP es pseudo True unknown-hosting label 162 width 120 cells [11, 120, 105, 20] lone-final-command False
+moodeeloo: 
+provider/opaque-model-2026-11-22-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc123-abc
+123-abc123-abc123-abc123-abc123-abc123-end — /settings taambiiéén caambiiaa eel moodeeloo dee iiniiciioo 
+preedeeteermiinaadoo
+DEAD-END es pseudo True /settings taambiiéén caambiiaa eel moodeeloo dee iiniiciioo preedeeteermiinaadoo
+PASS plain Rich matrix 96 cases; English same-code controls; pseudo only human text
+LIMITATION: no styled NoticeBlock, native geometry, transcript-family, UI integration, eligibility or release claim; no invented width cap
+AFTER en 4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff
+AFTER context b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc
+AFTER es 253fc1d487b648e6c778ac0f102ca5a49865dd8e223374ad31981f92ff97cce4

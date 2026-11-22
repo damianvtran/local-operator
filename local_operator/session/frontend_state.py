@@ -9073,6 +9073,18 @@ class FrontendStateStore:
         changes.update(self._channels_change(session))
         return self.mutate(**changes)
 
+    def refresh_observed_monitors(self, scheduler: Any) -> FrontendUpdate | None:
+        """Advance quiet check status only when a frontend is consuming it.
+
+        A later viewer takes a fresh session snapshot on attach; internal
+        transport observers alone do not justify projecting or serializing
+        every quiet check. For attached viewers, use the regular sequence
+        and field revision rather than silently editing the snapshot.
+        """
+        if not self.has_subscribers:
+            return None
+        return self.mutate(monitors=_monitor_state(scheduler))
+
     def refresh_jobs(self, session: Any) -> FrontendUpdate | None:
         """Publish the job roster without rescanning unrelated session state.
 

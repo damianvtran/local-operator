@@ -1,0 +1,1476 @@
+{
+  "fr": {
+    "wire.settings.bash_memory_mode.choice.manual.label": {
+      "before": "manual",
+      "after": "manuel"
+    },
+    "wire.settings.bash_memory_mode.help": {
+      "before": "'auto' dérive le plafond de la mémoire actuellement libre sur cet appareil, il se resserre donc tout seul quand la machine est occupée. 'manual' le fixe au nombre ci-dessous.",
+      "after": "Le mode « auto » déduit le plafond de la mémoire actuellement libre sur cet appareil : il se resserre donc tout seul quand la machine est occupée. Le mode « manuel » le fixe au nombre ci-dessous."
+    },
+    "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label": {
+      "before": "false",
+      "after": "non"
+    },
+    "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label": {
+      "before": "default",
+      "after": "par défaut"
+    },
+    "wire.settings.providers_openrouter_allow_fallbacks.help": {
+      "before": "'default' n’envoie rien (OpenRouter passe à un autre hôte quand l’hôte préféré échoue) ; 'false' échoue plutôt que de passer à un hôte hors de vos préférences.",
+      "after": "« par défaut » n’envoie rien (OpenRouter passe à un autre hôte quand l’hôte préféré échoue) ; « non » fait échouer l’appel plutôt que de passer à un hôte hors de vos préférences."
+    },
+    "wire.settings.providers_openrouter_data_collection.choice.allow.label": {
+      "before": "allow",
+      "after": "autoriser"
+    },
+    "wire.settings.providers_openrouter_data_collection.choice.deny.label": {
+      "before": "deny",
+      "after": "refuser"
+    },
+    "wire.settings.providers_openrouter_data_collection.choice.unset.label": {
+      "before": "default",
+      "after": "par défaut"
+    },
+    "wire.settings.providers_openrouter_data_collection.help": {
+      "before": "'deny' exclut les hôtes susceptibles d’entraîner leurs modèles sur vos prompts ou de les conserver. 'default' n’envoie aucune préférence (défaut d’OpenRouter : allow).",
+      "after": "« refuser » exclut les hôtes susceptibles d’entraîner leurs modèles sur vos prompts ou de les conserver. « par défaut » n’envoie aucune préférence (OpenRouter autorise cette collecte par défaut)."
+    },
+    "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label": {
+      "before": "true",
+      "after": "oui"
+    },
+    "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label": {
+      "before": "default",
+      "after": "par défaut"
+    },
+    "wire.settings.providers_openrouter_enforce_distillable_text.help": {
+      "before": "'true' : restreint aux endpoints dont la sortie texte peut être distillée. 'default' : rien n’est envoyé.",
+      "after": "« oui » restreint aux endpoints dont la sortie texte peut être distillée. « par défaut » n’envoie rien."
+    },
+    "wire.settings.providers_openrouter_require_parameters.choice.true.label": {
+      "before": "true",
+      "after": "oui"
+    },
+    "wire.settings.providers_openrouter_require_parameters.choice.unset.label": {
+      "before": "default",
+      "after": "par défaut"
+    },
+    "wire.settings.providers_openrouter_require_parameters.help": {
+      "before": "'true' restreint aux hôtes qui prennent en charge tous les paramètres que vous envoyez (outils, sortie structurée) ; 'default' laisse OpenRouter ignorer silencieusement les paramètres non pris en charge.",
+      "after": "« oui » restreint aux hôtes qui prennent en charge tous les paramètres que vous envoyez (outils, sortie structurée) ; « par défaut » laisse OpenRouter ignorer silencieusement les paramètres non pris en charge."
+    },
+    "wire.settings.providers_openrouter_sort.choice.unset.label": {
+      "before": "default",
+      "after": "par défaut"
+    },
+    "wire.settings.providers_openrouter_sort.help": {
+      "before": "Comment OpenRouter classe les hôtes pour cet appel. Peut vous éloigner de l’hôte qui détient votre cache de prompt chaud (démarrage à froid sur les longues conversations) ; 'default' n’envoie aucune préférence.",
+      "after": "Comment OpenRouter classe les hôtes pour cet appel. Peut vous éloigner de l’hôte qui détient votre cache de prompt chaud (démarrage à froid sur les longues conversations) ; « par défaut » n’envoie aucune préférence."
+    },
+    "wire.settings.providers_openrouter_zdr.choice.true.label": {
+      "before": "true",
+      "after": "oui"
+    },
+    "wire.settings.providers_openrouter_zdr.choice.unset.label": {
+      "before": "default",
+      "after": "par défaut"
+    },
+    "wire.settings.providers_openrouter_zdr.help": {
+      "before": "'true' : restreint aux endpoints sans rétention de données. 'default' : rien n’est envoyé.",
+      "after": "« oui » restreint aux endpoints sans rétention de données. « par défaut » n’envoie rien."
+    },
+    "wire.settings.shell_environment_inherit.help": {
+      "before": "Vide = l’ensemble sûr seul. Noms que le mode allowlist garde EN PLUS de l’ensemble sûr — par ex. LOCAL_OPERATOR_CONFIG_DIR pour un shell qui doit encore résoudre $(lop secret get NAME), ou LANG. Sans effet en mode inherit.",
+      "after": "Vide = l’ensemble sûr seul. Noms ajoutés à la liste d’autorisation EN PLUS de l’ensemble sûr — par ex. LOCAL_OPERATOR_CONFIG_DIR pour un shell qui doit encore résoudre $(lop secret get NAME), ou LANG. Sans effet en mode « hériter »."
+    },
+    "wire.settings.shell_environment_inherit.label": {
+      "before": "…gardés en mode allowlist",
+      "after": "…ajouts à la liste d’autorisation"
+    },
+    "wire.settings.shell_environment_mode.choice.allowlist.label": {
+      "before": "allowlist",
+      "after": "liste d’autorisation"
+    },
+    "wire.settings.shell_environment_mode.choice.inherit.label": {
+      "before": "inherit",
+      "after": "hériter"
+    },
+    "wire.settings.shell_environment_mode.help": {
+      "before": "'inherit' laisse une commande exécutée par l’agent voir votre environnement (gh, aws, npm gardent leurs tokens). 'allowlist' ne transmet que PATH/HOME/SHELL/TERM/USER/LOGNAME plus les deux listes à côté de ce réglage : la clé du fournisseur avec laquelle cette session a été lancée n’est donc pas transmise à une commande écrite par le modèle. Lu une fois par session : la modification prend effet au prochain lancement.",
+      "after": "« hériter » laisse une commande exécutée par l’agent voir votre environnement (gh, aws, npm gardent leurs tokens). « liste d’autorisation » ne transmet que PATH/HOME/SHELL/TERM/USER/LOGNAME plus les deux listes à côté de ce réglage : la clé du fournisseur avec laquelle cette session a été lancée n’est donc pas transmise à une commande écrite par le modèle. Lu une fois par session : la modification prend effet au prochain lancement."
+    },
+    "wire.settings.speech_transcription_cleanup.choice.off.label": {
+      "before": "off",
+      "after": "désactivé"
+    },
+    "wire.settings.speech_transcription_cleanup.choice.provider.label": {
+      "before": "provider",
+      "after": "fournisseur"
+    },
+    "wire.settings.speech_transcription_cleanup.help": {
+      "before": "Comment la dictée retire les mots parasites et les signaux non verbaux. auto utilise le nettoyage natif côté fournisseur lorsqu’il est disponible, sinon les règles conservatrices côté client ; provider et client appliquent chacun un seul des deux mécanismes ; off conserve la transcription telle quelle. Un champ `cleanup` par requête reste prioritaire.",
+      "after": "Comment la dictée retire les mots parasites et les signaux non verbaux. Le mode « auto » utilise le nettoyage natif côté fournisseur lorsqu’il est disponible, sinon les règles conservatrices côté client ; les modes « fournisseur » et « client » appliquent chacun un seul des deux mécanismes ; « désactivé » conserve la transcription telle quelle. Un champ `cleanup` par requête reste prioritaire."
+    },
+    "wire.settings.speech_voice_expressiveness.choice.medium.description": {
+      "before": "La constante actuelle.",
+      "after": "Diction habituelle."
+    },
+    "wire.settings.speech_voice_gender.choice.female.label": {
+      "before": "female",
+      "after": "féminine"
+    },
+    "wire.settings.speech_voice_gender.choice.male.label": {
+      "before": "male",
+      "after": "masculine"
+    },
+    "wire.settings.team_bridge_session.label": {
+      "before": "Session CoS",
+      "after": "Session de la cheffe de cabinet"
+    },
+    "wire.settings.web_search_strategy.choice.ordered.label": {
+      "before": "ordered",
+      "after": "par priorité"
+    },
+    "wire.settings.web_search_strategy.choice.round_robin.label": {
+      "before": "round_robin",
+      "after": "à tour de rôle"
+    }
+  },
+  "zh-CN": {
+    "wire.settings.bash_memory_limit_mb.help": {
+      "before": "选中'manual'时使用的上限。0表示改用自动上限，因此保持为0不会禁用防护。",
+      "after": "选中上方的“手动”时使用的上限。0表示改用自动上限，因此保持为0不会禁用防护。"
+    },
+    "wire.settings.bash_memory_mode.choice.auto.label": {
+      "before": "auto",
+      "after": "自动"
+    },
+    "wire.settings.bash_memory_mode.choice.manual.label": {
+      "before": "manual",
+      "after": "手动"
+    },
+    "wire.settings.bash_memory_mode.help": {
+      "before": "'auto'根据本设备当前空闲内存推导上限，机器繁忙时会自行收紧。'manual'则固定为下方的数值。",
+      "after": "“自动”根据本设备当前空闲内存推导上限，机器繁忙时会自行收紧。“手动”则固定为下方的数值。"
+    },
+    "wire.settings.classification_vendor.choice.auto.label": {
+      "before": "auto",
+      "after": "自动"
+    },
+    "wire.settings.classification_vendor.help": {
+      "before": "需开启智能提示。固定一个环节；auto优先Radient。",
+      "after": "需开启智能提示。固定一个环节；“自动”优先选择Radient。"
+    },
+    "wire.settings.compaction_strategy.choice.auto.label": {
+      "before": "auto",
+      "after": "自动"
+    },
+    "wire.settings.compaction_strategy.help": {
+      "before": "使用哪种压缩机制。auto按模型选择。",
+      "after": "使用哪种压缩机制。“自动”按模型选择。"
+    },
+    "wire.settings.display_nerd_icons.choice.none.label": {
+      "before": "auto",
+      "after": "自动"
+    },
+    "wire.settings.display_nerd_icons.help": {
+      "before": "展开的工具行图标。auto读取终端模拟器的标记。",
+      "after": "展开的工具行图标。“自动”读取终端模拟器的标记。"
+    },
+    "wire.settings.model_effort.choice.unset.label": {
+      "before": "auto",
+      "after": "自动"
+    },
+    "wire.settings.network_rollout_on_update.choice.auto.label": {
+      "before": "auto",
+      "after": "自动"
+    },
+    "wire.settings.network_rollout_on_update.choice.off.label": {
+      "before": "off",
+      "after": "关闭"
+    },
+    "wire.settings.network_rollout_on_update.help": {
+      "before": "`lop update`在此安装较新构建后，请本设备的mesh成员也移到该构建：一次一个、各自等待空闲、绝不强制。关：只有`lop network update`会滚动。未向本设备授予`update`的成员会被跳过，并附上在那里授予的补救办法。",
+      "after": "`lop update`在此安装较新构建后，请本设备网状网络中的成员也移到该构建：一次一个、各自等待空闲、绝不强制。“关闭”：只有`lop network update`会滚动升级。未向本设备授予`update`的成员会被跳过，并提示需在该成员上授予此权限。"
+    },
+    "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label": {
+      "before": "false",
+      "after": "否"
+    },
+    "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label": {
+      "before": "default",
+      "after": "默认"
+    },
+    "wire.settings.providers_openrouter_allow_fallbacks.help": {
+      "before": "'default'不发送任何内容（首选主机失败时，OpenRouter会切换到另一台主机）；'false'则宁可失败，也不切换到你的偏好之外的主机。",
+      "after": "“默认”不发送任何内容（首选主机失败时，OpenRouter会切换到另一台主机）；“否”则宁可失败，也不切换到你的偏好之外的主机。"
+    },
+    "wire.settings.providers_openrouter_data_collection.choice.allow.label": {
+      "before": "allow",
+      "after": "允许"
+    },
+    "wire.settings.providers_openrouter_data_collection.choice.deny.label": {
+      "before": "deny",
+      "after": "禁止"
+    },
+    "wire.settings.providers_openrouter_data_collection.choice.unset.label": {
+      "before": "default",
+      "after": "默认"
+    },
+    "wire.settings.providers_openrouter_data_collection.help": {
+      "before": "'deny'排除可能用你的提示词训练或留存的主机。'default'不发送偏好（OpenRouter默认：allow）。",
+      "after": "“禁止”排除可能用你的提示词训练或留存提示词的主机。“默认”不发送偏好（OpenRouter默认：允许）。"
+    },
+    "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label": {
+      "before": "true",
+      "after": "是"
+    },
+    "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label": {
+      "before": "default",
+      "after": "默认"
+    },
+    "wire.settings.providers_openrouter_enforce_distillable_text.help": {
+      "before": "'true'：仅限文本输出可被蒸馏的endpoint。'default'：不发送任何内容。",
+      "after": "“是”：仅限文本输出可被蒸馏的endpoint。“默认”：不发送任何内容。"
+    },
+    "wire.settings.providers_openrouter_require_parameters.choice.true.label": {
+      "before": "true",
+      "after": "是"
+    },
+    "wire.settings.providers_openrouter_require_parameters.choice.unset.label": {
+      "before": "default",
+      "after": "默认"
+    },
+    "wire.settings.providers_openrouter_require_parameters.help": {
+      "before": "'true'仅限支持你发送的每个参数（工具、结构化输出）的主机；'default'则任由OpenRouter静默丢弃不支持的参数。",
+      "after": "“是”仅限支持你发送的每个参数（工具、结构化输出）的主机；“默认”则允许OpenRouter静默丢弃不支持的参数。"
+    },
+    "wire.settings.providers_openrouter_sort.choice.unset.label": {
+      "before": "default",
+      "after": "默认"
+    },
+    "wire.settings.providers_openrouter_sort.help": {
+      "before": "OpenRouter如何为本次调用给主机排序。可能路由离开持有热提示词缓存的主机（长对话上会冷启动）；'default'完全不发送偏好。",
+      "after": "OpenRouter如何为本次调用给主机排序。可能路由离开持有热提示词缓存的主机（长对话上会冷启动）；“默认”完全不发送偏好。"
+    },
+    "wire.settings.providers_openrouter_zdr.choice.true.label": {
+      "before": "true",
+      "after": "是"
+    },
+    "wire.settings.providers_openrouter_zdr.choice.unset.label": {
+      "before": "default",
+      "after": "默认"
+    },
+    "wire.settings.providers_openrouter_zdr.help": {
+      "before": "'true'：仅限零数据留存的endpoint。'default'：不发送任何内容。",
+      "after": "“是”：仅限零数据留存的endpoint。“默认”：不发送任何内容。"
+    },
+    "wire.settings.shell_environment_inherit.help": {
+      "before": "留空则只有安全集。allowlist模式在安全集之外额外保留的名称——例如需要继续解析$(lop secret get NAME)的shell所用的LOCAL_OPERATOR_CONFIG_DIR，或LANG。inherit模式下无效。",
+      "after": "留空则只有安全集。“允许列表”模式在安全集之外额外保留的名称——例如需要继续解析$(lop secret get NAME)的命令行环境所用的LOCAL_OPERATOR_CONFIG_DIR，或LANG。“继承”模式下无效。"
+    },
+    "wire.settings.shell_environment_mode.choice.allowlist.label": {
+      "before": "allowlist",
+      "after": "允许列表"
+    },
+    "wire.settings.shell_environment_mode.choice.inherit.label": {
+      "before": "inherit",
+      "after": "继承"
+    },
+    "wire.settings.shell_environment_mode.help": {
+      "before": "'inherit'让智能体运行的命令看到你的环境（gh、aws、npm保持其令牌）。'allowlist'只传递PATH/HOME/SHELL/TERM/USER/LOGNAME，加上旁边这两个列表，因此本会话启动时用的提供商密钥不会交给模型编写的命令。每个会话只读取一次：修改后下次启动才生效。",
+      "after": "“继承”让智能体运行的命令看到你的环境（gh、aws、npm保留其令牌）。“允许列表”只传递PATH/HOME/SHELL/TERM/USER/LOGNAME，加上旁边这两个列表，因此本会话启动时用的提供商密钥不会交给模型编写的命令。每个会话只读取一次：修改后下次启动才生效。"
+    },
+    "wire.settings.speech_transcription_cleanup.choice.auto.label": {
+      "before": "auto",
+      "after": "自动"
+    },
+    "wire.settings.speech_transcription_cleanup.choice.client.label": {
+      "before": "client",
+      "after": "客户端"
+    },
+    "wire.settings.speech_transcription_cleanup.choice.off.label": {
+      "before": "off",
+      "after": "关闭"
+    },
+    "wire.settings.speech_transcription_cleanup.choice.provider.label": {
+      "before": "provider",
+      "after": "提供商"
+    },
+    "wire.settings.speech_transcription_cleanup.help": {
+      "before": "听写如何移除语气词和非语音提示。auto在提供商支持时使用原生清理，否则使用保守的客户端规则；provider和client各自仅使用其中一种机制；off保留逐字转录。单次请求中的`cleanup`字段仍优先。",
+      "after": "听写如何移除语气词和非语音提示。“自动”在提供商支持时使用原生清理，否则使用保守的客户端规则；“提供商”和“客户端”各自仅使用其中一种机制；“关闭”保留逐字转录。单次请求中的`cleanup`字段仍优先。"
+    },
+    "wire.settings.speech_voice_expressiveness.choice.medium.description": {
+      "before": "当前固定使用的值。",
+      "after": "标准语音表达。"
+    },
+    "wire.settings.speech_voice_gender.choice.auto.label": {
+      "before": "auto",
+      "after": "自动"
+    },
+    "wire.settings.speech_voice_gender.choice.female.label": {
+      "before": "female",
+      "after": "女声"
+    },
+    "wire.settings.speech_voice_gender.choice.male.label": {
+      "before": "male",
+      "after": "男声"
+    },
+    "wire.settings.speech_voice_gender.help": {
+      "before": "auto按智能体选择；固定值会覆盖分类器。",
+      "after": "“自动”按智能体选择；固定值会覆盖分类器。"
+    },
+    "wire.settings.web_fetch_render_backend.choice.auto.label": {
+      "before": "auto",
+      "after": "自动"
+    },
+    "wire.settings.web_fetch_render_backend.help": {
+      "before": "安装[fetch] extra后，auto会使用markdownify。",
+      "after": "安装[fetch] extra后，“自动”会使用markdownify。"
+    },
+    "wire.settings.web_search_strategy.choice.ordered.label": {
+      "before": "ordered",
+      "after": "按顺序"
+    },
+    "wire.settings.web_search_strategy.choice.round_robin.label": {
+      "before": "round_robin",
+      "after": "轮询"
+    }
+  },
+  "hi": {
+    "wire.settings.bash_memory_limit_mb.help": {
+      "before": "ऊपर 'manual' चुनने पर यही सीमा लागू होती है। 0 का मतलब है कि 'auto' सीमा इस्तेमाल होगी, इसलिए इसे 0 पर छोड़ने से गार्ड कभी बंद नहीं होता।",
+      "after": "ऊपर 'ख़ुद तय करें' चुनने पर यही सीमा लागू होती है। 0 का मतलब है कि स्वचालित सीमा इस्तेमाल होगी, इसलिए इसे 0 पर छोड़ने से गार्ड कभी बंद नहीं होता।"
+    },
+    "wire.settings.bash_memory_limit_mb.label": {
+      "before": "manual सीमा (MB)",
+      "after": "ख़ुद तय की गई सीमा (MB)"
+    },
+    "wire.settings.bash_memory_mode.choice.auto.label": {
+      "before": "auto",
+      "after": "स्वचालित"
+    },
+    "wire.settings.bash_memory_mode.choice.manual.label": {
+      "before": "manual",
+      "after": "ख़ुद तय करें"
+    },
+    "wire.settings.bash_memory_mode.help": {
+      "before": "'auto' इस डिवाइस की इस समय उपलब्ध मेमोरी से सीमा तय करता है, इसलिए मशीन व्यस्त होते ही यह ख़ुद सख़्त हो जाता है। 'manual' इसे नीचे दिए नंबर पर स्थिर रखता है।",
+      "after": "'स्वचालित' इस डिवाइस की इस समय उपलब्ध मेमोरी से सीमा तय करता है, इसलिए मशीन व्यस्त होने पर सीमा अपने-आप घट जाती है। 'ख़ुद तय करें' चुनने पर नीचे दी गई संख्या ही सीमा होती है।"
+    },
+    "wire.settings.classification_vendor.choice.auto.label": {
+      "before": "auto",
+      "after": "स्वचालित"
+    },
+    "wire.settings.classification_vendor.help": {
+      "before": "सिफ़ारिशें चालू होने पर ही लागू। एक कड़ी पिन करें; auto Radient को प्राथमिकता देता है।",
+      "after": "सिफ़ारिशें चालू होने पर ही लागू। एक विकल्प तय करें; स्वचालित मोड Radient को प्राथमिकता देता है।"
+    },
+    "wire.settings.compaction_strategy.choice.auto.label": {
+      "before": "auto",
+      "after": "स्वचालित"
+    },
+    "wire.settings.compaction_strategy.help": {
+      "before": "कौन-सा तंत्र संपीडित करता है। auto हर मॉडल के हिसाब से चुनता है।",
+      "after": "संपीडन के लिए इस्तेमाल होने वाला तंत्र। स्वचालित मोड हर मॉडल के हिसाब से चुनता है।"
+    },
+    "wire.settings.display_nerd_icons.choice.none.label": {
+      "before": "auto",
+      "after": "स्वचालित"
+    },
+    "wire.settings.display_nerd_icons.help": {
+      "before": "टूल-पंक्तियों के विस्तृत आइकॉन। auto टर्मिनल एमुलेटर के मार्कर पढ़ता है।",
+      "after": "टूल-पंक्तियों के विस्तृत आइकॉन। स्वचालित मोड टर्मिनल एमुलेटर के मार्कर पढ़ता है।"
+    },
+    "wire.settings.hub.description": {
+      "before": "Agent Hub से pull किए गए एजेंट और टीमें अपडेट रहें: अपडेट अपने-आप merge होते हैं या नहीं, हब कितनी बार जाँचा जाता है, और टकराव कौन-सा मॉडल सुलझाता है। आपने जो संपादित या हटाया, वह merge हो जाता है, कभी ओवरराइट नहीं।",
+      "after": "Agent Hub से pull किए गए एजेंट और टीमों को अपडेट रखें: अपडेट अपने-आप merge होते हैं या नहीं, हब कितनी बार जाँचा जाता है, और टकराव कौन-सा मॉडल सुलझाता है। आपके संपादन और हटाए गए हिस्से merge किए जाते हैं, कभी ओवरराइट नहीं किए जाते।"
+    },
+    "wire.settings.hub_auto_update_agents.help": {
+      "before": "हब अपडेट pull किए गए एजेंट में अपने-आप merge करें।",
+      "after": "हब से pull किए गए एजेंटों में हब के अपडेट अपने-आप merge करें।"
+    },
+    "wire.settings.hub_auto_update_teams.help": {
+      "before": "हब अपडेट pull की गई टीमों में अपने-आप merge करें।",
+      "after": "हब से pull की गई टीमों में हब के अपडेट अपने-आप merge करें।"
+    },
+    "wire.settings.librarian.description": {
+      "before": "लाइब्रेरियन वैश्विक लाइब्रेरी को व्यवस्थित रखता है: उसका प्रदर्शित नाम, दैनिक पास और पॉज़ स्विच। लाइब्रेरी दीर्घकालिक है और हर बातचीत में साझा है।",
+      "after": "लाइब्रेरियन वैश्विक लाइब्रेरी को व्यवस्थित रखती हैं: उनका प्रदर्शित नाम, दैनिक पास और पॉज़ स्विच। लाइब्रेरी दीर्घकालिक है और हर बातचीत में साझा है।"
+    },
+    "wire.settings.librarian_cadence_max_extra_per_day.help": {
+      "before": "वह प्रति दिन कितने अतिरिक्त पास माँग सकता है। 0 अतिरिक्त पास बंद करता है।",
+      "after": "वे प्रति दिन कितने अतिरिक्त पास माँग सकती हैं। 0 अतिरिक्त पास बंद करता है।"
+    },
+    "wire.settings.librarian_cadence_min_gap_minutes.help": {
+      "before": "उसके पासों के बीच न्यूनतम अंतर; इससे निकट अनुरोध अस्वीकार होते हैं।",
+      "after": "उनके पासों के बीच न्यूनतम अंतर; इससे कम अंतर वाले अनुरोध अस्वीकार होते हैं।"
+    },
+    "wire.settings.librarian_cadence_paused.help": {
+      "before": "पॉज़ उसकी निर्धारित पंक्तियाँ हटाता है; फिर से शुरू करने पर अगला पास तय होता है। डेस्कटॉप और /librarian एक ही कुंजी लिखते हैं।",
+      "after": "पॉज़ करने पर उनकी निर्धारित पंक्तियाँ हट जाती हैं; फिर से शुरू करने पर अगला पास तय होता है। डेस्कटॉप और /librarian एक ही कुंजी लिखते हैं।"
+    },
+    "wire.settings.librarian_enabled.help": {
+      "before": "बूट पर और /v1/desktop/librarian द्वारा पढ़ा जाता है; अक्षम इंस्टॉल उसका सत्र कभी नहीं बनाता।",
+      "after": "बूट पर और /v1/desktop/librarian द्वारा पढ़ा जाता है; अक्षम इंस्टॉल उनका सत्र कभी नहीं बनाता।"
+    },
+    "wire.settings.librarian_name.help": {
+      "before": "वह नाम जो उसकी पिन की गई बातचीत और हर रसीद उपयोग करती है।",
+      "after": "वह नाम जो उनकी पिन की गई बातचीत और हर रसीद इस्तेमाल करती है।"
+    },
+    "wire.settings.model_effort.choice.unset.label": {
+      "before": "auto",
+      "after": "स्वचालित"
+    },
+    "wire.settings.model_effort.help": {
+      "before": "नई बातचीत के लिए प्रयास। 'unset': मॉडल का डिफ़ॉल्ट।",
+      "after": "नई बातचीत के लिए प्रयास। स्वचालित: मॉडल का डिफ़ॉल्ट।"
+    },
+    "wire.settings.network_max_handshakes.help": {
+      "before": "यह रिले एक बार में कितने अप्रमाणित कनेक्शन रखेगा। पेयरिंग कोड टाइप होने तक के सेकंडों भर एक कनेक्शन रोकती है; सीमा से ऊपर का हर कनेक्शन accept पर ही गिरा दिया जाता है, बिना कोई reply फ़्रेम।",
+      "after": "यह रिले एक बार में कितने अप्रमाणित कनेक्शन रखेगा। पेयरिंग में कोड टाइप किए जाने तक एक कनेक्शन बना रहता है; सीमा से ऊपर के कनेक्शन स्वीकार होते ही बंद कर दिए जाते हैं, बिना जवाबी फ़्रेम भेजे।"
+    },
+    "wire.settings.network_rollout_on_update.choice.auto.label": {
+      "before": "auto",
+      "after": "स्वचालित"
+    },
+    "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label": {
+      "before": "false",
+      "after": "नहीं"
+    },
+    "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label": {
+      "before": "default",
+      "after": "डिफ़ॉल्ट"
+    },
+    "wire.settings.providers_openrouter_allow_fallbacks.help": {
+      "before": "'default' कुछ नहीं भेजता (पसंदीदा होस्ट विफल होने पर OpenRouter किसी और होस्ट पर चला जाता है); 'false' आपकी प्राथमिकताओं के बाहर के होस्ट पर चले जाने के बजाय विफल हो जाता है।",
+      "after": "'डिफ़ॉल्ट' कुछ नहीं भेजता (पसंदीदा होस्ट विफल होने पर OpenRouter किसी और होस्ट पर चला जाता है); 'नहीं' चुनने पर आपकी प्राथमिकताओं के बाहर के होस्ट पर जाने के बजाय अनुरोध विफल हो जाता है।"
+    },
+    "wire.settings.providers_openrouter_data_collection.choice.allow.label": {
+      "before": "allow",
+      "after": "अनुमति दें"
+    },
+    "wire.settings.providers_openrouter_data_collection.choice.deny.label": {
+      "before": "deny",
+      "after": "अनुमति न दें"
+    },
+    "wire.settings.providers_openrouter_data_collection.choice.unset.label": {
+      "before": "default",
+      "after": "डिफ़ॉल्ट"
+    },
+    "wire.settings.providers_openrouter_data_collection.help": {
+      "before": "'deny' ऐसे होस्ट हटा देता है जो आपके प्रॉम्प्ट पर ट्रेनिंग कर सकते हैं या उन्हें रख सकते हैं। 'default' कोई प्राथमिकता नहीं भेजता (OpenRouter का डिफ़ॉल्ट: अनुमति)।",
+      "after": "'अनुमति न दें' ऐसे होस्ट को बाहर रखता है जो आपके प्रॉम्प्ट पर ट्रेनिंग कर सकते हैं या उन्हें रख सकते हैं। 'डिफ़ॉल्ट' कोई प्राथमिकता नहीं भेजता (OpenRouter का डिफ़ॉल्ट: अनुमति दें)।"
+    },
+    "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.description": {
+      "before": "सिर्फ़ distillable-text endpoint",
+      "after": "सिर्फ़ ऐसे endpoint जिनके टेक्स्ट से मॉडल डिस्टिलेशन की अनुमति हो"
+    },
+    "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label": {
+      "before": "true",
+      "after": "हाँ"
+    },
+    "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label": {
+      "before": "default",
+      "after": "डिफ़ॉल्ट"
+    },
+    "wire.settings.providers_openrouter_enforce_distillable_text.help": {
+      "before": "'true': सिर्फ़ ऐसे endpoint जिनका टेक्स्ट आउटपुट distill किया जा सके। 'default': कुछ नहीं भेजा जाता।",
+      "after": "'हाँ': सिर्फ़ ऐसे endpoint जिनके टेक्स्ट आउटपुट से मॉडल डिस्टिलेशन की अनुमति हो। 'डिफ़ॉल्ट': कुछ नहीं भेजा जाता।"
+    },
+    "wire.settings.providers_openrouter_enforce_distillable_text.label": {
+      "before": "distillable टेक्स्ट",
+      "after": "डिस्टिलेशन योग्य टेक्स्ट"
+    },
+    "wire.settings.providers_openrouter_require_parameters.choice.true.label": {
+      "before": "true",
+      "after": "हाँ"
+    },
+    "wire.settings.providers_openrouter_require_parameters.choice.unset.label": {
+      "before": "default",
+      "after": "डिफ़ॉल्ट"
+    },
+    "wire.settings.providers_openrouter_require_parameters.help": {
+      "before": "'true' सिर्फ़ उन होस्ट तक सीमित करता है जो आपके भेजे हर पैरामीटर को सपोर्ट करते हैं (टूल, structured output); 'default' में OpenRouter असमर्थित पैरामीटर चुपचाप हटा देता है।",
+      "after": "'हाँ' सिर्फ़ उन होस्ट तक सीमित करता है जो आपके भेजे हर पैरामीटर को सपोर्ट करते हैं (टूल, संरचित आउटपुट); 'डिफ़ॉल्ट' में OpenRouter असमर्थित पैरामीटर चुपचाप हटा देता है।"
+    },
+    "wire.settings.providers_openrouter_sort.choice.unset.label": {
+      "before": "default",
+      "after": "डिफ़ॉल्ट"
+    },
+    "wire.settings.providers_openrouter_sort.help": {
+      "before": "OpenRouter इस कॉल के लिए होस्ट कैसे क्रमबद्ध करता है। यह आपका वॉर्म प्रॉम्प्ट कैश रखने वाले होस्ट से हटा सकता है (लंबी बातचीत पर कोल्ड स्टार्ट); 'default' कोई प्राथमिकता नहीं भेजता।",
+      "after": "OpenRouter इस कॉल के लिए होस्ट कैसे क्रमबद्ध करता है। यह आपका वॉर्म प्रॉम्प्ट कैश रखने वाले होस्ट से हटा सकता है (लंबी बातचीत पर कोल्ड स्टार्ट); 'डिफ़ॉल्ट' कोई प्राथमिकता नहीं भेजता।"
+    },
+    "wire.settings.providers_openrouter_zdr.choice.true.label": {
+      "before": "true",
+      "after": "हाँ"
+    },
+    "wire.settings.providers_openrouter_zdr.choice.unset.label": {
+      "before": "default",
+      "after": "डिफ़ॉल्ट"
+    },
+    "wire.settings.providers_openrouter_zdr.help": {
+      "before": "'true': सिर्फ़ शून्य-डेटा-रिटेंशन endpoint तक सीमित। 'default': कुछ नहीं भेजा जाता।",
+      "after": "'हाँ': सिर्फ़ शून्य-डेटा-रिटेंशन endpoint तक सीमित। 'डिफ़ॉल्ट': कुछ नहीं भेजा जाता।"
+    },
+    "wire.settings.shell_environment_inherit.help": {
+      "before": "खाली = सिर्फ़ सुरक्षित सेट। allowlist मोड में सुरक्षित सेट के ऊपर ही रखे जाने वाले नाम — जैसे उस शेल के लिए LOCAL_OPERATOR_CONFIG_DIR जिसमें $(lop secret get NAME) अब भी काम करे, या LANG। inherit मोड में बेअसर।",
+      "after": "खाली = सिर्फ़ सुरक्षित सेट। अनुमति-सूची मोड में सुरक्षित सेट के अलावा रखे जाने वाले नाम — जैसे उस शेल के लिए LOCAL_OPERATOR_CONFIG_DIR जिसमें $(lop secret get NAME) अब भी काम करे, या LANG। मौजूदा परिवेश मोड में बेअसर।"
+    },
+    "wire.settings.shell_environment_inherit.label": {
+      "before": "…allowlist मोड में रखे जाते हैं",
+      "after": "…अनुमति-सूची मोड में रखे जाते हैं"
+    },
+    "wire.settings.shell_environment_mode.choice.allowlist.label": {
+      "before": "allowlist",
+      "after": "अनुमति-सूची"
+    },
+    "wire.settings.shell_environment_mode.choice.inherit.label": {
+      "before": "inherit",
+      "after": "मौजूदा परिवेश"
+    },
+    "wire.settings.shell_environment_mode.help": {
+      "before": "'inherit' में एजेंट के चलाए कमांड को आपका एनवायरनमेंट दिखता है (gh, aws, npm अपने टोकन रखते हैं)। 'allowlist' सिर्फ़ PATH/HOME/SHELL/TERM/USER/LOGNAME और इसके पास की दोनों सूचियाँ भेजता है, इसलिए जिस प्रोवाइडर कुंजी से यह सत्र शुरू हुआ, वह मॉडल के लिखे कमांड को नहीं दी जाती। हर सत्र में एक बार पढ़ा जाता है: बदलाव अगले लॉन्च पर लागू होगा।",
+      "after": "'मौजूदा परिवेश' मोड में एजेंट के चलाए कमांड को आपका परिवेश मिलता है (gh, aws, npm अपने टोकन रखते हैं)। 'अनुमति-सूची' सिर्फ़ PATH/HOME/SHELL/TERM/USER/LOGNAME और इसके पास की दोनों सूचियाँ भेजता है, इसलिए जिस प्रोवाइडर कुंजी से यह सत्र शुरू हुआ, वह मॉडल के लिखे कमांड को नहीं दी जाती। हर सत्र में एक बार पढ़ा जाता है: बदलाव अगले लॉन्च पर लागू होगा।"
+    },
+    "wire.settings.speech_transcription_cleanup.choice.auto.label": {
+      "before": "auto",
+      "after": "स्वचालित"
+    },
+    "wire.settings.speech_transcription_cleanup.choice.client.label": {
+      "before": "client",
+      "after": "क्लाइंट"
+    },
+    "wire.settings.speech_transcription_cleanup.choice.off.label": {
+      "before": "off",
+      "after": "बंद"
+    },
+    "wire.settings.speech_transcription_cleanup.choice.provider.label": {
+      "before": "provider",
+      "after": "प्रोवाइडर"
+    },
+    "wire.settings.speech_transcription_cleanup.help": {
+      "before": "डिक्टेशन भरने वाले शब्द और गैर-भाषाई संकेत कैसे हटाता है। auto उपलब्ध होने पर प्रोवाइडर की अंतर्निहित सफ़ाई और बाक़ी मामलों में सतर्क क्लाइंट नियम लागू करता है; provider और client में से प्रत्येक केवल एक तंत्र लागू करता है; off ट्रांसक्रिप्ट ज्यों का त्यों रखता है। हर अनुरोध का `cleanup` फ़ील्ड अभी भी प्राथमिकता पाता है।",
+      "after": "डिक्टेशन में भराव शब्द और गैर-वाचिक संकेत कैसे हटते हैं। स्वचालित मोड उपलब्ध होने पर प्रोवाइडर की अंतर्निहित सफ़ाई और बाक़ी मामलों में सतर्क क्लाइंट नियम लागू करता है; प्रोवाइडर और क्लाइंट मोड केवल अपना-अपना तंत्र इस्तेमाल करते हैं; बंद मोड ट्रांसक्रिप्ट ज्यों का त्यों रखता है। हर अनुरोध का `cleanup` फ़ील्ड अब भी प्राथमिकता पाता है।"
+    },
+    "wire.settings.speech_voice_expressiveness.choice.medium.description": {
+      "before": "मौजूदा स्थिर मान।",
+      "after": "बोलने का सामान्य अंदाज़।"
+    },
+    "wire.settings.speech_voice_gender.choice.auto.label": {
+      "before": "auto",
+      "after": "स्वचालित"
+    },
+    "wire.settings.speech_voice_gender.choice.female.label": {
+      "before": "female",
+      "after": "स्त्री"
+    },
+    "wire.settings.speech_voice_gender.choice.male.label": {
+      "before": "male",
+      "after": "पुरुष"
+    },
+    "wire.settings.speech_voice_gender.help": {
+      "before": "auto हर एजेंट के लिए चुनता है; तय मान वर्गीकरण को ओवरराइड करता है।",
+      "after": "स्वचालित मोड हर एजेंट के लिए आवाज़ चुनता है; तय मान चुनने पर वर्गीकरण का परिणाम लागू नहीं होता।"
+    },
+    "wire.settings.web_fetch_render_backend.choice.auto.label": {
+      "before": "auto",
+      "after": "स्वचालित"
+    },
+    "wire.settings.web_fetch_render_backend.help": {
+      "before": "Auto, [fetch] extra इंस्टॉल होने पर markdownify इस्तेमाल करता है।",
+      "after": "स्वचालित मोड में, [fetch] extra इंस्टॉल होने पर markdownify इस्तेमाल होता है।"
+    },
+    "wire.settings.web_search_strategy.choice.ordered.label": {
+      "before": "ordered",
+      "after": "सूची के क्रम में"
+    },
+    "wire.settings.web_search_strategy.choice.round_robin.label": {
+      "before": "round_robin",
+      "after": "बारी-बारी"
+    }
+  },
+  "ur": {
+    "wire.settings.bash_memory_mode.choice.auto.label": {
+      "before": "auto",
+      "after": "خودکار"
+    },
+    "wire.settings.bash_memory_mode.choice.manual.label": {
+      "before": "manual",
+      "after": "دستی"
+    },
+    "wire.settings.bash_memory_mode.help": {
+      "before": "'auto' اس وقت ڈیوائس کی خالی میموری سے حد نکالتی ہے، اس لیے مصروف مشین پر خود سخت ہو جاتی ہے۔ 'manual' اسے نیچے دیے نمبر پر مقرر کرتی ہے۔",
+      "after": "'خودکار' اس وقت ڈیوائس کی خالی میموری سے حد نکالتا ہے، اس لیے مصروف مشین پر حد خود سخت ہو جاتی ہے۔ 'دستی' اسے نیچے دیے گئے عدد پر مقرر کرتا ہے۔"
+    },
+    "wire.settings.classification_vendor.choice.auto.label": {
+      "before": "auto",
+      "after": "خودکار"
+    },
+    "wire.settings.classification_vendor.help": {
+      "before": "تجاویز آن ہوں۔ ایک روٹ مقرر کریں؛ auto میں Radient اول ہے۔",
+      "after": "تجاویز فعال ہونی چاہییں۔ ایک راستہ مقرر کریں؛ خودکار انتخاب میں Radient کو ترجیح ملتی ہے۔"
+    },
+    "wire.settings.compaction_strategy.choice.auto.label": {
+      "before": "auto",
+      "after": "خودکار"
+    },
+    "wire.settings.compaction_strategy.help": {
+      "before": "کون سا میکانیزم کمپریس کرے۔ auto ماڈل کے حساب سے منتخب کرتا ہے۔",
+      "after": "کمپریشن کا طریقہ۔ خودکار انتخاب ماڈل کے مطابق ہوتا ہے۔"
+    },
+    "wire.settings.compaction_wire_bytes_budget.label": {
+      "before": "درخواست کی حد (bytes)",
+      "after": "درخواست کے حجم کی حد (بائٹس)"
+    },
+    "wire.settings.display_nerd_icons.choice.none.label": {
+      "before": "auto",
+      "after": "خودکار"
+    },
+    "wire.settings.display_nerd_icons.help": {
+      "before": "وسیع ٹول قطار کے آئیکنز۔ auto ٹرمینل ایمولیٹر کے نشانات پڑھتا ہے۔",
+      "after": "ٹول قطار کے بڑے آئیکنز۔ خودکار انتخاب ٹرمینل ایمولیٹر کے نشانات پڑھتا ہے۔"
+    },
+    "wire.settings.display_notification_session_name.help": {
+      "before": "بینرز پر سیشن کا نام، آخری سطر اور خرابی کی وجوہات آتی ہیں، لاک اسکرین اور جوڑے ہوئے فونز کی اطلاعات بھی شامل، جو ان تک Radient کی push سروس کے ذریعے پہنچتی ہیں۔",
+      "after": "بینرز پر سیشن کا نام، آخری سطر اور خرابی کی وجوہات ظاہر ہوتی ہیں۔ ان میں لاک اسکرین اور منسلک فونز کی اطلاعات بھی شامل ہیں، جو Radient کی پُش سروس کے ذریعے ان تک پہنچتی ہیں۔"
+    },
+    "wire.settings.display_rail.help": {
+      "before": "ایک لکیر ANSWER کو نشان زد کرتی ہے: ٹرن ختم کرنے والا پیغام۔ ٹرن کے دوران کے بیان پر ریل نہیں۔",
+      "after": "ایک لکیر جواب کو نمایاں کرتی ہے: وہ پیغام جو باری ختم کرتا ہے۔ باری کے دوران کی وضاحت کے ساتھ لکیر نہیں ہوتی۔"
+    },
+    "wire.settings.hub.description": {
+      "before": "Agent Hub سے حاصل کردہ ایجنٹس اور ٹیمیں تازہ رکھیں: اپ ڈیٹس خودکار merge ہوں، hub کتنی بار جانچ ہو، اور تضاد کون سا ماڈل حل کرے۔ آپ کی تبدیلیاں اور حذف کردہ مواد merge ہوتا ہے، اووررائیٹ نہیں۔",
+      "after": "Agent Hub سے حاصل کردہ ایجنٹس اور ٹیموں کو تازہ رکھیں: اپ ڈیٹس خودکار طور پر merge ہوں یا نہیں، ہب کتنی بار جانچا جائے، اور کون سا ماڈل تضاد حل کرے۔ آپ کی ترامیم اور حذف کردہ مواد merge ہوتے ہیں، ان کی جگہ نیا مواد نہیں لکھا جاتا۔"
+    },
+    "wire.settings.hub_auto_update_agents.choice.true.description": {
+      "before": "hub اپ ڈیٹس خودکار merge کریں",
+      "after": "ہب کی اپ ڈیٹس خودکار merge کریں"
+    },
+    "wire.settings.hub_auto_update_agents.help": {
+      "before": "حاصل کردہ ایجنٹس میں hub اپ ڈیٹس خودکار merge کریں۔",
+      "after": "حاصل کردہ ایجنٹس میں ہب کی اپ ڈیٹس خودکار merge کریں۔"
+    },
+    "wire.settings.hub_auto_update_teams.choice.true.description": {
+      "before": "hub اپ ڈیٹس خودکار merge کریں",
+      "after": "ہب کی اپ ڈیٹس خودکار merge کریں"
+    },
+    "wire.settings.hub_auto_update_teams.help": {
+      "before": "حاصل کردہ ٹیموں میں hub اپ ڈیٹس خودکار merge کریں۔",
+      "after": "حاصل کردہ ٹیموں میں ہب کی اپ ڈیٹس خودکار merge کریں۔"
+    },
+    "wire.settings.librarian.description": {
+      "before": "Librarian عالمی Library منظم رکھتی ہے: اس کا ظاہری نام، روزانہ پاس، اور روکنے کا اختیار۔ Library طویل مدت کی ہے اور ہر گفتگو میں مشترک ہے۔",
+      "after": "لائبریرین مشترکہ لائبریری منظم رکھتی ہے: اس کا ظاہری نام، روزانہ جائزہ اور روکنے کا اختیار۔ لائبریری طویل مدتی ذخیرہ ہے جو تمام گفتگوؤں میں مشترک ہے۔"
+    },
+    "wire.settings.librarian.title": {
+      "before": "Librarian",
+      "after": "لائبریرین"
+    },
+    "wire.settings.librarian_cadence_at.label": {
+      "before": "روزانہ پاس کا وقت",
+      "after": "روزانہ جائزے کا وقت"
+    },
+    "wire.settings.librarian_cadence_max_extra_per_day.help": {
+      "before": "روزانہ کتنے اضافی پاس کی درخواست کر سکے۔ 0 اضافی پاس بند کرتا ہے۔",
+      "after": "روزانہ کتنے اضافی جائزوں کی درخواست کر سکے۔ 0 اضافی جائزے بند کرتا ہے۔"
+    },
+    "wire.settings.librarian_cadence_max_extra_per_day.label": {
+      "before": "اضافی پاس / دن",
+      "after": "اضافی جائزے / دن"
+    },
+    "wire.settings.librarian_cadence_min_gap_minutes.help": {
+      "before": "پاسوں کے درمیان کم از کم وقفہ؛ اس سے کم وقفے والی درخواستیں مسترد ہوں گی۔",
+      "after": "جائزوں کے درمیان کم از کم وقفہ؛ اس سے کم وقفے والی درخواستیں مسترد ہوں گی۔"
+    },
+    "wire.settings.librarian_cadence_paused.help": {
+      "before": "روکنے پر شیڈول شدہ قطاریں ہٹتی ہیں؛ resume اگلا پاس مقرر کرتا ہے۔ ڈیسک ٹاپ اور /librarian ایک ہی کلید لکھتے ہیں۔",
+      "after": "روکنے پر شیڈول شدہ اندراجات ہٹ جاتے ہیں؛ دوبارہ شروع کرنے پر اگلا جائزہ مقرر ہو جاتا ہے۔ ڈیسک ٹاپ اور /librarian ایک ہی کلید میں تبدیلی کرتے ہیں۔"
+    },
+    "wire.settings.librarian_cadence_paused.label": {
+      "before": "روزانہ پاس روکا ہوا",
+      "after": "روزانہ جائزہ روکا ہوا"
+    },
+    "wire.settings.librarian_enabled.label": {
+      "before": "Librarian فعال",
+      "after": "لائبریرین فعال"
+    },
+    "wire.settings.model_effort.choice.unset.label": {
+      "before": "auto",
+      "after": "خودکار"
+    },
+    "wire.settings.network_rollout_on_update.choice.auto.label": {
+      "before": "auto",
+      "after": "خودکار"
+    },
+    "wire.settings.network_sync_debounce_s.help": {
+      "before": "مالک، نقل رکھنے والی ڈیوائسز کو pull کہنے سے پہلے سیشن ٹرانسکرپٹ کتنے سیکنڈ غیر بدلا رہے۔ بے کار ہوتے ہی push فوراً ہوتا ہے، اس لیے آخری پیغام اس سے نہیں رکتا۔",
+      "after": "سیشن کا ٹرانسکرپٹ کتنے سیکنڈ تک بے تبدیلی رہے، تب اس کا مالک نقل رکھنے والی ڈیوائسز کو تازہ نقل لینے کا کہے۔ سیشن فارغ ہوتے ہی تبدیلیاں فوراً بھیج دی جاتی ہیں، اس لیے اس کا آخری پیغام اس وقفے کی وجہ سے نہیں رکتا۔"
+    },
+    "wire.settings.network_sync_tick_s.help": {
+      "before": "مالک نقل شدہ سیشنز میں تبدیلی کتنی بار جانچ کرے: ہر بار ایک فائل stat۔",
+      "after": "مالک نقل شدہ سیشنز میں تبدیلیاں کتنی بار جانچے: ہر فائل کی حالت ایک بار جانچی جاتی ہے۔"
+    },
+    "wire.settings.providers.title": {
+      "before": "Wire پروٹوکول",
+      "after": "ترسیلی پروٹوکول"
+    },
+    "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label": {
+      "before": "false",
+      "after": "نہیں"
+    },
+    "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label": {
+      "before": "default",
+      "after": "طے شدہ"
+    },
+    "wire.settings.providers_openrouter_allow_fallbacks.help": {
+      "before": "'default' کچھ نہیں بھیجتی (ترجیحی ہوسٹ ناکام ہو تو OpenRouter دوسرے ہوسٹ پر منتقل ہوتا ہے)؛ 'false' آپ کی ترجیحات سے باہر ہوسٹ پر جانے کے بجائے ناکام ہوتی ہے۔",
+      "after": "'طے شدہ' کوئی ترجیح نہیں بھیجتا (ترجیحی ہوسٹ ناکام ہو تو OpenRouter دوسرے ہوسٹ پر منتقل ہوتا ہے)؛ 'نہیں' آپ کی ترجیحات سے باہر کے ہوسٹ پر جانے کے بجائے درخواست ناکام کر دیتا ہے۔"
+    },
+    "wire.settings.providers_openrouter_data_collection.choice.allow.label": {
+      "before": "allow",
+      "after": "اجازت دیں"
+    },
+    "wire.settings.providers_openrouter_data_collection.choice.deny.label": {
+      "before": "deny",
+      "after": "اجازت نہ دیں"
+    },
+    "wire.settings.providers_openrouter_data_collection.choice.unset.label": {
+      "before": "default",
+      "after": "طے شدہ"
+    },
+    "wire.settings.providers_openrouter_data_collection.help": {
+      "before": "'deny' ایسے ہوسٹس نکالتی ہے جو آپ کے پرامپٹس پر تربیت یا انہیں محفوظ کر سکتے ہوں۔ 'default' کوئی ترجیح نہیں بھیجتی (OpenRouter ڈیفالٹ: allow)۔",
+      "after": "'اجازت نہ دیں' ایسے ہوسٹس کو خارج کرتا ہے جو آپ کے پرامپٹس سے تربیت حاصل کر سکتے ہوں یا انہیں محفوظ رکھ سکتے ہوں۔ 'طے شدہ' کوئی ترجیح نہیں بھیجتا (OpenRouter کی طے شدہ ترجیح: اجازت دیں)۔"
+    },
+    "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label": {
+      "before": "true",
+      "after": "ہاں"
+    },
+    "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label": {
+      "before": "default",
+      "after": "طے شدہ"
+    },
+    "wire.settings.providers_openrouter_enforce_distillable_text.help": {
+      "before": "'true': صرف ان اینڈ پوائنٹس تک محدود جن کے متن آؤٹ پٹ کو ڈسٹل کیا جا سکے۔ 'default': کچھ نہیں بھیجا۔",
+      "after": "'ہاں': صرف ان اینڈ پوائنٹس تک محدود کرے جن کے متنی آؤٹ پٹ سے دوسرے ماڈل کی تربیت کی جا سکتی ہے۔ 'طے شدہ': کچھ نہیں بھیجا جاتا۔"
+    },
+    "wire.settings.providers_openrouter_require_parameters.choice.true.label": {
+      "before": "true",
+      "after": "ہاں"
+    },
+    "wire.settings.providers_openrouter_require_parameters.choice.unset.label": {
+      "before": "default",
+      "after": "طے شدہ"
+    },
+    "wire.settings.providers_openrouter_require_parameters.help": {
+      "before": "'true' صرف ان ہوسٹس تک محدود جو آپ کے بھیجے ہر پیرامیٹر (ٹولز، ساختہ آؤٹ پٹ) کی حمایت کریں؛ 'default' OpenRouter کو غیر معاون پیرامیٹرز خاموشی سے حذف کرنے دیتی ہے۔",
+      "after": "'ہاں' صرف ان ہوسٹس تک محدود کرتا ہے جو آپ کے بھیجے ہوئے تمام پیرامیٹرز کی حمایت کریں (ٹولز، ساختہ آؤٹ پٹ)؛ 'طے شدہ' OpenRouter کو غیر معاون پیرامیٹرز خاموشی سے حذف کرنے دیتا ہے۔"
+    },
+    "wire.settings.providers_openrouter_sort.choice.unset.label": {
+      "before": "default",
+      "after": "طے شدہ"
+    },
+    "wire.settings.providers_openrouter_sort.help": {
+      "before": "OpenRouter اس کال کے لیے ہوسٹس کی درجہ بندی کیسے کرے۔ وارم پرامپٹ کیشے والے ہوسٹ سے ہٹ سکتا ہے (طویل گفتگوؤں میں کولڈ آغاز)؛ 'default' کوئی ترجیح نہیں بھیجتی۔",
+      "after": "OpenRouter اس کال کے لیے ہوسٹس کی درجہ بندی کیسے کرے۔ موجودہ پرامپٹ کیشے والے ہوسٹ سے ہٹ سکتا ہے (طویل گفتگوؤں میں ابتدا سے کام کرنا پڑے گا)؛ 'طے شدہ' کوئی ترجیح نہیں بھیجتا۔"
+    },
+    "wire.settings.providers_openrouter_zdr.choice.true.label": {
+      "before": "true",
+      "after": "ہاں"
+    },
+    "wire.settings.providers_openrouter_zdr.choice.unset.label": {
+      "before": "default",
+      "after": "طے شدہ"
+    },
+    "wire.settings.providers_openrouter_zdr.help": {
+      "before": "'true': صرف صفر ڈیٹا ریٹینشن اینڈ پوائنٹس۔ 'default': کچھ نہیں بھیجا۔",
+      "after": "'ہاں': صرف ان اینڈ پوائنٹس تک محدود کرے جو ڈیٹا بالکل محفوظ نہیں رکھتے۔ 'طے شدہ': کچھ نہیں بھیجا جاتا۔"
+    },
+    "wire.settings.session_cleanup_max_total_bytes.label": {
+      "before": "↳ زیادہ سے زیادہ کل bytes",
+      "after": "↳ کل بائٹس کی حد"
+    },
+    "wire.settings.session_scratchpad.title": {
+      "before": "Scratchpad",
+      "after": "عارضی فائلیں"
+    },
+    "wire.settings.session_scratchpad_max_bytes.help": {
+      "before": "سیشن کے Scratchpad کی گنجائش: 16 MiB تا 8 GiB۔ ڈیفالٹ 256 MiB۔",
+      "after": "سیشن کی عارضی فائلوں کی گنجائش: 16 MiB سے 8 GiB تک۔ ڈیفالٹ 256 MiB۔"
+    },
+    "wire.settings.session_scratchpad_max_bytes.label": {
+      "before": "Scratchpad حد (bytes)",
+      "after": "عارضی فائلوں کی حد (بائٹس)"
+    },
+    "wire.settings.shell_environment_mode.choice.allowlist.label": {
+      "before": "allowlist",
+      "after": "اجازت کی فہرست"
+    },
+    "wire.settings.shell_environment_mode.choice.inherit.label": {
+      "before": "inherit",
+      "after": "موجودہ ماحول اپنائیں"
+    },
+    "wire.settings.shell_environment_mode.help": {
+      "before": "'inherit' ایجنٹ کمانڈ کو آپ کا ماحول دیکھنے دیتی ہے (gh، aws، npm اپنے ٹوکنز رکھتے ہیں)۔ 'allowlist' صرف PATH/HOME/SHELL/TERM/USER/LOGNAME اور ساتھ کی دو فہرستیں دیتی ہے، اس لیے سیشن لانچ کی پرووائیڈر کلید ماڈل کی لکھی کمانڈ کو نہیں ملتی۔ فی سیشن ایک بار پڑھی جاتی ہے: تبدیلی اگلے لانچ پر لاگو ہوتی ہے۔",
+      "after": "'موجودہ ماحول اپنائیں' ایجنٹ کی چلائی ہوئی کمانڈ کو آپ کے ماحول تک رسائی دیتا ہے (gh، aws، npm اپنے ٹوکنز رکھتے ہیں)۔ 'اجازت کی فہرست' صرف PATH/HOME/SHELL/TERM/USER/LOGNAME اور ساتھ کی دو فہرستیں دیتا ہے، اس لیے سیشن شروع کرتے وقت استعمال ہونے والی پرووائیڈر کلید ماڈل کی لکھی کمانڈ کو نہیں ملتی۔ فی سیشن ایک بار پڑھا جاتا ہے: تبدیلی اگلے آغاز پر لاگو ہوتی ہے۔"
+    },
+    "wire.settings.speech_transcription_cleanup.choice.auto.label": {
+      "before": "auto",
+      "after": "خودکار"
+    },
+    "wire.settings.speech_transcription_cleanup.choice.client.label": {
+      "before": "client",
+      "after": "کلائنٹ"
+    },
+    "wire.settings.speech_transcription_cleanup.choice.provider.label": {
+      "before": "provider",
+      "after": "پرووائیڈر"
+    },
+    "wire.settings.speech_transcription_cleanup.help": {
+      "before": "املاء سے فلر الفاظ اور غیر گفتار اشارے کیسے نکلیں۔ auto جہاں ممکن ہو پرووائیڈر کی مقامی صفائی، ورنہ محتاط کلائنٹ قواعد استعمال کرتا ہے؛ provider اور client میں سے ہر ایک صرف ایک میکانیزم استعمال کرتا ہے؛ آف حرف بہ حرف ٹرانسکرپٹ رکھتا ہے۔ فی درخواست `cleanup` فیلڈ بھی اول ہے۔",
+      "after": "بول کر لکھواتے وقت غیر ضروری الفاظ اور غیر گفتاری اشارے کیسے ہٹائے جائیں۔ خودکار انتخاب جہاں دستیاب ہو پرووائیڈر کی اپنی صفائی استعمال کرتا ہے، ورنہ کلائنٹ کے محتاط قواعد؛ پرووائیڈر اور کلائنٹ میں سے ہر انتخاب صرف اپنا متعلقہ طریقہ استعمال کرتا ہے؛ آف اصل ٹرانسکرپٹ جوں کا توں رکھتا ہے۔ ہر درخواست کا `cleanup` فیلڈ پھر بھی ترجیح رکھتا ہے۔"
+    },
+    "wire.settings.speech_voice_expressiveness.choice.medium.description": {
+      "before": "موجودہ مستقل قیمت۔",
+      "after": "آواز کی معمول کی ادائیگی۔"
+    },
+    "wire.settings.speech_voice_gender.choice.auto.label": {
+      "before": "auto",
+      "after": "خودکار"
+    },
+    "wire.settings.speech_voice_gender.choice.female.label": {
+      "before": "female",
+      "after": "خاتون"
+    },
+    "wire.settings.speech_voice_gender.choice.male.label": {
+      "before": "male",
+      "after": "مرد"
+    },
+    "wire.settings.speech_voice_gender.help": {
+      "before": "auto ہر ایجنٹ کے لیے منتخب کرتی ہے؛ مقررہ قیمت کلاسیفائر کو اووررائیڈ کرتی ہے۔",
+      "after": "خودکار انتخاب ہر ایجنٹ کے مطابق ہوتا ہے؛ مقررہ قدر درجہ بندی کرنے والے ماڈل کے انتخاب پر ترجیح رکھتی ہے۔"
+    },
+    "wire.settings.subagents_model_choice.choice.operator.description": {
+      "before": "سیشن کا ماڈل inherit کرے",
+      "after": "سیشن کا ماڈل اپناتا ہے"
+    },
+    "wire.settings.team_bridge_screening_ambient_budget_per_hour.help": {
+      "before": "غیر مخاطب کی بالائی حد میں سے نکالا گیا حصہ ہے، اس سے اکاؤنٹ کی بالائی حد میں کبھی اضافہ نہیں ہوتا: مشترکہ کمروں میں ایجنٹس کی بات چیت گھنٹے کا زیادہ سے زیادہ اتنا حصہ استعمال کر سکتی ہے۔",
+      "after": "یہ غیر مخاطب پیغامات کی حد میں سے مختص حصہ ہے، اکاؤنٹ کی حد میں اضافہ نہیں: مشترکہ کمروں میں ایجنٹس کی بات چیت کے لیے ہر گھنٹے زیادہ سے زیادہ اتنی جانچ کی کالیں کی جا سکتی ہیں۔"
+    },
+    "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.help": {
+      "before": "اکاؤنٹ کی بالائی حد میں سے نکالا گیا حصہ ہے، اس میں کبھی اضافہ نہیں ہوتا: آپ کے ایجنٹ کو مخاطب کرنے والے شخص کے سوا سب کچھ گھنٹے کا زیادہ سے زیادہ اتنا حصہ استعمال کر سکتا ہے۔ بقیہ حصہ لوگوں کے لیے رکھا جاتا ہے۔",
+      "after": "یہ اکاؤنٹ کی حد میں سے مختص حصہ ہے، اس میں اضافہ نہیں: آپ کے ایجنٹ کو مخاطب کرنے والے شخص کے پیغامات کے علاوہ باقی سب کے لیے ہر گھنٹے زیادہ سے زیادہ اتنی جانچ کی کالیں کی جا سکتی ہیں۔ باقی گنجائش لوگوں کے لیے محفوظ رہتی ہے۔"
+    },
+    "wire.settings.tools_search_interception_rg_excludes.label": {
+      "before": "...ripgrep کے لیے وینڈر درخت حذف کریں",
+      "after": "...وینڈر فولڈر ripgrep کی تلاش سے خارج کریں"
+    },
+    "wire.settings.web_fetch_render_backend.choice.auto.label": {
+      "before": "auto",
+      "after": "خودکار"
+    },
+    "wire.settings.web_fetch_render_backend.help": {
+      "before": "[fetch] extra انسٹال ہو تو auto markdownify استعمال کرتا ہے۔",
+      "after": "[fetch] extra انسٹال ہو تو خودکار انتخاب markdownify استعمال کرتا ہے۔"
+    },
+    "wire.settings.web_search_strategy.choice.ordered.label": {
+      "before": "ordered",
+      "after": "ترتیب وار"
+    },
+    "wire.settings.web_search_strategy.choice.round_robin.label": {
+      "before": "round_robin",
+      "after": "باری باری"
+    },
+    "wire.settings.mesh_move_working_set_max_bytes.help": {
+      "before": "ورکنگ فائل ڈیٹا (بنڈل شدہ commits کے ساتھ staged، unstaged اور untracked فائلیں) کی زیادہ سے زیادہ مقدار جو ایک منتقلی دوسری ڈیوائس کو بھیجتی ہے یا اس سے قبول کرتی ہے۔ اس سے زیادہ ہونے پر منتقلی مسترد ہو جاتی ہے اور کچھ نہیں بدلتا۔ ڈیفالٹ 256 MiB۔",
+      "after": "کام کی فائلوں کے ڈیٹا کی زیادہ سے زیادہ مقدار جو ایک منتقلی دوسری ڈیوائس کو بھیج یا اس سے قبول کر سکتی ہے۔ اس میں بنڈل شدہ commits اور اسٹیج کی گئی، اسٹیج نہ کی گئی اور Git میں شامل نہ کی گئی فائلیں شامل ہیں۔ حد سے زیادہ ہونے پر منتقلی مسترد ہوتی ہے اور کچھ نہیں بدلتا۔ ڈیفالٹ 256 MiB۔"
+    },
+    "wire.settings.mesh_move_working_set_roots.help": {
+      "before": "اس ڈیوائس پر سیشن کی منتقلی کہاں ریپوزٹری بنا یا بحال کر سکتی ہے: آپ کے ہوم کے اندر فولڈر، ~ کے ساتھ لکھے اور کاموں سے الگ کیے گئے (مثلاً ~/code, ~/work)۔ پوشیدہ، سسٹم، کمانڈ (PATH پر) اور node_modules فولڈر کبھی استعمال نہیں ہوتے۔ سیٹ نہ ہو تو: ریپوزٹری وہیں بحال ہوتی ہے جہاں وہ پہلے سے ہے، اور غائب ریپوزٹری صرف ایسے فولڈر میں کلون ہوتی ہے جس میں پہلے سے آپ کی ریپوزٹریز ہوں؛ دوسرے فولڈروں کی اجازت کے لیے اسے سیٹ کریں۔",
+      "after": "اس ڈیوائس پر سیشن کی منتقلی کہاں ریپوزٹری بنا یا بحال کر سکتی ہے: آپ کے ہوم کے اندر فولڈر، ~ کے ساتھ لکھے اور کوما سے الگ کیے گئے (مثلاً ~/code, ~/work)۔ پوشیدہ، سسٹم، کمانڈ (PATH پر) اور node_modules فولڈر کبھی استعمال نہیں ہوتے۔ سیٹ نہ ہو تو: ریپوزٹری وہیں بحال ہوتی ہے جہاں وہ پہلے سے ہے، اور غائب ریپوزٹری صرف ایسے فولڈر میں کلون ہوتی ہے جس میں پہلے سے آپ کی ریپوزٹریز ہوں؛ دوسرے فولڈروں کی اجازت کے لیے اسے سیٹ کریں۔"
+    }
+  },
+  "es": {
+    "wire.settings.display_composer_chevron.label": {
+      "before": "Chevron del prompt",
+      "after": "Indicador del prompt"
+    },
+    "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label": {
+      "before": "false",
+      "after": "desactivado"
+    },
+    "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label": {
+      "before": "default",
+      "after": "predeterminado"
+    },
+    "wire.settings.providers_openrouter_allow_fallbacks.help": {
+      "before": "'default' no envía nada (OpenRouter pasa a otro host cuando falla el preferido); 'false' falla en vez de pasar a un host fuera de tus preferencias.",
+      "after": "“predeterminado” (`default`) no envía nada (OpenRouter pasa a otro servidor cuando falla el preferido); “desactivado” (`false`) falla en vez de pasar a un servidor fuera de tus preferencias."
+    },
+    "wire.settings.providers_openrouter_data_collection.choice.allow.label": {
+      "before": "allow",
+      "after": "permitir"
+    },
+    "wire.settings.providers_openrouter_data_collection.choice.deny.label": {
+      "before": "deny",
+      "after": "denegar"
+    },
+    "wire.settings.providers_openrouter_data_collection.choice.unset.label": {
+      "before": "default",
+      "after": "predeterminado"
+    },
+    "wire.settings.providers_openrouter_data_collection.help": {
+      "before": "'deny' excluye los hosts que puedan entrenar con tus prompts o retenerlos. 'default' no envía preferencia (el valor predeterminado de OpenRouter: allow).",
+      "after": "“denegar” (`deny`) excluye los servidores que puedan entrenar con tus prompts o retenerlos. “predeterminado” (`default`) no envía preferencia (el valor predeterminado de OpenRouter es “permitir”, `allow`)."
+    },
+    "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label": {
+      "before": "true",
+      "after": "activado"
+    },
+    "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label": {
+      "before": "default",
+      "after": "predeterminado"
+    },
+    "wire.settings.providers_openrouter_enforce_distillable_text.help": {
+      "before": "'true': restringe a los endpoints cuya salida de texto pueda destilarse. 'default': no se envía nada.",
+      "after": "“activado” (`true`): restringe a los endpoints cuya salida de texto pueda destilarse. “predeterminado” (`default`): no se envía nada."
+    },
+    "wire.settings.providers_openrouter_require_parameters.choice.true.label": {
+      "before": "true",
+      "after": "activado"
+    },
+    "wire.settings.providers_openrouter_require_parameters.choice.unset.label": {
+      "before": "default",
+      "after": "predeterminado"
+    },
+    "wire.settings.providers_openrouter_require_parameters.help": {
+      "before": "'true' restringe a los hosts que admiten todos los parámetros que envías (herramientas, salida estructurada); con 'default', OpenRouter puede descartar los no admitidos en silencio.",
+      "after": "“activado” (`true`) restringe a los servidores que admiten todos los parámetros que envías (herramientas, salida estructurada); con “predeterminado” (`default`), OpenRouter puede descartar los no admitidos en silencio."
+    },
+    "wire.settings.providers_openrouter_sort.choice.unset.label": {
+      "before": "default",
+      "after": "predeterminado"
+    },
+    "wire.settings.providers_openrouter_sort.help": {
+      "before": "Cómo clasifica OpenRouter los hosts para esta llamada. Puede desviarse del host que tiene tu caché de prompts en caliente (inicio en frío en conversaciones largas); 'default' no envía preferencia alguna.",
+      "after": "Cómo clasifica OpenRouter los servidores para esta llamada. Puede desviarse del servidor que tiene tu caché de prompts en caliente (inicio en frío en conversaciones largas); “predeterminado” (`default`) no envía preferencia alguna."
+    },
+    "wire.settings.providers_openrouter_zdr.choice.true.label": {
+      "before": "true",
+      "after": "activado"
+    },
+    "wire.settings.providers_openrouter_zdr.choice.unset.label": {
+      "before": "default",
+      "after": "predeterminado"
+    },
+    "wire.settings.providers_openrouter_zdr.help": {
+      "before": "'true': restringe a los endpoints con retención de datos cero. 'default': no se envía nada.",
+      "after": "“activado” (`true`): restringe a los endpoints con retención de datos cero. “predeterminado” (`default`): no se envía nada."
+    },
+    "wire.settings.session_scratchpad.title": {
+      "before": "Scratchpad",
+      "after": "Borrador"
+    },
+    "wire.settings.session_scratchpad_max_bytes.help": {
+      "before": "Bytes que puede guardar el scratchpad de una sesión: de 16 MiB a 8 GiB. Predeterminado: 256 MiB.",
+      "after": "Bytes que puede guardar el borrador de una sesión: de 16 MiB a 8 GiB. Predeterminado: 256 MiB."
+    },
+    "wire.settings.session_scratchpad_max_bytes.label": {
+      "before": "Límite de scratchpad (bytes)",
+      "after": "Límite del borrador (bytes)"
+    },
+    "wire.settings.shell_environment_mode.choice.allowlist.label": {
+      "before": "allowlist",
+      "after": "lista de permitidos"
+    },
+    "wire.settings.shell_environment_mode.choice.inherit.label": {
+      "before": "inherit",
+      "after": "heredar"
+    },
+    "wire.settings.shell_environment_mode.help": {
+      "before": "'inherit' deja que un comando que ejecuta el agente vea tu entorno (gh, aws y npm conservan sus tokens). 'allowlist' solo pasa PATH/HOME/SHELL/TERM/USER/LOGNAME más las dos listas que acompañan a este ajuste, así que la clave del proveedor con la que se lanzó esta sesión no se entrega a ningún comando que escriba el modelo. Se lee una vez por sesión: el cambio surte efecto en el siguiente arranque.",
+      "after": "“heredar” (`inherit`) deja que un comando que ejecuta el agente vea tu entorno (gh, aws y npm conservan sus tokens). “lista de permitidos” (`allowlist`) solo pasa PATH/HOME/SHELL/TERM/USER/LOGNAME más las dos listas que acompañan a este ajuste, así que la clave del proveedor con la que se lanzó esta sesión no se entrega a ningún comando que escriba el modelo. Se lee una vez por sesión: el cambio surte efecto en el siguiente arranque."
+    },
+    "wire.settings.speech_transcription_cleanup.choice.auto.label": {
+      "before": "auto",
+      "after": "automática"
+    },
+    "wire.settings.speech_transcription_cleanup.choice.client.label": {
+      "before": "client",
+      "after": "cliente"
+    },
+    "wire.settings.speech_transcription_cleanup.choice.off.label": {
+      "before": "off",
+      "after": "desactivada"
+    },
+    "wire.settings.speech_transcription_cleanup.choice.provider.label": {
+      "before": "provider",
+      "after": "proveedor"
+    },
+    "wire.settings.speech_transcription_cleanup.help": {
+      "before": "Cómo el dictado quita las muletillas y las señales no verbales. auto usa la limpieza nativa del proveedor cuando está disponible y las reglas conservadoras del lado cliente en los demás casos; provider y client aplican solo uno de los dos mecanismos cada uno; off conserva la transcripción literal. El campo `cleanup` de cada petición sigue teniendo prioridad.",
+      "after": "Cómo el dictado quita las muletillas y las señales no verbales. La limpieza automática usa la limpieza nativa del proveedor cuando está disponible y las reglas conservadoras del lado cliente en los demás casos; las opciones de proveedor y cliente aplican solo uno de los dos mecanismos cada una; desactivada conserva la transcripción literal. El campo `cleanup` de cada petición sigue teniendo prioridad."
+    },
+    "wire.settings.speech_voice_expressiveness.choice.medium.description": {
+      "before": "La constante actual.",
+      "after": "Interpretación vocal estándar."
+    },
+    "wire.settings.speech_voice_gender.choice.female.label": {
+      "before": "female",
+      "after": "femenina"
+    },
+    "wire.settings.speech_voice_gender.choice.male.label": {
+      "before": "male",
+      "after": "masculina"
+    },
+    "wire.settings.subagents_models_hi.help": {
+      "before": "Se factura a las tarifas de ese modelo; 'default': session; vacío elimina el nivel",
+      "after": "Se factura a las tarifas de ese modelo; 'default': modelo de la sesión; vacío elimina el nivel"
+    },
+    "wire.settings.subagents_models_lo.help": {
+      "before": "Se factura a las tarifas de ese modelo; 'default': session; vacío elimina el nivel",
+      "after": "Se factura a las tarifas de ese modelo; 'default': modelo de la sesión; vacío elimina el nivel"
+    },
+    "wire.settings.subagents_models_med.help": {
+      "before": "Se factura a las tarifas de ese modelo; 'default': session; vacío elimina el nivel",
+      "after": "Se factura a las tarifas de ese modelo; 'default': modelo de la sesión; vacío elimina el nivel"
+    },
+    "wire.settings.team_bridge_session.label": {
+      "before": "Sesión de CoS",
+      "after": "Sesión de la jefa de gabinete"
+    },
+    "wire.settings.web_search_strategy.choice.ordered.label": {
+      "before": "ordered",
+      "after": "por orden"
+    },
+    "wire.settings.web_search_strategy.choice.round_robin.label": {
+      "before": "round_robin",
+      "after": "rotación"
+    }
+  },
+  "ru": {
+    "wire.settings.bash_memory_mode.choice.auto.label": {
+      "before": "auto",
+      "after": "автоматически"
+    },
+    "wire.settings.bash_memory_mode.choice.manual.label": {
+      "before": "manual",
+      "after": "вручную"
+    },
+    "wire.settings.bash_memory_mode.help": {
+      "before": "'auto' выводит потолок из свободной памяти устройства прямо сейчас, поэтому он сам снижается, когда машина занята. 'manual' привязывает его к числу ниже.",
+      "after": "В режиме «автоматически» предел рассчитывается по текущему объёму свободной памяти устройства и снижается, когда машина занята. В режиме «вручную» используется число ниже."
+    },
+    "wire.settings.classification_vendor.choice.auto.label": {
+      "before": "auto",
+      "after": "автоматически"
+    },
+    "wire.settings.classification_vendor.help": {
+      "before": "Требует включённых подсказок. Закрепить одно звено; auto предпочитает Radient.",
+      "after": "Требует включённых рекомендаций. Выберите одно звено каскада; в режиме «автоматически» предпочтение отдаётся Radient."
+    },
+    "wire.settings.compaction_strategy.choice.auto.label": {
+      "before": "auto",
+      "after": "автоматически"
+    },
+    "wire.settings.compaction_strategy.help": {
+      "before": "Какой механизм сжимает. auto выбирает по модели.",
+      "after": "Какой механизм выполняет сжатие. В режиме «автоматически» выбор зависит от модели."
+    },
+    "wire.settings.display_nerd_icons.choice.none.label": {
+      "before": "auto",
+      "after": "автоматически"
+    },
+    "wire.settings.display_nerd_icons.help": {
+      "before": "Расширенные значки в строках инструментов. auto читает маркеры терминального эмулятора.",
+      "after": "Расширенные значки в строках инструментов. В режиме «автоматически» используются маркеры терминального эмулятора."
+    },
+    "wire.settings.model_effort.choice.unset.label": {
+      "before": "auto",
+      "after": "автоматически"
+    },
+    "wire.settings.network_rollout_on_update.choice.auto.label": {
+      "before": "auto",
+      "after": "автоматически"
+    },
+    "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label": {
+      "before": "false",
+      "after": "нет"
+    },
+    "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label": {
+      "before": "default",
+      "after": "по умолчанию"
+    },
+    "wire.settings.providers_openrouter_allow_fallbacks.help": {
+      "before": "'default' ничего не отправляет (OpenRouter переходит на другой хост, когда предпочитаемый сбоит); 'false' завершается ошибкой, а не переходит на хост вне ваших предпочтений.",
+      "after": "«По умолчанию»: предпочтение не отправляется (OpenRouter переходит на другой хост при сбое предпочитаемого). «Нет»: ошибка вместо перехода на хост вне ваших предпочтений."
+    },
+    "wire.settings.providers_openrouter_data_collection.choice.allow.label": {
+      "before": "allow",
+      "after": "разрешить"
+    },
+    "wire.settings.providers_openrouter_data_collection.choice.deny.label": {
+      "before": "deny",
+      "after": "запретить"
+    },
+    "wire.settings.providers_openrouter_data_collection.choice.unset.label": {
+      "before": "default",
+      "after": "по умолчанию"
+    },
+    "wire.settings.providers_openrouter_data_collection.help": {
+      "before": "'deny' исключает хосты, которые могут обучаться на ваших промптах или хранить их. 'default' не отправляет предпочтений (значение OpenRouter по умолчанию: allow).",
+      "after": "«Запретить»: исключить хосты, которые могут обучаться на ваших промптах или хранить их. «По умолчанию»: предпочтение не отправляется (OpenRouter разрешает сбор данных по умолчанию)."
+    },
+    "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label": {
+      "before": "true",
+      "after": "да"
+    },
+    "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label": {
+      "before": "default",
+      "after": "по умолчанию"
+    },
+    "wire.settings.providers_openrouter_enforce_distillable_text.help": {
+      "before": "'true': ограничиться endpoint, чей текстовый вывод можно дистиллировать. 'default': ничего не отправляется.",
+      "after": "«Да»: использовать только endpoint, текстовый вывод которых разрешено дистиллировать. «По умолчанию»: предпочтение не отправляется."
+    },
+    "wire.settings.providers_openrouter_require_parameters.choice.true.label": {
+      "before": "true",
+      "after": "да"
+    },
+    "wire.settings.providers_openrouter_require_parameters.choice.unset.label": {
+      "before": "default",
+      "after": "по умолчанию"
+    },
+    "wire.settings.providers_openrouter_require_parameters.help": {
+      "before": "'true' ограничивает хостами, которые поддерживают все отправляемые вами параметры (инструменты, структурированный вывод); с 'default' OpenRouter может молча отбрасывать неподдерживаемые.",
+      "after": "«Да»: использовать только хосты, которые поддерживают все отправляемые вами параметры (инструменты, структурированный вывод). «По умолчанию»: OpenRouter может молча отбрасывать неподдерживаемые параметры."
+    },
+    "wire.settings.providers_openrouter_sort.choice.unset.label": {
+      "before": "default",
+      "after": "по умолчанию"
+    },
+    "wire.settings.providers_openrouter_sort.help": {
+      "before": "Как OpenRouter ранжирует хосты для этого вызова. Может увести от хоста с вашим тёплым кэшем промптов (холодный старт в длинных беседах); 'default' не отправляет предпочтений вовсе.",
+      "after": "Как OpenRouter ранжирует хосты для этого вызова. Запрос может уйти не на тот хост, где уже есть кэш ваших промптов (холодный старт в длинных беседах). «По умолчанию»: предпочтение не отправляется."
+    },
+    "wire.settings.providers_openrouter_zdr.choice.true.label": {
+      "before": "true",
+      "after": "да"
+    },
+    "wire.settings.providers_openrouter_zdr.choice.unset.label": {
+      "before": "default",
+      "after": "по умолчанию"
+    },
+    "wire.settings.providers_openrouter_zdr.help": {
+      "before": "'true': ограничиться endpoint с нулевым хранением данных. 'default': ничего не отправляется.",
+      "after": "«Да»: использовать только endpoint, которые не сохраняют данные. «По умолчанию»: предпочтение не отправляется."
+    },
+    "wire.settings.shell_environment_mode.choice.allowlist.label": {
+      "before": "allowlist",
+      "after": "список разрешений"
+    },
+    "wire.settings.shell_environment_mode.choice.inherit.label": {
+      "before": "inherit",
+      "after": "наследовать"
+    },
+    "wire.settings.shell_environment_mode.help": {
+      "before": "'inherit' позволяет команде, запускаемой агентом, видеть ваше окружение (gh, aws, npm сохраняют свои токены). 'allowlist' передаёт только PATH/HOME/SHELL/TERM/USER/LOGNAME плюс два списка рядом с этой настройкой, поэтому ключ провайдера, с которым запущена сессия, не попадает в команду, которую пишет модель. Читается один раз за сессию: изменение вступит в силу при следующем запуске.",
+      "after": "«Наследовать»: командам, запускаемым агентом, доступно ваше окружение (gh, aws, npm сохраняют свои токены). «Список разрешений»: передаются только PATH/HOME/SHELL/TERM/USER/LOGNAME и два списка рядом с этой настройкой, поэтому ключ провайдера, с которым запущена сессия, не попадает в команду, написанную моделью. Настройка читается один раз за сессию: изменение вступит в силу при следующем запуске."
+    },
+    "wire.settings.speech_transcription_cleanup.choice.auto.label": {
+      "before": "auto",
+      "after": "автоматически"
+    },
+    "wire.settings.speech_transcription_cleanup.choice.client.label": {
+      "before": "client",
+      "after": "на устройстве"
+    },
+    "wire.settings.speech_transcription_cleanup.choice.off.label": {
+      "before": "off",
+      "after": "выключено"
+    },
+    "wire.settings.speech_transcription_cleanup.choice.provider.label": {
+      "before": "provider",
+      "after": "у провайдера"
+    },
+    "wire.settings.speech_transcription_cleanup.help": {
+      "before": "Как диктовка удаляет слова-паразиты и неречевые сигналы. auto использует встроенную очистку провайдера, если она доступна, и консервативные правила клиента в остальных случаях; provider и client применяют каждый только один из двух механизмов; off сохраняет транскрипт дословно. Поле `cleanup`, заданное в запросе, по-прежнему имеет приоритет.",
+      "after": "Как из диктовки удаляются слова-паразиты и неречевые сигналы. В режиме «автоматически» используется встроенная очистка провайдера, если она доступна, иначе — консервативные правила клиента. Режимы «у провайдера» и «на устройстве» используют только соответствующий механизм; режим «выключено» сохраняет транскрипт дословно. Поле `cleanup` в запросе по-прежнему имеет приоритет."
+    },
+    "wire.settings.speech_voice_expressiveness.choice.medium.description": {
+      "before": "Текущая константа.",
+      "after": "Обычная манера речи."
+    },
+    "wire.settings.speech_voice_gender.choice.auto.label": {
+      "before": "auto",
+      "after": "автоматически"
+    },
+    "wire.settings.speech_voice_gender.choice.female.label": {
+      "before": "female",
+      "after": "женский"
+    },
+    "wire.settings.speech_voice_gender.choice.male.label": {
+      "before": "male",
+      "after": "мужской"
+    },
+    "wire.settings.speech_voice_gender.help": {
+      "before": "auto выбирает по агенту; фиксированное значение переопределяет классификатор.",
+      "after": "В режиме «автоматически» голос выбирается для каждого агента; фиксированное значение имеет приоритет над классификатором."
+    },
+    "wire.settings.team_bridge_session.label": {
+      "before": "Сессия CoS",
+      "after": "Сессия главы аппарата"
+    },
+    "wire.settings.web_fetch_render_backend.choice.auto.label": {
+      "before": "auto",
+      "after": "автоматически"
+    },
+    "wire.settings.web_fetch_render_backend.help": {
+      "before": "auto использует markdownify, когда установлен extra [fetch].",
+      "after": "В режиме «автоматически» используется markdownify, если установлен extra [fetch]."
+    },
+    "wire.settings.web_search_strategy.choice.ordered.label": {
+      "before": "ordered",
+      "after": "по порядку"
+    },
+    "wire.settings.web_search_strategy.choice.round_robin.label": {
+      "before": "round_robin",
+      "after": "по кругу"
+    }
+  },
+  "vi": {
+    "wire.settings.bash_memory_mode.choice.auto.label": {
+      "before": "auto",
+      "after": "Tự động"
+    },
+    "wire.settings.bash_memory_mode.choice.manual.label": {
+      "before": "manual",
+      "after": "Thủ công"
+    },
+    "wire.settings.bash_memory_mode.help": {
+      "before": "'auto' suy ra trần từ lượng bộ nhớ thiết bị còn trống ngay lúc này, nên nó tự siết lại khi máy bận. 'manual' ghim trần vào con số bên dưới.",
+      "after": "“Tự động” xác định mức trần theo lượng bộ nhớ thiết bị còn trống, nên tự giảm khi máy bận. “Thủ công” cố định mức trần ở con số bên dưới."
+    },
+    "wire.settings.classification_vendor.choice.auto.label": {
+      "before": "auto",
+      "after": "Tự động"
+    },
+    "wire.settings.classification_vendor.help": {
+      "before": "Cần bật gợi ý. Ghim một chặng; auto ưu tiên Radient.",
+      "after": "Cần bật gợi ý. Chọn cố định một dịch vụ; “Tự động” ưu tiên Radient."
+    },
+    "wire.settings.compaction_strategy.choice.auto.label": {
+      "before": "auto",
+      "after": "Tự động"
+    },
+    "wire.settings.compaction_strategy.help": {
+      "before": "Cơ chế nén nào được dùng. auto chọn theo mô hình.",
+      "after": "Cơ chế dùng để nén. “Tự động” chọn theo mô hình."
+    },
+    "wire.settings.display_nerd_icons.choice.none.label": {
+      "before": "auto",
+      "after": "Tự động"
+    },
+    "wire.settings.display_nerd_icons.help": {
+      "before": "Biểu tượng mở rộng cho hàng công cụ. auto đọc các dấu hiệu của trình mô phỏng terminal.",
+      "after": "Biểu tượng mở rộng cho hàng công cụ. “Tự động” đọc các dấu hiệu của trình giả lập thiết bị đầu cuối."
+    },
+    "wire.settings.fork.title": {
+      "before": "Fork",
+      "after": "Tách nhánh"
+    },
+    "wire.settings.fork_cmux_placement.choice.surface.description": {
+      "before": "một tab trong không gian làm việc hiện tại",
+      "after": "một thẻ trong không gian làm việc hiện tại"
+    },
+    "wire.settings.fork_cmux_placement.choice.surface.label": {
+      "before": "surface mới",
+      "after": "Thẻ mới"
+    },
+    "wire.settings.fork_cmux_placement.help": {
+      "before": "Dưới cmux, liệu nhánh mới có không gian làm việc riêng hay một surface ở đây.",
+      "after": "Trong cmux, nhánh mới sẽ mở trong không gian làm việc riêng hay trong một thẻ ở đây."
+    },
+    "wire.settings.model_effort.choice.unset.label": {
+      "before": "auto",
+      "after": "Tự động"
+    },
+    "wire.settings.monitor_classifymaxchars.help": {
+      "before": "Giới hạn số dòng thay đổi mà bước kiểm tra mức độ quan trọng nhận được (tên và mục đích của giám sát đi kèm, được cắt riêng).",
+      "after": "Giới hạn số ký tự trong các dòng thay đổi được gửi đến bước kiểm tra mức độ quan trọng (tên và mục đích của mục giám sát được gửi kèm, với giới hạn độ dài riêng)."
+    },
+    "wire.settings.network_rollout_on_update.choice.auto.label": {
+      "before": "auto",
+      "after": "Tự động"
+    },
+    "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label": {
+      "before": "false",
+      "after": "Không"
+    },
+    "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label": {
+      "before": "default",
+      "after": "Mặc định"
+    },
+    "wire.settings.providers_openrouter_allow_fallbacks.help": {
+      "before": "'default' không gửi gì (OpenRouter chuyển sang host khác khi host ưu tiên gặp lỗi); 'false' thất bại thay vì chuyển sang host ngoài tùy chọn của bạn.",
+      "after": "“Mặc định” không gửi tùy chọn nào (OpenRouter chuyển sang host khác khi host ưu tiên gặp lỗi); “Không” báo lỗi thay vì chuyển sang host ngoài các lựa chọn ưu tiên của bạn."
+    },
+    "wire.settings.providers_openrouter_data_collection.choice.allow.label": {
+      "before": "allow",
+      "after": "Cho phép"
+    },
+    "wire.settings.providers_openrouter_data_collection.choice.deny.label": {
+      "before": "deny",
+      "after": "Không cho phép"
+    },
+    "wire.settings.providers_openrouter_data_collection.choice.unset.label": {
+      "before": "default",
+      "after": "Mặc định"
+    },
+    "wire.settings.providers_openrouter_data_collection.help": {
+      "before": "'deny' loại trừ các host có thể huấn luyện trên hoặc lưu giữ prompt của bạn. 'default' không gửi tùy chọn nào (mặc định của OpenRouter: allow).",
+      "after": "“Không cho phép” loại trừ các host có thể dùng prompt của bạn để huấn luyện hoặc lưu giữ prompt. “Mặc định” không gửi tùy chọn nào (mặc định của OpenRouter là cho phép)."
+    },
+    "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label": {
+      "before": "true",
+      "after": "Có"
+    },
+    "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label": {
+      "before": "default",
+      "after": "Mặc định"
+    },
+    "wire.settings.providers_openrouter_enforce_distillable_text.help": {
+      "before": "'true': chỉ giới hạn ở endpoint có đầu ra văn bản được phép chưng cất. 'default': không gửi gì.",
+      "after": "“Có”: chỉ dùng các endpoint có đầu ra văn bản được phép dùng để chưng cất mô hình. “Mặc định”: không gửi tùy chọn nào."
+    },
+    "wire.settings.providers_openrouter_require_parameters.choice.true.label": {
+      "before": "true",
+      "after": "Có"
+    },
+    "wire.settings.providers_openrouter_require_parameters.choice.unset.label": {
+      "before": "default",
+      "after": "Mặc định"
+    },
+    "wire.settings.providers_openrouter_require_parameters.help": {
+      "before": "'true' giới hạn ở các host hỗ trợ mọi tham số được gửi (công cụ, đầu ra có cấu trúc); 'default' để OpenRouter âm thầm bỏ những tham số không được hỗ trợ.",
+      "after": "“Có” chỉ dùng các host hỗ trợ mọi tham số được gửi (công cụ, đầu ra có cấu trúc); “Mặc định” để OpenRouter âm thầm bỏ các tham số không được hỗ trợ."
+    },
+    "wire.settings.providers_openrouter_sort.choice.unset.label": {
+      "before": "default",
+      "after": "Mặc định"
+    },
+    "wire.settings.providers_openrouter_sort.help": {
+      "before": "Cách OpenRouter xếp hạng host cho lệnh gọi này. Có thể định tuyến rời khỏi host đang giữ cache prompt ấm (khởi động lạnh với hội thoại dài); 'default' không gửi tùy chọn nào cả.",
+      "after": "Cách OpenRouter xếp hạng host cho lệnh gọi này. Có thể chuyển khỏi host đang giữ cache prompt đã nạp (khiến cuộc trò chuyện dài phải nạp lại từ đầu); “Mặc định” không gửi tùy chọn nào."
+    },
+    "wire.settings.providers_openrouter_zdr.choice.true.label": {
+      "before": "true",
+      "after": "Có"
+    },
+    "wire.settings.providers_openrouter_zdr.choice.unset.label": {
+      "before": "default",
+      "after": "Mặc định"
+    },
+    "wire.settings.providers_openrouter_zdr.help": {
+      "before": "'true': giới hạn ở endpoint không lưu giữ dữ liệu. 'default': không gửi gì.",
+      "after": "“Có”: chỉ dùng các endpoint không lưu giữ dữ liệu. “Mặc định”: không gửi tùy chọn nào."
+    },
+    "wire.settings.session_scratchpad.description": {
+      "before": "Dung lượng khu vực nháp riêng của một phiên có thể chứa. Giới hạn được kiểm tra ở mỗi lần ghi và áp dụng ngay.",
+      "after": "Dung lượng tối đa của vùng nháp riêng cho mỗi phiên. Giới hạn được kiểm tra ở mỗi lần ghi và áp dụng ngay."
+    },
+    "wire.settings.session_scratchpad.title": {
+      "before": "Scratchpad",
+      "after": "Vùng nháp"
+    },
+    "wire.settings.session_scratchpad_max_bytes.help": {
+      "before": "Số byte scratchpad của một phiên có thể lưu trữ: từ 16 MiB đến 8 GiB. Mặc định 256 MiB.",
+      "after": "Dung lượng tối đa của vùng nháp mỗi phiên: từ 16 MiB đến 8 GiB. Mặc định 256 MiB."
+    },
+    "wire.settings.session_scratchpad_max_bytes.label": {
+      "before": "Giới hạn scratchpad (byte)",
+      "after": "Giới hạn vùng nháp (byte)"
+    },
+    "wire.settings.shell_environment_mode.choice.allowlist.label": {
+      "before": "allowlist",
+      "after": "Danh sách cho phép"
+    },
+    "wire.settings.shell_environment_mode.choice.inherit.label": {
+      "before": "inherit",
+      "after": "Kế thừa"
+    },
+    "wire.settings.shell_environment_mode.help": {
+      "before": "'inherit' để lệnh do tác nhân chạy thấy môi trường của bạn (gh, aws, npm giữ token của chúng). 'allowlist' chỉ truyền PATH/HOME/SHELL/TERM/USER/LOGNAME cùng hai danh sách bên cạnh, nên khóa của nhà cung cấp mà phiên này khởi chạy cùng không bị đưa cho lệnh do mô hình viết. Được đọc một lần mỗi phiên: thay đổi có hiệu lực từ lần khởi chạy kế tiếp.",
+      "after": "“Kế thừa” cho phép lệnh do tác nhân chạy truy cập môi trường của bạn (gh, aws, npm giữ các token của chúng). “Danh sách cho phép” chỉ truyền PATH/HOME/SHELL/TERM/USER/LOGNAME cùng hai danh sách bên cạnh, nên khóa nhà cung cấp dùng để khởi chạy phiên không bị truyền cho lệnh do mô hình viết. Thiết lập được đọc một lần mỗi phiên: thay đổi có hiệu lực từ lần khởi chạy kế tiếp."
+    },
+    "wire.settings.speech_transcription_cleanup.choice.auto.label": {
+      "before": "auto",
+      "after": "Tự động"
+    },
+    "wire.settings.speech_transcription_cleanup.choice.client.label": {
+      "before": "client",
+      "after": "Máy khách"
+    },
+    "wire.settings.speech_transcription_cleanup.choice.off.label": {
+      "before": "off",
+      "after": "Tắt"
+    },
+    "wire.settings.speech_transcription_cleanup.choice.provider.label": {
+      "before": "provider",
+      "after": "Nhà cung cấp"
+    },
+    "wire.settings.speech_transcription_cleanup.help": {
+      "before": "Cách nhập bằng giọng nói loại bỏ từ đệm và âm thanh phi ngôn ngữ. auto dùng tính năng làm sạch tích hợp sẵn của nhà cung cấp khi có và quy tắc thận trọng phía máy khách trong các trường hợp còn lại; provider và client mỗi bên chỉ dùng một trong hai cơ chế; off giữ nguyên bản ghi. Trường `cleanup` trong từng yêu cầu vẫn được ưu tiên.",
+      "after": "Cách nhập bằng giọng nói loại bỏ từ đệm và âm thanh phi ngôn ngữ. “Tự động” dùng tính năng làm sạch tích hợp của nhà cung cấp khi có, nếu không thì dùng các quy tắc thận trọng phía máy khách; “Nhà cung cấp” và “Máy khách” chỉ dùng cơ chế tương ứng; “Tắt” giữ nguyên bản ghi. Trường `cleanup` trong từng yêu cầu vẫn được ưu tiên."
+    },
+    "wire.settings.speech_voice_expressiveness.choice.medium.description": {
+      "before": "Mức cố định hiện nay.",
+      "after": "Giọng đọc tiêu chuẩn."
+    },
+    "wire.settings.speech_voice_gender.choice.auto.label": {
+      "before": "auto",
+      "after": "Tự động"
+    },
+    "wire.settings.speech_voice_gender.choice.female.label": {
+      "before": "female",
+      "after": "Nữ"
+    },
+    "wire.settings.speech_voice_gender.choice.male.label": {
+      "before": "male",
+      "after": "Nam"
+    },
+    "wire.settings.speech_voice_gender.help": {
+      "before": "auto chọn theo từng tác nhân; giá trị cố định ghi đè bộ phân loại.",
+      "after": "“Tự động” chọn theo từng tác nhân; giá trị cố định ghi đè bộ phân loại."
+    },
+    "wire.settings.team_bridge_session.label": {
+      "before": "Phiên CoS",
+      "after": "Phiên chánh văn phòng"
+    },
+    "wire.settings.tool_approval_mode.choice.ask.label": {
+      "before": "hỏi trước",
+      "after": "Hỏi trước"
+    },
+    "wire.settings.web_fetch_render_backend.choice.auto.label": {
+      "before": "auto",
+      "after": "Tự động"
+    },
+    "wire.settings.web_fetch_render_backend.help": {
+      "before": "auto dùng markdownify khi extra [fetch] được cài.",
+      "after": "“Tự động” dùng markdownify khi đã cài extra [fetch]."
+    },
+    "wire.settings.web_search_strategy.choice.ordered.label": {
+      "before": "ordered",
+      "after": "Theo thứ tự"
+    },
+    "wire.settings.web_search_strategy.choice.round_robin.label": {
+      "before": "round_robin",
+      "after": "Luân phiên"
+    }
+  }
+}

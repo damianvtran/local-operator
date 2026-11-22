@@ -135,6 +135,7 @@ from local_operator.server.utils.store_failures import (
 from local_operator.session import open_trace, transcript_index
 from local_operator.session.attached import RuntimeUnresponsiveError
 from local_operator.session.attention import (
+    BULK_RECEIPT_SESSION_ID_PATTERN,
     SUPERSEDED_TOKEN_CODE,
     SupersededCompletionToken,
 )
@@ -4421,10 +4422,14 @@ async def bridge_card_body(
     """What one inbound Team Bridge card's messages are to THIS viewer.
 
     ``{v:1, items:[{message_id, conversation_id, state, body?, source?, hold?,
-    reason?}], more}`` (bridge-body design §4; feature key
-    ``team_bridge_card_body``). ``state`` is one of admitted, pending, held,
-    refused, not_admitted, unavailable; ``body`` is UNTRUSTED third-party
-    markdown, present only when admitted. A READ: keyed by the transcript row
+    reason?}], more, card?: {received_at?, thread_reply}}`` (bridge-body design
+    §4; feature key ``team_bridge_card_body``). ``card`` is additive within
+    ``v:1``: facts of the card's own journal row (``received_at`` ISO-8601 UTC,
+    ``thread_reply`` bool), present on every answer for a found card so a client
+    can show when and where beside the body (``card_body._card_facts``).
+    ``state`` is one of admitted, pending, held, refused, not_admitted,
+    unavailable; ``body`` is UNTRUSTED third-party markdown, present only when
+    admitted. A READ: keyed by the transcript row
     the caller can already page, so it cannot be used to probe message ids.
     The display store and the hub's admitted-only history read are the only
     sources; the screener's classification fetch (``/messages/{id}/body``) is
@@ -5290,7 +5295,11 @@ async def answer(session_id: str, body: Answer, request: Request):
     # ``answer_gate`` is the only consumer; the queued-ask branch below answers
     # from the ask log and is not subject to it.
     deadline = time.monotonic() + DESKTOP_ANSWER_BUDGET_S
-    async with errors(request), host(request).session(session_id) as bridge:
+    # A queued ask is addressed by durable ID, not by the display epoch. Its
+    # control transport must remain usable when an older owner's canonical
+    # snapshot exceeds the line limit; the pool still owns lookup and retirement.
+    session_options = {"control_only": True} if body.ask_id is not None else {}
+    async with errors(request), host(request).session(session_id, **session_options) as bridge:
         assert bridge.remote is not None
         if body.ask_id is not None:
             # A QUEUED ASK (design §2.4/§4). Answered by id, BEFORE the epoch
@@ -5528,7 +5537,7 @@ class SeenItem(Input):
     later, unseen result.
     """
 
-    session_id: Annotated[str, Field(pattern=r"^[a-f0-9]{12}$")]
+    session_id: Annotated[str, Field(pattern=BULK_RECEIPT_SESSION_ID_PATTERN)]
     completion_token: RequestID
 
 
@@ -5536,7 +5545,7 @@ class SeenMany(Input):
     #: 1..500, and the bound is the CATALOGUE's own maximum page
     #: (``GET /v1/desktop/sessions?limit=``, ``le=500``), so a client can always
     #: send every row it holds in one call and never has to chunk a single user
-    #: gesture. The worst-case body is ~30 KB against the 900 KB control-frame
+    #: gesture. The worst-case body is under 60 KB against the 900 KB control-frame
     #: limit.
     items: Annotated[list[SeenItem], Field(min_length=1, max_length=500)]
 

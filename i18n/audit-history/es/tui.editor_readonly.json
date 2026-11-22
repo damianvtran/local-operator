@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "tui.editor_readonly",
+  "history_sha256": "aa10500229bc4be2cf0bac17cefbb3bcee0e97c9d9d4973482938ec0f58b1997",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "tui.editor_readonly",
+      "source_sha256": "a2a8bfb8a250b38e3a950bb2b02d885ec76cc726d77521086801099b6e99b5f2",
+      "context_sha256": "46c48a659223ad5e4861a1407c2c7a685183b9c7caecf6e19f53adb8131389ee",
+      "target_sha256": "d92fbdd397bbf7dd424c51c79b302c3b1b35b155a97a30cd5fd0973dbe1d950b",
+      "translator": {
+        "agent": "translator",
+        "session": "9309411c87eb",
+        "model": "openai/gpt-6.1-sol",
+        "provenance": "Host model-switch notice: temporary fallback from anthropic/claude-opus-5-5 due provider quota; authorship occurred after switch. No independent provider telemetry.",
+        "date": "2026-11-22"
+      },
+      "auditor": {
+        "agent": "translation-auditor / readonly-footer-seven-locale-audit-A",
+        "session": "1282ebc28f39",
+        "model": "openai/gpt-6.1-sol",
+        "model_source": "Explicit host model-switch notice during this turn: temporary fallback from anthropic/claude-opus-5-5 due quota. Language judgments and probes occurred after switch; no independent provider telemetry. Initial i18n guide read preceded switch.",
+        "independence": "Distinct session from translator 9309411c87eb and integrator 61203766acfe; not English/code source author or manager. No current partner-B judgment read. Same actual model as the translator is disclosed; this is a different independent agent/session, not a second model family.",
+        "audit_kind": "Independent LLM native-copy linguistic assessment, not a human native-speaker certification",
+        "date": "2026-11-22T05:58:54.986853+00:00",
+        "result": "passed",
+        "unresolved_blocker_major": 0,
+        "audit_receipt": "docs/pr-evidence/readonly-footer/readonly-footer-audit-A.json",
+        "audit_receipt_sha256": "98794868a94b3907098b6ab819af3766223eee11a5eac9a08fa18fafeba39b2f",
+        "keys_read": 1,
+        "fresh_keys": 1,
+        "retained_keys": 0
+      },
+      "second_audit": {
+        "agent": "translation-auditor B",
+        "session": "1be17b0ed9f1",
+        "actual_model": "openai/gpt-6.1-sol",
+        "fallback": "Host model-switch message: quota failure from anthropic/claude-opus-5-5; initial guide read preceded switch.",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-22T05:57:36.532887+00:00",
+        "result": "passed",
+        "unresolved_blocker_major": 0,
+        "audit_receipt": "docs/pr-evidence/readonly-footer/readonly-footer-audit-B.json",
+        "audit_receipt_sha256": "2a5874898d9c0019de903305ca44dd5c220b8e0f705f4927b65f7d5a45495a29",
+        "keys_read": 1,
+        "fresh_keys": 1,
+        "retained_keys": 0
+      },
+      "status": "passed",
+      "contribution_keys": [
+        "tui.editor_readonly.hint"
+      ],
+      "contribution_key_count": 1,
+      "full_namespace_reaudit": true,
+      "source_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+      "author_receipt": "docs/pr-evidence/readonly-footer/readonly-footer-author.json",
+      "author_receipt_sha256": "61604b5a8ae9f29f96cfc114e47eb5cd64bf2d6e2a8b2ae46f4546b1909a7313",
+      "note": "Private one-key namespace semantic admission from independent A/B LLM audits, each 1 fresh / 1 total; no inherited namespace claims. Integrator transports decisions only. Same actual model family across three distinct actors disclosed. Passed is semantic namespace audit status, not native glyph, rendered fit, code review, QA, CI or release approval. Original before-frame is manager-supplied and not re-captured here. Urdu native shaping and real 40-column composer fit remain unverified."
+    }
+  ]
+}
