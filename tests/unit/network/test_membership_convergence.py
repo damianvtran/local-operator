@@ -1044,9 +1044,9 @@ class _ForegroundHopTableGate:
         def adopt(server: Any, link: Any, rows: Any, **kwargs: Any) -> bool:
             if server.root != root:
                 return original(server, link, rows, **kwargs)
-            assert self._lock.acquire(timeout=net_fixtures.NET_WAIT_BUDGET_S), (
-                "foreground hop never released table adoption"
-            )
+            assert self._lock.acquire(
+                timeout=net_fixtures.NET_WAIT_BUDGET_S
+            ), "foreground hop never released table adoption"
             try:
                 return original(server, link, rows, **kwargs)
             finally:
@@ -1059,14 +1059,14 @@ class _ForegroundHopTableGate:
         # row, or before dial normalizes expected_device. Hold ONLY initial
         # entry, never commit/audit completion: the competitor is free to win
         # as soon as the foreground has entered its own rotation helper.
-        assert self.foreground_entered.wait(net_fixtures.NET_WAIT_BUDGET_S), (
-            "foreground never entered the hop helper"
-        )
+        assert self.foreground_entered.wait(
+            net_fixtures.NET_WAIT_BUDGET_S
+        ), "foreground never entered the hop helper"
 
     def hold(self) -> None:
-        assert self._lock.acquire(timeout=net_fixtures.NET_WAIT_BUDGET_S), (
-            "an in-flight table adoption never completed"
-        )
+        assert self._lock.acquire(
+            timeout=net_fixtures.NET_WAIT_BUDGET_S
+        ), "an in-flight table adoption never completed"
         self._held = True
 
     def release(self) -> None:
@@ -1144,8 +1144,12 @@ def test_a_peer_holding_the_pre_rotation_row_follows_the_hop_when_it_dials(
         assert row is not None and view.member(old_id) is row
         assert row.endpoints, "the rotated hub's address was demoted"
         assert set(before) <= set(row.endpoints)
-        assert [r.device_id for r in view.active_members() if r.device_id != peer.device_id] == [new_id]
-        assert len(applied_on_dial) == 1, "the foreground handshake must check one rotation statement"
+        assert [r.device_id for r in view.active_members() if r.device_id != peer.device_id] == [
+            new_id
+        ]
+        assert (
+            len(applied_on_dial) == 1
+        ), "the foreground handshake must check one rotation statement"
         # True means THIS invocation already called audit.record; keep that immediate
         # contract. False may observe another producer's committed row before that
         # producer enters audit.record, so wait for the actual observable event.
@@ -1169,7 +1173,9 @@ def test_a_peer_holding_the_pre_rotation_row_follows_the_hop_when_it_dials(
         table_gate.release()
 
 
-@pytest.mark.parametrize("ordering", ["audit_after", "audit_before", "audit_lost", "pre_entry_after"])
+@pytest.mark.parametrize(
+    "ordering", ["audit_after", "audit_before", "audit_lost", "pre_entry_after"]
+)
 def test_foreground_hop_audit_observation_keeps_competing_dials(
     devices: Any, monkeypatch: pytest.MonkeyPatch, ordering: str
 ) -> None:
@@ -1208,9 +1214,9 @@ def test_foreground_hop_audit_observation_keeps_competing_dials(
         release.set()
         # The actual True producer may be a native relay-loop thread, not the
         # injected dial. Observe its helper completion, never join that loop.
-        assert producer_completed.wait(net_fixtures.NET_WAIT_BUDGET_S), (
-            "the actual rotation producer never completed its helper"
-        )
+        assert producer_completed.wait(
+            net_fixtures.NET_WAIT_BUDGET_S
+        ), "the actual rotation producer never completed its helper"
         order.append("actual_producer_completion_observed")
         incidental_release.set()
         for worker in workers:
@@ -1233,9 +1239,11 @@ def test_foreground_hop_audit_observation_keeps_competing_dials(
 
         def compete() -> None:
             try:
-                results.append(device.server.dial(
-                    network_id, host=old.endpoints[0], epoch=1, expected_device=old_id
-                ))
+                results.append(
+                    device.server.dial(
+                        network_id, host=old.endpoints[0], epoch=1, expected_device=old_id
+                    )
+                )
             except BaseException as error:
                 errors.append(error)
 
@@ -1254,25 +1262,29 @@ def test_foreground_hop_audit_observation_keeps_competing_dials(
                 order.append("worker_entered_before_foreground")
                 pre_entry_waiting.set()
         else:
-            assert incidental_release.wait(net_fixtures.NET_WAIT_BUDGET_S), (
-                "controlled hop never released an incidental native helper"
-            )
+            assert incidental_release.wait(
+                net_fixtures.NET_WAIT_BUDGET_S
+            ), "controlled hop never released an incidental native helper"
         wait_for_foreground(gate)
 
     def before_snapshot(network_id: str, root: Path | None = None) -> Any:
         record = load(network_id, root)
         if (
-            ordering == "pre_entry_after" and not workers and peers and hubs
-            and threading.current_thread() is foreground and root == peers[0].root
+            ordering == "pre_entry_after"
+            and not workers
+            and peers
+            and hubs
+            and threading.current_thread() is foreground
+            and root == peers[0].root
             and hubs[0].server.identity.device_id != hubs[0].device_id
         ):
             old_id = hubs[0].device_id
             row = record.member(old_id)
             assert row is not None and row.device_id == old_id
             start_worker(network_id, old_id)
-            assert pre_entry_waiting.wait(net_fixtures.NET_WAIT_BUDGET_S), (
-                "the real competing dial never reached the pre-foreground helper barrier"
-            )
+            assert pre_entry_waiting.wait(
+                net_fixtures.NET_WAIT_BUDGET_S
+            ), "the real competing dial never reached the pre-foreground helper barrier"
             # Read the actual durable state again, not a cached/fabricated row.
             record = load(network_id, root)
             current = record.member(old_id)
@@ -1298,9 +1310,9 @@ def test_foreground_hop_audit_observation_keeps_competing_dials(
                 assert len(audit_producers) == 1, "more than one producer audited this rotation"
                 order.append("actual_producer_committed_audit_entry")
                 entered.set()
-                assert release.wait(net_fixtures.NET_WAIT_BUDGET_S), (
-                    "observer never released the competing audit producer"
-                )
+                assert release.wait(
+                    net_fixtures.NET_WAIT_BUDGET_S
+                ), "observer never released the competing audit producer"
                 if ordering == "audit_lost":
                     order.append("actual_producer_audit_dropped")
                     return
@@ -1328,9 +1340,9 @@ def test_foreground_hop_audit_observation_keeps_competing_dials(
             else:
                 assert pre_entry_waiting.is_set()
                 order.append("foreground_entered_releasing_worker")
-            assert entered.wait(net_fixtures.NET_WAIT_BUDGET_S), (
-                "competing real handshake never reached its rotation audit"
-            )
+            assert entered.wait(
+                net_fixtures.NET_WAIT_BUDGET_S
+            ), "competing real handshake never reached its rotation audit"
             # The row is genuinely committed while its audit has NOT entered the
             # real recorder. No disk/cache state or helper outcome is synthesized.
             successor = store.load(network_id, device.root).member(old_id)
@@ -1372,7 +1384,9 @@ def test_foreground_hop_audit_observation_keeps_competing_dials(
     monkeypatch.setitem(globals(), "_recorded", observe)
     try:
         if ordering == "audit_lost":
-            with pytest.raises(AssertionError, match="^the hop applied by the dial was not audited"):
+            with pytest.raises(
+                AssertionError, match="^the hop applied by the dial was not audited"
+            ):
                 test_a_peer_holding_the_pre_rotation_row_follows_the_hop_when_it_dials(
                     devices, monkeypatch
                 )
@@ -1380,19 +1394,27 @@ def test_foreground_hop_audit_observation_keeps_competing_dials(
             test_a_peer_holding_the_pre_rotation_row_follows_the_hop_when_it_dials(
                 devices, monkeypatch
             )
-        assert order.index("actual_producer_committed_audit_entry") < order.index("foreground_false_return")
+        assert order.index("actual_producer_committed_audit_entry") < order.index(
+            "foreground_false_return"
+        )
         if ordering == "audit_before":
             # Also valid with the OLD observer: publication really preceded the
             # foreground return, regardless of which observer spells the read.
             finish()
-            assert order.index("actual_producer_audit_published") < order.index("foreground_false_return")
+            assert order.index("actual_producer_audit_published") < order.index(
+                "foreground_false_return"
+            )
         elif ordering in ("audit_after", "pre_entry_after"):
             assert order.index("foreground_false_return") < order.index("corrected_observation")
-            assert order.index("corrected_observation") < order.index("actual_producer_audit_published")
+            assert order.index("corrected_observation") < order.index(
+                "actual_producer_audit_published"
+            )
         else:
             assert "actual_producer_audit_published" not in order
             assert order.index("foreground_false_return") < order.index("corrected_observation")
-            assert order.index("corrected_observation") < order.index("actual_producer_audit_dropped")
+            assert order.index("corrected_observation") < order.index(
+                "actual_producer_audit_dropped"
+            )
             assert order.index("actual_producer_audit_dropped") < order.index(
                 "actual_true_producer_helper_completed"
             )
@@ -1409,7 +1431,9 @@ def test_foreground_hop_audit_observation_keeps_competing_dials(
             assert order.index("snapshot_still_old_before_foreground") < order.index(
                 "foreground_entered_releasing_worker"
             )
-        print(json.dumps({"hop_control": ordering, "order": order, "competing_link_verified": True}))
+        print(
+            json.dumps({"hop_control": ordering, "order": order, "competing_link_verified": True})
+        )
     finally:
         # Release every incidental waiter on failure too, before fixture shutdown.
         # The scenario finally already opens the foreground-entry/table gates.
@@ -1417,9 +1441,9 @@ def test_foreground_hop_audit_observation_keeps_competing_dials(
         incidental_release.set()
         release.set()
         if audit_producers:
-            assert producer_completed.wait(net_fixtures.NET_WAIT_BUDGET_S), (
-                "actual rotation producer did not complete during cleanup"
-            )
+            assert producer_completed.wait(
+                net_fixtures.NET_WAIT_BUDGET_S
+            ), "actual rotation producer did not complete during cleanup"
         for worker in workers:
             worker.join(net_fixtures.NET_WAIT_BUDGET_S)
             assert not worker.is_alive(), "competing-hop cleanup did not terminate"
@@ -1449,9 +1473,9 @@ def test_foreground_hop_own_producer_audit_loss_still_fails_immediately(
                 # Otherwise a native True winner tests the duplicate contract,
                 # not the immediate audit contract this cell must discriminate.
                 if threading.current_thread() is not foreground:
-                    assert own_helper_completed.wait(net_fixtures.NET_WAIT_BUDGET_S), (
-                        "own-producer negative cell never completed its foreground helper"
-                    )
+                    assert own_helper_completed.wait(
+                        net_fixtures.NET_WAIT_BUDGET_S
+                    ), "own-producer negative cell never completed its foreground helper"
                     return apply(network_id, statement)
                 try:
                     outcome = apply(network_id, statement)
