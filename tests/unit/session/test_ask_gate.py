@@ -65,22 +65,23 @@ async def test_explicit_ask_queue_owns_admission(tmp_path, monkeypatch, verdict:
     }
     try:
         context = session._build_tool_context()
-        result = await execute_ask("first", args, context=context)
+        result = await execute_ask("first", args, None, None, context)
         queue = session.ask_queue()
         assert queue is not None
         records = queue.records()
         first_events = store.read_events(queue.session_dir)
         first_desktop, first_phone = list(desktop), list(phone)
-        retry = await execute_ask("retry", args, context=context)
+        retry = await execute_ask("retry", args, None, None, context)
         receipt = result.model_dump_json().lower()
         assert len(records) == 1, (
-            f"first_events={len(first_events)} first_hidden={result.details.get('ask_gate')} "
-            f"retry_status={retry.details.get('status')} fork_calls={len(fork_calls)}"
+            f"first_events={len(first_events)} first_hidden={(result.details or {}).get('ask_gate')} "
+            f"retry_status={(retry.details or {}).get('status')} fork_calls={len(fork_calls)}"
         )
         record = records[0]
         assert record["status"] == store.STATUS_OPEN
         assert [o["label"] for o in record["questions"][0]["options"]] == ["Blue", "Green"]
         assert not result.is_error
+        assert result.details is not None
         assert result.details["ask_id"] == record["ask_id"]
         for text in (receipt, retry.model_dump_json().lower()):
             assert all(
