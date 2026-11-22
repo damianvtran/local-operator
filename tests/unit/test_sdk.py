@@ -1146,8 +1146,10 @@ def test_public_surface_is_pinned() -> None:
         "decode_output",
         "deliver",
         "events",
+        "format_event_trace",
         "open_session",
         "spawn_session",
+        "trace_events",
         "SessionProtocol",
     ]
     for name in sdk.__all__:
@@ -1169,6 +1171,7 @@ def test_public_surface_is_pinned() -> None:
         ("roots", K),
         ("mode", K),
         ("allow_multi_root", K),
+        ("verbose", K),
     ]
     assert params(sdk.spawn_session) == [
         ("spec", P),
@@ -1185,6 +1188,8 @@ def test_public_surface_is_pinned() -> None:
         ("allow_multi_root", K),
     ]
     assert params(sdk.events) == [("session", P)]
+    assert params(sdk.format_event_trace) == [("event", P)]
+    assert params(sdk.trace_events) == [("session", P), ("logger", K), ("stream", K)]
 
 
 # --- output contract enforcement ---------------------------------------------------
