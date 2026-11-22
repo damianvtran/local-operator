@@ -400,6 +400,14 @@ class TranscriptBlock(Static):
     work_dormant: bool = False
     work_foreign: bool = False
     work_view_identity: tuple[str | None, int] | None = None
+    #: Names of the folds currently hiding this row. A SET, never a boolean:
+    #: two folds can cover one row at once (a tool row inside an open receipt
+    #: bar inside a closed run), and each has to be able to take its own veto
+    #: back without revealing a row the other still hides. Every writer goes
+    #: through :meth:`sync_display`; a direct ``display =`` write decides by
+    #: whichever fold wrote last, which reads as a row appearing under a bar
+    #: that still counts it.
+    fold_vetoes: set[str]
     # Reconciliation alone attaches these local facts. Annotation-only keeps
     # an unmarked block's attribute ABSENT (including hasattr/vars semantics),
     # rather than making a new default value look like ownership evidence.
@@ -435,6 +443,23 @@ class TranscriptBlock(Static):
     navigation_anchor_id: str = ""
     navigation_anchor_part: int = 0
     _navigation_visible: bool = True
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # Constructed rather than defaulted at class level: a shared mutable
+        # default would make one row's veto hide every row of its kind.
+        self.fold_vetoes = set()
+
+    def sync_display(self) -> None:
+        """One owner for whether this row paints: dormancy, plus fold vetoes.
+
+        A fold writes its own veto into :attr:`fold_vetoes` and calls this,
+        instead of assigning ``display`` directly. That is what lets the
+        receipt bar and the tool-fold layer negotiate a row they both cover:
+        each removes only its own name, and the row stays hidden while any
+        other veto remains.
+        """
+        self.display = not (self.work_dormant or self.fold_vetoes)
 
     def set_navigation_visible(self, visible: bool) -> None:
         self._navigation_visible = visible
@@ -4093,6 +4118,12 @@ class QuietGroupBlock(ExpandableActionBlock):
     """
 
     EXPANDED_CLASS = "quiet-group-expanded"
+    #: The veto this bar holds over its members while collapsed. One row
+    #: belongs to at most one bar at a time (adoption replaces the member list
+    #: and every removal hands its rows back first), so one shared name cannot
+    #: mistake another bar's veto for its own; the tool-fold layer uses its
+    #: own.
+    FOLD_VETO = "quiet-group"
 
     def __init__(self, group: QuietGroup, *, partial: bool = False, fold_width: int = 0) -> None:
         super().__init__()
@@ -4142,7 +4173,7 @@ class QuietGroupBlock(ExpandableActionBlock):
         """Fold one more row into the group (an open tail's append)."""
         self._members.append(block)
         if not self._expanded:
-            block.display = False
+            self._fold_member(block, folded=True)
 
     def adopt_members(
         self, members: Sequence[TranscriptBlock], *, expanded: bool | None = None
@@ -4186,7 +4217,20 @@ class QuietGroupBlock(ExpandableActionBlock):
     def _sync_member_visibility(self) -> None:
         """Members follow the bar's expansion state, in both directions."""
         for member in self._members:
-            member.display = self._expanded and not member.work_dormant
+            self._fold_member(member, folded=not self._expanded)
+
+    def _fold_member(self, member: TranscriptBlock, *, folded: bool) -> None:
+        """Hold or drop THIS bar's veto on one member, then repaint it."""
+        if folded:
+            member.fold_vetoes.add(self.FOLD_VETO)
+        else:
+            member.fold_vetoes.discard(self.FOLD_VETO)
+        member.sync_display()
+
+    def release_members(self, members: Sequence[TranscriptBlock]) -> None:
+        """Hand rows back to the transcript, keeping any other fold's veto."""
+        for member in members:
+            self._fold_member(member, folded=False)
 
     def _after_toggle(self) -> None:
         """The base's toggle seam: the members ARE this row's expansion."""
@@ -4753,12 +4797,11 @@ def sync_work_dormancy(block: TranscriptBlock, member: WorkMembership) -> None:
     if not block.owned_delivery_only:
         return
     dormant = member.role == "boundary" and member.attention == "none"
-    if dormant:
-        block.display = False
-    elif block.work_dormant or member.attention != "none":
-        block.display = True
     block.work_dormant = dormant
     block.ends_empty_state = not dormant
+    # Through the owner: dormancy is only this verdict's half, and a fold's
+    # veto still has to win while it covers the row.
+    block.sync_display()
 
 
 def quiet_group_record_of(
@@ -5674,8 +5717,7 @@ class QuietGroupTracker:
                 # A replacement fold is about to be formed over this span, so
                 # this bar must go or the two would stand together — the
                 # duplicate-bar reading the operator also reported.
-                for member in bar._members:
-                    member.display = not member.work_dormant
+                bar.release_members(bar._members)
                 self._view.remove_block(bar)
                 continue
             # NOTHING is replacing this fold (the span no longer qualifies, or
@@ -5871,8 +5913,7 @@ class QuietGroupTracker:
         kept = members[:splitter]
         released = members[splitter:]
         if not kept:
-            for member in members:
-                member.display = not member.work_dormant
+            bar.release_members(members)
             self._view.remove_block(bar)
             self._open = None
             return splitter
@@ -5897,9 +5938,7 @@ class QuietGroupTracker:
             # a released row would claim work it no longer hides.
             group = self._latched_group(bar, records)
         bar.restate_group(group)
-        for member in released:
-            if not member.work_dormant:
-                member.display = True
+        bar.release_members(released)
         return splitter
 
     @staticmethod
@@ -7456,9 +7495,7 @@ class TranscriptView(ScrollableContainer):
                 used_owners.add(retained)
             touched = [bar for bar in old_bars if any(member in span for member in bar._members)]
             for bar in touched:
-                for member in bar._members:
-                    if not member.work_dormant:
-                        member.display = True
+                bar.release_members(bar._members)
                 self.remove_block(bar)
             focused_member = any(member in focused_ancestors for member in span)
             if peer_cycle and not touched and focused_member:

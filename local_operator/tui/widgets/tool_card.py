@@ -2796,6 +2796,25 @@ class ToolCard(ExpandableActionBlock):
         """
         return self._state
 
+    @property
+    def duration_s(self) -> float | None:
+        """The interval this call reports, or ``None`` when none is known.
+
+        A settled row reports the executor's MEASURED interval (``_duration``:
+        set by ``mark_done``/``mark_failed`` live, or restored from the
+        persisted result on replay). A row still running has no interval yet,
+        so it reports its elapsed age — the number a running fold bar shows in
+        place of a total. ``None`` stays ``None``: a card that cannot date
+        itself (restored ``running`` without a start epoch, a legacy row with
+        no persisted duration) must not have a number invented for it.
+        """
+        return self._duration if self._duration is not None else self._elapsed()
+
+    @property
+    def is_failed(self) -> bool:
+        """A call that FAILED. ``interrupted`` is a stop, not a failure."""
+        return self._state == "error"
+
     def restore(
         self,
         *,

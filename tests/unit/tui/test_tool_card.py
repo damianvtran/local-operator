@@ -4024,6 +4024,40 @@ def test_a_settled_row_ignores_a_start_epoch() -> None:
     assert "27s" not in row, "the epoch has no part in a settled receipt"
 
 
+def test_duration_s_reports_the_measured_interval_or_the_live_age() -> None:
+    """The fold bars sum ``duration_s``; it must never invent a number.
+
+    Live: the age of a call that has started. Settled: the executor's measured
+    interval. Replayed: the persisted interval, restored rather than
+    recomputed from when the row was mounted. A card that cannot date itself
+    (restored ``running`` with no start epoch, a legacy row with no persisted
+    duration) reports ``None`` and the caller omits its time.
+    """
+    now = [1_000.0]
+    live = ToolCard("live", "bash", {"command": "sleep 3"}, clock=lambda: now[0])
+    live.begin_running("bash", {"command": "sleep 3"}, None)
+    now[0] = 1_002.5
+    assert live.duration_s == 2.5, "a running card reports its age so far"
+    live.mark_done("done")
+    assert live.duration_s == 2.5, "settling swaps the age for the measured interval"
+
+    replayed = ToolCard("replay", "bash", {"command": "sleep 3"}, clock=lambda: now[0])
+    replayed.restore(state="success", result_text="done", duration_s=6.0)
+    assert replayed.duration_s == 6.0, "replay restores the persisted interval"
+    assert not replayed.is_failed
+
+    unknown = ToolCard("unknown", "bash", {"command": "sleep 3"}, clock=lambda: now[0])
+    unknown.restore(state="running")
+    assert unknown.duration_s is None, "no start epoch, no number"
+
+    failed = ToolCard("failed", "bash", {"command": "false"})
+    failed.mark_failed("boom")
+    assert failed.is_failed
+    stopped = ToolCard("stopped", "bash", {"command": "sleep 3"})
+    stopped.mark_interrupted()
+    assert not stopped.is_failed, "interrupted is a stop, not a failure"
+
+
 def test_begin_running_arms_the_clock_from_the_epoch_when_it_has_one() -> None:
     """The re-entry arm, which the switch actually takes.
 
