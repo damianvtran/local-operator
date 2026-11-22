@@ -85,11 +85,7 @@ from local_operator.tui.widgets.assistant import (
 )
 from local_operator.tui.widgets.editor import BARREN_CLICK_WINDOW_S, Editor
 from local_operator.tui.widgets.toast import TOAST_FAILURE_MS, Toast
-from local_operator.tui.widgets.tool_card import (
-    ToolCard,
-    detail_indent,
-    row_indent,
-)
+from local_operator.tui.widgets.tool_card import ToolCard, detail_indent, row_indent
 from local_operator.tui.widgets.transcript import (
     BOOT_COLUMN_CLASS,
     SPINE_INDENT,
@@ -731,7 +727,8 @@ async def test_tool_card_expanded_output_copies_unindented() -> None:
         # rows follow it one cell further, both of which still paste
         # unindented.
         assert card.fold_depth == 1, "a lone call in a turn is a step"
-        assert card.copy_gutter(0) == row_indent(card._built_width, card.fold_depth) + ToolCard.ICON_COLS
+        inset = row_indent(card._built_width, card.fold_depth)
+        assert card.copy_gutter(0) == inset + ToolCard.ICON_COLS
         assert card.copy_gutter(1) == detail_indent(card._built_width, card.fold_depth)
 
 

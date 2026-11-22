@@ -699,6 +699,8 @@ def detail_indent(width: int, depth: int = 0) -> int:
     keeps every plain card's expansion byte-identical to before the fold.
     """
     return OUTPUT_INDENT + (row_indent(width, depth) - row_indent(width, 0))
+
+
 #: Expanded output is capped: a 20k-line bash dump would otherwise turn the
 #: transcript into a scroll trap. The head is kept (it carries the command's
 #: framing) and the remainder is announced on a dim marker row.

@@ -587,15 +587,11 @@ async def test_a_plain_tool_row_sits_in_the_bar_column_in_by_turn() -> None:
         assert bar.kind == "turn"
         lead = lambda row: len(row) - len(row.lstrip(" "))  # noqa: E731
         assert [card.fold_depth for card in small] == [1, 1]
-        assert [lead(card._build_row(120).plain) for card in small] == [
-            row_indent(120, 1)
-        ] * 2
-        assert lead(bar._build_row(120).plain) == row_indent(120, 1), "bar and tool row share a column"
+        assert [lead(card._build_row(120).plain) for card in small] == [row_indent(120, 1)] * 2
+        assert lead(bar._build_row(120).plain) == row_indent(120, 1), "bar and row share a column"
 
         # A covered row is one level below the bar it sits under.
         assert [card.fold_depth for card in big] == [2, 2, 2]
         bar.activate()
         await _settle(pilot)
-        assert [lead(card._build_row(120).plain) for card in big] == [
-            row_indent(120, 2)
-        ] * 3
+        assert [lead(card._build_row(120).plain) for card in big] == [row_indent(120, 2)] * 3
