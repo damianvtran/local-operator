@@ -1,0 +1,842 @@
+[
+  {
+    "locale": "fr",
+    "key": "tool_approval_mode",
+    "stage": "before",
+    "label": "Mode d’approbation des outils",
+    "help": "Assouplir exige une écriture dans cette session — /approvals auto.",
+    "summary": "  › Mode d’approbation des outils auto ▸",
+    "default": "tui.settings_view.chrome.clause.default",
+    "detail": "Assouplir exige une écriture dans cette session — /approvals auto. · tui.settings_view.chrome.clause.default",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "ask",
+        "label": "demander",
+        "description": "demander avant les outils d’écriture/exécution",
+        "paint": "      ○ demandertui.small.settings_view.default_marker  demander avant les outils d’écriture/exécution"
+      },
+      {
+        "value": "auto",
+        "label": "automatique",
+        "description": "les exécuter sans demander",
+        "paint": "    › ● automatique  les exécuter sans demander"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "Assouplir exige une écriture dans cette session — /approvals auto. · tui.settings_view.chrome.clause.default"
+    },
+    "pane": "tui.settings_view.pane.providers_header\n  tui.settings_view.pane.provi…\n\ntui.settings_view.pane.tab_teams  tui.settings_view.pane.tab_agents  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  tui.settings_view.pane.more\n\ntui.small.settings_view.read_only_label",
+    "config_unchanged": true
+  },
+  {
+    "locale": "fr",
+    "key": "shell_environment.mode",
+    "stage": "before",
+    "label": "Environnement du shell de l’agent",
+    "help": "'inherit' laisse une commande exécutée par l’agent voir votre environnement (gh, aws, npm gardent leurs tokens). 'allowlist' ne transmet que PATH/HOME/SHELL/TERM/USER/LOGNAME plus les deux listes à côté de ce réglage : la clé du fournisseur avec laquelle cette session a été lancée n’est donc pas transmise à une commande écrite par le modèle. Lu une fois par session : la modification prend effet au prochain lancement.",
+    "summary": "  › Environnement du shell de l’… inherit ▸",
+    "default": "",
+    "detail": "'inherit' laisse une commande exécutée par l’agent voir votre environnement (gh, aws, npm gardent leurs tokens).…",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "inherit",
+        "label": "inherit",
+        "description": "votre environnement, comme aujourd’hui (par défaut)",
+        "paint": "    › ● inherittui.small.settings_view.default_marker  votre environnement, comme aujourd’hui (par défaut)"
+      },
+      {
+        "value": "allowlist",
+        "label": "allowlist",
+        "description": "l’ensemble sûr plus les listes ci-dessous, rien d’autre",
+        "paint": "      ○ allowlist  l’ensemble sûr plus les listes ci-dessous, rien d’autre"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "'inherit' laisse une commande exécutée par l’agent voir votre environnement (gh, aws, npm gardent leurs tokens).…"
+    },
+    "pane": "tui.settings_view.pane.providers_header\n  tui.settings_view.pane.provi…\n\ntui.settings_view.pane.tab_teams  tui.settings_view.pane.tab_agents  (←→)\n  tui.settings_view.pane.teams…\n  tui.settings_view.pane.empty…\n\ntui.small.settings_view.read_only_label",
+    "config_unchanged": true
+  },
+  {
+    "locale": "fr",
+    "key": "providers.openrouter.enforce_distillable_text",
+    "stage": "before",
+    "label": "texte distillable",
+    "help": "'true' : restreint aux endpoints dont la sortie texte peut être distillée. 'default' : rien n’est envoyé.",
+    "summary": "  › texte distillable             true ▸",
+    "default": "tui.settings_view.chrome.clause.default",
+    "detail": "tui.settings_view.chrome.clause.default   providers.openrouter.enforce_distillable_text",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "",
+        "label": "default",
+        "description": "aucune préférence envoyée",
+        "paint": "      ○ defaulttui.small.settings_view.default_marker  aucune préférence envoyée"
+      },
+      {
+        "value": "true",
+        "label": "true",
+        "description": "endpoints à texte distillable uniquement",
+        "paint": "    › ● true  endpoints à texte distillable uniquement"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "tui.settings_view.chrome.clause.default   providers.openrouter.enforce_distillable_text"
+    },
+    "pane": "tui.settings_view.pane.providers_header\n  tui.settings_view.pane.provi…\n\ntui.settings_view.pane.tab_teams  tui.settings_view.pane.tab_agents  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  tui.settings_view.pane.more\n\ntui.small.settings_view.read_only_label",
+    "config_unchanged": true
+  },
+  {
+    "locale": "zh-CN",
+    "key": "tool_approval_mode",
+    "stage": "before",
+    "label": "工具审批模式",
+    "help": "放宽需要在本会话内写入——/approvals auto。",
+    "summary": "  › 工具审批模式                  auto ▸",
+    "default": "tui.settings_view.chrome.clause.default",
+    "detail": "放宽需要在本会话内写入——/approvals auto。 · tui.settings_view.chrome.clause.default   tool_approval_mode",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "ask",
+        "label": "询问",
+        "description": "写入/执行工具前先询问",
+        "paint": "      ○ 询问tui.small.settings_view.default_marker  写入/执行工具前先询问"
+      },
+      {
+        "value": "auto",
+        "label": "自动",
+        "description": "不经询问直接运行",
+        "paint": "    › ● 自动  不经询问直接运行"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "放宽需要在本会话内写入——/approvals auto。 · tui.settings_view.chrome.clause.default   tool_approval_mode"
+    },
+    "pane": "tui.settings_view.pane.providers_header\n  tui.settings_view.pane.provi…\n\ntui.settings_view.pane.tab_teams  tui.settings_view.pane.tab_agents  (←→)\n  tui.settings_view.pane.teams…\n  tui.settings_view.pane.empty…\n\ntui.small.settings_view.read_only_label",
+    "config_unchanged": true
+  },
+  {
+    "locale": "zh-CN",
+    "key": "shell_environment.mode",
+    "stage": "before",
+    "label": "智能体shell环境",
+    "help": "'inherit'让智能体运行的命令看到你的环境（gh、aws、npm保持其令牌）。'allowlist'只传递PATH/HOME/SHELL/TERM/USER/LOGNAME，加上旁边这两个列表，因此本会话启动时用的提供商密钥不会交给模型编写的命令。每个会话只读取一次：修改后下次启动才生效。",
+    "summary": "  › 智能体shell环境               inherit ▸",
+    "default": "",
+    "detail": "'inherit'让智能体运行的命令看到你的环境（gh、aws、npm保持其令牌）。'allowlist'只传递PATH/HOME/SHELL/TERM/USER/LOG…",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "inherit",
+        "label": "inherit",
+        "description": "你的环境，同现状（默认）",
+        "paint": "    › ● inherittui.small.settings_view.default_marker  你的环境，同现状（默认）"
+      },
+      {
+        "value": "allowlist",
+        "label": "allowlist",
+        "description": "安全集加下方列表，别无其他",
+        "paint": "      ○ allowlist  安全集加下方列表，别无其他"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "'inherit'让智能体运行的命令看到你的环境（gh、aws、npm保持其令牌）。'allowlist'只传递PATH/HOME/SHELL/TERM/USER/LOG…"
+    },
+    "pane": "tui.settings_view.pane.providers_header\n  tui.settings_view.pane.provi…\n\ntui.settings_view.pane.tab_teams  tui.settings_view.pane.tab_agents  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  tui.settings_view.pane.more\n\ntui.small.settings_view.read_only_label",
+    "config_unchanged": true
+  },
+  {
+    "locale": "zh-CN",
+    "key": "providers.openrouter.enforce_distillable_text",
+    "stage": "before",
+    "label": "可蒸馏文本",
+    "help": "'true'：仅限文本输出可被蒸馏的endpoint。'default'：不发送任何内容。",
+    "summary": "  › 可蒸馏文本                    true ▸",
+    "default": "tui.settings_view.chrome.clause.default",
+    "detail": "'true'：仅限文本输出可被蒸馏的endpoint。'default'：不发送任何内容。 · tui.settings_view.chrome.clause.default",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "",
+        "label": "default",
+        "description": "不发送偏好",
+        "paint": "      ○ defaulttui.small.settings_view.default_marker  不发送偏好"
+      },
+      {
+        "value": "true",
+        "label": "true",
+        "description": "仅限可蒸馏文本的endpoint",
+        "paint": "    › ● true  仅限可蒸馏文本的endpoint"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "'true'：仅限文本输出可被蒸馏的endpoint。'default'：不发送任何内容。 · tui.settings_view.chrome.clause.default"
+    },
+    "pane": "tui.settings_view.pane.providers_header\n  tui.settings_view.pane.provi…\n\ntui.settings_view.pane.tab_teams  tui.settings_view.pane.tab_agents  (←→)\n  tui.settings_view.pane.teams…\n  tui.settings_view.pane.empty…\n\ntui.small.settings_view.read_only_label",
+    "config_unchanged": true
+  },
+  {
+    "locale": "hi",
+    "key": "tool_approval_mode",
+    "stage": "before",
+    "label": "टूल स्वीकृति मोड",
+    "help": "ढीला करने के लिए इसी सत्र से लिखना पड़ेगा — /approvals auto।",
+    "summary": "  › टूल स्वीकृति मोड                    auto ▸",
+    "default": "tui.settings_view.chrome.clause.default",
+    "detail": "ढीला करने के लिए इसी सत्र से लिखना पड़ेगा — /approvals auto। · tui.settings_view.chrome.clause.default   tool_approval_mode",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "ask",
+        "label": "पूछें",
+        "description": "लिखने/चलाने वाले टूल से पहले पूछें",
+        "paint": "      ○ पूछेंtui.small.settings_view.default_marker  लिखने/चलाने वाले टूल से पहले पूछें"
+      },
+      {
+        "value": "auto",
+        "label": "स्वचालित",
+        "description": "बिना पूछे चलाएँ",
+        "paint": "    › ● स्वचालित  बिना पूछे चलाएँ"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "ढीला करने के लिए इसी सत्र से लिखना पड़ेगा — /approvals auto। · tui.settings_view.chrome.clause.default   tool_approval_mode"
+    },
+    "pane": "tui.settings_view.pane.providers_header\n  tui.settings_view.pane.provi…\n\ntui.settings_view.pane.tab_teams  tui.settings_view.pane.tab_agents  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  tui.settings_view.pane.more\n\ntui.small.settings_view.read_only_label",
+    "config_unchanged": true
+  },
+  {
+    "locale": "hi",
+    "key": "shell_environment.mode",
+    "stage": "before",
+    "label": "एजेंट शेल एनवायरनमेंट",
+    "help": "'inherit' में एजेंट के चलाए कमांड को आपका एनवायरनमेंट दिखता है (gh, aws, npm अपने टोकन रखते हैं)। 'allowlist' सिर्फ़ PATH/HOME/SHELL/TERM/USER/LOGNAME और इसके पास की दोनों सूचियाँ भेजता है, इसलिए जिस प्रोवाइडर कुंजी से यह सत्र शुरू हुआ, वह मॉडल के लिखे कमांड को नहीं दी जाती। हर सत्र में एक बार पढ़ा जाता है: बदलाव अगले लॉन्च पर लागू होगा।",
+    "summary": "  › एजेंट शेल एनवायरनमेंट               inherit ▸",
+    "default": "",
+    "detail": "'inherit' में एजेंट के चलाए कमांड को आपका एनवायरनमेंट दिखता है (gh, aws, npm अपने टोकन रखते हैं)। 'allowlist' सिर्फ़ PATH/HOME/SHELL/TERM…",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "inherit",
+        "label": "inherit",
+        "description": "आपका एनवायरनमेंट, अब जैसा है वैसा ही (डिफ़ॉल्ट)",
+        "paint": "    › ● inherittui.small.settings_view.default_marker  आपका एनवायरनमेंट, अब जैसा है वैसा ही (डिफ़ॉल्ट)"
+      },
+      {
+        "value": "allowlist",
+        "label": "allowlist",
+        "description": "सुरक्षित सेट और नीचे की सूचियाँ, और कुछ नहीं",
+        "paint": "      ○ allowlist  सुरक्षित सेट और नीचे की सूचियाँ, और कुछ नहीं"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "'inherit' में एजेंट के चलाए कमांड को आपका एनवायरनमेंट दिखता है (gh, aws, npm अपने टोकन रखते हैं)। 'allowlist' सिर्फ़ PATH/HOME/SHELL/TERM…"
+    },
+    "pane": "tui.settings_view.pane.providers_header\n  tui.settings_view.pane.provi…\n\ntui.settings_view.pane.tab_teams  tui.settings_view.pane.tab_agents  (←→)\n  tui.settings_view.pane.teams…\n  tui.settings_view.pane.empty…\n\ntui.small.settings_view.read_only_label",
+    "config_unchanged": true
+  },
+  {
+    "locale": "hi",
+    "key": "providers.openrouter.enforce_distillable_text",
+    "stage": "before",
+    "label": "distillable टेक्स्ट",
+    "help": "'true': सिर्फ़ ऐसे endpoint जिनका टेक्स्ट आउटपुट distill किया जा सके। 'default': कुछ नहीं भेजा जाता।",
+    "summary": "  › distillable टेक्स्ट              true ▸",
+    "default": "tui.settings_view.chrome.clause.default",
+    "detail": "tui.settings_view.chrome.clause.default   providers.openrouter.enforce_distillable_text",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "",
+        "label": "default",
+        "description": "कोई प्राथमिकता नहीं भेजी जाती",
+        "paint": "      ○ defaulttui.small.settings_view.default_marker  कोई प्राथमिकता नहीं भेजी जाती"
+      },
+      {
+        "value": "true",
+        "label": "true",
+        "description": "सिर्फ़ distillable-text endpoint",
+        "paint": "    › ● true  सिर्फ़ distillable-text endpoint"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "tui.settings_view.chrome.clause.default   providers.openrouter.enforce_distillable_text"
+    },
+    "pane": "tui.settings_view.pane.providers_header\n  tui.settings_view.pane.provi…\n\ntui.settings_view.pane.tab_teams  tui.settings_view.pane.tab_agents  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  tui.settings_view.pane.more\n\ntui.small.settings_view.read_only_label",
+    "config_unchanged": true
+  },
+  {
+    "locale": "ur",
+    "key": "tool_approval_mode",
+    "stage": "before",
+    "label": "ٹول منظوری موڈ",
+    "help": "نرم کرنے کے لیے اسی سیشن میں لکھنا ہوگا — /approvals auto۔",
+    "summary": "  › ٹول منظوری موڈ                auto ▸",
+    "default": "tui.settings_view.chrome.clause.default",
+    "detail": "نرم کرنے کے لیے اسی سیشن میں لکھنا ہوگا — /approvals auto۔ · tui.settings_view.chrome.clause.default",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "ask",
+        "label": "پوچھیں",
+        "description": "لکھنے/چلانے والے ٹولز سے پہلے پوچھیں",
+        "paint": "      ○ پوچھیںtui.small.settings_view.default_marker  لکھنے/چلانے والے ٹولز سے پہلے پوچھیں"
+      },
+      {
+        "value": "auto",
+        "label": "خودکار",
+        "description": "بغیر پوچھے چلائیں",
+        "paint": "    › ● خودکار  بغیر پوچھے چلائیں"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "نرم کرنے کے لیے اسی سیشن میں لکھنا ہوگا — /approvals auto۔ · tui.settings_view.chrome.clause.default"
+    },
+    "pane": "tui.settings_view.pane.providers_header\n  tui.settings_view.pane.provi…\n\ntui.settings_view.pane.tab_teams  tui.settings_view.pane.tab_agents  (←→)\n  tui.settings_view.pane.teams…\n  tui.settings_view.pane.empty…\n\ntui.small.settings_view.read_only_label",
+    "config_unchanged": true
+  },
+  {
+    "locale": "ur",
+    "key": "shell_environment.mode",
+    "stage": "before",
+    "label": "ایجنٹ شیل ماحول",
+    "help": "'inherit' ایجنٹ کمانڈ کو آپ کا ماحول دیکھنے دیتی ہے (gh، aws، npm اپنے ٹوکنز رکھتے ہیں)۔ 'allowlist' صرف PATH/HOME/SHELL/TERM/USER/LOGNAME اور ساتھ کی دو فہرستیں دیتی ہے، اس لیے سیشن لانچ کی پرووائیڈر کلید ماڈل کی لکھی کمانڈ کو نہیں ملتی۔ فی سیشن ایک بار پڑھی جاتی ہے: تبدیلی اگلے لانچ پر لاگو ہوتی ہے۔",
+    "summary": "  › ایجنٹ شیل ماحول               inherit ▸",
+    "default": "",
+    "detail": "'inherit' ایجنٹ کمانڈ کو آپ کا ماحول دیکھنے دیتی ہے (gh، aws، npm اپنے ٹوکنز رکھتے ہیں)۔ 'allowlist' صرف PATH/HOM…",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "inherit",
+        "label": "inherit",
+        "description": "آپ کا ماحول، جیسا آج (ڈیفالٹ)",
+        "paint": "    › ● inherittui.small.settings_view.default_marker  آپ کا ماحول، جیسا آج (ڈیفالٹ)"
+      },
+      {
+        "value": "allowlist",
+        "label": "allowlist",
+        "description": "محفوظ سیٹ اور نیچے کی فہرستیں، اور کچھ نہیں",
+        "paint": "      ○ allowlist  محفوظ سیٹ اور نیچے کی فہرستیں، اور کچھ نہیں"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "'inherit' ایجنٹ کمانڈ کو آپ کا ماحول دیکھنے دیتی ہے (gh، aws، npm اپنے ٹوکنز رکھتے ہیں)۔ 'allowlist' صرف PATH/HOM…"
+    },
+    "pane": "tui.settings_view.pane.providers_header\n  tui.settings_view.pane.provi…\n\ntui.settings_view.pane.tab_teams  tui.settings_view.pane.tab_agents  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  tui.settings_view.pane.more\n\ntui.small.settings_view.read_only_label",
+    "config_unchanged": true
+  },
+  {
+    "locale": "ur",
+    "key": "providers.openrouter.enforce_distillable_text",
+    "stage": "before",
+    "label": "ڈسٹل ہونے والا متن",
+    "help": "'true': صرف ان اینڈ پوائنٹس تک محدود جن کے متن آؤٹ پٹ کو ڈسٹل کیا جا سکے۔ 'default': کچھ نہیں بھیجا۔",
+    "summary": "  › ڈسٹل ہونے والا متن            true ▸",
+    "default": "tui.settings_view.chrome.clause.default",
+    "detail": "tui.settings_view.chrome.clause.default   providers.openrouter.enforce_distillable_text",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "",
+        "label": "default",
+        "description": "کوئی ترجیح نہیں بھیجی",
+        "paint": "      ○ defaulttui.small.settings_view.default_marker  کوئی ترجیح نہیں بھیجی"
+      },
+      {
+        "value": "true",
+        "label": "true",
+        "description": "صرف ڈسٹل قابل متن اینڈ پوائنٹس",
+        "paint": "    › ● true  صرف ڈسٹل قابل متن اینڈ پوائنٹس"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "tui.settings_view.chrome.clause.default   providers.openrouter.enforce_distillable_text"
+    },
+    "pane": "tui.settings_view.pane.providers_header\n  tui.settings_view.pane.provi…\n\ntui.settings_view.pane.tab_teams  tui.settings_view.pane.tab_agents  (←→)\n  tui.settings_view.pane.teams…\n  tui.settings_view.pane.empty…\n\ntui.small.settings_view.read_only_label",
+    "config_unchanged": true
+  },
+  {
+    "locale": "es",
+    "key": "tool_approval_mode",
+    "stage": "before",
+    "label": "Modo de aprobación de herramientas",
+    "help": "Aflojarlo requiere un cambio en esta sesión — /approvals auto.",
+    "summary": "  › Modo de aprobación de herram… auto ▸",
+    "default": "tui.settings_view.chrome.clause.default",
+    "detail": "Aflojarlo requiere un cambio en esta sesión — /approvals auto. · tui.settings_view.chrome.clause.default",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "ask",
+        "label": "preguntar",
+        "description": "preguntar antes de las herramientas de escritura/ejecución",
+        "paint": "      ○ preguntartui.small.settings_view.default_marker  preguntar antes de las herramientas de escritura/ejecución"
+      },
+      {
+        "value": "auto",
+        "label": "automático",
+        "description": "ejecutarlas sin preguntar",
+        "paint": "    › ● automático  ejecutarlas sin preguntar"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "Aflojarlo requiere un cambio en esta sesión — /approvals auto. · tui.settings_view.chrome.clause.default"
+    },
+    "pane": "tui.settings_view.pane.providers_header\n  tui.settings_view.pane.provi…\n\ntui.settings_view.pane.tab_teams  tui.settings_view.pane.tab_agents  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  tui.settings_view.pane.more\n\ntui.small.settings_view.read_only_label",
+    "config_unchanged": true
+  },
+  {
+    "locale": "es",
+    "key": "shell_environment.mode",
+    "stage": "before",
+    "label": "Entorno del shell del agente",
+    "help": "'inherit' deja que un comando que ejecuta el agente vea tu entorno (gh, aws y npm conservan sus tokens). 'allowlist' solo pasa PATH/HOME/SHELL/TERM/USER/LOGNAME más las dos listas que acompañan a este ajuste, así que la clave del proveedor con la que se lanzó esta sesión no se entrega a ningún comando que escriba el modelo. Se lee una vez por sesión: el cambio surte efecto en el siguiente arranque.",
+    "summary": "  › Entorno del shell del agente  inherit ▸",
+    "default": "",
+    "detail": "'inherit' deja que un comando que ejecuta el agente vea tu entorno (gh, aws y npm conservan sus tokens). 'allowli…",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "inherit",
+        "label": "inherit",
+        "description": "tu entorno, como hasta ahora (predeterminado)",
+        "paint": "    › ● inherittui.small.settings_view.default_marker  tu entorno, como hasta ahora (predeterminado)"
+      },
+      {
+        "value": "allowlist",
+        "label": "allowlist",
+        "description": "el conjunto seguro más las listas de abajo, nada más",
+        "paint": "      ○ allowlist  el conjunto seguro más las listas de abajo, nada más"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "'inherit' deja que un comando que ejecuta el agente vea tu entorno (gh, aws y npm conservan sus tokens). 'allowli…"
+    },
+    "pane": "tui.settings_view.pane.providers_header\n  tui.settings_view.pane.provi…\n\ntui.settings_view.pane.tab_teams  tui.settings_view.pane.tab_agents  (←→)\n  tui.settings_view.pane.teams…\n  tui.settings_view.pane.empty…\n\ntui.small.settings_view.read_only_label",
+    "config_unchanged": true
+  },
+  {
+    "locale": "es",
+    "key": "providers.openrouter.enforce_distillable_text",
+    "stage": "before",
+    "label": "texto destilable",
+    "help": "'true': restringe a los endpoints cuya salida de texto pueda destilarse. 'default': no se envía nada.",
+    "summary": "  › texto destilable              true ▸",
+    "default": "tui.settings_view.chrome.clause.default",
+    "detail": "tui.settings_view.chrome.clause.default   providers.openrouter.enforce_distillable_text",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "",
+        "label": "default",
+        "description": "no se envía ninguna preferencia",
+        "paint": "      ○ defaulttui.small.settings_view.default_marker  no se envía ninguna preferencia"
+      },
+      {
+        "value": "true",
+        "label": "true",
+        "description": "solo endpoints de texto destilable",
+        "paint": "    › ● true  solo endpoints de texto destilable"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "tui.settings_view.chrome.clause.default   providers.openrouter.enforce_distillable_text"
+    },
+    "pane": "tui.settings_view.pane.providers_header\n  tui.settings_view.pane.provi…\n\ntui.settings_view.pane.tab_teams  tui.settings_view.pane.tab_agents  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  tui.settings_view.pane.more\n\ntui.small.settings_view.read_only_label",
+    "config_unchanged": true
+  },
+  {
+    "locale": "ru",
+    "key": "tool_approval_mode",
+    "stage": "before",
+    "label": "Режим одобрения инструментов",
+    "help": "Для ослабления нужна запись в этой сессии — /approvals auto.",
+    "summary": "  › Режим одобрения инструментов  auto ▸",
+    "default": "tui.settings_view.chrome.clause.default",
+    "detail": "Для ослабления нужна запись в этой сессии — /approvals auto. · tui.settings_view.chrome.clause.default",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "ask",
+        "label": "спрашивать",
+        "description": "спрашивать перед инструментами записи/выполнения",
+        "paint": "      ○ спрашиватьtui.small.settings_view.default_marker  спрашивать перед инструментами записи/выполнения"
+      },
+      {
+        "value": "auto",
+        "label": "автоматически",
+        "description": "выполнять их, не спрашивая",
+        "paint": "    › ● автоматически  выполнять их, не спрашивая"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "Для ослабления нужна запись в этой сессии — /approvals auto. · tui.settings_view.chrome.clause.default"
+    },
+    "pane": "tui.settings_view.pane.providers_header\n  tui.settings_view.pane.provi…\n\ntui.settings_view.pane.tab_teams  tui.settings_view.pane.tab_agents  (←→)\n  tui.settings_view.pane.teams…\n  tui.settings_view.pane.empty…\n\ntui.small.settings_view.read_only_label",
+    "config_unchanged": true
+  },
+  {
+    "locale": "ru",
+    "key": "shell_environment.mode",
+    "stage": "before",
+    "label": "Окружение shell агента",
+    "help": "'inherit' позволяет команде, запускаемой агентом, видеть ваше окружение (gh, aws, npm сохраняют свои токены). 'allowlist' передаёт только PATH/HOME/SHELL/TERM/USER/LOGNAME плюс два списка рядом с этой настройкой, поэтому ключ провайдера, с которым запущена сессия, не попадает в команду, которую пишет модель. Читается один раз за сессию: изменение вступит в силу при следующем запуске.",
+    "summary": "  › Окружение shell агента        inherit ▸",
+    "default": "",
+    "detail": "'inherit' позволяет команде, запускаемой агентом, видеть ваше окружение (gh, aws, npm сохраняют свои токены). 'al…",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "inherit",
+        "label": "inherit",
+        "description": "ваше окружение, как сейчас (по умолчанию)",
+        "paint": "    › ● inherittui.small.settings_view.default_marker  ваше окружение, как сейчас (по умолчанию)"
+      },
+      {
+        "value": "allowlist",
+        "label": "allowlist",
+        "description": "безопасный набор плюс списки ниже, и ничего больше",
+        "paint": "      ○ allowlist  безопасный набор плюс списки ниже, и ничего больше"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "'inherit' позволяет команде, запускаемой агентом, видеть ваше окружение (gh, aws, npm сохраняют свои токены). 'al…"
+    },
+    "pane": "tui.settings_view.pane.providers_header\n  tui.settings_view.pane.provi…\n\ntui.settings_view.pane.tab_teams  tui.settings_view.pane.tab_agents  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  tui.settings_view.pane.more\n\ntui.small.settings_view.read_only_label",
+    "config_unchanged": true
+  },
+  {
+    "locale": "ru",
+    "key": "providers.openrouter.enforce_distillable_text",
+    "stage": "before",
+    "label": "дистиллируемый текст",
+    "help": "'true': ограничиться endpoint, чей текстовый вывод можно дистиллировать. 'default': ничего не отправляется.",
+    "summary": "  › дистиллируемый текст          true ▸",
+    "default": "tui.settings_view.chrome.clause.default",
+    "detail": "tui.settings_view.chrome.clause.default   providers.openrouter.enforce_distillable_text",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "",
+        "label": "default",
+        "description": "предпочтения не отправляются",
+        "paint": "      ○ defaulttui.small.settings_view.default_marker  предпочтения не отправляются"
+      },
+      {
+        "value": "true",
+        "label": "true",
+        "description": "только endpoint с дистиллируемым текстом",
+        "paint": "    › ● true  только endpoint с дистиллируемым текстом"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "tui.settings_view.chrome.clause.default   providers.openrouter.enforce_distillable_text"
+    },
+    "pane": "tui.settings_view.pane.providers_header\n  tui.settings_view.pane.provi…\n\ntui.settings_view.pane.tab_teams  tui.settings_view.pane.tab_agents  (←→)\n  tui.settings_view.pane.teams…\n  tui.settings_view.pane.empty…\n\ntui.small.settings_view.read_only_label",
+    "config_unchanged": true
+  },
+  {
+    "locale": "vi",
+    "key": "tool_approval_mode",
+    "stage": "before",
+    "label": "Chế độ phê duyệt công cụ",
+    "help": "Nới lỏng cần một lần ghi trong chính phiên này — /approvals auto.",
+    "summary": "  › Chế độ phê duyệt công cụ      auto ▸",
+    "default": "tui.settings_view.chrome.clause.default",
+    "detail": "Nới lỏng cần một lần ghi trong chính phiên này — /approvals auto. · tui.settings_view.chrome.clause.default",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "ask",
+        "label": "hỏi trước",
+        "description": "hỏi trước với công cụ ghi/thực thi",
+        "paint": "      ○ hỏi trướctui.small.settings_view.default_marker  hỏi trước với công cụ ghi/thực thi"
+      },
+      {
+        "value": "auto",
+        "label": "Tự động",
+        "description": "chạy chúng không hỏi",
+        "paint": "    › ● Tự động  chạy chúng không hỏi"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "Nới lỏng cần một lần ghi trong chính phiên này — /approvals auto. · tui.settings_view.chrome.clause.default"
+    },
+    "pane": "tui.settings_view.pane.providers_header\n  tui.settings_view.pane.provi…\n\ntui.settings_view.pane.tab_teams  tui.settings_view.pane.tab_agents  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  tui.settings_view.pane.more\n\ntui.small.settings_view.read_only_label",
+    "config_unchanged": true
+  },
+  {
+    "locale": "vi",
+    "key": "shell_environment.mode",
+    "stage": "before",
+    "label": "Môi trường shell của tác nhân",
+    "help": "'inherit' để lệnh do tác nhân chạy thấy môi trường của bạn (gh, aws, npm giữ token của chúng). 'allowlist' chỉ truyền PATH/HOME/SHELL/TERM/USER/LOGNAME cùng hai danh sách bên cạnh, nên khóa của nhà cung cấp mà phiên này khởi chạy cùng không bị đưa cho lệnh do mô hình viết. Được đọc một lần mỗi phiên: thay đổi có hiệu lực từ lần khởi chạy kế tiếp.",
+    "summary": "  › Môi trường shell của tác nhân inherit ▸",
+    "default": "",
+    "detail": "'inherit' để lệnh do tác nhân chạy thấy môi trường của bạn (gh, aws, npm giữ token của chúng). 'allowlist' chỉ tr…",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "inherit",
+        "label": "inherit",
+        "description": "môi trường của bạn, như hiện nay (mặc định)",
+        "paint": "    › ● inherittui.small.settings_view.default_marker  môi trường của bạn, như hiện nay (mặc định)"
+      },
+      {
+        "value": "allowlist",
+        "label": "allowlist",
+        "description": "bộ an toàn cộng các danh sách bên dưới, không gì khác",
+        "paint": "      ○ allowlist  bộ an toàn cộng các danh sách bên dưới, không gì khác"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "'inherit' để lệnh do tác nhân chạy thấy môi trường của bạn (gh, aws, npm giữ token của chúng). 'allowlist' chỉ tr…"
+    },
+    "pane": "tui.settings_view.pane.providers_header\n  tui.settings_view.pane.provi…\n\ntui.settings_view.pane.tab_teams  tui.settings_view.pane.tab_agents  (←→)\n  tui.settings_view.pane.teams…\n  tui.settings_view.pane.empty…\n\ntui.small.settings_view.read_only_label",
+    "config_unchanged": true
+  },
+  {
+    "locale": "vi",
+    "key": "providers.openrouter.enforce_distillable_text",
+    "stage": "before",
+    "label": "văn bản chưng cất được",
+    "help": "'true': chỉ giới hạn ở endpoint có đầu ra văn bản được phép chưng cất. 'default': không gửi gì.",
+    "summary": "  › văn bản chưng cất được        true ▸",
+    "default": "tui.settings_view.chrome.clause.default",
+    "detail": "tui.settings_view.chrome.clause.default   providers.openrouter.enforce_distillable_text",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "",
+        "label": "default",
+        "description": "không gửi tùy chọn nào",
+        "paint": "      ○ defaulttui.small.settings_view.default_marker  không gửi tùy chọn nào"
+      },
+      {
+        "value": "true",
+        "label": "true",
+        "description": "chỉ endpoint có văn bản chưng cất được",
+        "paint": "    › ● true  chỉ endpoint có văn bản chưng cất được"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "tui.settings_view.chrome.clause.default   providers.openrouter.enforce_distillable_text"
+    },
+    "pane": "tui.settings_view.pane.providers_header\n  tui.settings_view.pane.provi…\n\ntui.settings_view.pane.tab_teams  tui.settings_view.pane.tab_agents  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  tui.settings_view.pane.more\n\ntui.small.settings_view.read_only_label",
+    "config_unchanged": true
+  },
+  {
+    "locale": "fr",
+    "key": "team_bridge.session",
+    "compact": true,
+    "size": [
+      100,
+      30
+    ],
+    "source_label": "Session CoS",
+    "source_label_cells": 11,
+    "help": "Session pouvant être réveillée à l’arrivée de nouveaux messages ; vide = badge uniquement.",
+    "detail": "Session pouvant être réveillée à l’arrivée de nouveaux messages ; vide = badge uniquement.",
+    "list_width": 60,
+    "detail_width": 94,
+    "region": "Region(x=1, y=1, width=98, height=23)",
+    "virtual": "Size(width=96, height=21)",
+    "pane_display": true,
+    "first_equal_settled": true,
+    "paint": "Modèle\n    Fournisseur par défaut        —\n    Modèle par défaut             —\n    Effort de raisonnement par d… —\nProtocole de connexion\n    Utiliser le contexte OpenAI…  tui.small.settings_view.b…\n    Surface d’API OpenAI          responses\n    Cache 1 h d’Anthropic au-del… 150000\n    TTL 1 h sous-agents Anthropic 0\n    Région Amazon Bedrock         —\n    Authentification Bedrock      —\nRoutage OpenRouter\n    affinité de cache             tui.small.settings_view.b…\n    politique de routage          —\n    ordre des hôtes               —\n    hôtes autorisés               —\n    hôtes ignorés                 —\n    replis                        —\n    paramètres requis             —\n    collecte de données           —\n    rétention nulle               —\n    texte distillable             true\n    quantifications               —\n    prix max                      —\n    débit min (tok/s)             0.0\n    latence max (s)               0.0\n    wire.host_speed.retire_below… 0.0\nBasculement et réessais\n    Réessayer les appels en échec tui.small.settings_view.b…\n    Réessais max                  10\n    Délai de base (ms)            500\n    Réessais de connectivité      15\n    Plafond d’espacement de conn… 60000\n    Repli de modèle               tui.small.settings_view.b…\n    Repli selon l’utilisation     tui.small.settings_view.b…\n    wire.settings.account_policy… reset-soonest\n    wire.settings.account_policy… tui.small.settings_view.b…\n    Réserve d’utilisation (%)     10\n    Cascade de basculement        tui.settings_view.chrome.…\n      tui.settings_view.chrome.cascade.empty\n    tui.settings_view.row.add_chain\n    Repli de l’enfant épinglé     cross-family\nApparence\n    Thème                         dark\n    Animation de reflet           tui.small.settings_view.b…\n    Narration en cours de tour    tui.small.settings_view.b…\n    Raisonnement du modèle en di… tui.small.settings_view.b…\n    Filet en marge de l’assistant tui.small.settings_view.b…\n    Lignes d’action confortables  tui.small.settings_view.b…\n    Glyphes Nerd Font             tui.settings_view.chrome.…\n    Marqueurs de titre            tui.small.settings_view.b…\n    Titre du terminal             tui.small.settings_view.b…\n    Images intégrées              tui.small.settings_view.b…\n    Notifications de bureau       tui.small.settings_view.b…\n    Noms de session dans les not… tui.small.settings_view.b…\n    Format des heures de réveil   12h\n    Langue                        fr\n    Dock des sous-agents          full\n    Masquer le trafic entre sess… tui.small.settings_view.b…\n    Marquer la réponse du tour    tui.small.settings_view.b…\n    Bandeau d’état                tui.small.settings_view.b…\n    Chevron du prompt             tui.small.settings_view.b…\n    Bandeau : modèle              tui.small.settings_view.b…\n    Bandeau : répertoire de trav… tui.small.settings_view.b…\n    Bandeau : contexte            tui.small.settings_view.b…\n    Bandeau : débit de décodage   tui.small.settings_view.b…\n    Bandeau : coût de session     tui.small.settings_view.b…\n    Bandeau : temps écoulé        tui.small.settings_view.b…\n    Bandeau : commande d’état     —\n    Bandeau : cadence d’exécution 30\n    Barre latérale des sessions   tui.small.settings_view.b…\n    Position de la barre latérale left\n    Couche sous-agents de la bar… tui.small.settings_view.b…\nwire.notification_sound.title\n    wire.notification_sound.enab… tui.small.settings_view.b…\n    wire.notification_sound.id.l… soft-pulse\n    wire.notification_sound.volu… 70\nRaccourcis clavier\n    wire.settings.keymap.new_ses… ctrl+n\n    wire.settings.keymap.resume.… ctrl+s\n    wire.settings.keymap.quick_s… cmd+alt+shift+space\n    wire.settings.keymap.push_to… Right-Option (hold)\n    wire.settings.keymap.start_r… cmd+shift+s\nApprobations\n    Mode d’approbation des outils auto\nStockage des sessions\n    Enregistrement auto de la co… tui.small.settings_view.b…\nVos conversations\n    Nettoyage des sessions        tui.small.settings_view.b…\n    ↳ sessions max                0\n    ↳ jours d’inactivité max      0\n    ↳ octets totaux max           0\n    ↳ supprimer les vides         tui.small.settings_view.b…\n    Supprimer les conversations…  30\nCompression des transcriptions\n    Compresser les transcriptions tui.small.settings_view.b…\n    ↳ compresser après (jours)    30\nScratchpad\n    Plafond scratchpad (octets)   268435456\nTravail délégué\n    Nettoyage du travail délégué  tui.small.settings_view.b…\n    ↳ supprimer après (heures)    48\nSous-agents\n    Tâches d’arrière-plan max     15\n    Alléger les connaissances de… tui.small.settings_view.b…\n    Profondeur max d’équipes imb… 3\n    Qui choisit le modèle d’un s… operator\n    Modèle de sous-agent : lo     —\n    Modèle de sous-agent : med    —\n    Modèle de sous-agent : hi     —\nSuggestions intelligentes\n    Suggestions intelligentes     tui.small.settings_view.b…\n    ↳ fournisseur                 auto\n    ↳ modèle                      —\n    ↳ délai (ms)                  1500\n    ↳ budget d’attente (ms)       50\n    ↳ caractères d’état max       6000\n    ↳ candidats max               12\n    ↳ recommandations max         3\nwire.radient_saver.section.title\n    wire.radient_saver.mode.label off\nMises en avant\n    Mises en avant                tui.small.settings_view.b…\n    ↳ fichiers                    tui.small.settings_view.b…\n    ↳ graphiques                  tui.small.settings_view.b…\n    ↳ modèle des graphiques       auto\n    ↳ tours max                   2\n    ↳ tokens de sortie max        6000\n    ↳ limite de temps (s)         90\n    ↳ plafond de coût ($)         1.0\n    ↳ fichiers affichés           4\n    ↳ ne jamais lister sous       —\nSurveillances\n    Intervalle par défaut (s)     60\n    Max par session               8\n    Délai d’exécution (ms)        120000\n    Plafond de l’instantané (car… 32768\n    Lignes de delta max           12\n    Budget de delta (caractères)  1200\n    État du classifieur (caractè… 1200\n    Désactiver après échecs cons… 5\n    Livraisons par heure          12\n    Ignorer le bruit des horodat… tui.small.settings_view.b…\nRuntime\n    Continuer après /resume       tui.small.settings_view.b…\n    Garder les conversations fer… 300\n    Conversations chaudes max     4\n    Délai des questions en votre… 24\nCompactage\n    Compactage                    tui.small.settings_view.b…\n    Stratégie                     auto\n    Seuil (% de la fenêtre)       0.8\n    Seuil (tokens)                400000\n    Conserver les tokens récents  20000\n    Continuer après le compactage tui.small.settings_view.b…\n    Compactage en cours de tour   tui.small.settings_view.b…\n    Compactage en veille          tui.small.settings_view.b…\n    Seuil en veille (tokens)      200000\n    Croissance min. en veille (t… 60000\n    Rejeu à la reprise            full\n    Limite de taille de requête…  24000000\n    Déclencheur de taille de req… 16000000\nFork\n    Où un fork s’ouvre            switch\n    Où il s’ouvre sous cmux       workspace\nOutils web\n    Recherche web                 tui.small.settings_view.b…\n    Récupération web              tui.small.settings_view.b…\nRecherche web\n    Équilibrage de charge         round_robin\n    Fournisseurs                  duckduckgo, tavily\n    Fournisseurs exclus           —\n    Délai (s)                     20.0\n    Endpoint SearXNG              —\n    Preuves par page DeepSeek     tui.small.settings_view.b…\n    Lire depuis la recherche      tui.small.settings_view.b…\nRécupération web\n    Délai (s)                     20.0\n    Plafond de téléchargement (o… 5242880\n    Redirections max              5\n    TTL du cache (s)              900\n    Autoriser les adresses privé… tui.small.settings_view.b…\n    Moteur de rendu HTML          auto\n    Enrichir avant l’extraction   tui.small.settings_view.b…\n    Tentatives par maillon        3\n    Réessai avec profil de navig… tui.small.settings_view.b…\nOutils\n    Interpréteur Bash             —\n    Journaliser les envois non a… tui.small.settings_view.b…\n    Bloquer les recherches non b… tui.small.settings_view.b…\n    …refuser plutôt qu’avertir    tui.small.settings_view.b…\n    …élaguer les arborescences v… tui.small.settings_view.b…\n    Charger à la demande les sch… tui.small.settings_view.b…\nwire.guardrails.section.title\n    wire.guardrails.enabled.label tui.small.settings_view.b…\n    wire.guardrails.critical_ove… tui.small.settings_view.b…\n    wire.guardrails.judge_timeou… 20.0\n    wire.guardrails.rules_dir.la… —\nHooks\n    Hooks natifs                  tui.small.settings_view.b…\n    Transférer les hooks de Clau… tui.small.settings_view.b…\n    Transférer les hooks de Codex tui.small.settings_view.b…\nLimite de mémoire des commandes\n    Limite de mémoire des comman… tui.small.settings_view.b…\n    Source du plafond             auto\n    Plafond manuel (Mo)           0\n    Seuil d’avertissement         0.8\nFile d’attente des tâches lourdes\n    File d’attente des tâches lo… tui.small.settings_view.b…\nBudget des requêtes shell\n    Budget des requêtes shell     tui.small.settings_view.b…\n    …arrêter plutôt qu’avertir    tui.small.settings_view.b…\n    Budget (secondes)             60\nShell de l’agent\n    Environnement du shell de l’… inherit\n    …gardés en mode allowlist     —\n    …retirés dans les deux modes  —\nServeurs locaux\n    endpoint LM Studio            http://localhost:1234/v1\n    surcharges de modèle pour LM… {}\n    endpoint Ollama               http://localhost:11434/v1\n    surcharges de modèle pour Ol… {}\n    endpoint vLLM                 http://localhost:8000/v1\n    surcharges de modèle pour vL… {}\n    endpoint llama.cpp            http://localhost:8080/v1\n    surcharges de modèle pour ll… {}\n    endpoint OpenAI-compatible    —\n    surcharges de modèle pour Op… {}\nwire.console.title\n    wire.console.max_live.label   128\n    wire.console.max_owner.label  8\n    wire.console.user_reserved.l… 16\nApplication de bureau\n    commande de lancement         —\n    cache des fichiers distants…  1073741824\nwire.phone_access.title\n    wire.phone_access.auto_setup… tui.small.settings_view.b…\n    wire.phone_access.away_after… 120\nAperçus de fichiers\n    Racines d’aperçus supplément… —\nRéseau maillé\n    wire.memory.sync.label        tui.small.settings_view.b…\n    wire.memory.scopes.label      global, session, team, ag…\n    wire.memory.exclude.label     —\n    Adresse d’écoute              0.0.0.0\n    Port du maillage              4097\n    Endpoints annoncés            —\n    Taille d’audit par génération 8388608\n    Générations d’audit conservé… 5\n    Plafond d’âge d’audit (jours) 90.0\n    Handshakes simultanés         8\n    Période de calme de synchron… 30.0\n    Intervalle de vérification d… 15.0\n    Durée de vie du login emprun… 900.0\n    Maintien du login emprunté,…  86400.0\n    Dépôts GitHub                 —\nMises à jour du maillage\n    Propager le maillage après u… auto\nDéplacements de session\n    Plafond des fichiers de trav… 268435456\n    Dossiers pouvant recevoir de… ~\nMises à jour\n    Purge anciennes installations tui.small.settings_view.b…\n    Inutilisées conservées        2\nCalcul distant\n    Calcul distant                tui.small.settings_view.b…\nAida\n    Cheffe de cabinet activée     tui.small.settings_view.b…\n    Nom affiché                   Aida\n    Heure du point quotidien      08:30\n    wire.aida_cadence.interval_h… 0\n    Cadence en pause              tui.small.settings_view.b…\n    Points supplémentaires / jour 2\n    Écart minimal (minutes)       90\n    Intervalle de rappel d’intég… 14\nBibliothécaire\n    Bibliothécaire activé         tui.small.settings_view.b…\n    Nom affiché                   Librarian\n    Heure de la passe quotidienne 03:30\n    Passe quotidienne en pause    tui.small.settings_view.b…\n    Passes supplémentaires / jour 1\n    Écart minimal (minutes)       720\nAgent Hub\n    wire.settings.hub_defaults.a… tui.small.settings_view.b…\n    Mise à jour auto des équipes  tui.small.settings_view.b…\n    Intervalle de vérification (… 15\nAgents\n    Mise à jour auto des rôles i… tui.small.settings_view.b…\nProjets\n    Périmé après (heures)         4\nDéclencheurs de réveil\n    Activé                        tui.small.settings_view.b…\n    Réveils de point max par jour 6\n    Écart minimal (minutes)       60\n    Déclencheur de projets périm… tui.small.settings_view.b…\nClasse proactive\n    Attente de patience par défa… 300000\n    Facteur d’espacement de pati… 3\n    Tentatives max de patience    3\n    TTL du cycle de patience (ms) 7200000\n    Attentes en suspens par sess… 4\nVoix\n    Genre de la voix              auto\n    Tonalité                      warm\n    Expressivité                  medium\n    Rythme                        1.0\n    Langue                        auto\n    Accent                        —\n    Instructions de diction       Speak aloud and pay atten…\n    Nettoyage de la transcription auto\n    wire.voice.provider.label     tui.settings_view.chrome.…\nwire.voice.title\n    wire.voice.max_spoken_chars.… 800\nMessages entre agents\n    Activé sur cette machine      tui.small.settings_view.b…\n  › Session CoS                   —\n    Retenir les demandes de tâche tui.small.settings_view.b…\n    Plafond de filtrage / heure   400\n    Plafond non adressés / heure  350\n    Plafond de bavardage / heure  300\n    Plafond d’expéditeur / heure  200\n    Modèle de filtrage            —\nRetirées\n    Longueur de conversation      100\n    Longueur du détail            15\n    Historique max d’apprentissa… 50\n    Avis des suggestions intelli… tui.small.settings_view.b…\nwire.memory.title\n    wire.memory.enabled.label     tui.small.settings_view.b…\n    wire.memory.capture.label     tui.small.settings_view.b…\n    wire.memory.capture.locators… tui.small.settings_view.b…\n    wire.memory.suggest.label     tui.small.settings_view.b…\nQuestions\n    Questions expirées visibles   7d",
+    "config_unchanged": true
+  },
+  {
+    "locale": "fr",
+    "key": "team_bridge.session",
+    "compact": true,
+    "size": [
+      80,
+      24
+    ],
+    "source_label": "Session CoS",
+    "source_label_cells": 11,
+    "help": "Session pouvant être réveillée à l’arrivée de nouveaux messages ; vide = badge uniquement.",
+    "detail": "Session pouvant être réveillée à l’arrivée de nouveaux messages ; vide =\nbadge uniquement.",
+    "list_width": 74,
+    "detail_width": 74,
+    "region": "Region(x=1, y=1, width=78, height=17)",
+    "virtual": "Size(width=76, height=15)",
+    "pane_display": false,
+    "first_equal_settled": true,
+    "paint": "Modèle                            tui.settings_view.section.takes_effect\n    Fournisseur par défaut        —\n    Modèle par défaut             —\n    Effort de raisonnement par d… —\nProtocole de connexion            tui.settings_view.section.takes_effect\n    Utiliser le contexte OpenAI…  tui.small.settings_view.bool_on\n    Surface d’API OpenAI          responses\n    Cache 1 h d’Anthropic au-del… 150000\n    TTL 1 h sous-agents Anthropic 0\n    Région Amazon Bedrock         —\n    Authentification Bedrock      —\nRoutage OpenRouter                tui.settings_view.section.takes_effect\n    affinité de cache             tui.small.settings_view.bool_on\n    politique de routage          —\n    ordre des hôtes               —\n    hôtes autorisés               —\n    hôtes ignorés                 —\n    replis                        —\n    paramètres requis             —\n    collecte de données           —\n    rétention nulle               —\n    texte distillable             true\n    quantifications               —\n    prix max                      —\n    débit min (tok/s)             0.0\n    latence max (s)               0.0\n    wire.host_speed.retire_below… 0.0\nBasculement et réessais           tui.settings_view.section.takes_effect\n    Réessayer les appels en échec tui.small.settings_view.bool_on\n    Réessais max                  10\n    Délai de base (ms)            500\n    Réessais de connectivité      15\n    Plafond d’espacement de conn… 60000\n    Repli de modèle               tui.small.settings_view.bool_on\n    Repli selon l’utilisation     tui.small.settings_view.bool_off\n    wire.settings.account_policy… reset-soonest\n    wire.settings.account_policy… tui.small.settings_view.bool_on\n    Réserve d’utilisation (%)     10\n    Cascade de basculement        tui.settings_view.chrome.value.chains\n      tui.settings_view.chrome.cascade.empty\n    tui.settings_view.row.add_chain\n    Repli de l’enfant épinglé     cross-family\nApparence                         tui.settings_view.section.takes_effect\n    Thème                         dark\n    Animation de reflet           tui.small.settings_view.bool_on\n    Narration en cours de tour    tui.small.settings_view.bool_on\n    Raisonnement du modèle en di… tui.small.settings_view.bool_off\n    Filet en marge de l’assistant tui.small.settings_view.bool_on\n    Lignes d’action confortables  tui.small.settings_view.bool_off\n    Glyphes Nerd Font             tui.settings_view.chrome.value.auto\n    Marqueurs de titre            tui.small.settings_view.bool_off\n    Titre du terminal             tui.small.settings_view.bool_on\n    Images intégrées              tui.small.settings_view.bool_on\n    Notifications de bureau       tui.small.settings_view.bool_on\n    Noms de session dans les not… tui.small.settings_view.bool_on\n    Format des heures de réveil   12h\n    Langue                        fr\n    Dock des sous-agents          full\n    Masquer le trafic entre sess… tui.small.settings_view.bool_off\n    Marquer la réponse du tour    tui.small.settings_view.bool_off\n    Bandeau d’état                tui.small.settings_view.bool_on\n    Chevron du prompt             tui.small.settings_view.bool_on\n    Bandeau : modèle              tui.small.settings_view.bool_on\n    Bandeau : répertoire de trav… tui.small.settings_view.bool_on\n    Bandeau : contexte            tui.small.settings_view.bool_on\n    Bandeau : débit de décodage   tui.small.settings_view.bool_on\n    Bandeau : coût de session     tui.small.settings_view.bool_on\n    Bandeau : temps écoulé        tui.small.settings_view.bool_on\n    Bandeau : commande d’état     —\n    Bandeau : cadence d’exécution 30\n    Barre latérale des sessions   tui.small.settings_view.bool_off\n    Position de la barre latérale left\n    Couche sous-agents de la bar… tui.small.settings_view.bool_off\nwire.notification_sound.title     tui.settings_view.section.takes_effect\n    wire.notification_sound.enab… tui.small.settings_view.bool_on\n    wire.notification_sound.id.l… soft-pulse\n    wire.notification_sound.volu… 70\nRaccourcis clavier                tui.settings_view.section.takes_effect\n    wire.settings.keymap.new_ses… ctrl+n\n    wire.settings.keymap.resume.… ctrl+s\n    wire.settings.keymap.quick_s… cmd+alt+shift+space\n    wire.settings.keymap.push_to… Right-Option (hold)\n    wire.settings.keymap.start_r… cmd+shift+s\nApprobations                      tui.settings_view.section.takes_effect\n    Mode d’approbation des outils auto\nStockage des sessions             tui.settings_view.section.takes_effect\n    Enregistrement auto de la co… tui.small.settings_view.bool_off\nVos conversations                 tui.settings_view.section.takes_effect\n    Nettoyage des sessions        tui.small.settings_view.bool_off\n    ↳ sessions max                0\n    ↳ jours d’inactivité max      0\n    ↳ octets totaux max           0\n    ↳ supprimer les vides         tui.small.settings_view.bool_off\n    Supprimer les conversations…  30\nCompression des transcriptions    tui.settings_view.section.takes_effect\n    Compresser les transcriptions tui.small.settings_view.bool_on\n    ↳ compresser après (jours)    30\nScratchpad                        tui.settings_view.section.takes_effect\n    Plafond scratchpad (octets)   268435456\nTravail délégué                   tui.settings_view.section.takes_effect\n    Nettoyage du travail délégué  tui.small.settings_view.bool_on\n    ↳ supprimer après (heures)    48\nSous-agents                       tui.settings_view.section.takes_effect\n    Tâches d’arrière-plan max     15\n    Alléger les connaissances de… tui.small.settings_view.bool_on\n    Profondeur max d’équipes imb… 3\n    Qui choisit le modèle d’un s… operator\n    Modèle de sous-agent : lo     —\n    Modèle de sous-agent : med    —\n    Modèle de sous-agent : hi     —\nSuggestions intelligentes         tui.settings_view.section.takes_effect\n    Suggestions intelligentes     tui.small.settings_view.bool_on\n    ↳ fournisseur                 auto\n    ↳ modèle                      —\n    ↳ délai (ms)                  1500\n    ↳ budget d’attente (ms)       50\n    ↳ caractères d’état max       6000\n    ↳ candidats max               12\n    ↳ recommandations max         3\nwire.radient_saver.section.title  tui.settings_view.section.takes_effect\n    wire.radient_saver.mode.label off\nMises en avant                    tui.settings_view.section.takes_effect\n    Mises en avant                tui.small.settings_view.bool_on\n    ↳ fichiers                    tui.small.settings_view.bool_on\n    ↳ graphiques                  tui.small.settings_view.bool_on\n    ↳ modèle des graphiques       auto\n    ↳ tours max                   2\n    ↳ tokens de sortie max        6000\n    ↳ limite de temps (s)         90\n    ↳ plafond de coût ($)         1.0\n    ↳ fichiers affichés           4\n    ↳ ne jamais lister sous       —\nSurveillances                     tui.settings_view.section.takes_effect\n    Intervalle par défaut (s)     60\n    Max par session               8\n    Délai d’exécution (ms)        120000\n    Plafond de l’instantané (car… 32768\n    Lignes de delta max           12\n    Budget de delta (caractères)  1200\n    État du classifieur (caractè… 1200\n    Désactiver après échecs cons… 5\n    Livraisons par heure          12\n    Ignorer le bruit des horodat… tui.small.settings_view.bool_on\nRuntime                           tui.settings_view.section.takes_effect\n    Continuer après /resume       tui.small.settings_view.bool_on\n    Garder les conversations fer… 300\n    Conversations chaudes max     4\n    Délai des questions en votre… 24\nCompactage                        tui.settings_view.section.takes_effect\n    Compactage                    tui.small.settings_view.bool_on\n    Stratégie                     auto\n    Seuil (% de la fenêtre)       0.8\n    Seuil (tokens)                400000\n    Conserver les tokens récents  20000\n    Continuer après le compactage tui.small.settings_view.bool_on\n    Compactage en cours de tour   tui.small.settings_view.bool_on\n    Compactage en veille          tui.small.settings_view.bool_on\n    Seuil en veille (tokens)      200000\n    Croissance min. en veille (t… 60000\n    Rejeu à la reprise            full\n    Limite de taille de requête…  24000000\n    Déclencheur de taille de req… 16000000\nFork                              tui.settings_view.section.takes_effect\n    Où un fork s’ouvre            switch\n    Où il s’ouvre sous cmux       workspace\nOutils web                        tui.settings_view.section.takes_effect\n    Recherche web                 tui.small.settings_view.bool_on\n    Récupération web              tui.small.settings_view.bool_on\nRecherche web                     tui.settings_view.section.takes_effect\n    Équilibrage de charge         round_robin\n    Fournisseurs                  duckduckgo, tavily\n    Fournisseurs exclus           —\n    Délai (s)                     20.0\n    Endpoint SearXNG              —\n    Preuves par page DeepSeek     tui.small.settings_view.bool_off\n    Lire depuis la recherche      tui.small.settings_view.bool_on\nRécupération web                  tui.settings_view.section.takes_effect\n    Délai (s)                     20.0\n    Plafond de téléchargement (o… 5242880\n    Redirections max              5\n    TTL du cache (s)              900\n    Autoriser les adresses privé… tui.small.settings_view.bool_off\n    Moteur de rendu HTML          auto\n    Enrichir avant l’extraction   tui.small.settings_view.bool_on\n    Tentatives par maillon        3\n    Réessai avec profil de navig… tui.small.settings_view.bool_on\nOutils                            tui.settings_view.section.takes_effect\n    Interpréteur Bash             —\n    Journaliser les envois non a… tui.small.settings_view.bool_off\n    Bloquer les recherches non b… tui.small.settings_view.bool_on\n    …refuser plutôt qu’avertir    tui.small.settings_view.bool_on\n    …élaguer les arborescences v… tui.small.settings_view.bool_on\n    Charger à la demande les sch… tui.small.settings_view.bool_on\nwire.guardrails.section.title     tui.settings_view.section.takes_effect\n    wire.guardrails.enabled.label tui.small.settings_view.bool_on\n    wire.guardrails.critical_ove… tui.small.settings_view.bool_off\n    wire.guardrails.judge_timeou… 20.0\n    wire.guardrails.rules_dir.la… —\nHooks                             tui.settings_view.section.takes_effect\n    Hooks natifs                  tui.small.settings_view.bool_off\n    Transférer les hooks de Clau… tui.small.settings_view.bool_off\n    Transférer les hooks de Codex tui.small.settings_view.bool_off\nLimite de mémoire des commandes   tui.settings_view.section.takes_effect\n    Limite de mémoire des comman… tui.small.settings_view.bool_on\n    Source du plafond             auto\n    Plafond manuel (Mo)           0\n    Seuil d’avertissement         0.8\nFile d’attente des tâches lourdes tui.settings_view.section.takes_effect\n    File d’attente des tâches lo… tui.small.settings_view.bool_on\nBudget des requêtes shell         tui.settings_view.section.takes_effect\n    Budget des requêtes shell     tui.small.settings_view.bool_on\n    …arrêter plutôt qu’avertir    tui.small.settings_view.bool_on\n    Budget (secondes)             60\nShell de l’agent                  tui.settings_view.section.takes_effect\n    Environnement du shell de l’… inherit\n    …gardés en mode allowlist     —\n    …retirés dans les deux modes  —\nServeurs locaux                   tui.settings_view.section.takes_effect\n    endpoint LM Studio            http://localhost:1234/v1\n    surcharges de modèle pour LM… {}\n    endpoint Ollama               http://localhost:11434/v1\n    surcharges de modèle pour Ol… {}\n    endpoint vLLM                 http://localhost:8000/v1\n    surcharges de modèle pour vL… {}\n    endpoint llama.cpp            http://localhost:8080/v1\n    surcharges de modèle pour ll… {}\n    endpoint OpenAI-compatible    —\n    surcharges de modèle pour Op… {}\nwire.console.title                tui.settings_view.section.takes_effect\n    wire.console.max_live.label   128\n    wire.console.max_owner.label  8\n    wire.console.user_reserved.l… 16\nApplication de bureau             tui.settings_view.section.takes_effect\n    commande de lancement         —\n    cache des fichiers distants…  1073741824\nwire.phone_access.title           tui.settings_view.section.takes_effect\n    wire.phone_access.auto_setup… tui.small.settings_view.bool_on\n    wire.phone_access.away_after… 120\nAperçus de fichiers               tui.settings_view.section.takes_effect\n    Racines d’aperçus supplément… —\nRéseau maillé                     tui.settings_view.section.takes_effect\n    wire.memory.sync.label        tui.small.settings_view.bool_on\n    wire.memory.scopes.label      global, session, team, agent\n    wire.memory.exclude.label     —\n    Adresse d’écoute              0.0.0.0\n    Port du maillage              4097\n    Endpoints annoncés            —\n    Taille d’audit par génération 8388608\n    Générations d’audit conservé… 5\n    Plafond d’âge d’audit (jours) 90.0\n    Handshakes simultanés         8\n    Période de calme de synchron… 30.0\n    Intervalle de vérification d… 15.0\n    Durée de vie du login emprun… 900.0\n    Maintien du login emprunté,…  86400.0\n    Dépôts GitHub                 —\nMises à jour du maillage          tui.settings_view.section.takes_effect\n    Propager le maillage après u… auto\nDéplacements de session           tui.settings_view.section.takes_effect\n    Plafond des fichiers de trav… 268435456\n    Dossiers pouvant recevoir de… ~\nMises à jour                      tui.settings_view.section.takes_effect\n    Purge anciennes installations tui.small.settings_view.bool_on\n    Inutilisées conservées        2\nCalcul distant                    tui.settings_view.section.takes_effect\n    Calcul distant                tui.small.settings_view.bool_off\nAida                              tui.settings_view.section.takes_effect\n    Cheffe de cabinet activée     tui.small.settings_view.bool_on\n    Nom affiché                   Aida\n    Heure du point quotidien      08:30\n    wire.aida_cadence.interval_h… 0\n    Cadence en pause              tui.small.settings_view.bool_off\n    Points supplémentaires / jour 2\n    Écart minimal (minutes)       90\n    Intervalle de rappel d’intég… 14\nBibliothécaire                    tui.settings_view.section.takes_effect\n    Bibliothécaire activé         tui.small.settings_view.bool_on\n    Nom affiché                   Librarian\n    Heure de la passe quotidienne 03:30\n    Passe quotidienne en pause    tui.small.settings_view.bool_off\n    Passes supplémentaires / jour 1\n    Écart minimal (minutes)       720\nAgent Hub                         tui.settings_view.section.takes_effect\n    wire.settings.hub_defaults.a… tui.small.settings_view.bool_on\n    Mise à jour auto des équipes  tui.small.settings_view.bool_on\n    Intervalle de vérification (… 15\nAgents                            tui.settings_view.section.takes_effect\n    Mise à jour auto des rôles i… tui.small.settings_view.bool_on\nProjets                           tui.settings_view.section.takes_effect\n    Périmé après (heures)         4\nDéclencheurs de réveil            tui.settings_view.section.takes_effect\n    Activé                        tui.small.settings_view.bool_on\n    Réveils de point max par jour 6\n    Écart minimal (minutes)       60\n    Déclencheur de projets périm… tui.small.settings_view.bool_on\nClasse proactive                  tui.settings_view.section.takes_effect\n    Attente de patience par défa… 300000\n    Facteur d’espacement de pati… 3\n    Tentatives max de patience    3\n    TTL du cycle de patience (ms) 7200000\n    Attentes en suspens par sess… 4\nVoix                              tui.settings_view.section.takes_effect\n    Genre de la voix              auto\n    Tonalité                      warm\n    Expressivité                  medium\n    Rythme                        1.0\n    Langue                        auto\n    Accent                        —\n    Instructions de diction       Speak aloud and pay attention to potent…\n    Nettoyage de la transcription auto\n    wire.voice.provider.label     tui.settings_view.chrome.value.auto\nwire.voice.title                  tui.settings_view.section.takes_effect\n    wire.voice.max_spoken_chars.… 800\nMessages entre agents             tui.settings_view.section.takes_effect\n    Activé sur cette machine      tui.small.settings_view.bool_off\n  › Session CoS                   —\n    Retenir les demandes de tâche tui.small.settings_view.bool_on\n    Plafond de filtrage / heure   400\n    Plafond non adressés / heure  350\n    Plafond de bavardage / heure  300\n    Plafond d’expéditeur / heure  200\n    Modèle de filtrage            —\nRetirées                          tui.settings_view.section.takes_effect\n    Longueur de conversation      100\n    Longueur du détail            15\n    Historique max d’apprentissa… 50\n    Avis des suggestions intelli… tui.small.settings_view.bool_on\nwire.memory.title                 tui.settings_view.section.takes_effect\n    wire.memory.enabled.label     tui.small.settings_view.bool_on\n    wire.memory.capture.label     tui.small.settings_view.bool_on\n    wire.memory.capture.locators… tui.small.settings_view.bool_off\n    wire.memory.suggest.label     tui.small.settings_view.bool_on\nQuestions                         tui.settings_view.section.takes_effect\n    Questions expirées visibles   7d",
+    "config_unchanged": true
+  },
+  {
+    "locale": "hi",
+    "key": "providers.openrouter.enforce_distillable_text",
+    "compact": true,
+    "size": [
+      100,
+      30
+    ],
+    "source_label": "distillable टेक्स्ट",
+    "source_label_cells": 16,
+    "help": "'true': सिर्फ़ ऐसे endpoint जिनका टेक्स्ट आउटपुट distill किया जा सके। 'default': कुछ नहीं भेजा जाता।",
+    "detail": "tui.settings_view.chrome.clause.not_saved   providers.openrouter.enforce_distillable_text",
+    "list_width": 60,
+    "detail_width": 94,
+    "region": "Region(x=1, y=1, width=98, height=23)",
+    "virtual": "Size(width=96, height=21)",
+    "pane_display": true,
+    "first_equal_settled": true,
+    "paint": "मॉडल\n    डिफ़ॉल्ट प्रोवाइडर                   —\n    डिफ़ॉल्ट मॉडल                      —\n    डिफ़ॉल्ट तर्क-प्रयास                 —\nवायर प्रोटोकॉल\n    अधिकतम OpenAI संदर्भ इस्तेमाल करें    tui.small.settings_view.b…\n    OpenAI API सरफ़ेस               responses\n    Anthropic 1h कैश इससे ऊपर (टोकन) 150000\n    Anthropic उप-एजेंट 1h कैश सीमा     0\n    Amazon Bedrock क्षेत्र           —\n    Amazon Bedrock प्रमाणीकरण        —\nOpenRouter रूटिंग\n    कैश एफ़िनिटी                       tui.small.settings_view.b…\n    रूटिंग नीति                        —\n    होस्ट क्रम                       —\n    अनुमत होस्ट                      —\n    अनदेखे होस्ट                      —\n    फ़ॉलबैक                          —\n    पैरामीटर अनिवार्य करें                —\n    डेटा संग्रह                       —\n    शून्य डेटा रिटेंशन                   —\n    distillable टेक्स्ट              true ▾\n      ○ defaulttui.small.settings_view.default_marker  कोई प्…\n    › ● true  सिर्फ़ distillable-text endpoint\n    क्वांटाइज़ेशन                       —\n    अधिकतम कीमत                     —\n    न्यूनतम थ्रूपुट (tok/s)            0.0\n    अधिकतम लेटेंसी (s)                 0.0\n    wire.host_speed.retire_below… 0.0\nफ़ेलओवर और रीट्राई\n    विफल कॉल फिर आज़माएँ                tui.small.settings_view.b…\n    अधिकतम रीट्राई                    10\n    आधार देरी (ms)                   500\n    कनेक्टिविटी रीट्राई                   15\n    कनेक्टिविटी बैकऑफ़ सीमा (ms)           60000\n    मॉडल फ़ॉलबैक                      tui.small.settings_view.b…\n    उपयोग-सजग फ़ॉलबैक                 tui.small.settings_view.b…\n    wire.settings.account_policy… reset-soonest\n    wire.settings.account_policy… tui.small.settings_view.b…\n    उपयोग रिज़र्व (%)                 10\n    फ़ेलओवर कैस्केड                    tui.settings_view.chrome.…\n      tui.settings_view.chrome.cascade.empty\n    tui.settings_view.row.add_chain\n    पिन किए उप-एजेंट का फ़ॉलबैक           cross-family\nदिखावट\n    थीम                            dark\n    शिमर एनिमेशन                     tui.small.settings_view.b…\n    टर्न के दौरान वर्णन                tui.small.settings_view.b…\n    मॉडल का लाइव तर्क                 tui.small.settings_view.b…\n    असिस्टेंट मार्जिन रेखा                 tui.small.settings_view.b…\n    आरामदेह एक्शन पंक्तियाँ               tui.small.settings_view.b…\n    Nerd Font ग्लिफ़                 tui.settings_view.chrome.…\n    शीर्षक मार्कर                     tui.small.settings_view.b…\n    टर्मिनल शीर्षक                    tui.small.settings_view.b…\n    अंतर्निहित छवियाँ                    tui.small.settings_view.b…\n    डेस्कटॉप सूचनाएँ                    tui.small.settings_view.b…\n    सूचना में सत्र नाम                  tui.small.settings_view.b…\n    जागृति समय प्रारूप                  12h\n    भाषा                            fr\n    उप-एजेंट डॉक                     full\n    क्रॉस-सत्र ट्रैफ़िक छिपाएँ              tui.small.settings_view.b…\n    टर्न के उत्तर को चिह्नित करें          tui.small.settings_view.b…\n    स्टेटस बैंड                       tui.small.settings_view.b…\n    प्रॉम्प्ट शेवरॉन                    tui.small.settings_view.b…\n    बैंड: मॉडल                       tui.small.settings_view.b…\n    बैंड: कार्य निर्देशिका                 tui.small.settings_view.b…\n    बैंड: संदर्भ                      tui.small.settings_view.b…\n    बैंड: डिकोड रेट                    tui.small.settings_view.b…\n    बैंड: सत्र लागत                   tui.small.settings_view.b…\n    बैंड: बीता समय                    tui.small.settings_view.b…\n    बैंड: स्टेटस कमांड                  —\n    बैंड: कमांड अंतराल                  30\n    सत्र साइडबार                     tui.small.settings_view.b…\n    साइडबार की जगह                   left\n    साइडबार उप-एजेंट लेयर              tui.small.settings_view.b…\nwire.notification_sound.title\n    wire.notification_sound.enab… tui.small.settings_view.b…\n    wire.notification_sound.id.l… soft-pulse\n    wire.notification_sound.volu… 70\nहॉटकीज़\n    wire.settings.keymap.new_ses… ctrl+n\n    wire.settings.keymap.resume.… ctrl+s\n    wire.settings.keymap.quick_s… cmd+alt+shift+space\n    wire.settings.keymap.push_to… Right-Option (hold)\n    wire.settings.keymap.start_r… cmd+shift+s\nस्वीकृतियाँ\n    टूल स्वीकृति मोड                    auto\nसत्र भंडारण\n    बातचीत अपने-आप सहेजें               tui.small.settings_view.b…\nआपकी बातचीत\n    सत्र सफ़ाई                       tui.small.settings_view.b…\n    ↳ अधिकतम सत्र                   0\n    ↳ अधिकतम निष्क्रिय दिन              0\n    ↳ अधिकतम कुल बाइट                0\n    ↳ खाली हटाएँ                      tui.small.settings_view.b…\n    इतनी देर बाद अस्थायी चैट हटाएँ         30\nट्रांसक्रिप्ट कंप्रेशन\n    पुरानी ट्रांसक्रिप्ट कंप्रेस करें           tui.small.settings_view.b…\n    ↳ (दिन) बाद कंप्रेस करें             30\nस्क्रैचपैड\n    स्क्रैचपैड आकार सीमा (बाइट)           268435456\nसौंपा गया काम\n    सौंपे काम की सफ़ाई                   tui.small.settings_view.b…\n    ↳ इतने घंटों बाद हटाएँ               48\nउप-एजेंट\n    अधिकतम बैकग्राउंड जॉब               15\n    उप-एजेंट का ज्ञान पतला करें           tui.small.settings_view.b…\n    अधिकतम नेस्टेड टीम गहराई            3\n    उप-एजेंट का मॉडल कौन चुने            operator\n    उप-एजेंट मॉडल: lo                —\n    उप-एजेंट मॉडल: med               —\n    उप-एजेंट मॉडल: hi                —\nस्मार्ट संकेत\n    स्मार्ट संकेत                      tui.small.settings_view.b…\n    ↳ वेंडर                         auto\n    ↳ मॉडल                         —\n    ↳ डेडलाइन (ms)                  1500\n    ↳ इंतज़ार बजट (ms)               50\n    ↳ अधिकतम स्टेट अक्षर              6000\n    ↳ अधिकतम उम्मीदवार                12\n    ↳ अधिकतम सिफ़ारिशें                  3\nwire.radient_saver.section.title\n    wire.radient_saver.mode.label off\nहाइलाइट्स\n    हाइलाइट्स                        tui.small.settings_view.b…\n    ↳ फ़ाइलें                         tui.small.settings_view.b…\n    ↳ ग्राफ़िक्स                       tui.small.settings_view.b…\n    ↳ ग्राफ़िक्स मॉडल                   auto\n    ↳ अधिकतम टर्न                   2\n    ↳ अधिकतम आउटपुट टोकन             6000\n    ↳ समय सीमा (s)                  90\n    ↳ लागत सीमा ($)                  1.0\n    ↳ दिखाई जाने वाली फ़ाइलें               4\n    ↳ इनके नीचे कभी सूचीबद्ध न करें        —\nमॉनिटर\n    डिफ़ॉल्ट अंतराल (s)                 60\n    प्रति सत्र अधिकतम                 8\n    रन टाइमआउट (ms)                120000\n    स्नैपशॉट सीमा (अक्षर)               32768\n    अधिकतम डेल्टा पंक्तियाँ                12\n    डेल्टा बजट (अक्षर)                1200\n    क्लासिफ़ायर स्टेट (अक्षर)             1200\n    कितनी विफलताओं पर बंद करें            5\n    प्रति घंटा डिलीवरी                   12\n    टाइमस्टैम्प उथल-पुथल अनदेखी करें       tui.small.settings_view.b…\nरनटाइम\n    /resume के बाद भी काम जारी रखें       tui.small.settings_view.b…\n    बंद बातचीत वॉर्म रखें (s)            300\n    अधिकतम वॉर्म बातचीत                4\n    दूर रहने पर सवाल टाइमआउट (h)      24\nसंपीडन\n    संपीडन                          tui.small.settings_view.b…\n    रणनीति                          auto\n    थ्रेशोल्ड (विंडो का %)                0.8\n    थ्रेशोल्ड (टोकन)                   400000\n    हाल के टोकन रखें                   20000\n    संपीडन के बाद जारी रखें               tui.small.settings_view.b…\n    टर्न के दौरान संपीडन                tui.small.settings_view.b…\n    निष्क्रिय-सत्र संपीडन                tui.small.settings_view.b…\n    निष्क्रिय-सत्र थ्रेशोल्ड (टोकन)         200000\n    निष्क्रिय-सत्र न्यूनतम वृद्धि (टोकन)     60000\n    फिर शुरू होने पर रीप्ले               full\n    अनुरोध आकार सीमा (बाइट)             24000000\n    अनुरोध आकार ट्रिगर (बाइट)           16000000\nफ़ोर्क\n    फ़ोर्क कहाँ खुलेगा                    switch\n    cmux में कहाँ खुलेगा                 workspace\nवेब टूल\n    वेब सर्च                        tui.small.settings_view.b…\n    वेब फ़ेच                         tui.small.settings_view.b…\nवेब सर्च\n    लोड बैलेंसिंग                       round_robin\n    प्रोवाइडर                        duckduckgo, tavily\n    बाहर रखे प्रोवाइडर                 —\n    टाइमआउट (s)                    20.0\n    SearXNG endpoint              —\n    DeepSeek पेज साक्ष्य              tui.small.settings_view.b…\n    सर्च से पढ़ें                      tui.small.settings_view.b…\nवेब फ़ेच\n    टाइमआउट (s)                    20.0\n    डाउनलोड सीमा (बाइट)                5242880\n    अधिकतम रीडायरेक्ट                  5\n    कैश TTL (s)                    900\n    निजी पते अनुमत करें                 tui.small.settings_view.b…\n    HTML रेंडरर                     auto\n    स्क्रैप से पहले एनरिच करें            tui.small.settings_view.b…\n    प्रति हॉप प्रयास                   3\n    ब्राउज़र-प्रोफ़ाइल रीट्राई              tui.small.settings_view.b…\nटूल\n    Bash इंटरप्रेटर                  —\n    बिना-पुष्टि send दर्ज करें            tui.small.settings_view.b…\n    बिना सीमा की सर्च रोकें                tui.small.settings_view.b…\n    …चेतावनी देने के बजाय अस्वीकार करें       tui.small.settings_view.b…\n    …ripgrep के लिए वेंडर ट्री छाँटें       tui.small.settings_view.b…\n    कम इस्तेमाल टूल स्कीमा ज़रूरत पर लोड करें tui.small.settings_view.b…\nwire.guardrails.section.title\n    wire.guardrails.enabled.label tui.small.settings_view.b…\n    wire.guardrails.critical_ove… tui.small.settings_view.b…\n    wire.guardrails.judge_timeou… 20.0\n    wire.guardrails.rules_dir.la… —\nहुक\n    नेटिव हुक                        tui.small.settings_view.b…\n    Claude Code हुक फ़ॉरवर्ड करें       tui.small.settings_view.b…\n    Codex हुक फ़ॉरवर्ड करें             tui.small.settings_view.b…\nकमांड मेमोरी सीमा\n    कमांड मेमोरी सीमा                    tui.small.settings_view.b…\n    सीमा का स्रोत                      auto\n    manual सीमा (MB)                0\n    सलाह थ्रेशोल्ड                     0.8\nभारी जॉब कतार\n    भारी जॉब कतार                     tui.small.settings_view.b…\nशेल क्वेरी बजट\n    शेल क्वेरी बजट                    tui.small.settings_view.b…\n    …चेतावनी देने के बजाय रोकें             tui.small.settings_view.b…\n    बजट (सेकंड)                     60\nएजेंट शेल\n    एजेंट शेल एनवायरनमेंट               inherit\n    …allowlist मोड में रखे जाते हैं       —\n    …दोनों मोड में हटाए जाते हैं             —\nस्थानीय सर्वर\n    LM Studio endpoint            http://localhost:1234/v1\n    LM Studio मॉडल ओवरराइड          {}\n    Ollama endpoint               http://localhost:11434/v1\n    Ollama मॉडल ओवरराइड             {}\n    vLLM endpoint                 http://localhost:8000/v1\n    vLLM मॉडल ओवरराइड               {}\n    llama.cpp endpoint            http://localhost:8080/v1\n    llama.cpp मॉडल ओवरराइड          {}\n    OpenAI-compatible endpoint    —\n    OpenAI-compatible मॉडल ओवरराइड  {}\nwire.console.title\n    wire.console.max_live.label   128\n    wire.console.max_owner.label  8\n    wire.console.user_reserved.l… 16\nडेस्कटॉप ऐप\n    लॉन्च कमांड                       —\n    रिमोट फ़ाइल कैश (बाइट)              1073741824\nwire.phone_access.title\n    wire.phone_access.auto_setup… tui.small.settings_view.b…\n    wire.phone_access.away_after… 120\nफ़ाइल प्रीव्यू\n    अतिरिक्त प्रीव्यू रूट                 —\nमेश नेटवर्क\n    wire.memory.sync.label        tui.small.settings_view.b…\n    wire.memory.scopes.label      global, session, team, ag…\n    wire.memory.exclude.label     —\n    सुनने का पता                      0.0.0.0\n    मेश पोर्ट                        4097\n    घोषित endpoint                  —\n    प्रति जनरेशन ऑडिट आकार             8388608\n    रखी जाने वाली ऑडिट जनरेशन            5\n    ऑडिट उम्र सीमा (दिन)               90.0\n    एक साथ हैंडशेक                    8\n    सिंक शांति अवधि (s)                 30.0\n    सिंक जाँच अंतराल (s)                15.0\n    उधार लॉगिन की आयु (s)              900.0\n    मालिक के दूर रहने पर उधार लॉगिन की मोह… 86400.0\n    GitHub रिपॉज़िटरी                  —\nमेश अपडेट\n    अपडेट के बाद मेश रोलआउट करें         auto\nसत्र मूव\n    प्रति मूव वर्किंग फ़ाइलों की सीमा (बाइट)    268435456\n    वे फ़ोल्डर जो मूव की गई रिपॉज़िटरी पा सकते… ~\nअपडेट\n    पुराने इंस्टॉल हटाएँ                  tui.small.settings_view.b…\n    रखे जाने वाले अप्रयुक्त इंस्टॉल          2\nरिमोट कंप्यूट\n    रिमोट कंप्यूट                      tui.small.settings_view.b…\nAida\n    चीफ़ ऑफ़ स्टाफ़ चालू                  tui.small.settings_view.b…\n    प्रदर्शित नाम                     Aida\n    रोज़ का चेक-इन समय                08:30\n    wire.aida_cadence.interval_h… 0\n    कैडेंस रुका हुआ                     tui.small.settings_view.b…\n    अतिरिक्त चेक-इन / दिन              2\n    न्यूनतम अंतराल (मिनट)              90\n    इंटीग्रेशन याद दिलाने का अंतराल (दिन)     14\nलाइब्रेरियन\n    लाइब्रेरियन सक्षम                  tui.small.settings_view.b…\n    प्रदर्शित नाम                     Librarian\n    दैनिक पास का समय                  03:30\n    दैनिक पास रोका गया                  tui.small.settings_view.b…\n    अतिरिक्त पास / दिन                 1\n    न्यूनतम अंतर (मिनट)               720\nAgent Hub\n    wire.settings.hub_defaults.a… tui.small.settings_view.b…\n    टीमें अपने-आप अपडेट करें             tui.small.settings_view.b…\n    जाँच अंतराल (मिनट)                 15\nएजेंट\n    बिल्ट-इन रोल अपने-आप अपडेट करें      tui.small.settings_view.b…\nप्रोजेक्ट\n    इतने घंटों बाद पुराना                 4\nजागृति ट्रिगर\n    चालू                            tui.small.settings_view.b…\n    प्रति दिन अधिकतम चेक-इन जागृतियाँ       6\n    न्यूनतम अंतराल (मिनट)              60\n    प्रोजेक्ट पुराना होने का ट्रिगर           tui.small.settings_view.b…\nप्रोऐक्टिव क्लास\n    डिफ़ॉल्ट धैर्य-इंतज़ार (ms)            300000\n    धैर्य बैकऑफ़ गुणक                  3\n    धैर्य अधिकतम प्रयास                3\n    धैर्य चक्र TTL (ms)              7200000\n    प्रति सत्र लंबित इंतज़ार              4\nबोलने की आवाज़\n    आवाज़ का लिंग                      auto\n    टोन                            warm\n    अभिव्यंजकता                       medium\n    गति                            1.0\n    भाषा                            auto\n    लहजा                           —\n    डिलीवरी निर्देश                     Speak aloud and pay atten…\n    ट्रांसक्रिप्ट सफ़ाई                   auto\n    wire.voice.provider.label     tui.settings_view.chrome.…\nwire.voice.title\n    wire.voice.max_spoken_chars.… 800\nएजेंट संदेश\n    इस डिवाइस पर चालू                 tui.small.settings_view.b…\n    CoS सत्र                       —\n    काम के अनुरोध समीक्षा के लिए रोकें        tui.small.settings_view.b…\n    स्क्रीनिंग सीमा प्रति घंटा               400\n    असंबोधित सीमा प्रति घंटा               350\n    गपशप सीमा प्रति घंटा                300\n    हर प्रेषक की सीमा प्रति घंटा           200\n    स्क्रीनिंग मॉडल                     —\nसेवानिवृत्त\n    बातचीत की लंबाई                    100\n    विवरण की लंबाई                    15\n    लर्निंग्स इतिहास अधिकतम              50\n    स्मार्ट संकेत सूचना                  tui.small.settings_view.b…\nwire.memory.title\n    wire.memory.enabled.label     tui.small.settings_view.b…\n    wire.memory.capture.label     tui.small.settings_view.b…\n    wire.memory.capture.locators… tui.small.settings_view.b…\n    wire.memory.suggest.label     tui.small.settings_view.b…\nसवाल\n    टाइमआउट हुए सवाल कब तक दिखें        7d",
+    "config_unchanged": true
+  },
+  {
+    "locale": "hi",
+    "key": "providers.openrouter.enforce_distillable_text",
+    "compact": true,
+    "size": [
+      80,
+      24
+    ],
+    "source_label": "distillable टेक्स्ट",
+    "source_label_cells": 16,
+    "help": "'true': सिर्फ़ ऐसे endpoint जिनका टेक्स्ट आउटपुट distill किया जा सके। 'default': कुछ नहीं भेजा जाता।",
+    "detail": "tui.settings_view.chrome.clause.not_saved",
+    "list_width": 74,
+    "detail_width": 74,
+    "region": "Region(x=1, y=1, width=78, height=17)",
+    "virtual": "Size(width=76, height=15)",
+    "pane_display": false,
+    "first_equal_settled": true,
+    "paint": "मॉडल                               tui.settings_view.section.takes_effect\n    डिफ़ॉल्ट प्रोवाइडर                   —\n    डिफ़ॉल्ट मॉडल                      —\n    डिफ़ॉल्ट तर्क-प्रयास                 —\nवायर प्रोटोकॉल                         tui.settings_view.section.takes_effect\n    अधिकतम OpenAI संदर्भ इस्तेमाल करें    tui.small.settings_view.bool_on\n    OpenAI API सरफ़ेस               responses\n    Anthropic 1h कैश इससे ऊपर (टोकन) 150000\n    Anthropic उप-एजेंट 1h कैश सीमा     0\n    Amazon Bedrock क्षेत्र           —\n    Amazon Bedrock प्रमाणीकरण        —\nOpenRouter रूटिंग                    tui.settings_view.section.takes_effect\n    कैश एफ़िनिटी                       tui.small.settings_view.bool_on\n    रूटिंग नीति                        —\n    होस्ट क्रम                       —\n    अनुमत होस्ट                      —\n    अनदेखे होस्ट                      —\n    फ़ॉलबैक                          —\n    पैरामीटर अनिवार्य करें                —\n    डेटा संग्रह                       —\n    शून्य डेटा रिटेंशन                   —\n    distillable टेक्स्ट              true ▾\n      ○ defaulttui.small.settings_view.default_marker  कोई प्राथमिकता नहीं भेजी जाती\n    › ● true  सिर्फ़ distillable-text endpoint\n    क्वांटाइज़ेशन                       —\n    अधिकतम कीमत                     —\n    न्यूनतम थ्रूपुट (tok/s)            0.0\n    अधिकतम लेटेंसी (s)                 0.0\n    wire.host_speed.retire_below… 0.0\nफ़ेलओवर और रीट्राई                     tui.settings_view.section.takes_effect\n    विफल कॉल फिर आज़माएँ                tui.small.settings_view.bool_on\n    अधिकतम रीट्राई                    10\n    आधार देरी (ms)                   500\n    कनेक्टिविटी रीट्राई                   15\n    कनेक्टिविटी बैकऑफ़ सीमा (ms)           60000\n    मॉडल फ़ॉलबैक                      tui.small.settings_view.bool_on\n    उपयोग-सजग फ़ॉलबैक                 tui.small.settings_view.bool_off\n    wire.settings.account_policy… reset-soonest\n    wire.settings.account_policy… tui.small.settings_view.bool_on\n    उपयोग रिज़र्व (%)                 10\n    फ़ेलओवर कैस्केड                    tui.settings_view.chrome.value.chains\n      tui.settings_view.chrome.cascade.empty\n    tui.settings_view.row.add_chain\n    पिन किए उप-एजेंट का फ़ॉलबैक           cross-family\nदिखावट                              tui.settings_view.section.takes_effect\n    थीम                            dark\n    शिमर एनिमेशन                     tui.small.settings_view.bool_on\n    टर्न के दौरान वर्णन                tui.small.settings_view.bool_on\n    मॉडल का लाइव तर्क                 tui.small.settings_view.bool_off\n    असिस्टेंट मार्जिन रेखा                 tui.small.settings_view.bool_on\n    आरामदेह एक्शन पंक्तियाँ               tui.small.settings_view.bool_off\n    Nerd Font ग्लिफ़                 tui.settings_view.chrome.value.auto\n    शीर्षक मार्कर                     tui.small.settings_view.bool_off\n    टर्मिनल शीर्षक                    tui.small.settings_view.bool_on\n    अंतर्निहित छवियाँ                    tui.small.settings_view.bool_on\n    डेस्कटॉप सूचनाएँ                    tui.small.settings_view.bool_on\n    सूचना में सत्र नाम                  tui.small.settings_view.bool_on\n    जागृति समय प्रारूप                  12h\n    भाषा                            fr\n    उप-एजेंट डॉक                     full\n    क्रॉस-सत्र ट्रैफ़िक छिपाएँ              tui.small.settings_view.bool_off\n    टर्न के उत्तर को चिह्नित करें          tui.small.settings_view.bool_off\n    स्टेटस बैंड                       tui.small.settings_view.bool_on\n    प्रॉम्प्ट शेवरॉन                    tui.small.settings_view.bool_on\n    बैंड: मॉडल                       tui.small.settings_view.bool_on\n    बैंड: कार्य निर्देशिका                 tui.small.settings_view.bool_on\n    बैंड: संदर्भ                      tui.small.settings_view.bool_on\n    बैंड: डिकोड रेट                    tui.small.settings_view.bool_on\n    बैंड: सत्र लागत                   tui.small.settings_view.bool_on\n    बैंड: बीता समय                    tui.small.settings_view.bool_on\n    बैंड: स्टेटस कमांड                  —\n    बैंड: कमांड अंतराल                  30\n    सत्र साइडबार                     tui.small.settings_view.bool_off\n    साइडबार की जगह                   left\n    साइडबार उप-एजेंट लेयर              tui.small.settings_view.bool_off\nwire.notification_sound.title     tui.settings_view.section.takes_effect\n    wire.notification_sound.enab… tui.small.settings_view.bool_on\n    wire.notification_sound.id.l… soft-pulse\n    wire.notification_sound.volu… 70\nहॉटकीज़                              tui.settings_view.section.takes_effect\n    wire.settings.keymap.new_ses… ctrl+n\n    wire.settings.keymap.resume.… ctrl+s\n    wire.settings.keymap.quick_s… cmd+alt+shift+space\n    wire.settings.keymap.push_to… Right-Option (hold)\n    wire.settings.keymap.start_r… cmd+shift+s\nस्वीकृतियाँ                             tui.settings_view.section.takes_effect\n    टूल स्वीकृति मोड                    auto\nसत्र भंडारण                          tui.settings_view.section.takes_effect\n    बातचीत अपने-आप सहेजें               tui.small.settings_view.bool_off\nआपकी बातचीत                          tui.settings_view.section.takes_effect\n    सत्र सफ़ाई                       tui.small.settings_view.bool_off\n    ↳ अधिकतम सत्र                   0\n    ↳ अधिकतम निष्क्रिय दिन              0\n    ↳ अधिकतम कुल बाइट                0\n    ↳ खाली हटाएँ                      tui.small.settings_view.bool_off\n    इतनी देर बाद अस्थायी चैट हटाएँ         30\nट्रांसक्रिप्ट कंप्रेशन                     tui.settings_view.section.takes_effect\n    पुरानी ट्रांसक्रिप्ट कंप्रेस करें           tui.small.settings_view.bool_on\n    ↳ (दिन) बाद कंप्रेस करें             30\nस्क्रैचपैड                            tui.settings_view.section.takes_effect\n    स्क्रैचपैड आकार सीमा (बाइट)           268435456\nसौंपा गया काम                          tui.settings_view.section.takes_effect\n    सौंपे काम की सफ़ाई                   tui.small.settings_view.bool_on\n    ↳ इतने घंटों बाद हटाएँ               48\nउप-एजेंट                            tui.settings_view.section.takes_effect\n    अधिकतम बैकग्राउंड जॉब               15\n    उप-एजेंट का ज्ञान पतला करें           tui.small.settings_view.bool_on\n    अधिकतम नेस्टेड टीम गहराई            3\n    उप-एजेंट का मॉडल कौन चुने            operator\n    उप-एजेंट मॉडल: lo                —\n    उप-एजेंट मॉडल: med               —\n    उप-एजेंट मॉडल: hi                —\nस्मार्ट संकेत                          tui.settings_view.section.takes_effect\n    स्मार्ट संकेत                      tui.small.settings_view.bool_on\n    ↳ वेंडर                         auto\n    ↳ मॉडल                         —\n    ↳ डेडलाइन (ms)                  1500\n    ↳ इंतज़ार बजट (ms)               50\n    ↳ अधिकतम स्टेट अक्षर              6000\n    ↳ अधिकतम उम्मीदवार                12\n    ↳ अधिकतम सिफ़ारिशें                  3\nwire.radient_saver.section.title  tui.settings_view.section.takes_effect\n    wire.radient_saver.mode.label off\nहाइलाइट्स                            tui.settings_view.section.takes_effect\n    हाइलाइट्स                        tui.small.settings_view.bool_on\n    ↳ फ़ाइलें                         tui.small.settings_view.bool_on\n    ↳ ग्राफ़िक्स                       tui.small.settings_view.bool_on\n    ↳ ग्राफ़िक्स मॉडल                   auto\n    ↳ अधिकतम टर्न                   2\n    ↳ अधिकतम आउटपुट टोकन             6000\n    ↳ समय सीमा (s)                  90\n    ↳ लागत सीमा ($)                  1.0\n    ↳ दिखाई जाने वाली फ़ाइलें               4\n    ↳ इनके नीचे कभी सूचीबद्ध न करें        —\nमॉनिटर                              tui.settings_view.section.takes_effect\n    डिफ़ॉल्ट अंतराल (s)                 60\n    प्रति सत्र अधिकतम                 8\n    रन टाइमआउट (ms)                120000\n    स्नैपशॉट सीमा (अक्षर)               32768\n    अधिकतम डेल्टा पंक्तियाँ                12\n    डेल्टा बजट (अक्षर)                1200\n    क्लासिफ़ायर स्टेट (अक्षर)             1200\n    कितनी विफलताओं पर बंद करें            5\n    प्रति घंटा डिलीवरी                   12\n    टाइमस्टैम्प उथल-पुथल अनदेखी करें       tui.small.settings_view.bool_on\nरनटाइम                             tui.settings_view.section.takes_effect\n    /resume के बाद भी काम जारी रखें       tui.small.settings_view.bool_on\n    बंद बातचीत वॉर्म रखें (s)            300\n    अधिकतम वॉर्म बातचीत                4\n    दूर रहने पर सवाल टाइमआउट (h)      24\nसंपीडन                              tui.settings_view.section.takes_effect\n    संपीडन                          tui.small.settings_view.bool_on\n    रणनीति                          auto\n    थ्रेशोल्ड (विंडो का %)                0.8\n    थ्रेशोल्ड (टोकन)                   400000\n    हाल के टोकन रखें                   20000\n    संपीडन के बाद जारी रखें               tui.small.settings_view.bool_on\n    टर्न के दौरान संपीडन                tui.small.settings_view.bool_on\n    निष्क्रिय-सत्र संपीडन                tui.small.settings_view.bool_on\n    निष्क्रिय-सत्र थ्रेशोल्ड (टोकन)         200000\n    निष्क्रिय-सत्र न्यूनतम वृद्धि (टोकन)     60000\n    फिर शुरू होने पर रीप्ले               full\n    अनुरोध आकार सीमा (बाइट)             24000000\n    अनुरोध आकार ट्रिगर (बाइट)           16000000\nफ़ोर्क                               tui.settings_view.section.takes_effect\n    फ़ोर्क कहाँ खुलेगा                    switch\n    cmux में कहाँ खुलेगा                 workspace\nवेब टूल                             tui.settings_view.section.takes_effect\n    वेब सर्च                        tui.small.settings_view.bool_on\n    वेब फ़ेच                         tui.small.settings_view.bool_on\nवेब सर्च                            tui.settings_view.section.takes_effect\n    लोड बैलेंसिंग                       round_robin\n    प्रोवाइडर                        duckduckgo, tavily\n    बाहर रखे प्रोवाइडर                 —\n    टाइमआउट (s)                    20.0\n    SearXNG endpoint              —\n    DeepSeek पेज साक्ष्य              tui.small.settings_view.bool_off\n    सर्च से पढ़ें                      tui.small.settings_view.bool_on\nवेब फ़ेच                             tui.settings_view.section.takes_effect\n    टाइमआउट (s)                    20.0\n    डाउनलोड सीमा (बाइट)                5242880\n    अधिकतम रीडायरेक्ट                  5\n    कैश TTL (s)                    900\n    निजी पते अनुमत करें                 tui.small.settings_view.bool_off\n    HTML रेंडरर                     auto\n    स्क्रैप से पहले एनरिच करें            tui.small.settings_view.bool_on\n    प्रति हॉप प्रयास                   3\n    ब्राउज़र-प्रोफ़ाइल रीट्राई              tui.small.settings_view.bool_on\nटूल                                tui.settings_view.section.takes_effect\n    Bash इंटरप्रेटर                  —\n    बिना-पुष्टि send दर्ज करें            tui.small.settings_view.bool_off\n    बिना सीमा की सर्च रोकें                tui.small.settings_view.bool_on\n    …चेतावनी देने के बजाय अस्वीकार करें       tui.small.settings_view.bool_on\n    …ripgrep के लिए वेंडर ट्री छाँटें       tui.small.settings_view.bool_on\n    कम इस्तेमाल टूल स्कीमा ज़रूरत पर लोड करें tui.small.settings_view.bool_on\nwire.guardrails.section.title     tui.settings_view.section.takes_effect\n    wire.guardrails.enabled.label tui.small.settings_view.bool_on\n    wire.guardrails.critical_ove… tui.small.settings_view.bool_off\n    wire.guardrails.judge_timeou… 20.0\n    wire.guardrails.rules_dir.la… —\nहुक                                tui.settings_view.section.takes_effect\n    नेटिव हुक                        tui.small.settings_view.bool_off\n    Claude Code हुक फ़ॉरवर्ड करें       tui.small.settings_view.bool_off\n    Codex हुक फ़ॉरवर्ड करें             tui.small.settings_view.bool_off\nकमांड मेमोरी सीमा                        tui.settings_view.section.takes_effect\n    कमांड मेमोरी सीमा                    tui.small.settings_view.bool_on\n    सीमा का स्रोत                      auto\n    manual सीमा (MB)                0\n    सलाह थ्रेशोल्ड                     0.8\nभारी जॉब कतार                         tui.settings_view.section.takes_effect\n    भारी जॉब कतार                     tui.small.settings_view.bool_on\nशेल क्वेरी बजट                        tui.settings_view.section.takes_effect\n    शेल क्वेरी बजट                    tui.small.settings_view.bool_on\n    …चेतावनी देने के बजाय रोकें             tui.small.settings_view.bool_on\n    बजट (सेकंड)                     60\nएजेंट शेल                            tui.settings_view.section.takes_effect\n    एजेंट शेल एनवायरनमेंट               inherit\n    …allowlist मोड में रखे जाते हैं       —\n    …दोनों मोड में हटाए जाते हैं             —\nस्थानीय सर्वर                         tui.settings_view.section.takes_effect\n    LM Studio endpoint            http://localhost:1234/v1\n    LM Studio मॉडल ओवरराइड          {}\n    Ollama endpoint               http://localhost:11434/v1\n    Ollama मॉडल ओवरराइड             {}\n    vLLM endpoint                 http://localhost:8000/v1\n    vLLM मॉडल ओवरराइड               {}\n    llama.cpp endpoint            http://localhost:8080/v1\n    llama.cpp मॉडल ओवरराइड          {}\n    OpenAI-compatible endpoint    —\n    OpenAI-compatible मॉडल ओवरराइड  {}\nwire.console.title                tui.settings_view.section.takes_effect\n    wire.console.max_live.label   128\n    wire.console.max_owner.label  8\n    wire.console.user_reserved.l… 16\nडेस्कटॉप ऐप                          tui.settings_view.section.takes_effect\n    लॉन्च कमांड                       —\n    रिमोट फ़ाइल कैश (बाइट)              1073741824\nwire.phone_access.title           tui.settings_view.section.takes_effect\n    wire.phone_access.auto_setup… tui.small.settings_view.bool_on\n    wire.phone_access.away_after… 120\nफ़ाइल प्रीव्यू                          tui.settings_view.section.takes_effect\n    अतिरिक्त प्रीव्यू रूट                 —\nमेश नेटवर्क                          tui.settings_view.section.takes_effect\n    wire.memory.sync.label        tui.small.settings_view.bool_on\n    wire.memory.scopes.label      global, session, team, agent\n    wire.memory.exclude.label     —\n    सुनने का पता                      0.0.0.0\n    मेश पोर्ट                        4097\n    घोषित endpoint                  —\n    प्रति जनरेशन ऑडिट आकार             8388608\n    रखी जाने वाली ऑडिट जनरेशन            5\n    ऑडिट उम्र सीमा (दिन)               90.0\n    एक साथ हैंडशेक                    8\n    सिंक शांति अवधि (s)                 30.0\n    सिंक जाँच अंतराल (s)                15.0\n    उधार लॉगिन की आयु (s)              900.0\n    मालिक के दूर रहने पर उधार लॉगिन की मोह… 86400.0\n    GitHub रिपॉज़िटरी                  —\nमेश अपडेट                           tui.settings_view.section.takes_effect\n    अपडेट के बाद मेश रोलआउट करें         auto\nसत्र मूव                            tui.settings_view.section.takes_effect\n    प्रति मूव वर्किंग फ़ाइलों की सीमा (बाइट)    268435456\n    वे फ़ोल्डर जो मूव की गई रिपॉज़िटरी पा सकते… ~\nअपडेट                              tui.settings_view.section.takes_effect\n    पुराने इंस्टॉल हटाएँ                  tui.small.settings_view.bool_on\n    रखे जाने वाले अप्रयुक्त इंस्टॉल          2\nरिमोट कंप्यूट                          tui.settings_view.section.takes_effect\n    रिमोट कंप्यूट                      tui.small.settings_view.bool_off\nAida                              tui.settings_view.section.takes_effect\n    चीफ़ ऑफ़ स्टाफ़ चालू                  tui.small.settings_view.bool_on\n    प्रदर्शित नाम                     Aida\n    रोज़ का चेक-इन समय                08:30\n    wire.aida_cadence.interval_h… 0\n    कैडेंस रुका हुआ                     tui.small.settings_view.bool_off\n    अतिरिक्त चेक-इन / दिन              2\n    न्यूनतम अंतराल (मिनट)              90\n    इंटीग्रेशन याद दिलाने का अंतराल (दिन)     14\nलाइब्रेरियन                           tui.settings_view.section.takes_effect\n    लाइब्रेरियन सक्षम                  tui.small.settings_view.bool_on\n    प्रदर्शित नाम                     Librarian\n    दैनिक पास का समय                  03:30\n    दैनिक पास रोका गया                  tui.small.settings_view.bool_off\n    अतिरिक्त पास / दिन                 1\n    न्यूनतम अंतर (मिनट)               720\nAgent Hub                         tui.settings_view.section.takes_effect\n    wire.settings.hub_defaults.a… tui.small.settings_view.bool_on\n    टीमें अपने-आप अपडेट करें             tui.small.settings_view.bool_on\n    जाँच अंतराल (मिनट)                 15\nएजेंट                               tui.settings_view.section.takes_effect\n    बिल्ट-इन रोल अपने-आप अपडेट करें      tui.small.settings_view.bool_on\nप्रोजेक्ट                             tui.settings_view.section.takes_effect\n    इतने घंटों बाद पुराना                 4\nजागृति ट्रिगर                          tui.settings_view.section.takes_effect\n    चालू                            tui.small.settings_view.bool_on\n    प्रति दिन अधिकतम चेक-इन जागृतियाँ       6\n    न्यूनतम अंतराल (मिनट)              60\n    प्रोजेक्ट पुराना होने का ट्रिगर           tui.small.settings_view.bool_on\nप्रोऐक्टिव क्लास                        tui.settings_view.section.takes_effect\n    डिफ़ॉल्ट धैर्य-इंतज़ार (ms)            300000\n    धैर्य बैकऑफ़ गुणक                  3\n    धैर्य अधिकतम प्रयास                3\n    धैर्य चक्र TTL (ms)              7200000\n    प्रति सत्र लंबित इंतज़ार              4\nबोलने की आवाज़                         tui.settings_view.section.takes_effect\n    आवाज़ का लिंग                      auto\n    टोन                            warm\n    अभिव्यंजकता                       medium\n    गति                            1.0\n    भाषा                            auto\n    लहजा                           —\n    डिलीवरी निर्देश                     Speak aloud and pay attention to potent…\n    ट्रांसक्रिप्ट सफ़ाई                   auto\n    wire.voice.provider.label     tui.settings_view.chrome.value.auto\nwire.voice.title                  tui.settings_view.section.takes_effect\n    wire.voice.max_spoken_chars.… 800\nएजेंट संदेश                           tui.settings_view.section.takes_effect\n    इस डिवाइस पर चालू                 tui.small.settings_view.bool_off\n    CoS सत्र                       —\n    काम के अनुरोध समीक्षा के लिए रोकें        tui.small.settings_view.bool_on\n    स्क्रीनिंग सीमा प्रति घंटा               400\n    असंबोधित सीमा प्रति घंटा               350\n    गपशप सीमा प्रति घंटा                300\n    हर प्रेषक की सीमा प्रति घंटा           200\n    स्क्रीनिंग मॉडल                     —\nसेवानिवृत्त                            tui.settings_view.section.takes_effect\n    बातचीत की लंबाई                    100\n    विवरण की लंबाई                    15\n    लर्निंग्स इतिहास अधिकतम              50\n    स्मार्ट संकेत सूचना                  tui.small.settings_view.bool_on\nwire.memory.title                 tui.settings_view.section.takes_effect\n    wire.memory.enabled.label     tui.small.settings_view.bool_on\n    wire.memory.capture.label     tui.small.settings_view.bool_on\n    wire.memory.capture.locators… tui.small.settings_view.bool_off\n    wire.memory.suggest.label     tui.small.settings_view.bool_on\nसवाल                               tui.settings_view.section.takes_effect\n    टाइमआउट हुए सवाल कब तक दिखें        7d",
+    "config_unchanged": true
+  },
+  {
+    "locale": "ur",
+    "key": "shell_environment.mode",
+    "compact": true,
+    "size": [
+      100,
+      30
+    ],
+    "source_label": "ایجنٹ شیل ماحول",
+    "source_label_cells": 15,
+    "help": "'inherit' ایجنٹ کمانڈ کو آپ کا ماحول دیکھنے دیتی ہے (gh، aws، npm اپنے ٹوکنز رکھتے ہیں)۔ 'allowlist' صرف PATH/HOME/SHELL/TERM/USER/LOGNAME اور ساتھ کی دو فہرستیں دیتی ہے، اس لیے سیشن لانچ کی پرووائیڈر کلید ماڈل کی لکھی کمانڈ کو نہیں ملتی۔ فی سیشن ایک بار پڑھی جاتی ہے: تبدیلی اگلے لانچ پر لاگو ہوتی ہے۔",
+    "detail": "tui.settings_view.chrome.clause.not_saved   shell_environment.mode",
+    "list_width": 60,
+    "detail_width": 94,
+    "region": "Region(x=1, y=1, width=98, height=23)",
+    "virtual": "Size(width=96, height=21)",
+    "pane_display": true,
+    "first_equal_settled": true,
+    "paint": "ماڈل\n    ڈیفالٹ پرووائیڈر              —\n    ڈیفالٹ ماڈل                   —\n    ڈیفالٹ استدلال کی شدت         —\nWire پروٹوکول\n    زیادہ سے زیادہ OpenAI سیاق و… tui.small.settings_view.b…\n    OpenAI API سرفیس              responses\n    Anthropic 1h کیشے حد (ٹوکنز)  150000\n    Anthropic ذیلی ایجنٹ 1h کیشے  0\n    Amazon Bedrock ریجن           —\n    Amazon Bedrock تصدیق          —\nOpenRouter روٹنگ\n    کیشے وابستگی                  tui.small.settings_view.b…\n    روٹنگ پالیسی                  —\n    ہوسٹ ترتیب                    —\n    اجازت یافتہ ہوسٹس             —\n    نظر انداز ہوسٹس               —\n    فال بیکس                      —\n    پیرامیٹرز لازم کریں           —\n    ڈیٹا جمع کرنا                 —\n    صفر ڈیٹا ریٹینشن              —\n    ڈسٹل ہونے والا متن            true\n    کوانٹائزیشنز                  —\n    زیادہ سے زیادہ قیمت           —\n    کم از کم تھراپٹ (tok/s)       0.0\n    زیادہ سے زیادہ لیٹنسی (s)     0.0\n    wire.host_speed.retire_below… 0.0\nفیل اوور اور دوبارہ کوشش\n    ناکام کالوں پر دوبارہ کوشش    tui.small.settings_view.b…\n    زیادہ سے زیادہ دوبارہ کوششیں  10\n    بنیادی تاخیر (ms)             500\n    کنیکٹیوٹی دوبارہ کوششیں       15\n    کنیکٹیوٹی بیک آف حد (ms)      60000\n    ماڈل فال بیک                  tui.small.settings_view.b…\n    استعمال کے حساب سے فال بیک    tui.small.settings_view.b…\n    wire.settings.account_policy… reset-soonest\n    wire.settings.account_policy… tui.small.settings_view.b…\n    استعمال کا ذخیرہ (%)          10\n    فیل اوور کیسکیڈ               tui.settings_view.chrome.…\n      tui.settings_view.chrome.cascade.empty\n    tui.settings_view.row.add_chain\n    پن شدہ ذیلی ایجنٹ فال بیک     cross-family\nظاہری انداز\n    تھیم                          dark\n    چمک کی اینیمیشن               tui.small.settings_view.b…\n    ٹرن کے دوران بیان             tui.small.settings_view.b…\n    ماڈل کا براہ راست استدلال     tui.small.settings_view.b…\n    اسسٹنٹ گٹر ریل                tui.small.settings_view.b…\n    کلک آسان قطاریں               tui.small.settings_view.b…\n    Nerd Font گلفس                tui.settings_view.chrome.…\n    سرخی کے نشانات                tui.small.settings_view.b…\n    ٹرمینل عنوان                  tui.small.settings_view.b…\n    ان لائن تصاویر                tui.small.settings_view.b…\n    ڈیسک ٹاپ اطلاعات              tui.small.settings_view.b…\n    اطلاعات میں سیشن کے نام       tui.small.settings_view.b…\n    بیداری کے وقت کا انداز        12h\n    زبان                          fr\n    ذیلی ایجنٹ ڈاک                full\n    سیشنز کے درمیان ٹریفک پوشیدہ  tui.small.settings_view.b…\n    ٹرن کے جواب کا نشان           tui.small.settings_view.b…\n    اسٹیٹس بینڈ                   tui.small.settings_view.b…\n    پرامپٹ شیوران                 tui.small.settings_view.b…\n    بینڈ: ماڈل                    tui.small.settings_view.b…\n    بینڈ: ورکنگ ڈائریکٹری         tui.small.settings_view.b…\n    بینڈ: سیاق و سباق             tui.small.settings_view.b…\n    بینڈ: ڈیکوڈ رفتار             tui.small.settings_view.b…\n    بینڈ: سیشن لاگت               tui.small.settings_view.b…\n    بینڈ: گزرا وقت                tui.small.settings_view.b…\n    بینڈ: اسٹیٹس کمانڈ            —\n    بینڈ: کمانڈ وقفہ              30\n    سیشن سائڈبار                  tui.small.settings_view.b…\n    سائڈبار کی جگہ                left\n    سائڈبار ذیلی ایجنٹ تہہ        tui.small.settings_view.b…\nwire.notification_sound.title\n    wire.notification_sound.enab… tui.small.settings_view.b…\n    wire.notification_sound.id.l… soft-pulse\n    wire.notification_sound.volu… 70\nہاٹ کیز\n    wire.settings.keymap.new_ses… ctrl+n\n    wire.settings.keymap.resume.… ctrl+s\n    wire.settings.keymap.quick_s… cmd+alt+shift+space\n    wire.settings.keymap.push_to… Right-Option (hold)\n    wire.settings.keymap.start_r… cmd+shift+s\nمنظوریاں\n    ٹول منظوری موڈ                auto\nسیشن اسٹوریج\n    گفتگو خودکار محفوظ کریں       tui.small.settings_view.b…\nآپ کی گفتگوئیں\n    سیشن صفائی                    tui.small.settings_view.b…\n    ↳ زیادہ سے زیادہ سیشنز        0\n    ↳ زیادہ سے زیادہ غیر فعال دن  0\n    ↳ زیادہ سے زیادہ کل bytes     0\n    ↳ خالی ہٹائیں                 tui.small.settings_view.b…\n    اتنی دیر بعد عارضی چیٹس حذف…  30\nٹرانسکرپٹ کمپریشن\n    پرانے ٹرانسکرپٹس کمپریس کریں  tui.small.settings_view.b…\n    ↳ اتنے دن بعد کمپریس کریں     30\nScratchpad\n    Scratchpad حد (bytes)         268435456\nسونپا گیا کام\n    سونپے گئے کام کی صفائی        tui.small.settings_view.b…\n    ↳ اتنے گھنٹے بعد ہٹائیں       48\nذیلی ایجنٹس\n    زیادہ سے زیادہ پس منظر جاب    15\n    ذیلی ایجنٹ کا علم مختصر کریں  tui.small.settings_view.b…\n    نیسٹڈ ٹیم کی زیادہ سے زیادہ…  3\n    ذیلی ایجنٹ کا ماڈل کون منتخب… operator\n    ذیلی ایجنٹ ماڈل: lo           —\n    ذیلی ایجنٹ ماڈل: med          —\n    ذیلی ایجنٹ ماڈل: hi           —\nذہین اشارے\n    ذہین اشارے                    tui.small.settings_view.b…\n    ↳ وینڈر                       auto\n    ↳ ماڈل                        —\n    ↳ مہلت (ms)                   1500\n    ↳ انتظار بجٹ (ms)             50\n    ↳ حالت کے زیادہ سے زیادہ حروف 6000\n    ↳ زیادہ سے زیادہ امیدوار      12\n    ↳ زیادہ سے زیادہ تجاویز       3\nwire.radient_saver.section.title\n    wire.radient_saver.mode.label off\nنمایاں حصے\n    نمایاں حصے                    tui.small.settings_view.b…\n    ↳ فائلیں                      tui.small.settings_view.b…\n    ↳ گرافکس                      tui.small.settings_view.b…\n    ↳ گرافکس ماڈل                 auto\n    ↳ زیادہ سے زیادہ ٹرن          2\n    ↳ زیادہ سے زیادہ آؤٹ پٹ ٹوکنز 6000\n    ↳ وقت حد (s)                  90\n    ↳ لاگت حد ($)                 1.0\n    ↳ دکھائی گئی فائلیں           4\n    ↳ ان کے نیچے کبھی فہرست نہ ک… —\nنگرانی\n    ڈیفالٹ وقفہ (s)               60\n    فی سیشن زیادہ سے زیادہ        8\n    رن کی مہلت (ms)               120000\n    سنیپ شاٹ حد (حروف)            32768\n    زیادہ سے زیادہ ڈیلٹا سطریں    12\n    ڈیلٹا بجٹ (حروف)              1200\n    کلاسیفائر حالت (حروف)         1200\n    ناکامیوں پر بند کریں          5\n    فی گھنٹہ ڈیلیوریز             12\n    ٹائم اسٹیمپ تبدیلیاں نظر اند… tui.small.settings_view.b…\nرن ٹائم\n    /resume کے بعد کام جاری رکھیں tui.small.settings_view.b…\n    بند گفتگوئیں وارم رکھیں (s)   300\n    زیادہ سے زیادہ وارم گفتگوئیں  4\n    بلا نگرانی سوال کی مہلت (h)   24\nکمپریشن\n    کمپریشن                       tui.small.settings_view.b…\n    حکمت عملی                     auto\n    حد (ونڈو کا %)                0.8\n    حد (ٹوکنز)                    400000\n    حالیہ ٹوکنز رکھیں             20000\n    کمپریشن کے بعد جاری رکھیں     tui.small.settings_view.b…\n    ٹرن کے دوران کمپریشن          tui.small.settings_view.b…\n    فارغ سیشن کمپریشن             tui.small.settings_view.b…\n    فارغ سیشن کی حد (ٹوکنز)       200000\n    فارغ سیشن کم از کم اضافہ (ٹو… 60000\n    دوبارہ شروع پر ری پلے         full\n    درخواست کی حد (bytes)         24000000\n    درخواست محرک (بائٹس)          16000000\nفورک\n    فورک کہاں کھلے                switch\n    cmux میں کہاں کھلے            workspace\nویب ٹولز\n    ویب تلاش                      tui.small.settings_view.b…\n    ویب فیچ                       tui.small.settings_view.b…\nویب تلاش\n    لوڈ بیلنسنگ                   round_robin\n    پرووائیڈرز                    duckduckgo, tavily\n    مستثنیٰ پرووائیڈرز             —\n    ٹائم آؤٹ (s)                  20.0\n    SearXNG بیس URL               —\n    DeepSeek صفحہ کا ثبوت         tui.small.settings_view.b…\n    تلاش سے پڑھیں                 tui.small.settings_view.b…\nویب فیچ\n    ٹائم آؤٹ (s)                  20.0\n    ڈاؤن لوڈ حد (بائٹس)           5242880\n    زیادہ سے زیادہ ری ڈائریکٹس    5\n    کیشے TTL (s)                  900\n    نجی ایڈریسز کی اجازت          tui.small.settings_view.b…\n    HTML رینڈرر                   auto\n    اسکریپ سے پہلے بہتر بنائیں    tui.small.settings_view.b…\n    فی ہاپ کوششیں                 3\n    براؤزر پروفائل سے دوبارہ کوشش tui.small.settings_view.b…\nٹولز\n    Bash انٹرپریٹر                —\n    غیر تصدیق شدہ send اندراجات…  tui.small.settings_view.b…\n    لامحدود تلاشیں روکیں          tui.small.settings_view.b…\n    ...انتباہ کے بجائے مسترد کریں tui.small.settings_view.b…\n    ...ripgrep کے لیے وینڈر درخت… tui.small.settings_view.b…\n    کم استعمال ٹول اسکیما ضرورت…  tui.small.settings_view.b…\nwire.guardrails.section.title\n    wire.guardrails.enabled.label tui.small.settings_view.b…\n    wire.guardrails.critical_ove… tui.small.settings_view.b…\n    wire.guardrails.judge_timeou… 20.0\n    wire.guardrails.rules_dir.la… —\nہکس\n    مقامی ہکس                     tui.small.settings_view.b…\n    Claude Code ہکس فارورڈ کریں   tui.small.settings_view.b…\n    Codex ہکس فارورڈ کریں         tui.small.settings_view.b…\nکمانڈ میموری حد\n    کمانڈ میموری حد               tui.small.settings_view.b…\n    حد کا ماخذ                    auto\n    دستی حد (MB)                  0\n    انتباہ حد                     0.8\nبھاری جاب قطار\n    بھاری جاب قطار                tui.small.settings_view.b…\nشیل کوئری کا بجٹ\n    شیل کوئری کا بجٹ              tui.small.settings_view.b…\n    ...انتباہ کے بجائے روکیں      tui.small.settings_view.b…\n    بجٹ (سیکنڈ)                   60\nایجنٹ شیل\n    ایجنٹ شیل ماحول               inherit ▾\n    › ● inherittui.small.settings_view.default_marker  آپ ک…\n      ○ allowlist  محفوظ سیٹ اور نیچے کی فہرستیں، اور کچھ ن…\n    …allowlist موڈ میں رکھے گئے   —\n    …دونوں موڈز میں نکالے گئے     —\nمقامی سرورز\n    LM Studio بیس URL             http://localhost:1234/v1\n    LM Studio ماڈل اووررائیڈس     {}\n    Ollama بیس URL                http://localhost:11434/v1\n    Ollama ماڈل اووررائیڈس        {}\n    vLLM بیس URL                  http://localhost:8000/v1\n    vLLM ماڈل اووررائیڈس          {}\n    llama.cpp بیس URL             http://localhost:8080/v1\n    llama.cpp ماڈل اووررائیڈس     {}\n    OpenAI-compatible بیس URL     —\n    OpenAI-compatible ماڈل اوورر… {}\nwire.console.title\n    wire.console.max_live.label   128\n    wire.console.max_owner.label  8\n    wire.console.user_reserved.l… 16\nڈیسک ٹاپ ایپ\n    لانچ کمانڈ                    —\n    ریموٹ فائلوں کا کیش (بائٹس)   1073741824\nwire.phone_access.title\n    wire.phone_access.auto_setup… tui.small.settings_view.b…\n    wire.phone_access.away_after… 120\nفائلوں کے پیش نظارے\n    اضافی پیش نظارہ روٹس          —\nمیش نیٹ ورک\n    wire.memory.sync.label        tui.small.settings_view.b…\n    wire.memory.scopes.label      global, session, team, ag…\n    wire.memory.exclude.label     —\n    کنکشن قبول کرنے کا ایڈریس     0.0.0.0\n    میش پورٹ                      4097\n    اعلان شدہ اینڈ پوائنٹس        —\n    فی جنیریشن آڈٹ سائز           8388608\n    محفوظ آڈٹ جنیریشنز            5\n    آڈٹ عمر حد (دن)               90.0\n    ہم وقت ہینڈ شیکس              8\n    سنک خاموش مدت (s)             30.0\n    سنک جانچ وقفہ (s)             15.0\n    عارضی لاگ اِن مدت (s)          900.0\n    مالک کی غیر موجودگی میں عارض… 86400.0\n    GitHub ریپوزیٹریز             —\nمیش اپ ڈیٹس\n    اپ ڈیٹ کے بعد میش رول کریں    auto\nسیشن منتقلی\n    فی منتقلی ورکنگ فائلوں کی حد… 268435456\n    وہ فولڈر جو منتقل شدہ ریپوزٹ… ~\nاپ ڈیٹس\n    پرانی انسٹالیشنز صاف کریں     tui.small.settings_view.b…\n    غیر مستعمل انسٹالیشنز رکھیں   2\nریموٹ کمپیوٹ\n    ریموٹ کمپیوٹ                  tui.small.settings_view.b…\nAida\n    چیف آف اسٹاف فعال             tui.small.settings_view.b…\n    ظاہری نام                     Aida\n    روزانہ رابطے کا وقت           08:30\n    wire.aida_cadence.interval_h… 0\n    کیڈنس روکی ہوئی               tui.small.settings_view.b…\n    اضافی روابط / دن              2\n    کم از کم وقفہ (منٹ)           90\n    انضمام یاد دہانی وقفہ (دن)    14\nLibrarian\n    Librarian فعال                tui.small.settings_view.b…\n    ظاہری نام                     Librarian\n    روزانہ پاس کا وقت             03:30\n    روزانہ پاس روکا ہوا           tui.small.settings_view.b…\n    اضافی پاس / دن                1\n    کم از کم وقفہ (منٹ)           720\nAgent Hub\n    wire.settings.hub_defaults.a… tui.small.settings_view.b…\n    ٹیمیں خودکار اپ ڈیٹ کریں      tui.small.settings_view.b…\n    جانچ وقفہ (منٹ)               15\nایجنٹس\n    بلٹ اِن کردار خودکار اپ ڈیٹ ک… tui.small.settings_view.b…\nپروجیکٹس\n    پرانا ہونے کی حد (گھنٹے)      4\nبیداری کے محرکات\n    فعال                          tui.small.settings_view.b…\n    روزانہ رابطے کی زیادہ سے زیا… 6\n    کم از کم وقفہ (منٹ)           60\n    پروجیکٹ کی پرانی پیش رفت کا…  tui.small.settings_view.b…\nپیش قدم قسم\n    ڈیفالٹ صبر انتظار (ms)        300000\n    صبر کے بیک آف کا عنصر         3\n    صبر کی زیادہ سے زیادہ کوششیں  3\n    صبر کے چکر کی TTL (ms)        7200000\n    فی سیشن زیر التوا انتظار      4\nتقریر کی آواز\n    آواز کی جنس                   auto\n    لہجہ                          warm\n    اظہاریت                       medium\n    رفتار                         1.0\n    زبان                          auto\n    لہجہ                          —\n    ڈیلیوری کی ہدایات             Speak aloud and pay atten…\n    ٹرانسکرپٹ کی صفائی            auto\n    wire.voice.provider.label     tui.settings_view.chrome.…\nwire.voice.title\n    wire.voice.max_spoken_chars.… 800\nایجنٹ پیغامات\n    اس مشین پر فعال               tui.small.settings_view.b…\n    CoS سیشن                      —\n    کام کی درخواستیں روکیں        tui.small.settings_view.b…\n    اسکریننگ کی فی گھنٹہ حد       400\n    غیر مخاطب کی فی گھنٹہ حد      350\n    بات چیت کی فی گھنٹہ حد        300\n    بھیجنے والے کی فی گھنٹہ حد    200\n    اسکریننگ ماڈل                 —\nفرسودہ\n    گفتگو کی لمبائی               100\n    تفصیل کی لمبائی               15\n    سیکھے ہوئے نکات کی زیادہ سے…  50\n    ذہین اشاروں کا نوٹس           tui.small.settings_view.b…\nwire.memory.title\n    wire.memory.enabled.label     tui.small.settings_view.b…\n    wire.memory.capture.label     tui.small.settings_view.b…\n    wire.memory.capture.locators… tui.small.settings_view.b…\n    wire.memory.suggest.label     tui.small.settings_view.b…\nسوالات\n    وقت ختم سوالات دکھائیں        7d",
+    "config_unchanged": true
+  },
+  {
+    "locale": "ur",
+    "key": "shell_environment.mode",
+    "compact": true,
+    "size": [
+      80,
+      24
+    ],
+    "source_label": "ایجنٹ شیل ماحول",
+    "source_label_cells": 15,
+    "help": "'inherit' ایجنٹ کمانڈ کو آپ کا ماحول دیکھنے دیتی ہے (gh، aws، npm اپنے ٹوکنز رکھتے ہیں)۔ 'allowlist' صرف PATH/HOME/SHELL/TERM/USER/LOGNAME اور ساتھ کی دو فہرستیں دیتی ہے، اس لیے سیشن لانچ کی پرووائیڈر کلید ماڈل کی لکھی کمانڈ کو نہیں ملتی۔ فی سیشن ایک بار پڑھی جاتی ہے: تبدیلی اگلے لانچ پر لاگو ہوتی ہے۔",
+    "detail": "tui.settings_view.chrome.clause.not_saved   shell_environment.mode",
+    "list_width": 74,
+    "detail_width": 74,
+    "region": "Region(x=1, y=1, width=78, height=17)",
+    "virtual": "Size(width=76, height=15)",
+    "pane_display": false,
+    "first_equal_settled": true,
+    "paint": "ماڈل                              tui.settings_view.section.takes_effect\n    ڈیفالٹ پرووائیڈر              —\n    ڈیفالٹ ماڈل                   —\n    ڈیفالٹ استدلال کی شدت         —\nWire پروٹوکول                     tui.settings_view.section.takes_effect\n    زیادہ سے زیادہ OpenAI سیاق و… tui.small.settings_view.bool_on\n    OpenAI API سرفیس              responses\n    Anthropic 1h کیشے حد (ٹوکنز)  150000\n    Anthropic ذیلی ایجنٹ 1h کیشے  0\n    Amazon Bedrock ریجن           —\n    Amazon Bedrock تصدیق          —\nOpenRouter روٹنگ                  tui.settings_view.section.takes_effect\n    کیشے وابستگی                  tui.small.settings_view.bool_on\n    روٹنگ پالیسی                  —\n    ہوسٹ ترتیب                    —\n    اجازت یافتہ ہوسٹس             —\n    نظر انداز ہوسٹس               —\n    فال بیکس                      —\n    پیرامیٹرز لازم کریں           —\n    ڈیٹا جمع کرنا                 —\n    صفر ڈیٹا ریٹینشن              —\n    ڈسٹل ہونے والا متن            true\n    کوانٹائزیشنز                  —\n    زیادہ سے زیادہ قیمت           —\n    کم از کم تھراپٹ (tok/s)       0.0\n    زیادہ سے زیادہ لیٹنسی (s)     0.0\n    wire.host_speed.retire_below… 0.0\nفیل اوور اور دوبارہ کوشش          tui.settings_view.section.takes_effect\n    ناکام کالوں پر دوبارہ کوشش    tui.small.settings_view.bool_on\n    زیادہ سے زیادہ دوبارہ کوششیں  10\n    بنیادی تاخیر (ms)             500\n    کنیکٹیوٹی دوبارہ کوششیں       15\n    کنیکٹیوٹی بیک آف حد (ms)      60000\n    ماڈل فال بیک                  tui.small.settings_view.bool_on\n    استعمال کے حساب سے فال بیک    tui.small.settings_view.bool_off\n    wire.settings.account_policy… reset-soonest\n    wire.settings.account_policy… tui.small.settings_view.bool_on\n    استعمال کا ذخیرہ (%)          10\n    فیل اوور کیسکیڈ               tui.settings_view.chrome.value.chains\n      tui.settings_view.chrome.cascade.empty\n    tui.settings_view.row.add_chain\n    پن شدہ ذیلی ایجنٹ فال بیک     cross-family\nظاہری انداز                       tui.settings_view.section.takes_effect\n    تھیم                          dark\n    چمک کی اینیمیشن               tui.small.settings_view.bool_on\n    ٹرن کے دوران بیان             tui.small.settings_view.bool_on\n    ماڈل کا براہ راست استدلال     tui.small.settings_view.bool_off\n    اسسٹنٹ گٹر ریل                tui.small.settings_view.bool_on\n    کلک آسان قطاریں               tui.small.settings_view.bool_off\n    Nerd Font گلفس                tui.settings_view.chrome.value.auto\n    سرخی کے نشانات                tui.small.settings_view.bool_off\n    ٹرمینل عنوان                  tui.small.settings_view.bool_on\n    ان لائن تصاویر                tui.small.settings_view.bool_on\n    ڈیسک ٹاپ اطلاعات              tui.small.settings_view.bool_on\n    اطلاعات میں سیشن کے نام       tui.small.settings_view.bool_on\n    بیداری کے وقت کا انداز        12h\n    زبان                          fr\n    ذیلی ایجنٹ ڈاک                full\n    سیشنز کے درمیان ٹریفک پوشیدہ  tui.small.settings_view.bool_off\n    ٹرن کے جواب کا نشان           tui.small.settings_view.bool_off\n    اسٹیٹس بینڈ                   tui.small.settings_view.bool_on\n    پرامپٹ شیوران                 tui.small.settings_view.bool_on\n    بینڈ: ماڈل                    tui.small.settings_view.bool_on\n    بینڈ: ورکنگ ڈائریکٹری         tui.small.settings_view.bool_on\n    بینڈ: سیاق و سباق             tui.small.settings_view.bool_on\n    بینڈ: ڈیکوڈ رفتار             tui.small.settings_view.bool_on\n    بینڈ: سیشن لاگت               tui.small.settings_view.bool_on\n    بینڈ: گزرا وقت                tui.small.settings_view.bool_on\n    بینڈ: اسٹیٹس کمانڈ            —\n    بینڈ: کمانڈ وقفہ              30\n    سیشن سائڈبار                  tui.small.settings_view.bool_off\n    سائڈبار کی جگہ                left\n    سائڈبار ذیلی ایجنٹ تہہ        tui.small.settings_view.bool_off\nwire.notification_sound.title     tui.settings_view.section.takes_effect\n    wire.notification_sound.enab… tui.small.settings_view.bool_on\n    wire.notification_sound.id.l… soft-pulse\n    wire.notification_sound.volu… 70\nہاٹ کیز                           tui.settings_view.section.takes_effect\n    wire.settings.keymap.new_ses… ctrl+n\n    wire.settings.keymap.resume.… ctrl+s\n    wire.settings.keymap.quick_s… cmd+alt+shift+space\n    wire.settings.keymap.push_to… Right-Option (hold)\n    wire.settings.keymap.start_r… cmd+shift+s\nمنظوریاں                          tui.settings_view.section.takes_effect\n    ٹول منظوری موڈ                auto\nسیشن اسٹوریج                      tui.settings_view.section.takes_effect\n    گفتگو خودکار محفوظ کریں       tui.small.settings_view.bool_off\nآپ کی گفتگوئیں                    tui.settings_view.section.takes_effect\n    سیشن صفائی                    tui.small.settings_view.bool_off\n    ↳ زیادہ سے زیادہ سیشنز        0\n    ↳ زیادہ سے زیادہ غیر فعال دن  0\n    ↳ زیادہ سے زیادہ کل bytes     0\n    ↳ خالی ہٹائیں                 tui.small.settings_view.bool_off\n    اتنی دیر بعد عارضی چیٹس حذف…  30\nٹرانسکرپٹ کمپریشن                 tui.settings_view.section.takes_effect\n    پرانے ٹرانسکرپٹس کمپریس کریں  tui.small.settings_view.bool_on\n    ↳ اتنے دن بعد کمپریس کریں     30\nScratchpad                        tui.settings_view.section.takes_effect\n    Scratchpad حد (bytes)         268435456\nسونپا گیا کام                     tui.settings_view.section.takes_effect\n    سونپے گئے کام کی صفائی        tui.small.settings_view.bool_on\n    ↳ اتنے گھنٹے بعد ہٹائیں       48\nذیلی ایجنٹس                       tui.settings_view.section.takes_effect\n    زیادہ سے زیادہ پس منظر جاب    15\n    ذیلی ایجنٹ کا علم مختصر کریں  tui.small.settings_view.bool_on\n    نیسٹڈ ٹیم کی زیادہ سے زیادہ…  3\n    ذیلی ایجنٹ کا ماڈل کون منتخب… operator\n    ذیلی ایجنٹ ماڈل: lo           —\n    ذیلی ایجنٹ ماڈل: med          —\n    ذیلی ایجنٹ ماڈل: hi           —\nذہین اشارے                        tui.settings_view.section.takes_effect\n    ذہین اشارے                    tui.small.settings_view.bool_on\n    ↳ وینڈر                       auto\n    ↳ ماڈل                        —\n    ↳ مہلت (ms)                   1500\n    ↳ انتظار بجٹ (ms)             50\n    ↳ حالت کے زیادہ سے زیادہ حروف 6000\n    ↳ زیادہ سے زیادہ امیدوار      12\n    ↳ زیادہ سے زیادہ تجاویز       3\nwire.radient_saver.section.title  tui.settings_view.section.takes_effect\n    wire.radient_saver.mode.label off\nنمایاں حصے                        tui.settings_view.section.takes_effect\n    نمایاں حصے                    tui.small.settings_view.bool_on\n    ↳ فائلیں                      tui.small.settings_view.bool_on\n    ↳ گرافکس                      tui.small.settings_view.bool_on\n    ↳ گرافکس ماڈل                 auto\n    ↳ زیادہ سے زیادہ ٹرن          2\n    ↳ زیادہ سے زیادہ آؤٹ پٹ ٹوکنز 6000\n    ↳ وقت حد (s)                  90\n    ↳ لاگت حد ($)                 1.0\n    ↳ دکھائی گئی فائلیں           4\n    ↳ ان کے نیچے کبھی فہرست نہ ک… —\nنگرانی                            tui.settings_view.section.takes_effect\n    ڈیفالٹ وقفہ (s)               60\n    فی سیشن زیادہ سے زیادہ        8\n    رن کی مہلت (ms)               120000\n    سنیپ شاٹ حد (حروف)            32768\n    زیادہ سے زیادہ ڈیلٹا سطریں    12\n    ڈیلٹا بجٹ (حروف)              1200\n    کلاسیفائر حالت (حروف)         1200\n    ناکامیوں پر بند کریں          5\n    فی گھنٹہ ڈیلیوریز             12\n    ٹائم اسٹیمپ تبدیلیاں نظر اند… tui.small.settings_view.bool_on\nرن ٹائم                           tui.settings_view.section.takes_effect\n    /resume کے بعد کام جاری رکھیں tui.small.settings_view.bool_on\n    بند گفتگوئیں وارم رکھیں (s)   300\n    زیادہ سے زیادہ وارم گفتگوئیں  4\n    بلا نگرانی سوال کی مہلت (h)   24\nکمپریشن                           tui.settings_view.section.takes_effect\n    کمپریشن                       tui.small.settings_view.bool_on\n    حکمت عملی                     auto\n    حد (ونڈو کا %)                0.8\n    حد (ٹوکنز)                    400000\n    حالیہ ٹوکنز رکھیں             20000\n    کمپریشن کے بعد جاری رکھیں     tui.small.settings_view.bool_on\n    ٹرن کے دوران کمپریشن          tui.small.settings_view.bool_on\n    فارغ سیشن کمپریشن             tui.small.settings_view.bool_on\n    فارغ سیشن کی حد (ٹوکنز)       200000\n    فارغ سیشن کم از کم اضافہ (ٹو… 60000\n    دوبارہ شروع پر ری پلے         full\n    درخواست کی حد (bytes)         24000000\n    درخواست محرک (بائٹس)          16000000\nفورک                              tui.settings_view.section.takes_effect\n    فورک کہاں کھلے                switch\n    cmux میں کہاں کھلے            workspace\nویب ٹولز                          tui.settings_view.section.takes_effect\n    ویب تلاش                      tui.small.settings_view.bool_on\n    ویب فیچ                       tui.small.settings_view.bool_on\nویب تلاش                          tui.settings_view.section.takes_effect\n    لوڈ بیلنسنگ                   round_robin\n    پرووائیڈرز                    duckduckgo, tavily\n    مستثنیٰ پرووائیڈرز             —\n    ٹائم آؤٹ (s)                  20.0\n    SearXNG بیس URL               —\n    DeepSeek صفحہ کا ثبوت         tui.small.settings_view.bool_off\n    تلاش سے پڑھیں                 tui.small.settings_view.bool_on\nویب فیچ                           tui.settings_view.section.takes_effect\n    ٹائم آؤٹ (s)                  20.0\n    ڈاؤن لوڈ حد (بائٹس)           5242880\n    زیادہ سے زیادہ ری ڈائریکٹس    5\n    کیشے TTL (s)                  900\n    نجی ایڈریسز کی اجازت          tui.small.settings_view.bool_off\n    HTML رینڈرر                   auto\n    اسکریپ سے پہلے بہتر بنائیں    tui.small.settings_view.bool_on\n    فی ہاپ کوششیں                 3\n    براؤزر پروفائل سے دوبارہ کوشش tui.small.settings_view.bool_on\nٹولز                              tui.settings_view.section.takes_effect\n    Bash انٹرپریٹر                —\n    غیر تصدیق شدہ send اندراجات…  tui.small.settings_view.bool_off\n    لامحدود تلاشیں روکیں          tui.small.settings_view.bool_on\n    ...انتباہ کے بجائے مسترد کریں tui.small.settings_view.bool_on\n    ...ripgrep کے لیے وینڈر درخت… tui.small.settings_view.bool_on\n    کم استعمال ٹول اسکیما ضرورت…  tui.small.settings_view.bool_on\nwire.guardrails.section.title     tui.settings_view.section.takes_effect\n    wire.guardrails.enabled.label tui.small.settings_view.bool_on\n    wire.guardrails.critical_ove… tui.small.settings_view.bool_off\n    wire.guardrails.judge_timeou… 20.0\n    wire.guardrails.rules_dir.la… —\nہکس                               tui.settings_view.section.takes_effect\n    مقامی ہکس                     tui.small.settings_view.bool_off\n    Claude Code ہکس فارورڈ کریں   tui.small.settings_view.bool_off\n    Codex ہکس فارورڈ کریں         tui.small.settings_view.bool_off\nکمانڈ میموری حد                   tui.settings_view.section.takes_effect\n    کمانڈ میموری حد               tui.small.settings_view.bool_on\n    حد کا ماخذ                    auto\n    دستی حد (MB)                  0\n    انتباہ حد                     0.8\nبھاری جاب قطار                    tui.settings_view.section.takes_effect\n    بھاری جاب قطار                tui.small.settings_view.bool_on\nشیل کوئری کا بجٹ                  tui.settings_view.section.takes_effect\n    شیل کوئری کا بجٹ              tui.small.settings_view.bool_on\n    ...انتباہ کے بجائے روکیں      tui.small.settings_view.bool_on\n    بجٹ (سیکنڈ)                   60\nایجنٹ شیل                         tui.settings_view.section.takes_effect\n    ایجنٹ شیل ماحول               inherit ▾\n    › ● inherittui.small.settings_view.default_marker  آپ کا ماحول، جیسا …\n      ○ allowlist  محفوظ سیٹ اور نیچے کی فہرستیں، اور کچھ نہیں\n    …allowlist موڈ میں رکھے گئے   —\n    …دونوں موڈز میں نکالے گئے     —\nمقامی سرورز                       tui.settings_view.section.takes_effect\n    LM Studio بیس URL             http://localhost:1234/v1\n    LM Studio ماڈل اووررائیڈس     {}\n    Ollama بیس URL                http://localhost:11434/v1\n    Ollama ماڈل اووررائیڈس        {}\n    vLLM بیس URL                  http://localhost:8000/v1\n    vLLM ماڈل اووررائیڈس          {}\n    llama.cpp بیس URL             http://localhost:8080/v1\n    llama.cpp ماڈل اووررائیڈس     {}\n    OpenAI-compatible بیس URL     —\n    OpenAI-compatible ماڈل اوورر… {}\nwire.console.title                tui.settings_view.section.takes_effect\n    wire.console.max_live.label   128\n    wire.console.max_owner.label  8\n    wire.console.user_reserved.l… 16\nڈیسک ٹاپ ایپ                      tui.settings_view.section.takes_effect\n    لانچ کمانڈ                    —\n    ریموٹ فائلوں کا کیش (بائٹس)   1073741824\nwire.phone_access.title           tui.settings_view.section.takes_effect\n    wire.phone_access.auto_setup… tui.small.settings_view.bool_on\n    wire.phone_access.away_after… 120\nفائلوں کے پیش نظارے               tui.settings_view.section.takes_effect\n    اضافی پیش نظارہ روٹس          —\nمیش نیٹ ورک                       tui.settings_view.section.takes_effect\n    wire.memory.sync.label        tui.small.settings_view.bool_on\n    wire.memory.scopes.label      global, session, team, agent\n    wire.memory.exclude.label     —\n    کنکشن قبول کرنے کا ایڈریس     0.0.0.0\n    میش پورٹ                      4097\n    اعلان شدہ اینڈ پوائنٹس        —\n    فی جنیریشن آڈٹ سائز           8388608\n    محفوظ آڈٹ جنیریشنز            5\n    آڈٹ عمر حد (دن)               90.0\n    ہم وقت ہینڈ شیکس              8\n    سنک خاموش مدت (s)             30.0\n    سنک جانچ وقفہ (s)             15.0\n    عارضی لاگ اِن مدت (s)          900.0\n    مالک کی غیر موجودگی میں عارض… 86400.0\n    GitHub ریپوزیٹریز             —\nمیش اپ ڈیٹس                       tui.settings_view.section.takes_effect\n    اپ ڈیٹ کے بعد میش رول کریں    auto\nسیشن منتقلی                       tui.settings_view.section.takes_effect\n    فی منتقلی ورکنگ فائلوں کی حد… 268435456\n    وہ فولڈر جو منتقل شدہ ریپوزٹ… ~\nاپ ڈیٹس                           tui.settings_view.section.takes_effect\n    پرانی انسٹالیشنز صاف کریں     tui.small.settings_view.bool_on\n    غیر مستعمل انسٹالیشنز رکھیں   2\nریموٹ کمپیوٹ                      tui.settings_view.section.takes_effect\n    ریموٹ کمپیوٹ                  tui.small.settings_view.bool_off\nAida                              tui.settings_view.section.takes_effect\n    چیف آف اسٹاف فعال             tui.small.settings_view.bool_on\n    ظاہری نام                     Aida\n    روزانہ رابطے کا وقت           08:30\n    wire.aida_cadence.interval_h… 0\n    کیڈنس روکی ہوئی               tui.small.settings_view.bool_off\n    اضافی روابط / دن              2\n    کم از کم وقفہ (منٹ)           90\n    انضمام یاد دہانی وقفہ (دن)    14\nLibrarian                         tui.settings_view.section.takes_effect\n    Librarian فعال                tui.small.settings_view.bool_on\n    ظاہری نام                     Librarian\n    روزانہ پاس کا وقت             03:30\n    روزانہ پاس روکا ہوا           tui.small.settings_view.bool_off\n    اضافی پاس / دن                1\n    کم از کم وقفہ (منٹ)           720\nAgent Hub                         tui.settings_view.section.takes_effect\n    wire.settings.hub_defaults.a… tui.small.settings_view.bool_on\n    ٹیمیں خودکار اپ ڈیٹ کریں      tui.small.settings_view.bool_on\n    جانچ وقفہ (منٹ)               15\nایجنٹس                            tui.settings_view.section.takes_effect\n    بلٹ اِن کردار خودکار اپ ڈیٹ ک… tui.small.settings_view.bool_on\nپروجیکٹس                          tui.settings_view.section.takes_effect\n    پرانا ہونے کی حد (گھنٹے)      4\nبیداری کے محرکات                  tui.settings_view.section.takes_effect\n    فعال                          tui.small.settings_view.bool_on\n    روزانہ رابطے کی زیادہ سے زیا… 6\n    کم از کم وقفہ (منٹ)           60\n    پروجیکٹ کی پرانی پیش رفت کا…  tui.small.settings_view.bool_on\nپیش قدم قسم                       tui.settings_view.section.takes_effect\n    ڈیفالٹ صبر انتظار (ms)        300000\n    صبر کے بیک آف کا عنصر         3\n    صبر کی زیادہ سے زیادہ کوششیں  3\n    صبر کے چکر کی TTL (ms)        7200000\n    فی سیشن زیر التوا انتظار      4\nتقریر کی آواز                     tui.settings_view.section.takes_effect\n    آواز کی جنس                   auto\n    لہجہ                          warm\n    اظہاریت                       medium\n    رفتار                         1.0\n    زبان                          auto\n    لہجہ                          —\n    ڈیلیوری کی ہدایات             Speak aloud and pay attention to potent…\n    ٹرانسکرپٹ کی صفائی            auto\n    wire.voice.provider.label     tui.settings_view.chrome.value.auto\nwire.voice.title                  tui.settings_view.section.takes_effect\n    wire.voice.max_spoken_chars.… 800\nایجنٹ پیغامات                     tui.settings_view.section.takes_effect\n    اس مشین پر فعال               tui.small.settings_view.bool_off\n    CoS سیشن                      —\n    کام کی درخواستیں روکیں        tui.small.settings_view.bool_on\n    اسکریننگ کی فی گھنٹہ حد       400\n    غیر مخاطب کی فی گھنٹہ حد      350\n    بات چیت کی فی گھنٹہ حد        300\n    بھیجنے والے کی فی گھنٹہ حد    200\n    اسکریننگ ماڈل                 —\nفرسودہ                            tui.settings_view.section.takes_effect\n    گفتگو کی لمبائی               100\n    تفصیل کی لمبائی               15\n    سیکھے ہوئے نکات کی زیادہ سے…  50\n    ذہین اشاروں کا نوٹس           tui.small.settings_view.bool_on\nwire.memory.title                 tui.settings_view.section.takes_effect\n    wire.memory.enabled.label     tui.small.settings_view.bool_on\n    wire.memory.capture.label     tui.small.settings_view.bool_on\n    wire.memory.capture.locators… tui.small.settings_view.bool_off\n    wire.memory.suggest.label     tui.small.settings_view.bool_on\nسوالات                            tui.settings_view.section.takes_effect\n    وقت ختم سوالات دکھائیں        7d",
+    "config_unchanged": true
+  }
+]

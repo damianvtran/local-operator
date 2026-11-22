@@ -1,0 +1,11 @@
+ISOLATION /Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/run-after-complete/temp/lop-probe-euuoqlyc /Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/run-after-complete/temp/lop-probe-euuoqlyc/config /Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/run-after-complete
+ROLE_IDENTITY team_bridge.session wire.settings.team_bridge_session.label
+operator authority: the anchor's private half is a 0600 FILE, so any process running as this user can sign for the operator — loosening is authorised but NOT presence-gated on this host
+LOCALE_DONE fr
+LOCALE_DONE zh-CN
+LOCALE_DONE hi
+LOCALE_DONE ur
+LOCALE_DONE es
+LOCALE_DONE ru
+LOCALE_DONE vi
+CAPTURE_DONE 27
