@@ -4528,6 +4528,9 @@ class Session:
         # The goal rides the prompt's volatile tail; the holder is shared with
         # the system-blocks provider so an edit applies from the next turn.
         self._goal_state = goal_state if goal_state is not None else GoalState()
+        self._goal_recovery_disabled = False
+        self._goal_recovery_prior_token = ""
+        self._goal_restored_token = ""
         self._variables = variables
         self._job_id = job_id
         saver_bridge = getattr(self._stream_fn, "bind_saver", None)
@@ -8916,6 +8919,12 @@ class Session:
         stored = self._goal_state.arm(text)
         self._persist_attachment()
         self._persist_goal_record()
+        if stored and not getattr(self, "_goal_recovery_disabled", False):
+            from local_operator.resume import USER_ORIGINS, session_origin
+
+            origin = session_origin(self._transcript.directory)
+            if not origin or origin in USER_ORIGINS:
+                self._ensure_wake_supervisor()
         self.refresh_frontend_state()
         return stored
 
@@ -9272,7 +9281,52 @@ class Session:
             directory = self._transcript.directory
         except Exception:  # noqa: BLE001 — a reduced host must not lose its turn
             return
-        write_goal_record(directory, self._goal_state.to_payload())
+        payload = self._goal_state.to_payload()
+        payload["recover"] = True
+        if getattr(self, "_goal_recovery_disabled", False):
+            # A one-shot run must not plant a new unattended obligation. If
+            # it was explicitly resumed against an already armed token, leave
+            # that token's original policy intact.
+            payload["recover"] = self._goal_state.token == getattr(
+                self, "_goal_recovery_prior_token", ""
+            )
+        payload["cwd"] = getattr(self, "_cwd", "")
+        write_goal_record(directory, payload)
+
+    def goal_recovery_due(self) -> bool:
+        """A retry is an owner-side trigger, never a durable prompt."""
+        from local_operator.wakes.goals import retry_at
+        from local_operator.wakes.store import is_held, read_entry
+
+        if (
+            self._disposed
+            or self._job_id is not None
+            or self._goal_state.status != "active"
+            or getattr(self, "_goal_recovery_disabled", False)
+        ):
+            return False
+        due = retry_at(self._transcript.directory)
+        return (
+            due is not None
+            and due <= int(time.time() * 1000)
+            and not is_held(read_entry(self._config_dir, self._session_id))
+        )
+
+    def disable_goal_recovery(self) -> None:
+        """Keep one-shot exec's verdict-only contract across its teardown."""
+        from local_operator.resume import read_goal_record
+
+        record = read_goal_record(self._transcript.directory) or {}
+        # Exec may be resuming an existing goal, or may just have armed a new
+        # one. Only the former is allowed to retain its cold-wake authority.
+        if (
+            self._goal_restored_token == self._goal_state.token
+            and record.get("recover") is not False
+        ):
+            self._goal_recovery_prior_token = self._goal_state.token
+        self._goal_recovery_disabled = True
+        if self._goal_state.status == "active":
+            self._persist_goal_record()
 
     def _restore_goal_record(self) -> None:
         """Rebuild the judged-goal record from ``goal.json``, if there is one.
@@ -9309,6 +9363,7 @@ class Session:
         holder.judge = record.judge
         holder.history = record.history
         holder.token = record.token
+        self._goal_restored_token = record.token
         holder.created_at = record.created_at
 
     def _clear_unresolved(self, slot: str) -> None:

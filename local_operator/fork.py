@@ -786,6 +786,8 @@ def _rewrite_fork_goal_judge(fork_dir: Path) -> None:
     payload = read_goal_record(fork_dir)
     if payload is None:
         return
+    # Cloning is not authorization to run a second unattended goal chain.
+    payload["recover"] = False
     judge = payload.get("judge")
     payload["judge"] = {
         **(judge if isinstance(judge, dict) else {}),

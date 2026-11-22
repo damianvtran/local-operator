@@ -7003,6 +7003,7 @@ class OperatorApp(App[None]):
         # The count has no event to hang off (see JOB_POLL_INTERVAL_S).
         self.set_interval(JOB_POLL_INTERVAL_S, self._poll_subagents)
         self.set_interval(1.0, self._poll_completion_attention)
+        self.set_interval(JOB_POLL_INTERVAL_S, self._poll_goal_recovery)
         self.set_interval(TEMPORARY_BAND_TICK_S, self._tick_temporary_band)
         self.set_interval(TERMINAL_LIFECYCLE_CHECK_S, self._check_terminal_frontend)
         # Prime the reader observation while mount still owns a known-live
@@ -12981,6 +12982,7 @@ class OperatorApp(App[None]):
         # The count has no event to hang off (see JOB_POLL_INTERVAL_S).
         self.set_interval(JOB_POLL_INTERVAL_S, self._poll_subagents)
         self.set_interval(1.0, self._poll_completion_attention)
+        self.set_interval(JOB_POLL_INTERVAL_S, self._poll_goal_recovery)
         self.set_interval(TEMPORARY_BAND_TICK_S, self._tick_temporary_band)
         self.set_interval(TERMINAL_LIFECYCLE_CHECK_S, self._check_terminal_frontend)
         # Prime the reader observation while mount still owns a known-live
@@ -14703,27 +14705,8 @@ class OperatorApp(App[None]):
         self._report_degraded_attach(session)
         self._submit_boot_prompt(session)
         self._submit_aida_prompt(session)
-        # TRIGGER 3, on the other owning host: a goal whose continuation was in
-        # flight when this terminal closed is re-engaged ONCE, here, where the
-        # restored record is readable and the session is current.
-        #
-        # Why this host needed its own wiring rather than inheriting the
-        # runtime's: `GoalJudge.rearm_on_resume` was called from exactly one
-        # place (`ServingSessionHandle.rearm_goal_judge`, wired once per boot in
-        # `server.py`), and the TUI builds its own driver whose ONLY caller was
-        # the turn-end hook. So a local session killed mid-continuation reopened
-        # with the goal reading `active` and the judge reading `continuing` and
-        # nothing to re-engage it until the user happened to type — the
-        # "silently sitting inert" case, in exactly the app-reopened shape the
-        # operator named (agent review round 1, MAJOR-1; reproduced: `judge_calls
-        # after boot = 0`, no prompt admitted).
-        #
-        # Once per BOOT and not per adoption: a sidebar switch re-adopts, and the
-        # record's state has moved on by then in every settled case — this is the
-        # restart prologue the runtime runs, not a rule about focus. The driver's
-        # own guard (RULINGS R3) refuses anything but `continuing`/`judging`, and
-        # its in-flight claim refuses a second run, so a re-arm that lands on a
-        # goal nothing was spending on is a no-op by construction.
+        # Only the local owner can spend; an attached TUI leaves retries to
+        # the runtime, including on boot.
         self._rearm_goal_judge_on_boot(session)
         # Bring the runtime up NOW rather than on the first keystroke. A cold
         # viewer can only paint what it reads off disk — the cwd and the
@@ -50835,7 +50818,9 @@ class OperatorApp(App[None]):
             group=self._interaction.worker_group("loop"),
         )
 
-    async def _admit_goal_continuation(self, session: Any, text: str, echo: Any) -> None:
+    async def _admit_goal_continuation(
+        self, session: Any, text: str, echo: Any, *, current: Callable[[], bool]
+    ) -> None:
         """Admit ONE judge continuation, deferred until the session can take it.
 
         See :data:`_GOAL_CONTINUATION_ADMISSION_S` for why the wait is here at
@@ -50860,9 +50845,13 @@ class OperatorApp(App[None]):
         from local_operator.session.errors import TurnInFlight
 
         fields: dict[str, Any] = dict(echo.prompt_kwargs())
+        if "owner_typed" in inspect.signature(session.prompt).parameters:
+            fields["owner_typed"] = False
 
         deadline = time.monotonic() + _GOAL_CONTINUATION_ADMISSION_S
         while True:
+            if not current():
+                raise RuntimeError("goal continuation no longer current")
             try:
                 await self._prompt_loop_turn(session, text, **fields)
                 return
@@ -51119,6 +51108,28 @@ class OperatorApp(App[None]):
             return answer or ""
 
         async def prompt(text: str) -> None:
+            from local_operator.harness.types import AgentEndEvent
+            from local_operator.session.errors import FirstTurnFailed
+
+            context = (record.goal_token, record.goal_turn_serial)
+
+            def current() -> bool:
+                return (
+                    self._interactions.get(id(session)) is source
+                    and not source.loop.running
+                    and record.goal_status == "active"
+                    and (record.goal_token, record.goal_turn_serial) == context
+                )
+
+            failure = ""
+
+            def observe(event: Any) -> None:
+                nonlocal failure
+                if isinstance(event, AgentEndEvent) and (event.error or event.aborted):
+                    failure = str(event.error or "goal continuation aborted")
+
+            subscribe = getattr(session, "subscribe", None)
+            unsubscribe = subscribe(observe) if callable(subscribe) else None
             source.turn.operation += 1
             if self._is_current(source) and self._status is not None:
                 self._status.update(streaming=True)
@@ -51132,7 +51143,9 @@ class OperatorApp(App[None]):
                 # `_prompt_loop_turn` — which prefers `prompt_and_wait`, so the
                 # driver AWAITS the terminal outcome and judges the turn it just
                 # admitted instead of correlating an event.
-                await self._admit_goal_continuation(session, text, echo)
+                await self._admit_goal_continuation(session, text, echo, current=current)
+                if failure:
+                    raise FirstTurnFailed(failure)
             except BaseException:
                 # A refused admission (a retiring session) never announces, so
                 # take the echo entry back out — otherwise it would swallow the
@@ -51143,6 +51156,9 @@ class OperatorApp(App[None]):
                 if self._is_current(source):
                     self._retire_turn_band(session)
                 raise
+            finally:
+                if callable(unsubscribe):
+                    unsubscribe()
             if self._is_current(source):
                 self._retire_turn_band(session)
 
@@ -51186,19 +51202,33 @@ class OperatorApp(App[None]):
             # The loop check is a CALLBACK over the interaction's own flag, so a
             # loop that ends re-enables this judge with no bookkeeping.
             loop_running=lambda: source.loop.running,
+            context_available=lambda: self._interactions.get(id(session)) is source,
+            recovery_idle=lambda: not getattr(session, "is_streaming", False),
         )
 
-    def _rearm_goal_judge_on_boot(self, session: SessionProtocol) -> None:
-        """Trigger 3 on this host: re-engage a judge that was in flight at close.
+    def _poll_goal_recovery(self) -> None:
+        for source in list(self._interactions.values()):
+            if source.session is not None:
+                self._rearm_goal_judge_on_boot(source.session)
 
-        Called once per boot, after adoption, for the reasons stated at the call
-        site. Deferred to a worker rather than awaited: boot must not wait on a
-        provider call, and nothing here is the session's boot outcome.
-        """
+    def _rearm_goal_judge_on_boot(self, session: SessionProtocol) -> None:
+        """Recover a due local goal when no turn or loop owns the session."""
         from local_operator.session.goal_judge import owns_the_session
 
-        source = self._interaction
-        if session is None or not owns_the_session(session) or source.goal.judge_in_flight:
+        source = self._interactions.get(id(session))
+        if source is None:
+            return
+        due = getattr(session, "goal_recovery_due", None)
+        if (
+            not owns_the_session(session)
+            or source.goal.judge_in_flight
+            or source.loop.running
+            or getattr(session, "is_streaming", False)
+            or (lock := getattr(session, "_turn_lock", None)) is not None
+            and lock.locked()
+            or not callable(due)
+            or not due()
+        ):
             return
         source.goal.judge_in_flight = True
         try:

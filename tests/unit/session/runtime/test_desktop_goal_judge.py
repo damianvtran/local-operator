@@ -200,7 +200,10 @@ async def test_an_agent_end_admits_a_continuation_through_the_prompt_queue(tmp_p
             if row.text == goal_continuation_prompt("Ship it")
         ]
         assert len(continuation) == 1
-        assert continuation[0].provider_payload == {"harness_injected": True}
+        assert continuation[0].provider_payload == {
+            "harness_injected": True,
+            "lop_remote_prompt": True,
+        }
         # MINOR-3: the handle carries no judge-only command id. The id was minted,
         # stored and cleared and read by nothing; what tells the judge's turn from
         # a user's is the STRUCTURAL stamp asserted above, and the id is now local
@@ -393,6 +396,11 @@ class GoalDouble(FakeSession):
         self.verdict = JUDGE_ACHIEVED
         self.runtime_locality = locality  # type: ignore[misc]
 
+    recovery_due = True
+
+    def goal_recovery_due(self) -> bool:
+        return self.recovery_due
+
     @property
     def goal(self) -> str:
         return self.goal_state.text
@@ -470,7 +478,7 @@ async def test_a_running_loop_owns_the_verdict():
 
 
 @pytest.mark.asyncio
-async def test_the_boot_rearm_judges_a_continuing_record_and_leaves_waiting_alone():
+async def test_the_boot_rearm_checks_the_due_time_before_judging():
     continuing = GoalDouble()
     continuing.goal_state.arm("Ship it")
     continuing.goal_state.judge.state = "continuing"
@@ -486,28 +494,32 @@ async def test_the_boot_rearm_judges_a_continuing_record_and_leaves_waiting_alon
     waiting = GoalDouble()
     waiting.goal_state.arm("Ship it")
     waiting.goal_state.judge.state = "waiting"
+    waiting.recovery_due = False
     other = _double_handle(waiting)
     try:
         other.rearm_goal_judge()
         await asyncio.sleep(0.05)
-        # RULINGS R3: a `waiting` goal is NOT re-armed by a restart — nothing was
-        # in flight, and checkpoint state is not an instruction to spend tokens.
+        # A recent waiting record does not bypass the recovery cadence.
         assert waiting.complete_aside_calls == []
         assert waiting.goal_status == "active"
+        waiting.recovery_due = True
+        other.rearm_goal_judge()
+        await wait_for(lambda: waiting.goal_status == "done")
+        assert len(waiting.complete_aside_calls) == 1
     finally:
         await other.dispose()
 
 
 @pytest.mark.asyncio
-async def test_a_stalled_record_is_not_rearmed_by_a_restart():
+async def test_a_due_stalled_record_can_settle_after_restart():
     session = GoalDouble()
     session.goal_state.arm("Ship it")
     session.goal_state.judge.state = "stalled"
     handle = _double_handle(session)
     try:
         handle.rearm_goal_judge()
-        await asyncio.sleep(0.05)
-        assert session.complete_aside_calls == []
+        await wait_for(lambda: session.goal_status == "done")
+        assert len(session.complete_aside_calls) == 1
     finally:
         await handle.dispose()
 
@@ -612,10 +624,8 @@ async def test_a_stall_reaches_attached_surfaces_once_and_names_the_bound():
         await _drain_notices(handle)
         assert [event.text for event in breaker_seen] == [STALLED_BREAKER_NOTICE]
         assert breaker.goal_judge_state.reason == "judge could not decide"
-        # ONCE PER ENTRY. The boot re-arm on a record that already reads
-        # `stalled` publishes nothing at all (RULINGS R3), so it cannot announce
-        # a second time; and a later frame that MOVES a field while the state
-        # stays put is what the edge rule exists to keep quiet.
+        # A tick inside the cooldown cannot start another episode.
+        breaker.recovery_due = False
         handle.rearm_goal_judge()
         await _drain_notices(handle)
         assert len(breaker_seen) == 1
@@ -662,5 +672,46 @@ async def test_an_achieved_goal_reaches_surfaces_with_no_stall_receipt():
         await _drain_notices(handle)
         assert session.goal_status == "done"
         assert [event for event in seen if isinstance(event, NoticeEvent)] == []
+    finally:
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_due_waiting_record_recovers_through_real_owner_and_fork(tmp_path):
+    import os
+    import time
+
+    from local_operator.resume import GOAL_SIDECAR_NAME
+    from local_operator.wakes.goals import GOAL_RETRY_S
+
+    directory = tmp_path / "syntheticgoal"
+    original = make_owner_session(directory, JudgeStream([]))
+    original.arm_goal("Ship it")
+    original.note_goal_judge(state="waiting", verdict="continue", run=6, failures=0)
+    await original.dispose()
+    clock = time.time() - GOAL_RETRY_S - 1
+    os.utime(directory / GOAL_SIDECAR_NAME, (clock, clock))
+
+    stream = JudgeStream([JUDGE_CONTINUE, JUDGE_ACHIEVED])
+    session = make_owner_session(directory, stream)
+    handle = make_handle(session)
+    try:
+        assert session.goal_judge_state.state == "waiting"
+        assert session.goal_judge_state.run == 6
+        # A parked approval owns the session even if nothing is streaming.
+        gate = asyncio.get_running_loop().create_future()
+        handle._pending_futures["synthetic-approval"] = gate
+        handle.rearm_goal_judge()
+        assert handle._goal_judge is None
+        handle._pending_futures.pop("synthetic-approval")
+        gate.cancel()
+
+        handle.rearm_goal_judge()
+        handle.rearm_goal_judge()
+        await wait_for(lambda: session.goal_status == "done")
+        assert len(stream.judge_calls) == 2
+        assert stream.turn_calls == 1
+        assert [m.text for m in _user_messages(session)] == [goal_continuation_prompt("Ship it")]
+        assert session.history_view()[0]["reason"] == "All the work is done"
     finally:
         await handle.dispose()
