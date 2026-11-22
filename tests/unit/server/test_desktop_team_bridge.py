@@ -551,6 +551,10 @@ class FakeClient:
         FakeClient.behavior["last_lifecycle"] = (conversation_id, action)
         return self._answer("conversation_lifecycle")
 
+    async def conversation_update(self, conversation_id, **fields):
+        FakeClient.behavior["last_update"] = (conversation_id, fields)
+        return self._answer("conversation_update")
+
     async def conversation_rename(
         self,
         conversation_id: str,
@@ -4989,3 +4993,104 @@ async def test_rename_forwards_an_empty_name_for_the_server_rule(api, name):
     response = await client.post(RENAME, json={"name": name})
     assert response.status_code == 200, response.text
     assert FakeClient.behavior["last_rename"][1] == name
+
+
+# ASGI route-contract fixtures: FakeClient is intentional; these do not claim
+# a live hub, MongoDB transaction or production write.
+UPDATE = "/v1/desktop/team-bridge/conversations/bcv_abc12345"
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"topic": ""},
+        {"name": "new"},
+        {"topic": "  line 1\nline 2  "},
+        {"name": None},
+        {"topic": None},
+        {},
+    ],
+)
+async def test_metadata_update_preserves_field_presence(api, fields):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_update"] = {"name": "new"}
+    body = {"expected_account_id": "acc_1", "tenant_id": "tnt_1", **fields}
+    response = await client.patch(UPDATE, json=body)
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_update"] == ("bcv_abc12345", body)
+    assert "topic" not in response.json()["result"]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "description",
+        "members",
+        "visibility",
+        "kind",
+        "agent_capable",
+        "builtin",
+        "status",
+        "actor_endpoint_id",
+        "endpoint_id",
+        "notify",
+    ],
+)
+async def test_metadata_update_rejects_unknown_metadata_before_io(api, extra):
+    client, _root, _d = api
+    calls = FakeClient.calls
+    response = await client.patch(UPDATE, json={"topic": "x", extra: "no"})
+    assert response.status_code == 422, response.text
+    assert FakeClient.calls == calls
+
+
+@pytest.mark.parametrize(
+    "suffix,body",
+    [
+        ("?tenant_id=tnt_1", {"topic": "x"}),
+        ("?expected_account_id=acc_1", {"topic": "x"}),
+        ("", {"expected_account_id": "acc_1", "topic": "x"}),
+        ("", {"expected_account_id": "acc_1", "tenant_id": "  ", "topic": "x"}),
+        ("", {"topic": 123}),
+    ],
+)
+async def test_metadata_update_rejects_malformed_receipts_before_io(api, suffix, body):
+    client, _root, _d = api
+    calls = FakeClient.calls
+    response = await client.patch(UPDATE + suffix, json=body)
+    assert response.status_code == 422, response.text
+    assert FakeClient.calls == calls
+
+
+async def test_metadata_update_refuses_account_scope(api):
+    client, _root, _d = api
+    calls = FakeClient.calls
+    response = await client.patch(UPDATE + "?scope=account", json={"topic": "x"})
+    assert response.status_code == 422, response.text
+    assert FakeClient.calls == calls
+
+
+@pytest.mark.parametrize(
+    "status,code,details",
+    [
+        (400, "invalid_request", {"field": "topic", "rule": "not_allowed"}),
+        (400, "invalid_request", {"rule": "no_fields"}),
+        (401, "unauthorized", None),
+        (403, "conversation_not_permitted", None),
+        (404, "conversation_not_found", None),
+        (409, "conversation_name_taken", {"name": "x"}),
+        (429, "rate_limited", None),
+        (503, "messaging_unavailable", None),
+    ],
+)
+async def test_metadata_update_refusals_pass_through(api, status, code, details):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_update"] = BridgeRefusal(
+        code, "refused", http_status=status, details=details
+    )
+    response = await client.patch(UPDATE, json={"topic": ""})
+    assert response.status_code == status, response.text
+    expected = {"code": code, "message": "refused"}
+    if details:
+        expected["details"] = details
+    assert response.json()["detail"] == expected
