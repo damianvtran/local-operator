@@ -367,6 +367,14 @@ def render_block(skills: list[Skill], *, conditional_skills: bool = False) -> st
         )
         lines.append("</skills>")
         sections.append("\n".join(lines))
+    # Pay for the read-result caveats only when a resource is selected, once
+    # even when both catalogues are present.
+    if sections:
+        sections.append(
+            "Use direct `read` to bring instructions into context. A listing, partial "
+            "index, spill handle or nested call's status alone does not supply omitted "
+            "content; use the indicated range or spill handle for needed sections."
+        )
     return "\n\n".join(sections)
 
 

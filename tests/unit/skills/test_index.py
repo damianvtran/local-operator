@@ -305,7 +305,10 @@ class TestRenderBlock:
             "<skills>\n"
             "- alpha: first skill\n"
             "- beta: second skill\n"
-            "</skills>"
+            "</skills>\n\n"
+            "Use direct `read` to bring instructions into context. A listing, partial "
+            "index, spill handle or nested call's status alone does not supply omitted "
+            "content; use the indicated range or spill handle for needed sections."
         )
 
     def test_selected_url_encodes_frontmatter_name_for_resolver(self) -> None:
