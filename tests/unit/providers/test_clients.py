@@ -1073,6 +1073,70 @@ async def test_mock_client_ask_marker_settles_after_its_tool_result() -> None:
     ]
 
 
+async def test_mock_client_markers_ignore_an_ephemeral_request_tail() -> None:
+    """A request-local ``_ephemeral`` tail is not the user's instruction.
+
+    The voice session appends its spoken-summary note as the LAST request
+    message of a dictated turn (flagged ``_ephemeral``, never stored). Reading
+    that tail as the newest message answered the dictated turn at once with no
+    tool call, so a steer landed on a finished turn (QA round 2, Q1).
+    """
+    client = MockClient()
+    note = Message.user("(the spoken-summary note)")
+    note._ephemeral = True
+    dictated = Message.user("please [bash:1] list files")
+
+    # The dictated text still selects the marker with the note behind it.
+    events = await _collect(
+        client.stream(ChatRequest(model=_spec("test", "mock"), messages=[dictated, note]), None)
+    )
+    tool_events = [e for e in events if isinstance(e, StreamToolCallDelta)]
+    assert tool_events[0].name == "bash"
+    assert json.loads("".join(e.argument_delta for e in tool_events if e.argument_delta)) == {
+        "command": "sleep 1"
+    }
+    assert events[-1].stop_reason == "toolUse"
+
+    # No ephemeral tail: the same message behaves identically.
+    plain = await _collect(
+        client.stream(
+            ChatRequest(
+                model=_spec("test", "mock"), messages=[Message.user("please [bash:1] list files")]
+            ),
+            None,
+        )
+    )
+    plain_events = [e for e in plain if isinstance(e, StreamToolCallDelta)]
+    assert plain_events[0].name == "bash"
+    assert json.loads("".join(e.argument_delta for e in plain_events if e.argument_delta)) == {
+        "command": "sleep 1"
+    }
+    assert plain[-1].stop_reason == "toolUse"
+
+    # And the note is not "the newest message": once the tool result is the
+    # newest real message the turn completes, exactly as without the note.
+    settled = await _collect(
+        client.stream(
+            ChatRequest(
+                model=_spec("test", "mock"),
+                messages=[
+                    dictated,
+                    Message(
+                        role="tool",
+                        tool_call_id="call_mock_bash",
+                        tool_name="bash",
+                        content=[TextContent(text="done")],
+                    ),
+                    note,
+                ],
+            ),
+            None,
+        )
+    )
+    assert not [e for e in settled if isinstance(e, StreamToolCallDelta)]
+    assert settled[-1].stop_reason == "stop"
+
+
 async def test_mock_client_hang_branch_never_ends_the_stream() -> None:
     """``[hang]``: the one request that never returns — the drain's reap shape.
 

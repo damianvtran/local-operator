@@ -127,14 +127,6 @@ async def _parked_bash_card(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     mock = MockClient()
 
     async def stream(request: ChatRequest, signal: object = None):
-        # The dictated turn's request ends with the spoken-summary note, an
-        # ephemeral user message. MockClient keys its markers off the NEWEST user
-        # message, so it must not take the note for the user's instruction.
-        request = request.model_copy(
-            update={
-                "messages": [m for m in request.messages if not getattr(m, "_ephemeral", False)]
-            }
-        )
         async for event in mock.stream(request, None):
             yield event
 

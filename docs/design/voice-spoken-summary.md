@@ -55,7 +55,9 @@ never stored. The exact text
   the Anthropic and the OpenAI-compatible encoders), so the marker stays on the
   persistent message before it and the prefix is byte-identical with and without
   the note. A system-block note would sit ahead of the messages and invalidate the
-  whole conversation cache. (Offline encoding is pinned in
+  whole conversation cache. The Google encoder places no cache markers at all
+  (implicit caching), so its test pins message ORDER only — the note after the
+  function response — not a breakpoint. (Offline encoding is pinned in
   `tests/unit/session/test_voice_summary_note.py`; a live cache-hit measurement
   was not done and stays a post-ship observation.) It is NOT appended in
   `_append_busy_resume_note`: that helper serves the wake/monitor/catch-up
@@ -67,7 +69,12 @@ never stored. The exact text
   newest user message, so later provider calls of that turn go without the note, and
   the reply to the steer falls back to the whole reply unless the agent writes a
   `Spoken:` paragraph unprompted. The id lives in memory only: a turn resumed
-  after a restart has none, so it gets no note and falls back the same way.
+  after a restart has none, so it gets no note and falls back the same way. The
+  loop's own recovery prompts (a degenerate stream, a nameless tool call, a
+  length stop, the continue-truncated-answer prompt, a wordless stop, the
+  no-progress nudge, the post-compaction continuation) are user-role messages
+  too, so one of them displaces the note for the rest of that turn exactly as a
+  steer does — accepted degradation (m-1), the fallback is safe.
 - **Who gets it (narrowed).** ONLY a prompt carrying `input_mode="dictated"` (set
   by the voice utterance route, `server/routes/desktop_voice.py:940`) in the
   session that holds the slot. A typed prompt, a wake, a monitor delivery, a
@@ -233,6 +240,19 @@ Risks accepted, in the open:
 - **A steer drops the note** (see "Disarming"): the rest of that turn is
   answered without the request, so it falls back to the whole reply unless the
   agent writes the paragraph anyway.
+- **Loop recovery drops it the same way (m-1, accepted).** The recovery prompts
+  listed under "Disarming" are user-role messages, so after one fits the
+  newest user message the remaining provider calls of that turn carry no note:
+  speech falls back to the whole reply (first 800 chars). Safe, not silent —
+  the answer is still spoken, only the summarised form is lost. Re-arming the
+  note after a prompt the model did not write is out of scope.
+- **The fallback can say the word "Spoken:" (n-1, accepted).** Recognition is
+  paragraph-level and Markdown-shaped, so a near-miss is not a marker: only a
+  single newline before the label, a tab or a `>` quote in front of it, a list
+  item (`- **Spoken:**`), or two markers where the LAST reduces to empty. Those
+  speak the whole reply, label included, so the word can be heard. Harmless for
+  the ear; guessing at near-markers would speak text the agent did not
+  designate.
 - **A turn resumed mid-turn after a restart has no note** (the id is in memory):
   fallback to the whole reply.
 - **Fallback.** Whenever no `Spoken:` paragraph appears (the model ignored the
