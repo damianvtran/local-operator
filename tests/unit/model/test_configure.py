@@ -40,6 +40,7 @@ from local_operator.model.registry import ModelInfo
 from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.failover import FallbackTarget, RetrySettings
 from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+from local_operator.session.inline_ui import INSTRUCTIONS
 
 
 @pytest.fixture
@@ -4977,9 +4978,19 @@ async def test_session_stream_feeds_last_context_into_anthropic_ttl(tmp_path) ->
         m == {"type": "ephemeral"} for m in _cache_markers(bodies[0])
     )
     # Turn 1 / call 2 (after the tool ran): call 1 reported 200k → 1h NOW.
-    assert bodies[1]["messages"][-1]["content"][0]["type"] == "tool_result"
+    # Discovery is appended after cache placement; it must not take the tool
+    # result's breakpoint, which ends the reusable conversation prefix.
+    messages = bodies[1]["messages"]
+    discovery_tail = {"role": "user", "content": [{"type": "text", "text": INSTRUCTIONS}]}
+    assert messages[-1] == discovery_tail
+    assert messages.count(discovery_tail) == 1
+    assert messages[-2]["role"] == "user"
+    tool_result = messages[-2]["content"][0]
+    assert tool_result["type"] == "tool_result"
+    one_hour_marker = {"type": "ephemeral", "ttl": "1h"}
+    assert tool_result.get("cache_control") == one_hour_marker
     assert _cache_markers(bodies[1]) and all(
-        m == {"type": "ephemeral", "ttl": "1h"} for m in _cache_markers(bodies[1])
+        m == one_hour_marker for m in _cache_markers(bodies[1])
     )
     # Isolated errand: the session's hint says 200k, but its request carries
     # none and its small body stays 5m by the estimate.
