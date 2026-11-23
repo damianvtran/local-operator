@@ -49,7 +49,7 @@ export type MessageParams = {
   "relay.ask.dismiss.receipt": undefined;
   "relay.ask.dismiss.receipt_answered_in_chat": undefined;
   "relay.ask.dismiss.receipt_moot": undefined;
-  "relay.ask.dismiss.title": undefined;
+  "relay.ask.dismiss.title": { "count": number };
   "relay.asks.card.choose_any": undefined;
   "relay.asks.card.cold_wait": undefined;
   "relay.asks.card.command.copied": undefined;
@@ -61,6 +61,7 @@ export type MessageParams = {
   "relay.asks.card.gone": undefined;
   "relay.asks.card.nothing_left": undefined;
   "relay.asks.card.other": undefined;
+  "relay.asks.card.other_kept": undefined;
   "relay.asks.card.placeholder_answer": undefined;
   "relay.asks.card.placeholder_secret": undefined;
   "relay.asks.card.progress_pick_or_type": undefined;
@@ -116,12 +117,12 @@ export type MessageParams = {
   "relay.asks.pending.remember": undefined;
   "relay.asks.pending.send": undefined;
   "relay.asks.row.told": undefined;
-  "relay.asks.sheet.earlier": undefined;
   "relay.asks.sheet.empty": undefined;
   "relay.asks.sheet.ended_wait": undefined;
   "relay.asks.sheet.loading": undefined;
   "relay.asks.sheet.not_running_wait": undefined;
   "relay.asks.sheet.retry": undefined;
+  "relay.asks.sheet.settled": undefined;
   "relay.asks.sheet.title_lapsed": { "count": number };
   "relay.asks.sheet.title_plain": undefined;
   "relay.asks.sheet.title_waiting": { "count": number };

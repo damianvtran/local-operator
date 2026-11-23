@@ -53,6 +53,10 @@ def card_other() -> Msg:
     return Msg("relay.asks.card.other", {})
 
 
+def card_other_kept() -> Msg:
+    return Msg("relay.asks.card.other_kept", {})
+
+
 def card_placeholder_answer() -> Msg:
     return Msg("relay.asks.card.placeholder_answer", {})
 
@@ -273,10 +277,6 @@ def row_told() -> Msg:
     return Msg("relay.asks.row.told", {})
 
 
-def sheet_earlier() -> Msg:
-    return Msg("relay.asks.sheet.earlier", {})
-
-
 def sheet_empty() -> Msg:
     return Msg("relay.asks.sheet.empty", {})
 
@@ -295,6 +295,10 @@ def sheet_not_running_wait() -> Msg:
 
 def sheet_retry() -> Msg:
     return Msg("relay.asks.sheet.retry", {})
+
+
+def sheet_settled() -> Msg:
+    return Msg("relay.asks.sheet.settled", {})
 
 
 def sheet_title_lapsed(*, count: int | float) -> Msg:

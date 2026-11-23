@@ -255,19 +255,19 @@ export function AsksSheet({
 	const listed = useMemo(() => orderedForDisplay(rows), [rows]);
 	/* TWO BANDS, in display order (ask-panel parity, the native panel's `askBands`):
 	   the asks that still show a card (waiting, lapsed, and an `expired` one drawn
-	   as a receipt), and the settled ones under "Earlier". Splitting AFTER
+	   as a receipt), and the settled ones under "Settled". Splitting AFTER
 	   `orderedForDisplay` keeps the head ask first in its band. Settled asks are a
 	   band of their own because one that has nothing left to do belongs below
 	   everything that still does — it used to sit between the open card's options
 	   and its buttons. */
 	const bands = useMemo(() => {
 		const current: PendingAsk[] = [];
-		const earlier: PendingAsk[] = [];
+		const done: PendingAsk[] = [];
 		for (const row of listed) {
 			const status = String(row.status || "open");
-			(isOutstanding(status) || status === "expired" ? current : earlier).push(row);
+			(isOutstanding(status) || status === "expired" ? current : done).push(row);
 		}
-		return { current, earlier };
+		return { current, done };
 	}, [listed]);
 	/* ONE ASK IS OPEN AT A TIME, and it is the one the pinned bar answers. The
 	   reader's own pick (`choice`) wins; until they make one, the first ask that
@@ -412,7 +412,7 @@ export function AsksSheet({
 				? messageRuntime.t("relay.asks.sheet.title_lapsed", { count: lapsed })
 				: messageRuntime.t("relay.asks.sheet.title_plain");
 
-	/* The open ask's row, if it is in the current band (an expanded "Earlier" row
+	/* The open ask's row, if it is in the current band (an expanded "Settled" row
 	   is drawn in place, not up here). */
 	const openRow = bands.current.find((row) => row.ask_id === openId);
 	const settled = (row: PendingAsk, kind: "respond" | "decline" | "dismiss") => {
@@ -439,31 +439,42 @@ export function AsksSheet({
 		const asked = questionStart(row);
 		return (
 			<div key={`${sessionOf(row)}:${row.ask_id}`} className="flex flex-col gap-1">
-				{crossConversation ? (
-					<p dir={contentDir(nameOf(row))} className="truncate text-meta font-medium text-ink-dim">
-						{nameOf(row)}
-					</p>
-				) : null}
 				<button
 					type="button"
 					aria-expanded={expanded}
 					data-testid="ask-row"
 					data-ask-id={row.ask_id}
 					onClick={() => setChoice(expanded ? undefined : row.ask_id)}
-					className="flex min-h-11 w-full items-center gap-2 rounded-sm text-start active:bg-surface"
+					className="flex min-h-11 w-full items-start gap-2 rounded-sm py-1 text-start active:bg-surface"
 				>
-					{/* NOT `flex-wrap`: the sentence is the flexible child and the caret
-					    never wraps away from it, so the line stays one line. */}
-					<span className="min-w-0 flex-1 truncate text-meta">
-						<span className={askToneClass(state.tone)}>{state.text}</span>
-						{row.urgent && !expanded ? (
-							<span className="text-ink-dim"> {messageRuntime.t("relay.asks.card.urgent")}</span>
+					{/* THE QUESTION LEADS, the state sentence follows on its own line and is
+					    never cut: a waiting row is read for WHAT it asks first, and the state
+					    sentence is the part that must stay whole. The conversation's name
+					    (data) is the row's own first line when the sheet holds several
+					    conversations. The caret stays on the first line, beside the text it
+					    opens, and mirrors in a right-to-left layout (`lo-directional`). */}
+					<span className="flex min-w-0 flex-1 flex-col">
+						{crossConversation ? (
+							<span dir={contentDir(nameOf(row))} className="truncate text-start text-meta text-ink-muted">
+								{nameOf(row)}
+							</span>
 						) : null}
 						{asked === "" ? null : (
-							<span dir={contentDir(asked)} className="text-ink-dim"> · {asked}</span>
+							<span
+								dir={contentDir(asked)}
+								className="line-clamp-2 text-start text-body-sm font-medium break-words text-ink"
+							>
+								{asked}
+							</span>
 						)}
+						<span className="text-start text-meta">
+							<span className={askToneClass(state.tone)}>{state.text}</span>
+							{row.urgent && !expanded ? (
+								<span className="font-medium text-warning"> {messageRuntime.t("relay.asks.card.urgent")}</span>
+							) : null}
+						</span>
 					</span>
-					<Chevron open={expanded} />
+					<Chevron open={expanded} className="mt-0.5" />
 				</button>
 				{expanded ? (
 					<AskCard
@@ -498,14 +509,14 @@ export function AsksSheet({
 		>
 			<div className="flex flex-col gap-3 p-3">
 				{error ? (
-					<div className="flex flex-wrap items-center gap-2">
-						<p className="text-body-sm text-danger">{error}</p>
+					<div className="flex flex-col items-start gap-2">
+						<p className="text-start text-body-sm text-danger">{error}</p>
 						{/* A RETRY, because a hung or failed read must not leave the sheet
 						   with closing as its only move (U6). */}
 						<button
 							type="button"
 							onClick={() => void load()}
-							className="flex min-h-11 items-center rounded-sm px-3 text-body-sm text-ink-muted active:bg-elevated"
+							className="flex min-h-11 items-center rounded-sm border border-control px-3 text-body-sm text-ink active:bg-surface"
 						>
 							{messageRuntime.t("relay.asks.sheet.retry")}
 						</button>
@@ -560,12 +571,12 @@ export function AsksSheet({
 					.map((row) => collapsedRow(row, false))}
 				{/* SETTLED ASKS go under their own heading, below everything that still
 				    waits, and expand IN PLACE into their receipt. */}
-				{bands.earlier.length > 0 ? (
+				{bands.done.length > 0 ? (
 					<>
 						<h3 className="pt-1 text-meta font-medium text-ink-muted">
-							{messageRuntime.t("relay.asks.sheet.earlier")}
+							{messageRuntime.t("relay.asks.sheet.settled")}
 						</h3>
-						{bands.earlier.map((row) => collapsedRow(row, openId === row.ask_id))}
+						{bands.done.map((row) => collapsedRow(row, openId === row.ask_id))}
 					</>
 				) : null}
 			</div>

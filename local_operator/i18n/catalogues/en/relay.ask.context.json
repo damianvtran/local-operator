@@ -7,7 +7,7 @@
   },
   "relay.ask.dismiss.answered_in_chat": {
     "role": "phone ask card, dismiss reason button",
-    "tone": "plain, decisive",
+    "tone": "Plain, decisive. Sentence case (capital first letter). No final full stop.",
     "maxCells": 34,
     "note": "One of the two reason buttons on an OPEN ask's card on the phone, revealed by 'close…'. It means the operator already answered the question by typing in the conversation, so the agent should read their messages and treat the ask as settled (sent as reason=answered_in_chat). A reason, not a command; no exclamation mark. The buttons sit side by side, so keep it short. WIDTH, corrected after the first independent audit: the two reason controls and their cancel are a FLEX-WRAP row (the phone wraps them to separate lines rather than truncating), and the terminal draws the label and its note on ONE row clipped against the list's width — so 34 cells for a label and 44 for a note is the honest budget, and 'conversation'/'conversación'/'cuộc trò chuyện' fit it where a shorter synonym would have had to be invented."
   },
@@ -19,7 +19,7 @@
   },
   "relay.ask.dismiss.moot": {
     "role": "phone ask card, dismiss reason button",
-    "tone": "plain, decisive",
+    "tone": "Plain, decisive. Sentence case (capital first letter). No final full stop.",
     "maxCells": 34,
     "note": "One of the two reason buttons on an OPEN ask's card on the phone, revealed by 'close…'. It means the question no longer matters to the operator (the work moved on, someone else decided), so the agent should drop it (sent as reason=moot). A reason, not a command, and it must not read as an approval or a refusal of the question. The buttons sit side by side, so keep it short. WIDTH, corrected after the first independent audit: the two reason controls and their cancel are a FLEX-WRAP row (the phone wraps them to separate lines rather than truncating), and the terminal draws the label and its note on ONE row clipped against the list's width — so 34 cells for a label and 44 for a note is the honest budget, and 'conversation'/'conversación'/'cuộc trò chuyện' fit it where a shorter synonym would have had to be invented."
   },
@@ -33,17 +33,17 @@
     "role": "phone ask card, dismiss reasons heading",
     "tone": "plain, instructional",
     "maxCells": 24,
-    "note": "The heading above the two reason buttons, shown after the operator taps 'Dismiss…'. It names the act so the two reasons below read as one choice rather than two more actions. Same words as the terminal's chooser heading where the language allows; no punctuation at the end, no exclamation mark."
+    "note": "The heading above the two reason buttons, shown after the operator taps 'Dismiss…'. {count} is the number of questions in the ask (>= 1) and feeds the plural: 'this question' for one, 'these questions' for several. Same wording as the native app's mobile.asks.dismiss_title; no punctuation at the end."
   },
   "relay.ask.dismiss.moot_note": {
     "role": "phone ask card, dismiss reason note",
-    "tone": "plain, explanatory",
+    "tone": "Plain, explanatory. Sentence case (capital first letter). No final full stop.",
     "maxCells": 44,
     "note": "The one-line explanation drawn UNDER the 'No longer needed' reason button on the phone, in a smaller dim register. It says what happens to the waiting: the agent stops expecting an answer. No trailing punctuation, no em dash (the layout puts it on its own line), and it must not read as an approval or a refusal of the question itself."
   },
   "relay.ask.dismiss.answered_in_chat_note": {
     "role": "phone ask card, dismiss reason note",
-    "tone": "plain, explanatory",
+    "tone": "Plain, explanatory. Sentence case (capital first letter). No final full stop.",
     "maxCells": 44,
     "note": "The one-line explanation drawn UNDER the 'Answered in chat' reason button on the phone, in a smaller dim register. It names what the operator already did, so they can recognise their own case and cannot mistake the button for 'send my answer'. No trailing punctuation, no em dash (the layout puts it on its own line)."
   },

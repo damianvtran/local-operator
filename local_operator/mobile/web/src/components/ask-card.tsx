@@ -38,6 +38,7 @@
 import { contentDir } from "../lib/content-direction";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useKeyboardUp } from "../lib/use-keyboard-up";
 import type { ReactNode } from "react";
 import { HttpError, sendCommand } from "../api";
 import { cn } from "../lib/cn";
@@ -252,7 +253,7 @@ function QuestionText({ text }: { text: string }) {
 			data-testid="ask-question-text"
 			tabIndex={0}
 			style={columnCap(ASK_QUESTION_FRACTION)}
-			className="lo-scroll block min-w-0 overflow-y-auto overflow-x-hidden break-words whitespace-pre-line"
+			className="lo-scroll block min-w-0 text-start overflow-y-auto overflow-x-hidden break-words whitespace-pre-line"
 		>
 			{text}
 		</span>
@@ -381,24 +382,35 @@ function CommandBlock({ command }: { command: string }) {
  * The look of one option row (and the `Other` row), the web twin of the native
  * app's `choiceRowClasses` so the two panels draw the same rows.
  *
- * - REST: a tinted fill (the accent wash) and a 2 px accent start edge.
- * - SELECTED: the same tint, a 4 px edge and a trailing tick (`Tick`) — colour
- *   alone never says "chosen". The edge takes the 2 px it gains out of the start
- *   padding, so the label does not shift when a row is picked. (The native app
- *   also deepens the fill on selection; the relay's palette has no stronger tint
- *   than the wash, and a runtime blend would sit outside what
- *   `scripts/contrast-contract.mjs` can verify, so shape carries the state here.)
+ * - REST: a tinted fill (the accent wash), a 2 px accent start edge, and a
+ *   trailing EMPTY ring (one choice) or square (several) in `inkDim`.
+ * - SELECTED: the same tint, a 4 px edge, a semibold label, and the indicator
+ *   FILLS to an accent disc/square holding a check (`Indicator`) — selection is
+ *   shape and weight as well as colour, so it survives greyscale. The edge takes
+ *   the 2 px it gains out of the start padding, so the label does not shift.
+ *   (The native app also deepens the fill on selection; the relay's palette has
+ *   no stronger tint than the wash, and a runtime blend would sit outside what
+ *   `scripts/contrast-contract.mjs` can verify.)
  * - PRESSED: a brief dim under the finger.
- * - DISABLED (and not selected): sunken ground, hairline edge, disabled ink. A
- *   selected row keeps its look while an answer is in flight, so the thing being
- *   sent stays readable.
+ * - DISABLED (and not selected): sunken ground, hairline edge and ring, disabled
+ *   ink. A selected row keeps its look while an answer is in flight, so the
+ *   thing being sent stays readable.
  *
- * Every ink sits on the accent wash or the sunken ground, pairs the contrast
- * contract pins in every theme: ink, inkMuted, inkDim and accent on accentWash at
- * 4.5:1 (ink on sunken at 7:1). The disabled ink is exempt, as an inactive
- * control's is.
+ * Contrast: ink, inkMuted, inkDim and accent on accentWash and onAccent on accent
+ * are pinned at 4.5:1 in every theme by the contrast contract. The ring is
+ * `inkDim` rather than the native app's control edge because `control` on
+ * accentWash measures 2.96 (ayuLight) and 2.89 (iceberg), under the 3:1 non-text
+ * floor, where `inkDim` is at least 4.55.
  */
-function optionRowLook({ selected, disabled }: { selected: boolean; disabled: boolean }) {
+function optionRowLook({
+	selected,
+	disabled,
+	multi,
+}: {
+	selected: boolean;
+	disabled: boolean;
+	multi: boolean;
+}) {
 	const dimmed = disabled && !selected;
 	return {
 		row: cn(
@@ -407,20 +419,29 @@ function optionRowLook({ selected, disabled }: { selected: boolean; disabled: bo
 			dimmed ? "border-s-hairline bg-sunken" : "border-s-accent",
 			!dimmed && "bg-accent-wash active:brightness-95",
 		),
-		inkMain: dimmed ? "text-ink-disabled" : "text-ink",
+		inkMain: cn(selected && "font-semibold", dimmed ? "text-ink-disabled" : "text-ink"),
 		note: dimmed ? "text-ink-disabled" : "text-ink-dim",
 		desc: dimmed ? "text-ink-disabled" : "text-ink-muted",
+		indicator: cn(
+			"ms-auto flex h-5 w-5 shrink-0 items-center justify-center border-2 text-meta leading-none",
+			multi ? "rounded-xs" : "rounded-full",
+			selected
+				? "border-accent bg-accent text-on-accent"
+				: dimmed
+					? "border-hairline"
+					: "border-ink-dim",
+		),
 	};
 }
 
-/** The trailing tick of a chosen row. Decorative: `aria-checked` carries the
-    state for assistive tech, the glyph carries it for everyone who sees. */
-function Tick({ on }: { on: boolean }) {
-	return on ? (
-		<span aria-hidden className="shrink-0 text-body-sm font-medium text-accent">
-			✓
+/** The trailing ring (or square) of a row: empty at rest, a disc holding a check
+    when chosen. Decorative: `aria-checked` carries the state for assistive tech. */
+function Indicator({ className, on }: { className: string; on: boolean }) {
+	return (
+		<span aria-hidden className={className} data-ask-indicator={on ? "on" : "off"}>
+			{on ? "✓" : null}
 		</span>
-	) : null;
+	);
 }
 
 function QuestionField({
@@ -464,7 +485,7 @@ function QuestionField({
 		onChange(cellWith(ticks, multi, next));
 	};
 	const chosen = new Set(ticks);
-	const otherLook = optionRowLook({ selected: other.open, disabled });
+	const otherLook = optionRowLook({ selected: other.open, disabled, multi });
 	if (options.length === 0) {
 		/* A free-text or secret question: the answer IS the typed string. */
 		return (
@@ -518,7 +539,7 @@ function QuestionField({
 				   runtime stops hoisting (agent review round 2, N1). A multi-select
 				   may recommend several rows, so every one in the set is badged. */
 				const recommended = recommendedRows(question).includes(index);
-				const rowLook = optionRowLook({ selected: on, disabled });
+				const rowLook = optionRowLook({ selected: on, disabled, multi });
 				return (
 					<button
 						key={option.label}
@@ -567,7 +588,7 @@ function QuestionField({
 								<span className={cn("text-body-sm", rowLook.desc)}>{option.description}</span>
 							) : null}
 						</span>
-						<Tick on={on} />
+						<Indicator className={rowLook.indicator} on={on} />
 					</button>
 				);
 			})}
@@ -609,11 +630,15 @@ function QuestionField({
 						</span>
 						{other.open ? null : (
 							<span className={cn("text-body-sm", otherLook.note)}>
-								{messageRuntime.t("relay.asks.card.placeholder_answer")}
+								{/* TYPED TEXT SURVIVES CLOSING THE ROW (it stays in card state), and
+								    the row says so: otherwise a closed row reads as an empty door
+								    while the text is still there, unsent. */}
+								{other.text.trim() !== ""
+									? messageRuntime.t("relay.asks.card.other_kept")
+									: messageRuntime.t("relay.asks.card.placeholder_answer")}
 							</span>
 						)}
-						<span className="flex-1" />
-						<Tick on={other.open} />
+						<Indicator className={otherLook.indicator} on={other.open} />
 					</button>
 					{other.open ? (
 						<input
@@ -950,7 +975,7 @@ export function AskCard({
 				<span className={cn("flex flex-wrap items-center gap-x-2 text-meta", toneClass)}>
 					<span role="status">{stateLine}</span>
 					{row.urgent && offered ? (
-						<span className="text-ink-dim">{messageRuntime.t("relay.asks.card.urgent")}</span>
+						<span className="font-medium text-warning">{messageRuntime.t("relay.asks.card.urgent")}</span>
 					) : null}
 				</span>
 			)}
@@ -1150,6 +1175,7 @@ export function AskCard({
 	   of the question, so a long question can scroll without taking the buttons
 	   with it. Absent on a terminal card (its sentence is the whole state), a
 	   settled receipt (nothing to do) and an `expired` one. */
+	const keyboardUp = useKeyboardUp();
 	const hasBar = !terminal && (offered || (lapsed && dismissible));
 	const unfilled = open_questions.filter((question) => !filled(String(question.id)));
 	/* WHY SEND IS GREY, said in words (the native panel's rule): a disabled button
@@ -1210,7 +1236,7 @@ export function AskCard({
 				   until the agent's next turn). */
 				<div className="flex flex-col gap-1">
 					<span className="text-meta text-ink-dim">
-						{messageRuntime.t("relay.ask.dismiss.title")}
+						{messageRuntime.t("relay.ask.dismiss.title", { count: questions.length })}
 					</span>
 					{DISMISS_REASONS.map((reason) => (
 						<button
@@ -1274,16 +1300,22 @@ export function AskCard({
 							{error}
 						</p>
 					) : null}
-					{progressLine ? <p className="text-meta text-ink-dim">{progressLine}</p> : null}
-					{/* HALF WIDTH EACH, the label staying put while in flight: the button
-					    dims and says it is busy, and never collapses to a bare `…` (D1). */}
-					<div className="flex gap-2">
+					{/* EQUAL HEIGHT, SIDE BY SIDE; STACKED when the labels would not fit. A
+					    wrapping row of `flex-1 basis-0 min-w-fit` buttons is both at once
+					    with no measuring: while both labels fit on one line they share the
+					    row and stretch to one height, and when their no-wrap widths no longer
+					    fit (a 320 px phone, a long locale, a larger root font size, since the
+					    widths are rem-based) the row wraps and each takes a full row. Side by
+					    side at large text, "Send answer" wrapped to two lines beside a
+					    one-line Decline and the bar took a third of the sheet. The label
+					    STAYS put while in flight: the button dims and says it is busy. */}
+					<div className="flex flex-wrap gap-2">
 						<button
 							type="button"
 							disabled={busy !== "" || !complete}
 							aria-busy={busy === "respond" || undefined}
 							onClick={respond}
-							className="flex min-h-11 flex-1 items-center justify-center rounded-sm bg-accent px-4 text-body-sm font-medium text-on-accent active:bg-accent-active disabled:opacity-50"
+							className="flex min-h-11 min-w-fit flex-1 basis-0 items-center justify-center rounded-sm bg-accent px-4 text-body-sm font-medium whitespace-nowrap text-on-accent active:bg-accent-active disabled:opacity-50"
 						>
 							{open_questions.length > 1
 								? messageRuntime.t("relay.asks.card.send_answers")
@@ -1294,23 +1326,31 @@ export function AskCard({
 							disabled={busy !== ""}
 							aria-busy={busy === "decline" || undefined}
 							onClick={decline}
-							className="flex min-h-11 flex-1 items-center justify-center rounded-sm bg-danger-wash px-3 text-body-sm text-danger active:bg-danger-wash disabled:opacity-50"
+							className="flex min-h-11 min-w-fit flex-1 basis-0 items-center justify-center rounded-sm bg-danger-wash px-3 text-body-sm whitespace-nowrap text-danger active:bg-danger-wash disabled:opacity-50"
 						>
 							{messageRuntime.t("relay.asks.card.decline")}
 						</button>
 					</div>
-					{/* THE OPEN ASK'S OWN DOOR (R5, §15's amended D6): puts the QUESTION away
-					    without answering anybody, which is the act a stale ask needs. Quiet,
-					    and deliberately not beside Decline. */}
-					{reason_needed ? (
-						<button
-							type="button"
-							disabled={busy !== "" || dismissRefused}
-							onClick={() => setClosing(true)}
-							className="flex min-h-11 items-center self-center rounded-sm px-3 text-body-sm text-ink-dim active:bg-surface disabled:opacity-50"
-						>
-							{messageRuntime.t("relay.ask.dismiss.open")}
-						</button>
+					{/* WHY SEND IS GREY and the quiet way out share ONE row, so the bar stays
+					    compact. `Dismiss…` is a text link, not a button: dismissing answers
+					    nobody and buys no turn, so it must not compete with Send and Decline
+					    (R5, §15's amended D6; it asks WHY first, hence the ellipsis). It
+					    steps aside while the on-screen keyboard is up, which is when the
+					    question needs the room. */}
+					{progressLine || (reason_needed && !keyboardUp) ? (
+						<div className="flex items-center gap-x-3">
+							<p className="min-w-0 flex-1 text-start text-meta text-ink-dim">{progressLine}</p>
+							{reason_needed && !keyboardUp ? (
+								<button
+									type="button"
+									disabled={busy !== "" || dismissRefused}
+									onClick={() => setClosing(true)}
+									className="flex min-h-11 shrink-0 items-center rounded-sm px-1 text-meta text-ink-muted active:bg-surface disabled:opacity-50"
+								>
+									{messageRuntime.t("relay.ask.dismiss.open")}
+								</button>
+							) : null}
+						</div>
 					) : null}
 				</>
 			)}
@@ -1349,7 +1389,7 @@ export function AskCard({
 				data-testid="ask-card"
 				data-ask-id={row.ask_id}
 				data-ask-status={String(row.status || "open")}
-				className="flex flex-col gap-2 rounded-md bg-surface p-2.5"
+				className="flex flex-col gap-2 rounded-md border border-hairline bg-surface p-2.5"
 			>
 				{body}
 				{footerSlot === undefined ? bar : null}

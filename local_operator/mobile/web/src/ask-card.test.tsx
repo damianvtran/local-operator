@@ -107,7 +107,7 @@ describe("AskCard", () => {
 
 		/* Skipping is not "leaving it blank": it is the explicit empty list the
 		   queue's contract defines, so it is what unblocks the submit. */
-		fireEvent.click(screen.getAllByRole("button", { name: /skip — send no answer/ })[1]);
+		fireEvent.click(screen.getAllByRole("button", { name: /Skip \(send no answer\)/ })[1]);
 		expect((send as HTMLButtonElement).disabled).toBe(false);
 		fireEvent.click(send);
 		return waitFor(() =>
@@ -136,7 +136,7 @@ describe("AskCard", () => {
 
 	it("never renders a secret question's answer back, and says it is not stored in the transcript", () => {
 		renderCard(ask({ questions: [question({ options: [], secret: true, persist: true })] }));
-		expect(screen.getByPlaceholderText("paste secret").getAttribute("type")).toBe("password");
+		expect(screen.getByPlaceholderText("Secret value").getAttribute("type")).toBe("password");
 		expect(screen.getByText(/not shown in the transcript/)).toBeTruthy();
 	});
 
@@ -156,7 +156,7 @@ describe("AskCard", () => {
 		expect(screen.queryByRole("radio")).toBeNull();
 		expect(screen.queryByRole("button", { name: /Send answer/ })).toBeNull();
 		expect(screen.queryByRole("button", { name: /^Decline$/ })).toBeNull();
-		expect(screen.getByRole("button", { name: /Dismiss — send no reply/ })).toBeTruthy();
+		expect(screen.getByRole("button", { name: /^Dismiss$/ })).toBeTruthy();
 		/* The question is stated once. */
 		expect(screen.getAllByText("ship the fix?").length).toBe(1);
 	});
@@ -164,7 +164,7 @@ describe("AskCard", () => {
 	it("dismisses a timed-out ask with no reason", async () => {
 		const settled = vi.fn();
 		renderCard(ask({ status: "timed_out" }), settled);
-		fireEvent.click(screen.getByRole("button", { name: /Dismiss — send no reply/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^Dismiss$/ }));
 		await waitFor(() =>
 			expect(sendCommand).toHaveBeenCalledWith("s1", { op: "ask_dismiss", ask_id: "ask-1" }),
 		);
@@ -187,7 +187,7 @@ describe("AskCard", () => {
 		   one-tap dismissal, which says "send no reply" over an ask the agent is
 		   still owed an answer to. */
 		expect(screen.getByRole("button", { name: /^Dismiss…$/ })).toBeTruthy();
-		expect(screen.queryByRole("button", { name: /Dismiss — send no reply/ })).toBeNull();
+		expect(screen.queryByRole("button", { name: /^Dismiss$/ })).toBeNull();
 	});
 
 	it("offers no controls on a settled ask, and no error register on an expired one", () => {
@@ -216,7 +216,7 @@ describe("AskCard", () => {
 		   agent has walked past the deadline. An OPEN ask's door is `close…` plus
 		   a reason, exercised in its own cases below. */
 		renderCard(ask({ status: "timed_out" }));
-		fireEvent.click(screen.getByRole("button", { name: /Dismiss — send no reply/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^Dismiss$/ }));
 		await waitFor(() =>
 			expect(sendCommand).toHaveBeenCalledWith("s1", { op: "ask_dismiss", ask_id: "ask-1" }),
 		);
@@ -224,11 +224,11 @@ describe("AskCard", () => {
 
 	it("offers the one-tap dismissal on a timed-out ask and the reason row on an open one", () => {
 		const { unmount } = renderCard(ask());
-		expect(screen.queryByRole("button", { name: /Dismiss — send no reply/ })).toBeNull();
+		expect(screen.queryByRole("button", { name: /^Dismiss$/ })).toBeNull();
 		expect(screen.getByRole("button", { name: /^Dismiss…$/ })).toBeTruthy();
 		unmount();
 		renderCard(ask({ status: "timed_out" }));
-		expect(screen.getByRole("button", { name: /Dismiss — send no reply/ })).toBeTruthy();
+		expect(screen.getByRole("button", { name: /^Dismiss$/ })).toBeTruthy();
 		expect(screen.queryByRole("button", { name: /^Dismiss…$/ })).toBeNull();
 	});
 
@@ -254,7 +254,7 @@ describe("AskCard", () => {
 	it("sends answered_in_chat when the operator says they replied in chat", async () => {
 		renderCard(ask());
 		fireEvent.click(screen.getByRole("button", { name: /^Dismiss…$/ }));
-		fireEvent.click(screen.getByRole("button", { name: /^Answered in chat/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^Answered in the conversation/ }));
 		await waitFor(() =>
 			expect(sendCommand).toHaveBeenCalledWith("s1", {
 				op: "ask_dismiss",
@@ -308,7 +308,7 @@ describe("AskCard", () => {
 		fireEvent.click(screen.getByRole("button", { name: /^Dismiss…$/ }));
 		fireEvent.click(screen.getByRole("button", { name: /^No longer needed/ }));
 		await waitFor(() => expect(sendCommand).toHaveBeenCalled());
-		expect(screen.queryByText(/bringing the session up/)).toBeNull();
+		expect(screen.queryByText(/Bringing the conversation up/)).toBeNull();
 		await act(async () => { release({ ok: true, detail: "dismissed" }); });
 	});
 
@@ -330,18 +330,18 @@ describe("AskCard", () => {
 
 	it("names the act, and states what each reason tells the agent", () => {
 		/* Design round 1, D1 = UX round 1, U6: the reveal used to be three controls
-		   on one line with no heading and no explanation, so "Answered in chat"
+		   on one line with no heading and no explanation, so "Answered in the conversation"
 		   could be read as "send my answer" while sitting 8.5 px under `decline`.
 		   The heading says "Dismiss", and each row carries its note. */
 		renderCard(ask());
 		fireEvent.click(screen.getByRole("button", { name: /^Dismiss…$/ }));
 		expect(screen.getByText("Dismiss this question")).toBeTruthy();
 		expect(screen.getByRole("button", { name: /^No longer needed/ }).textContent).toContain(
-			"stop waiting on it",
+			"The agent stops waiting for an answer",
 		);
 		expect(
-			screen.getByRole("button", { name: /^Answered in chat/ }).textContent,
-		).toContain("you already replied in the conversation");
+			screen.getByRole("button", { name: /^Answered in the conversation/ }).textContent,
+		).toContain("You already replied in the conversation");
 	});
 
 	it("keeps the pressed reason's label while the dismissal is in flight", async () => {
@@ -353,14 +353,14 @@ describe("AskCard", () => {
 		);
 		renderCard(ask());
 		fireEvent.click(screen.getByRole("button", { name: /^Dismiss…$/ }));
-		fireEvent.click(screen.getByRole("button", { name: /^Answered in chat/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^Answered in the conversation/ }));
 		await waitFor(() =>
-			expect(screen.getByRole("button", { name: /^Answered in chat/ }).textContent).toContain(
-				"Answered in chat",
+			expect(screen.getByRole("button", { name: /^Answered in the conversation/ }).textContent).toContain(
+				"Answered in the conversation",
 			),
 		);
 		expect(
-			screen.getByRole("button", { name: /^Answered in chat/ }).getAttribute("aria-busy"),
+			screen.getByRole("button", { name: /^Answered in the conversation/ }).getAttribute("aria-busy"),
 		).toBe("true");
 		await act(async () => { release({ ok: true, detail: "dismissed" }); });
 	});
@@ -592,7 +592,7 @@ describe("AskCard", () => {
 
 		it("puts the 'choose any' hint above the option rows, not after the Other field", () => {
 			renderCard(ask({ questions: [question({ multi: true })] }));
-			const hint = screen.getByText("choose any that apply");
+			const hint = screen.getByText("Choose any that apply");
 			const first = screen.getByRole("checkbox", { name: /^yes$/ });
 			expect(
 				hint.compareDocumentPosition(first) & Node.DOCUMENT_POSITION_FOLLOWING,
@@ -655,7 +655,7 @@ describe("AskCard", () => {
 
 		it("is withheld on a secret question and on a free-text one", () => {
 			renderCard(ask({ questions: [question({ options: [], secret: true })] }));
-			expect(screen.getByPlaceholderText("paste secret").getAttribute("type")).toBe("password");
+			expect(screen.getByPlaceholderText("Secret value").getAttribute("type")).toBe("password");
 			expect(screen.queryByRole("button", { name: /^Other/ })).toBeNull();
 			cleanup();
 			renderCard(ask({ questions: [question({ options: [] })] }));
@@ -701,7 +701,7 @@ describe("AskCard", () => {
 
 	it("marks the recommended option from the wire's own index", () => {
 		renderCard(ask({ questions: [question({ recommended: 0 })] }));
-		expect(screen.getByText(/· recommended/)).toBeTruthy();
+		expect(screen.getByText(/· Recommended/)).toBeTruthy();
 	});
 
 	it("badges every row of a multi-select's recommendation set, and ticks none", () => {
@@ -721,7 +721,7 @@ describe("AskCard", () => {
 				],
 			}),
 		);
-		expect(screen.getAllByText(/· recommended/)).toHaveLength(2);
+		expect(screen.getAllByText(/· Recommended/)).toHaveLength(2);
 		for (const name of [/yes/, /maybe/, /no/]) {
 			expect(screen.getByRole("checkbox", { name }).getAttribute("aria-checked")).toBe("false");
 		}
@@ -730,19 +730,19 @@ describe("AskCard", () => {
 	it("badges one row when a multi-select payload carries only `recommended: 0`", () => {
 		/* An older runtime, or a stored row from before the set existed. */
 		renderCard(ask({ questions: [question({ multi: true, recommended: 0 })] }));
-		expect(screen.getAllByText(/· recommended/)).toHaveLength(1);
+		expect(screen.getAllByText(/· Recommended/)).toHaveLength(1);
 	});
 
 	it("badges nothing for a single-select with no recommendation", () => {
 		renderCard(ask({ questions: [question({ recommended: null })] }));
-		expect(screen.queryByText(/· recommended/)).toBeNull();
+		expect(screen.queryByText(/· Recommended/)).toBeNull();
 	});
 
 	it("says why an ask with nothing left to answer cannot be sent", () => {
 		/* R6 (agent review round 1): `draft_question_ids` had every question, so
 		   the card rendered no fields and a disabled send with no explanation. */
 		renderCard(ask({ draft_question_ids: ["q1"] }));
-		expect(screen.getByText(/nothing left to answer here/)).toBeTruthy();
+		expect(screen.getByText(/Nothing left to answer here/)).toBeTruthy();
 		expect(
 			(screen.getByRole("button", { name: /Send answer/ }) as HTMLButtonElement).disabled,
 		).toBe(true);
@@ -803,7 +803,7 @@ describe("AskCard", () => {
 		renderCard(ask({ runtime_live: false }));
 		fireEvent.click(screen.getByRole("radio", { name: /yes/ }));
 		fireEvent.click(screen.getByRole("button", { name: /Send answer/ }));
-		expect(await screen.findByText(/this can take up to ~30 s/)).toBeTruthy();
+		expect(await screen.findByText(/30 s/)).toBeTruthy();
 		release?.();
 	});
 
@@ -829,7 +829,7 @@ describe("AskCard", () => {
 			).toBe("true"),
 		);
 		expect((screen.getByRole("button", { name: /Send answer/ }) as HTMLButtonElement).disabled).toBe(true);
-		expect(screen.queryByText(/this can take up to ~30 s/)).toBeNull();
+		expect(screen.queryByText(/30 s/)).toBeNull();
 		release?.();
 	});
 
@@ -845,7 +845,7 @@ describe("AskCard", () => {
 			),
 		);
 		renderCard(ask({ status: "timed_out", runtime_live: false }));
-		fireEvent.click(screen.getByRole("button", { name: /Dismiss — send no reply/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^Dismiss$/ }));
 		await waitFor(() => expect(screen.getByText(/nothing was sent/)).toBeTruthy());
 		expect(screen.queryByRole("button", { name: /Send answer/ })).toBeNull();
 		expect(screen.queryByRole("button", { name: /^Decline$/ })).toBeNull();
@@ -876,9 +876,9 @@ describe("AskCard", () => {
 			new Error("only a timed-out ask can be dismissed; it is still open."),
 		);
 		renderCard(ask({ status: "timed_out" }));
-		fireEvent.click(screen.getByRole("button", { name: /Dismiss — send no reply/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^Dismiss$/ }));
 		const sentence = await screen.findByText(/only a timed-out ask/);
-		const dismiss = screen.getByRole("button", { name: /Dismiss — send no reply/ });
+		const dismiss = screen.getByRole("button", { name: /^Dismiss$/ });
 		expect(
 			dismiss.compareDocumentPosition(sentence) & Node.DOCUMENT_POSITION_FOLLOWING,
 		).toBeTruthy();
@@ -894,10 +894,10 @@ describe("AskCard", () => {
 			() => new Promise<never>(() => {}),
 		);
 		renderCard(ask({ status: "timed_out", runtime_live: false }));
-		const resting = screen.getByRole("button", { name: "Dismiss — send no reply" });
+		const resting = screen.getByRole("button", { name: "Dismiss" });
 		fireEvent.click(resting);
 		await waitFor(() => expect(sendCommand).toHaveBeenCalled());
-		const inFlight = screen.getByRole("button", { name: "Dismiss — send no reply" });
+		const inFlight = screen.getByRole("button", { name: "Dismiss" });
 		// The same node, so the same box: nothing remounted and no label changed.
 		expect(inFlight).toBe(resting);
 		expect((inFlight as HTMLButtonElement).disabled).toBe(true);
@@ -915,12 +915,12 @@ describe("AskCard", () => {
 		);
 		renderCard(ask({ status: "timed_out", runtime_live: false }));
 		expect(
-			screen.getByRole("button", { name: /Dismiss — send no reply/ }),
+			screen.getByRole("button", { name: /^Dismiss$/ }),
 		).toBeTruthy();
-		fireEvent.click(screen.getByRole("button", { name: /Dismiss — send no reply/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^Dismiss$/ }));
 		await waitFor(() => expect(sendCommand).toHaveBeenCalled());
 		expect(screen.queryByText(/brought up to record it/)).toBeNull();
-		expect(screen.queryByText(/bringing the session up/)).toBeNull();
+		expect(screen.queryByText(/Bringing the conversation up/)).toBeNull();
 		expect(screen.queryByText(/~30 s/)).toBeNull();
 	});
 
@@ -933,7 +933,7 @@ describe("AskCard", () => {
 		fireEvent.click(screen.getByRole("radio", { name: /yes/ }));
 		fireEvent.click(screen.getByRole("button", { name: /Send answer/ }));
 		await waitFor(() => expect(sendCommand).toHaveBeenCalled());
-		await waitFor(() => expect(screen.queryByText(/this can take up to ~30 s/)).toBeNull());
+		await waitFor(() => expect(screen.queryByText(/30 s/)).toBeNull());
 		expect(screen.getByRole("button", { name: /Send answer/ })).toBeTruthy();
 	});
 
@@ -945,7 +945,7 @@ describe("AskCard", () => {
 		   no control invites a tap that cannot work. */
 		renderCard(ask({ runtime_live: false, durable: false }));
 		expect(
-			screen.getByText(/this conversation no longer exists — the ask can never be read; start a new conversation and ask again\./),
+			screen.getByText(/This conversation no longer exists, so this question can't be read\. Start a new conversation and ask again\./),
 		).toBeTruthy();
 		expect(screen.queryByRole("button", { name: /Send answer/ })).toBeNull();
 		expect(screen.queryByRole("button", { name: /^Decline$/ })).toBeNull();
@@ -960,11 +960,11 @@ describe("AskCard", () => {
 		   mirror of the bug this lane was opened to fix, pinned before it can
 		   come back. */
 		renderCard(ask({ runtime_live: true, durable: false }));
-		expect(screen.queryByText(/this conversation no longer exists/)).toBeNull();
+		expect(screen.queryByText(/This conversation no longer exists/)).toBeNull();
 		expect(screen.getByRole("button", { name: /Send answer/ })).toBeTruthy();
 		expect(screen.getByRole("button", { name: /^Decline$/ })).toBeTruthy();
 		/* And no wait is promised either: the relay can deliver right now. */
-		expect(screen.queryByText(/this can take up to ~30 s/)).toBeNull();
+		expect(screen.queryByText(/30 s/)).toBeNull();
 	});
 
 	it("keeps a settled receipt in a dead conversation", () => {
@@ -972,7 +972,7 @@ describe("AskCard", () => {
 		   into a dead end — a row already answered in a conversation that has since
 		   gone still has its own record to show. */
 		renderCard(ask({ status: "answered", delivered: true, runtime_live: false, durable: false }));
-		expect(screen.queryByText(/this conversation no longer exists/)).toBeNull();
+		expect(screen.queryByText(/This conversation no longer exists/)).toBeNull();
 		expect(screen.getByRole("status")).toBeTruthy();
 	});
 });
@@ -1127,24 +1127,24 @@ describe("the answering bar", () => {
 
 	it("says how far along a several-question form is, and what a single question takes", () => {
 		const { unmount } = renderCard(two());
-		expect(screen.getByText("0 of 2 answered")).toBeTruthy();
+		expect(screen.getByText("0 of 2 questions answered or skipped")).toBeTruthy();
 		fireEvent.click(screen.getAllByRole("radio", { name: /^yes$/ })[0]);
-		expect(screen.getByText("1 of 2 answered")).toBeTruthy();
+		expect(screen.getByText("1 of 2 questions answered or skipped")).toBeTruthy();
 		unmount();
 		localStorage.clear(); // the pick above is kept under this ask's id
 
 		const withOptions = renderCard(ask());
-		expect(screen.getByText("Pick an option or type your own to answer.")).toBeTruthy();
+		expect(screen.getByText("Pick an option or type your own answer to send.")).toBeTruthy();
 		withOptions.unmount();
 
 		renderCard(ask({ questions: [question({ options: [] })] }));
-		expect(screen.getByText("Type your answer, or skip it, to send.")).toBeTruthy();
+		expect(screen.getByText("Type an answer or skip the question to send.")).toBeTruthy();
 	});
 
 	it("counts a skipped question as answered, and drops the line once send is live", () => {
 		renderCard(two());
 		fireEvent.click(screen.getAllByRole("radio", { name: /^yes$/ })[0]);
-		fireEvent.click(screen.getAllByRole("button", { name: /skip — send no answer/ })[1]);
+		fireEvent.click(screen.getAllByRole("button", { name: /Skip \(send no answer\)/ })[1]);
 		expect(screen.queryByText(/answered$/)).toBeNull();
 		expect((screen.getByRole("button", { name: /Send answers/ }) as HTMLButtonElement).disabled).toBe(false);
 	});
@@ -1155,7 +1155,7 @@ describe("the answering bar", () => {
 		);
 		renderCard(ask({ questions: [question({ options: [] })] }));
 		fireEvent.change(screen.getByRole("textbox"), { target: { value: "ok" } });
-		expect(screen.queryByText("Type your answer, or skip it, to send.")).toBeNull();
+		expect(screen.queryByText("Type an answer or skip the question to send.")).toBeNull();
 		fireEvent.click(screen.getByRole("button", { name: /Send answer/ }));
 		await waitFor(() => expect(sendCommand).toHaveBeenCalled());
 		expect(screen.queryByText(/answered$/)).toBeNull();
@@ -1177,7 +1177,7 @@ describe("the answering bar", () => {
 		renderCard(ask());
 		fireEvent.click(screen.getByRole("button", { name: /^Dismiss…$/ }));
 		expect(screen.getByRole("button", { name: /^No longer needed/ })).toBeTruthy();
-		expect(screen.getByRole("button", { name: /^Answered in chat/ })).toBeTruthy();
+		expect(screen.getByRole("button", { name: /^Answered in the conversation/ })).toBeTruthy();
 		// Nothing a hurried thumb could mistake for "send my answer" stays up.
 		expect(screen.queryByRole("button", { name: /Send answer/ })).toBeNull();
 		expect(screen.queryByRole("button", { name: /^Decline$/ })).toBeNull();
@@ -1281,7 +1281,7 @@ describe("a secret question's answer is never persisted", () => {
 
 	it("keeps a typed secret out of storage while the card still uses it, and keeps other answers", async () => {
 		renderCard(mixed());
-		fireEvent.change(screen.getByPlaceholderText("paste secret"), { target: { value: SECRET } });
+		fireEvent.change(screen.getByPlaceholderText("Secret value"), { target: { value: SECRET } });
 		// Alone, a secret leaves no cell at all.
 		expect(localStorage.getItem(KEY)).toBeNull();
 		fireEvent.click(screen.getByRole("radio", { name: /yes/ }));
@@ -1300,11 +1300,11 @@ describe("a secret question's answer is never persisted", () => {
 
 	it("does not bring a secret back after the card is closed and reopened", () => {
 		const first = renderCard(mixed());
-		fireEvent.change(screen.getByPlaceholderText("paste secret"), { target: { value: SECRET } });
+		fireEvent.change(screen.getByPlaceholderText("Secret value"), { target: { value: SECRET } });
 		fireEvent.click(screen.getByRole("radio", { name: /yes/ }));
 		first.unmount();
 		renderCard(mixed());
-		expect((screen.getByPlaceholderText("paste secret") as HTMLInputElement).value).toBe("");
+		expect((screen.getByPlaceholderText("Secret value") as HTMLInputElement).value).toBe("");
 		expect(screen.getByRole("radio", { name: /yes/ }).getAttribute("aria-checked")).toBe("true");
 	});
 
@@ -1314,7 +1314,7 @@ describe("a secret question's answer is never persisted", () => {
 			JSON.stringify({ answers: { q1: [SECRET], q2: ["yes"] }, skipped: ["q3"] }),
 		);
 		renderCard(mixed());
-		expect((screen.getByPlaceholderText("paste secret") as HTMLInputElement).value).toBe("");
+		expect((screen.getByPlaceholderText("Secret value") as HTMLInputElement).value).toBe("");
 		expect(stored()).not.toContain(SECRET);
 		expect(JSON.parse(stored())).toEqual({ answers: { q2: ["yes"] }, skipped: ["q3"] });
 	});
@@ -1329,5 +1329,118 @@ describe("a secret question's answer is never persisted", () => {
 		renderCard(ask({ questions: [question({ options: [] })] }));
 		fireEvent.change(screen.getByRole("textbox"), { target: { value: "plain text" } });
 		expect(JSON.parse(stored()).answers).toEqual({ q1: ["plain text"] });
+	});
+});
+
+describe("the panel's final look (native parity)", () => {
+	beforeEach(() => localStorage.clear());
+
+	it("draws an empty ring on a resting single-choice row and fills it to a disc with a check when chosen", () => {
+		renderCard(ask());
+		const yes = screen.getByRole("radio", { name: /^yes$/ });
+		const ring = yes.querySelector("[data-ask-indicator]") as HTMLElement;
+		expect(ring.getAttribute("data-ask-indicator")).toBe("off");
+		expect(ring.textContent).toBe("");
+		expect(ring.className).toContain("rounded-full");
+		expect(ring.className).toContain("border-ink-dim");
+		expect(ring.getAttribute("aria-hidden")).toBe("true");
+		expect(yes.querySelector(".font-semibold")).toBeNull();
+		fireEvent.click(yes);
+		const disc = screen.getByRole("radio", { name: /yes/ }).querySelector("[data-ask-indicator]") as HTMLElement;
+		expect(disc.getAttribute("data-ask-indicator")).toBe("on");
+		expect(disc.textContent).toBe("✓");
+		expect(disc.className).toContain("bg-accent");
+		expect(disc.className).toContain("text-on-accent");
+		// The chosen label is semibold: weight, as well as shape and colour.
+		expect(screen.getByRole("radio", { name: /yes/ }).querySelector(".font-semibold")).toBeTruthy();
+	});
+
+	it("draws a square, not a ring, on a multi-select row", () => {
+		renderCard(ask({ questions: [question({ multi: true })] }));
+		const box = screen.getByRole("checkbox", { name: /^yes$/ }).querySelector("[data-ask-indicator]") as HTMLElement;
+		expect(box.className).toContain("rounded-xs");
+		expect(box.className).not.toContain("rounded-full");
+	});
+
+	it("says a closed Other row still holds the reader's text, without sending it", () => {
+		renderCard(ask());
+		fireEvent.click(screen.getByRole("radio", { name: /^Other/ }));
+		fireEvent.change(screen.getByRole("textbox"), { target: { value: "my own words" } });
+		fireEvent.click(screen.getByRole("radio", { name: /^yes$/ }));
+		const other = screen.getByRole("radio", { name: /^Other/ });
+		expect(other.textContent).toContain("Your text is kept, not sent");
+		expect(other.textContent).not.toContain("Your answer");
+	});
+
+	it("names the dismissal for one question or several", () => {
+		const { unmount } = renderCard(ask());
+		fireEvent.click(screen.getByRole("button", { name: /^Dismiss…$/ }));
+		expect(screen.getByText("Dismiss this question")).toBeTruthy();
+		unmount();
+		renderCard(ask({ questions: [question(), question({ id: "q2", question: "and the date?" })] }));
+		fireEvent.click(screen.getByRole("button", { name: /^Dismiss…$/ }));
+		expect(screen.getByText("Dismiss these questions")).toBeTruthy();
+	});
+
+	it("gives Send and Decline one height side by side, wrapping to a row each only when their labels cannot fit", () => {
+		renderCard(ask());
+		const send = screen.getByRole("button", { name: /Send answer/ });
+		const decline = screen.getByRole("button", { name: /^Decline$/ });
+		for (const button of [send, decline]) {
+			for (const cls of ["flex-1", "basis-0", "min-w-fit", "whitespace-nowrap"]) {
+				expect(button.className).toContain(cls);
+			}
+		}
+		expect(send.parentElement?.className).toContain("flex-wrap");
+	});
+
+	it("shares one row between the progress line and a quiet, regular-weight Dismiss…", () => {
+		renderCard(ask());
+		const dismiss = screen.getByRole("button", { name: /^Dismiss…$/ });
+		const progress = screen.getByText("Pick an option or type your own answer to send.");
+		expect(progress.parentElement).toBe(dismiss.parentElement);
+		expect(dismiss.className).toContain("text-ink-muted");
+		expect(dismiss.className).not.toContain("font-medium");
+		expect(dismiss.className.split(" ")).not.toContain("bg-accent");
+		expect(dismiss.className).not.toContain("border");
+	});
+
+	it("keeps Dismiss… out of the way while the on-screen keyboard is up, and the progress line in", () => {
+		const real = Object.getOwnPropertyDescriptor(window, "visualViewport");
+		const listeners: Array<() => void> = [];
+		const vv = {
+			height: window.innerHeight - 300,
+			addEventListener: (_: string, fn: () => void) => listeners.push(fn),
+			removeEventListener: () => {},
+		};
+		Object.defineProperty(window, "visualViewport", { value: vv, configurable: true });
+		try {
+			renderCard(ask());
+			expect(screen.queryByRole("button", { name: /^Dismiss…$/ })).toBeNull();
+			expect(screen.getByText("Pick an option or type your own answer to send.")).toBeTruthy();
+			// The keyboard goes away: the link comes back.
+			vv.height = window.innerHeight;
+			act(() => listeners.forEach((fn) => fn()));
+			expect(screen.getByRole("button", { name: /^Dismiss…$/ })).toBeTruthy();
+		} finally {
+			if (real) Object.defineProperty(window, "visualViewport", real);
+			else delete (window as { visualViewport?: unknown }).visualViewport;
+		}
+	});
+
+	it("keeps a lapsed ask's Dismiss a button", () => {
+		renderCard(ask({ status: "timed_out" }));
+		const dismiss = screen.getByRole("button", { name: /^Dismiss$/ });
+		expect(dismiss.className).toContain("min-h-11");
+		expect(screen.queryByRole("button", { name: /^Dismiss…$/ })).toBeNull();
+	});
+
+	it("draws the card with a hairline border and an urgent mark in warning ink", () => {
+		renderCard(ask({ urgent: true }));
+		expect(screen.getByTestId("ask-card").className).toContain("border-hairline");
+		const urgent = screen.getByText("· Urgent");
+		expect(urgent.className).toContain("text-warning");
+		expect(urgent.className).toContain("font-medium");
+		expect(screen.getByTestId("ask-question-text").className).toContain("text-start");
 	});
 });

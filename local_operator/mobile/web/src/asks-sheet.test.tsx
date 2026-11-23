@@ -165,7 +165,7 @@ describe("AsksSheet", () => {
 			asks: [ask({ ask_id: "other-1", session_id: "other" })],
 		});
 		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
-		await waitFor(() => expect(screen.getByText(/nothing waiting/)).toBeTruthy());
+		await waitFor(() => expect(screen.getByText(/Nothing waiting/)).toBeTruthy());
 		expect(screen.queryByTestId("ask-card")).toBeNull();
 	});
 
@@ -189,7 +189,7 @@ describe("AsksSheet", () => {
 	it("says nothing is waiting when the aggregate is empty", async () => {
 		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({ asks: [] });
 		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
-		await waitFor(() => expect(screen.getByText(/nothing waiting/)).toBeTruthy());
+		await waitFor(() => expect(screen.getByText(/Nothing waiting/)).toBeTruthy());
 	});
 
 	it("acknowledges a dismissal while another ask is still waiting", async () => {
@@ -249,9 +249,9 @@ describe("AsksSheet", () => {
 		await waitFor(() => expect(screen.getAllByTestId("ask-row").length).toBe(1));
 		fireEvent.click(screen.getByRole("button", { name: /^Dismiss…$/ }));
 		fireEvent.click(screen.getByRole("button", { name: /^No longer needed/ }));
-		/* The settled row is back under "Earlier", saying why … */
+		/* The settled row is back under "Settled", saying why … */
 		await waitFor(() => expect(screen.getByText("Dismissed — no longer needed")).toBeTruthy());
-		expect(screen.getByRole("heading", { name: "Earlier" })).toBeTruthy();
+		expect(screen.getByRole("heading", { name: "Settled" })).toBeTruthy();
 		/* … and the receipt is gone, so it says it once. */
 		expect(screen.queryByTestId("ask-receipt")).toBeNull();
 		expect(screen.getAllByTestId("ask-card").length).toBe(1);
@@ -321,7 +321,7 @@ describe("AsksSheet", () => {
 		await waitFor(() => expect(screen.getByTestId("ask-card")).toBeTruthy());
 		/* The only ask is a lapsed one, so it is the open card and its one door
 		   (Dismiss, no reason) is in the pinned bar. */
-		fireEvent.click(screen.getByRole("button", { name: /Dismiss — send no reply/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^Dismiss$/ }));
 		await waitFor(() => expect(screen.getByTestId("ask-receipt")).toBeTruthy());
 		expect(screen.getByTestId("ask-receipt").textContent).toBe("Dismissed — no reply sent");
 		/* The read still lists the id: the receipt must survive it. */
@@ -366,7 +366,7 @@ describe("AsksSheet", () => {
 		await waitFor(() => expect(screen.getByTestId("ask-card")).toBeTruthy());
 		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({ asks: [] });
 		fireEvent.click(screen.getByRole("button", { name: /^Dismiss…$/ }));
-		fireEvent.click(screen.getByRole("button", { name: /^Answered in chat/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^Answered in the conversation/ }));
 		await waitFor(() =>
 			expect(sendCommand).toHaveBeenCalledWith("mine", {
 				op: "ask_dismiss",
@@ -375,7 +375,7 @@ describe("AsksSheet", () => {
 			}),
 		);
 		await waitFor(() => expect(screen.getByText("Dismissed — answered in chat")).toBeTruthy());
-		expect(screen.queryByText(/nothing waiting/)).toBeNull();
+		expect(screen.queryByText(/Nothing waiting/)).toBeNull();
 	});
 
 	it("re-reads when the outstanding population moves, without a manual refresh", async () => {
@@ -412,7 +412,7 @@ describe("AsksSheet", () => {
 		await waitFor(() => expect(getAsks).toHaveBeenCalledTimes(2));
 		await waitFor(() => expect(screen.queryAllByTestId("ask-card").length).toBe(0));
 		expect(screen.getByText("Questions")).toBeTruthy();
-		expect(screen.getByText(/nothing waiting/)).toBeTruthy();
+		expect(screen.getByText(/Nothing waiting/)).toBeTruthy();
 	});
 
 	it("states the daemon's refusal reason when the read fails", async () => {
@@ -456,11 +456,11 @@ describe("AsksSheet", () => {
 	it("warns before the tap when the owning conversation has ended", async () => {
 		rows = [summary({ ended: true })];
 		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
-		await waitFor(() => expect(screen.getByText(/this conversation has ended/)).toBeTruthy());
+		await waitFor(() => expect(screen.getByText(/This conversation has ended/)).toBeTruthy());
 		/* THE COST IS ON THE LINE (design round 1, D4 = UX U1/U4): the relay now
 		   reopens it itself, so "may need it reopened" described a manual remedy
 		   that no longer exists — while the ~30 s the cold arm costs went unsaid. */
-		expect(screen.getByText(/answering will reopen it \(this can take up to ~30 s\)/)).toBeTruthy();
+		expect(screen.getByText(/Answering will reopen it, which can take up to 30 s/)).toBeTruthy();
 	});
 
 	it("warns before the tap when the conversation is simply not running", async () => {
@@ -474,8 +474,8 @@ describe("AsksSheet", () => {
 			asks: [ask({ runtime_live: false })],
 		});
 		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
-		await waitFor(() => expect(screen.getByText(/this conversation is not running/)).toBeTruthy());
-		expect(screen.getByText(/answering will bring it up \(this can take up to ~30 s\)/)).toBeTruthy();
+		await waitFor(() => expect(screen.getByText(/This conversation is not running/)).toBeTruthy());
+		expect(screen.getByText(/Answering will start it, which can take up to 30 s/)).toBeTruthy();
 	});
 
 	it("says nothing about a wait when the relay can deliver now", async () => {
@@ -485,7 +485,7 @@ describe("AsksSheet", () => {
 		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({ asks: [ask({ runtime_live: true })] });
 		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
 		await waitFor(() => expect(screen.getByTestId("ask-card")).toBeTruthy());
-		expect(screen.queryByText(/this can take up to ~30 s/)).toBeNull();
+		expect(screen.queryByText(/30 s/)).toBeNull();
 	});
 
 	it("says nothing about a wait above a settled receipt", async () => {
@@ -497,11 +497,11 @@ describe("AsksSheet", () => {
 			asks: [ask({ status: "answered", delivered: true, runtime_live: false })],
 		});
 		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
-		/* A settled ask is one line under "Earlier"; opening it expands its receipt. */
+		/* A settled ask is one line under "Settled"; opening it expands its receipt. */
 		await waitFor(() => expect(screen.getByTestId("ask-row")).toBeTruthy());
 		fireEvent.click(screen.getByTestId("ask-row"));
 		expect(screen.getByTestId("ask-card")).toBeTruthy();
-		expect(screen.queryByText(/this conversation is not running/)).toBeNull();
+		expect(screen.queryByText(/This conversation is not running/)).toBeNull();
 	});
 
 	it("stays silent on a DEAD row, and the card states it", async () => {
@@ -514,9 +514,9 @@ describe("AsksSheet", () => {
 		});
 		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
 		await waitFor(() =>
-			expect(screen.getByText(/the ask can never be read/)).toBeTruthy(),
+			expect(screen.getByText(/so this question can't be read/)).toBeTruthy(),
 		);
-		expect(screen.queryByText(/this conversation is not running/)).toBeNull();
+		expect(screen.queryByText(/This conversation is not running/)).toBeNull();
 	});
 
 	it("keeps the affordances on a LIVE conversation with no transcript", async () => {
@@ -530,7 +530,7 @@ describe("AsksSheet", () => {
 		});
 		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
 		await waitFor(() => expect(screen.getByTestId("ask-card")).toBeTruthy());
-		expect(screen.queryByText(/this conversation no longer exists/)).toBeNull();
+		expect(screen.queryByText(/This conversation no longer exists/)).toBeNull();
 		expect(screen.getByRole("button", { name: /Send answer/ })).toBeTruthy();
 	});
 
@@ -593,7 +593,7 @@ describe("AsksSheet", () => {
 		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
 		await waitFor(() => expect(screen.getAllByTestId("ask-card").length).toBe(1));
 		expect(screen.getByText("Timed out — the agent goes ahead without your answer")).toBeTruthy();
-		expect(screen.queryByText(/this conversation is not running/)).toBeNull();
+		expect(screen.queryByText(/This conversation is not running/)).toBeNull();
 	});
 
 	it("keeps a timed-out ask as a one-line row beside an open one, which stays fully offered", async () => {
@@ -611,12 +611,12 @@ describe("AsksSheet", () => {
 		expect(row.textContent).toContain("Timed out");
 		expect(row.textContent).toContain("ship the fix?");
 		expect(screen.getByPlaceholderText("Your answer")).toBeTruthy();
-		expect(screen.queryByRole("button", { name: /Dismiss — send no reply/ })).toBeNull();
+		expect(screen.queryByRole("button", { name: /^Dismiss$/ })).toBeNull();
 	});
 });
 
 /* THE PANEL'S SHAPE (ask-panel parity with the native app): one open card, the
-   other waiting asks as one-line rows, settled asks under "Earlier", and the
+   other waiting asks as one-line rows, settled asks under "Settled", and the
    controls that answer the open card PINNED outside the scrolling body. */
 describe("the ask panel", () => {
 	beforeEach(() => localStorage.clear());
@@ -721,11 +721,11 @@ describe("the ask panel", () => {
 			expect(document.activeElement).toBe(screen.getByTestId("ask-question-text")),
 		);
 		expect(screen.getByTestId("ask-question-text").textContent).toBe("second question?");
-		// The answered one is now under "Earlier", one line.
-		await waitFor(() => expect(screen.getByRole("heading", { name: "Earlier" })).toBeTruthy());
+		// The answered one is now under "Settled", one line.
+		await waitFor(() => expect(screen.getByRole("heading", { name: "Settled" })).toBeTruthy());
 	});
 
-	it("puts answered asks under Earlier, expanding in place, never between options and buttons", async () => {
+	it("puts answered asks under Settled, expanding in place, never between options and buttons", async () => {
 		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
 			asks: [
 				ask({ ask_id: "done", status: "answered", delivered: true, answers: { q1: ["blue"] } }),
@@ -733,7 +733,7 @@ describe("the ask panel", () => {
 			],
 		});
 		open();
-		const heading = await screen.findByRole("heading", { name: "Earlier" });
+		const heading = await screen.findByRole("heading", { name: "Settled" });
 		const rows = screen.getAllByTestId("ask-row");
 		expect(rows).toHaveLength(1);
 		expect(rows[0].getAttribute("data-ask-id")).toBe("done");
@@ -763,9 +763,9 @@ describe("the ask panel", () => {
 		});
 		open();
 		const bar = await screen.findByTestId("asks-bar");
-		await waitFor(() => expect(bar.textContent).toContain("0 of 2 answered"));
+		await waitFor(() => expect(bar.textContent).toContain("0 of 2 questions answered or skipped"));
 		fireEvent.click(screen.getAllByRole("radio", { name: /^yes$/ })[0]);
-		expect(bar.textContent).toContain("1 of 2 answered");
+		expect(bar.textContent).toContain("1 of 2 questions answered or skipped");
 		fireEvent.click(screen.getAllByRole("radio", { name: /^yes$/ })[1]);
 		expect(bar.textContent).not.toContain("answered");
 		expect((within(bar).getByRole("button", { name: /Send answers/ }) as HTMLButtonElement).disabled).toBe(false);
@@ -799,5 +799,81 @@ describe("the ask panel", () => {
 		(getAsks as ReturnType<typeof vi.fn>).mockImplementation(() => new Promise(() => {}));
 		open();
 		expect(screen.getByText("Reading questions…")).toBeTruthy();
+	});
+
+	it("lays the panel out as card, waiting rows, Settled, then the pinned bar", async () => {
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [
+				ask({ ask_id: "gone", status: "answered", delivered: true, answers: { q1: ["blue"] } }),
+				choice("open", "first?"),
+				choice("wait", "second?"),
+			],
+		});
+		open();
+		const card = await screen.findByTestId("ask-card");
+		await waitFor(() => expect(screen.getAllByTestId("ask-row").length).toBe(2));
+		const rows = screen.getAllByTestId("ask-row");
+		const waiting = rows.find((row) => row.getAttribute("data-ask-id") === "wait") as HTMLElement;
+		const settledRow = rows.find((row) => row.getAttribute("data-ask-id") === "gone") as HTMLElement;
+		const heading = screen.getByRole("heading", { name: "Settled" });
+		const bar = screen.getByTestId("asks-bar");
+		const before = (a: Element, b: Element) =>
+			Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+		expect(before(card, waiting)).toBe(true);
+		expect(before(waiting, heading)).toBe(true);
+		expect(before(heading, settledRow)).toBe(true);
+		expect(before(settledRow, bar)).toBe(true);
+		expect(screen.queryByText("Earlier")).toBeNull();
+	});
+
+	it("draws a waiting row with the question first and the whole state sentence under it", async () => {
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [
+				choice("open", "first?"),
+				{ ...choice("wait", "Which cookie should the agent bake for the long weekend party?"), urgent: true },
+			],
+		});
+		open();
+		const row = await screen.findByTestId("ask-row");
+		const [question, state] = Array.from(row.querySelectorAll(":scope > span:first-child > span")) as HTMLElement[];
+		expect(question.textContent).toBe("Which cookie should the agent bake for the long weekend party?");
+		expect(question.className).toContain("line-clamp-2");
+		expect(question.className).toContain("font-medium");
+		expect(question.className).toContain("text-ink");
+		// The state sentence is never cut, and its urgent mark is warning ink.
+		expect(state.className).not.toContain("truncate");
+		expect(state.textContent).toMatch(/^Queued — the agent is continuing; expires in .* · Urgent$/);
+		expect(state.querySelector(".text-warning")?.textContent).toContain("· Urgent");
+		// The caret mirrors in a right-to-left layout.
+		expect(row.querySelector(".lo-directional")).toBeTruthy();
+	});
+
+	it("names the conversation on the first line inside a row when the sheet holds several", async () => {
+		rows = [
+			summary({ session_id: "mine" }),
+			summary({ session_id: "other", conversation_name: "tax receipts" }),
+		];
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [
+				{ ...choice("a", "first?"), session_id: "mine" },
+				{ ...choice("b", "second?"), session_id: "other" },
+			],
+		});
+		render(<AsksSheet open onClose={() => {}} currentSessionId="" />);
+		const row = await screen.findByTestId("ask-row");
+		const lines = Array.from(row.querySelector("span")!.children) as HTMLElement[];
+		expect(lines[0].textContent).toBe("tax receipts");
+		expect(lines[1].textContent).toBe("second?");
+	});
+
+	it("draws Try again as an outline button, left-aligned under the error line", async () => {
+		(getAsks as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("could not reach the daemon"));
+		open();
+		const line = await screen.findByText("could not reach the daemon");
+		const retry = screen.getByRole("button", { name: "Try again" });
+		expect(retry.className).toContain("border");
+		expect(retry.className).toContain("border-control");
+		expect(line.parentElement).toBe(retry.parentElement);
+		expect(line.parentElement?.className).toContain("items-start");
 	});
 });
