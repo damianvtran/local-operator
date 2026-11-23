@@ -7192,7 +7192,23 @@ class MockClient:
         # fresh runaway and a follow-up after Esc looped identically (round 2,
         # U6/N2). A real provider decides per request; the mock's closest
         # analogue is the newest instruction.
-        last_user = next((m for m in reversed(messages) if m.role == "user"), None)
+        #
+        # ``_ephemeral`` messages are request-local tails, never the user's
+        # words: the voice session appends its spoken-summary note as the LAST
+        # message of a dictated turn. Reading that tail as the newest message
+        # hid every marker in the dictated text, so the turn answered at once
+        # and a steer landed on a finished turn (QA round 2, Q1). Both the
+        # marker text and the "newest message" test skip them; a real provider
+        # reads the note as an instruction, not as the user's request.
+        newest = next((m for m in reversed(messages) if not getattr(m, "_ephemeral", False)), None)
+        last_user = next(
+            (
+                m
+                for m in reversed(messages)
+                if m.role == "user" and not getattr(m, "_ephemeral", False)
+            ),
+            None,
+        )
         # ``[hang]``: a request that NEVER returns. The one shape that leaves a
         # runtime busy with nothing this process can read as a step — the
         # parent's own provider request is not a term of
@@ -7205,12 +7221,7 @@ class MockClient:
         # end without it. Scoped to the NEWEST user instruction, like
         # ``[bash:N]`` and for its reason: a marker that stayed in the
         # transcript would hang every later request of the session.
-        hangs = (
-            last_user is not None
-            and messages
-            and messages[-1] is last_user
-            and "[hang]" in last_user.text
-        )
+        hangs = last_user is not None and newest is last_user and "[hang]" in last_user.text
         if hangs:
             # Park forever: the consumer sees a request in flight and nothing
             # else, which is the marker's whole contract. Cancellation at
@@ -7219,13 +7230,13 @@ class MockClient:
             await asyncio.Event().wait()
             return
         wants_tool = last_user is not None and "[tool]" in last_user.text
-        # ``[bash:N]`` fires ONCE per prompt: only when the newest message is
-        # the user's. After the tool result comes back the newest message is
-        # the tool row, and the mock answers with text so the turn completes
-        # instead of sleeping again forever.
+        # ``[bash:N]`` fires ONCE per prompt: only when the newest real message
+        # is the user's. After the tool result comes back the newest real
+        # message is the tool row, and the mock answers with text so the turn
+        # completes instead of sleeping again forever.
         sleep_for = (
             _mock_bash_sleep(last_user.text)
-            if last_user is not None and messages and messages[-1] is last_user
+            if last_user is not None and newest is last_user
             else None
         )
         if sleep_for is not None:
@@ -7254,7 +7265,7 @@ class MockClient:
         # production path. Scoped to the newest USER message for the same reason
         # as ``[bash:N]``: the marker remains in history, and after the tool
         # result the newest message is the tool row, so the follow-up completes.
-        askable = last_user is not None and bool(messages) and messages[-1] is last_user
+        askable = last_user is not None and newest is last_user
         ask_kind = _mock_ask_kind(last_user.text) if askable and last_user is not None else None
         if ask_kind is not None:
             question: dict[str, Any] = (

@@ -202,3 +202,13 @@ def test_the_spoken_fields_are_unchanged_for_a_table_and_code_reply() -> None:
         "Pre yes no one two (code block omitted) See docs or link now.",
     )
     assert not hasattr(reply, "full_text")
+
+
+def test_speak_segments_reports_the_summary_source_and_segments_it() -> None:
+    reply = "Long report. " * 40 + "\n\nSpoken: Two short sentences. Heard once."
+    spoken = speak_segments(reply, max_chars=800)
+    assert spoken.source == "summary"
+    assert spoken.text == "Two short sentences. Heard once."
+    assert "".join(spoken.segments) == spoken.text
+    assert speak_segments("Long report. " * 40, max_chars=800).source == "reply"
+    assert speak_segments(reply, max_chars=800, summary=False).source == "reply"
