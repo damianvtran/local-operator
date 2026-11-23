@@ -386,6 +386,49 @@ STT_TOO_LARGE_ERROR = (
     "Try a shorter clip."
 )
 
+#: The client classes the transcribe log line may name. The web client and the
+#: phone app declare themselves with a multipart ``client`` field; anything else
+#: (an older client, a probe, a hand-rolled curl) is classified coarsely from
+#: the User-Agent instead of being echoed, because that field is caller input
+#: and this value lands in a log line.
+STT_CLIENT_KINDS = frozenset({"web", "app"})
+
+
+def _stt_log_text(value: str, limit: int = 200) -> str:
+    """Caller-influenced text made safe to place in ONE log record.
+
+    ``media_type`` is the uploaded part's own ``Content-Type`` and ``detail`` is
+    a transport failure's sentence: both are caller text. A newline inside one
+    forges a second record — python-multipart accepts a bare LF in a part-header
+    value, so ``Content-Type: audio/x\\nFAKE status=200`` used to render as two
+    lines, the second reading as a successful call in a grep of ``mobile.log``.
+    Non-printables become spaces rather than escapes: a log file is read, never
+    round-tripped, so a literal ``\\n`` would be noise, not fidelity.
+    """
+    printable = "".join(ch if ch.isprintable() else " " for ch in value)
+    return printable.strip()[:limit]
+
+
+def _stt_client_kind(declared: Any, user_agent: str) -> str:
+    """The coarse client class for the transcription refusal line.
+
+    ``declared`` is the request's own ``client`` field when the body parsed (a
+    pre-parse refusal has none). The User-Agent fallback exists so a 413 that
+    never read the body still says which surface hit the cap; React Native's
+    fetch sends ``okhttp``/``CFNetwork`` and a browser sends ``Mozilla/5.0``,
+    so two substrings separate the shipped surfaces without a UA database.
+    """
+    value = declared.strip().lower() if isinstance(declared, str) else ""
+    if value in STT_CLIENT_KINDS:
+        return value
+    agent = user_agent.lower()
+    if "okhttp" in agent or "cfnetwork" in agent or "expo" in agent:
+        return "app"
+    if "mozilla" in agent or "applewebkit" in agent:
+        return "web"
+    return "unknown"
+
+
 #: Memo for the STATIC half of the lifted feature-flag dict
 #: (``capabilities.features``). Only ``server.features.static_feature_flags``
 #: is cached: those keys are build facts, while the live half (the
@@ -11600,6 +11643,74 @@ def build_app(daemon: MobileDaemon):
         denied = gate(request)
         if denied is not None:
             return denied
+        # The refusal line's fields, filled in as the request is read: locals a
+        # ``refusal`` closure reads at call time, so each arm below stays the
+        # one-line answer it was instead of nine copies of the same log call.
+        user_agent = str(request.headers.get("user-agent") or "")
+        client_kind = _stt_client_kind(None, user_agent)
+        session_ref: str | None = None
+        audio_bytes: int | None = None
+        media_type = ""
+        provider = ""
+
+        def refusal(
+            status: int,
+            code: str,
+            body: dict[str, str],
+            *,
+            upstream: str = "-",
+            detail: str = "",
+        ) -> Response:
+            """Answer a transcription refusal with ONE operator log line.
+
+            WHY one line, and this shape: a phone report says "transcription
+            failed" and this route used to answer with a status and nothing
+            else, so afterwards nobody could name the hop (ours, Radient's, the
+            provider's) or the reason. These are the fields that split that
+            question: our status and code (also the request log's ``reason``,
+            through ``note_reason``), the provider label, the upstream status
+            or exception class, the client class, the session, the size and
+            the media type.
+
+            WHAT IS NEVER HERE: the audio, the Authorization header, the
+            upstream body (it can carry a credential or an account name, and
+            the classifier has already read it), any header value or cookie.
+            ``detail`` is the ONE tolerated free text — a transport failure's
+            own sentence ("connection refused"), truncated; it never carries a
+            response body. Both fields below are caller text: ``media`` is
+            allowlisted and ``detail`` goes through ``_stt_log_text`` before
+            this ONE record is written.
+            """
+            note_reason(request.scope, code)
+            # The part's Content-Type is whatever the client sent, and it lands
+            # in a log line: only an allowlisted media type is echoed, anything
+            # else is the literal ``other`` (a pre-parse arm has none: ``-``).
+            # Logged raw, ``audio/x\nFAKE status=200`` forged a second record
+            # that reads as a successful call — see ``_stt_log_text``.
+            if not media_type:
+                media_log = "-"
+            elif media_type in STT_MIME_ALLOWLIST:
+                media_log = media_type
+            else:
+                media_log = "other"
+            detail_log = _stt_log_text(detail) if detail else ""
+            logger.warning(
+                "mobile transcription refused: status=%s code=%s provider=%s upstream=%s "
+                "client=%s session=%s bytes=%s media=%s%s",
+                status,
+                code,
+                provider or "-",
+                upstream,
+                client_kind,
+                session_ref or "-",
+                # The audio part's own size once it was read; the declared body
+                # length when the header refused it before the parse.
+                "-" if audio_bytes is None else audio_bytes,
+                media_log,
+                f" detail={detail_log}" if detail_log else "",
+            )
+            return JSONResponse(body, status_code=status)
+
         declared = request.headers.get("content-length")
         if declared is not None and declared.isdigit():
             # Multipart framing costs a few hundred bytes; the 1 MB of slack
@@ -11607,35 +11718,55 @@ def build_app(daemon: MobileDaemon):
             # admitting a sizeably larger one (the post-read check is the real
             # bound).
             if int(declared) > STT_MAX_UPLOAD_BYTES + (1 << 20):
-                return JSONResponse({"error": STT_TOO_LARGE_ERROR}, status_code=413)
+                audio_bytes = int(declared)
+                return refusal(413, "stt_too_large", {"error": STT_TOO_LARGE_ERROR})
         try:
             form = await request.form()
-        except Exception:  # noqa: BLE001 — a malformed multipart body is a 422, not a 500
-            return JSONResponse({"error": "invalid multipart body"}, status_code=422)
-        from starlette.datastructures import UploadFile as StarletteUploadFile
-
-        audio = form.get("audio")
-        if not isinstance(audio, StarletteUploadFile):
-            return JSONResponse({"error": "audio file is required"}, status_code=422)
-        try:
-            payload = await audio.read()
-        finally:
-            await audio.close()
-        if not payload:
-            return JSONResponse({"error": "audio file is empty"}, status_code=422)
-        if len(payload) > STT_MAX_UPLOAD_BYTES:
-            return JSONResponse({"error": STT_TOO_LARGE_ERROR}, status_code=413)
-        media_type = str(audio.content_type or "").split(";", 1)[0].strip().lower()
-        if media_type not in STT_MIME_ALLOWLIST:
-            return JSONResponse(
-                {"error": f"Unsupported audio format: {media_type or 'unknown'}."},
-                status_code=422,
+        except Exception as exc:  # noqa: BLE001 — a malformed multipart body is a 422, not a 500
+            return refusal(
+                422,
+                "stt_invalid_multipart",
+                {"error": "invalid multipart body"},
+                upstream=type(exc).__name__,
             )
+        from starlette.datastructures import UploadFile as StarletteUploadFile
 
         def _optional_field(name: str) -> str | None:
             """A form text field, or None when absent/blank (forward-compat)."""
             value = form.get(name)
             return value if isinstance(value, str) and value.strip() else None
+
+        # WHO is calling, for the log line only: an allowlisted ``client`` word
+        # (never echoed) and the session, kept only when it matches the daemon's
+        # own id shape — anything else is dropped rather than written out. Read
+        # here, before the audio checks, so a 413/422 still names its caller.
+        client_kind = _stt_client_kind(_optional_field("client"), user_agent)
+        declared_session = _optional_field("session_id")
+        if declared_session is not None:
+            from local_operator.session.attention import _SESSION_ID_RE
+
+            if _SESSION_ID_RE.fullmatch(declared_session):
+                session_ref = declared_session
+
+        audio = form.get("audio")
+        if not isinstance(audio, StarletteUploadFile):
+            return refusal(422, "stt_audio_missing", {"error": "audio file is required"})
+        try:
+            payload = await audio.read()
+        finally:
+            await audio.close()
+        audio_bytes = len(payload)
+        media_type = str(audio.content_type or "").split(";", 1)[0].strip().lower()
+        if not payload:
+            return refusal(422, "stt_audio_empty", {"error": "audio file is empty"})
+        if len(payload) > STT_MAX_UPLOAD_BYTES:
+            return refusal(413, "stt_too_large", {"error": STT_TOO_LARGE_ERROR})
+        if media_type not in STT_MIME_ALLOWLIST:
+            return refusal(
+                422,
+                "stt_unsupported_media",
+                {"error": f"Unsupported audio format: {media_type or 'unknown'}."},
+            )
 
         from local_operator.clients._http import APIError
         from local_operator.clients.stt import SttBackendUnavailable
@@ -11662,6 +11793,7 @@ def build_app(daemon: MobileDaemon):
         # provider label and the dispatch both use is the SAME read (the module
         # caches anyway; passing it makes the route's view internally coherent).
         answer = await stt_availability()
+        provider = path_provider_label(answer.get("path"))
         try:
             outcome = await transcribe_audio(
                 payload,
@@ -11672,34 +11804,59 @@ def build_app(daemon: MobileDaemon):
                 cleanup=requested_cleanup or default_cleanup,
                 availability=answer,
             )
-        except SttBackendUnavailable:
+        except SttBackendUnavailable as exc:
             # Defence in depth: availability said available a moment ago (or the
             # caller raced a cache expiry); the fixed sentence keeps the phone's
             # copy stable whatever the rung-level reason was.
-            return JSONResponse(
+            return refusal(
+                503,
+                "stt_unavailable",
                 {
                     "error": "Voice input isn't available on this machine.",
                     "code": "stt_unavailable",
                 },
-                status_code=503,
+                upstream=type(exc).__name__,
             )
         except APIError as exc:
-            status, body = describe_stt_failure(
-                exc, provider=path_provider_label(answer.get("path"))
+            status, body = describe_stt_failure(exc, provider=provider)
+            # A transport failure (no status) never reached the upstream: its own
+            # sentence is the diagnostic and carries no body. A statused refusal
+            # is named by the NUMBER only — its body can carry an account name.
+            transport = exc.status_code is None
+            return refusal(
+                status,
+                str(body.get("code") or "stt_upstream"),
+                body,
+                upstream=str(exc.status_code) if not transport else type(exc).__name__,
+                detail=str(exc) if transport else "",
             )
-            return JSONResponse(body, status_code=status)
         except ValueError as exc:
             # A pre-admission refusal from the client's own validators (prompt
             # length, language shape): 422, the daemon's shape-refusal status.
-            return JSONResponse({"error": str(exc)}, status_code=422)
+            return refusal(
+                422,
+                "stt_invalid_request",
+                {"error": str(exc)},
+                upstream=type(exc).__name__,
+            )
         except RuntimeError as exc:
             # A plain RuntimeError is OURS: the clients raise one only for a
             # server-side configuration fault (no Radient key) or an unforeseen
             # internal error; every upstream failure arrives typed (above).
-            return JSONResponse({"error": str(exc)}, status_code=500)
-        except Exception:  # noqa: BLE001 — an unforeseen fault stays a 500
+            return refusal(
+                500,
+                "stt_internal",
+                {"error": str(exc)},
+                upstream=type(exc).__name__,
+            )
+        except Exception as exc:  # noqa: BLE001 — an unforeseen fault stays a 500
             logger.exception("mobile transcription failed unexpectedly")
-            return JSONResponse({"error": "Voice input failed unexpectedly."}, status_code=500)
+            return refusal(
+                500,
+                "stt_internal",
+                {"error": "Voice input failed unexpectedly."},
+                upstream=type(exc).__name__,
+            )
         return JSONResponse(
             {
                 "text": outcome.text,

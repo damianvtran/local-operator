@@ -10,6 +10,7 @@ THE SAME BYTES it reads sessions from.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -421,3 +422,208 @@ def test_a_request_cleanup_does_not_read_the_settings_file(
 
     assert response.status_code == 200
     assert calls[0]["cleanup"] == "client"
+
+
+# --- the refusal line ---------------------------------------------------------
+#
+# A phone report says "transcription failed", and before this the daemon answered
+# with a status and nothing else: the hop (ours, Radient's, the provider's), the
+# client and the size could not be named afterwards. These pin the ONE warning
+# line each refusal arm now writes, the reason code it hands the request log, and
+# the thing it must never write: the upstream body.
+
+
+def _refusal_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """The route's own warning records, as rendered messages."""
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "local_operator.mobile.daemon" and record.levelname == "WARNING"
+    ]
+
+
+def _post_with_fields(client: TestClient, data: dict[str, str] | None = None) -> Any:
+    return client.post("/api/transcribe", data=data or {}, **_audio())
+
+
+def test_a_refusal_logs_one_support_line_without_the_upstream_body(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Composed, so no credential scanner mistakes the fixture for a real one.
+    marker = "private" + "-body-token-" + str(42)
+    _stub_dispatch(
+        monkeypatch,
+        error=APIError("upstream refused", status_code=502, body=f"token {marker} rejected"),
+    )
+    client = _logged_in()
+    with caplog.at_level("WARNING", logger="local_operator.mobile.daemon"):
+        response = _post_with_fields(client, {"client": "web", "session_id": "abcdef123456"})
+
+    assert response.status_code == 502
+    lines = _refusal_lines(caplog)
+    assert len(lines) == 1
+    line = lines[0]
+    assert "status=502" in line
+    assert "code=stt_upstream" in line
+    assert f"provider={mobile_stt.path_provider_label('provider_stt_radient')}" in line
+    assert "upstream=502" in line
+    assert "client=web" in line
+    assert "session=abcdef123456" in line
+    assert "bytes=16" in line  # len(b"not-really-audio")
+    assert "media=audio/wav" in line
+    # The upstream body is the one thing that can carry a credential: it is read
+    # by the classifier and never written out.
+    assert marker not in line
+    assert marker not in caplog.text
+
+
+def test_a_transport_failure_is_named_by_class_and_its_own_sentence(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _stub_dispatch(monkeypatch, error=APIError("Connection refused", status_code=None))
+    client = _logged_in()
+    with caplog.at_level("WARNING", logger="local_operator.mobile.daemon"):
+        response = _post_with_fields(client)
+
+    assert response.status_code == 502
+    line = _refusal_lines(caplog)[0]
+    assert "upstream=APIError" in line
+    assert "detail=Connection refused" in line
+
+
+def _injected_multipart(media_type: str) -> bytes:
+    """A multipart body whose audio part declares ``media_type`` verbatim.
+
+    httpx refuses to build a header with a bare LF in it, so the body is written
+    by hand: python-multipart accepts the LF inside a part-header VALUE, which is
+    how a caller controls ``UploadFile.content_type``.
+    """
+    boundary = "probe-not-closed"
+    return (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="audio"; filename="a.wav"\r\n'
+        f"Content-Type: {media_type}\r\n"
+        "\r\n"
+        "not-really-audio\r\n"
+        f"--{boundary}--\r\n"
+    ).encode()
+
+
+def test_a_forged_media_type_cannot_split_the_refusal_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The part's Content-Type is caller text and used to reach the log raw.
+
+    Logged before the allowlist check, ``audio/x\\nFAKE status=200 code=ok``
+    rendered as TWO lines in ``mobile.log`` — the second reading as a successful
+    call to any ``grep``, which is the triage this line exists to support. Only
+    an allowlisted media type is echoed now; anything else is ``other``.
+    """
+    client = _logged_in()
+    with caplog.at_level("WARNING", logger="local_operator.mobile.daemon"):
+        response = client.post(
+            "/api/transcribe",
+            content=_injected_multipart("audio/x\nFAKE status=200 code=ok"),
+            headers={"content-type": "multipart/form-data; boundary=probe-not-closed"},
+        )
+
+    assert response.status_code == 422
+    lines = _refusal_lines(caplog)
+    assert len(lines) == 1
+    line = lines[0]
+    assert "media=other" in line
+    # Neither the forged record's break nor the tokens that made it read as a
+    # successful call.
+    assert "\n" not in line
+    assert "\r" not in line
+    assert "status=200" not in line
+    assert "code=ok" not in line
+
+
+def test_control_characters_in_a_transport_detail_cannot_split_the_line(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A transport failure's sentence is free text: it stays ONE record too."""
+    _stub_dispatch(
+        monkeypatch,
+        error=APIError("connection\r\nrefused\x00 by the far end", status_code=None),
+    )
+    client = _logged_in()
+    with caplog.at_level("WARNING", logger="local_operator.mobile.daemon"):
+        response = _post_with_fields(client)
+
+    assert response.status_code == 502
+    line = _refusal_lines(caplog)[0]
+    assert "\n" not in line
+    assert "\r" not in line
+    assert "\x00" not in line
+    assert "detail=connection" in line
+
+
+def test_a_quota_refusal_logs_the_quota_code(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _stub_dispatch(monkeypatch, error=APIError("balance", status_code=402))
+    client = _logged_in()
+    with caplog.at_level("WARNING", logger="local_operator.mobile.daemon"):
+        response = _post_with_fields(client)
+
+    assert response.status_code == 402
+    line = _refusal_lines(caplog)[0]
+    assert "status=402" in line
+    assert "code=stt_quota" in line
+
+
+def test_the_client_word_is_allowlisted_and_a_bad_session_id_is_dropped(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _stub_dispatch(monkeypatch, error=APIError("upstream refused", status_code=502))
+    client = _logged_in()
+    with caplog.at_level("WARNING", logger="local_operator.mobile.daemon"):
+        _post_with_fields(client, {"client": "curl", "session_id": "not-a-session"})
+
+    line = _refusal_lines(caplog)[0]
+    # The client word is caller-controlled: only the allowlist is echoed, and
+    # httpx's own User-Agent is not a browser or the app, so the class is honest.
+    assert "client=unknown" in line
+    assert "session=-" in line
+
+
+def test_the_header_refusal_logs_the_declared_size(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(daemon_mod, "STT_MAX_UPLOAD_BYTES", 32)
+    client = _logged_in()
+    body = b"x" * (32 + (1 << 20) + 16)
+    with caplog.at_level("WARNING", logger="local_operator.mobile.daemon"):
+        response = client.post(
+            "/api/transcribe",
+            content=body,
+            headers={"content-type": "multipart/form-data; boundary=never-closed"},
+        )
+
+    assert response.status_code == 413
+    line = _refusal_lines(caplog)[0]
+    assert "status=413" in line
+    assert "code=stt_too_large" in line
+    # The parse never ran, so the only size there is to name is the declared one.
+    assert f"bytes={len(body)}" in line
+
+
+def test_a_shape_refusal_sets_the_request_logs_reason(tmp_path: Any) -> None:
+    """`reason` in mobile-requests.log is no longer blank for a transcribe refusal."""
+    from local_operator.tunnels.request_log import RequestLog
+
+    path = tmp_path / "requests.log"
+    app = RequestLog(path).middleware(build_app(MobileDaemon(port=0, password="pw123")))
+    client = TestClient(app, follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+
+    refused = client.post("/api/transcribe", data={"language": "en"})
+
+    assert refused.status_code == 422
+    entries = [json.loads(row) for row in path.read_text().splitlines() if row.strip()]
+    transcribes = [entry for entry in entries if entry["path"] == "/api/transcribe"]
+    assert transcribes, entries
+    assert transcribes[-1]["status"] == 422
+    assert transcribes[-1]["reason"] == "stt_audio_missing"
