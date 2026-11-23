@@ -4766,7 +4766,8 @@ def _bound_usage_diagnostics_in_place(payload: dict[str, Any], snapshot: dict[st
 def _yield_asks_when_the_frame_has_no_room(
     snapshot: dict[str, Any], payload: dict[str, Any]
 ) -> None:
-    """Drop the ask list entirely when the frame it rides is already full.
+    """Drop ask rows — tails, then the head — when the frame it rides is already
+    full, and the ``asks_open`` tally only if even that cannot pay.
 
     THE LAST-RESORT YIELD, and the reason it is needed rather than a smaller
     constant: the attach frame has essentially no slack at the all-maximum shape
@@ -4795,14 +4796,27 @@ def _yield_asks_when_the_frame_has_no_room(
     the tail's bytes:
 
     1. the TAIL goes and the HEAD row stays whole (``asks_truncated`` says the
-       list is a prefix) — the same "the head ask always survives" rule
-       :func:`bound_ask_rows` applies to the text budget, extended to the
-       frame. While a row rides, an ask-kind ``pending_gate`` mirror is
-       suppressed by the client in favour of the Asks panel, which is the
-       surface that can answer a remote ask;
+       list is a prefix) — the rule :func:`bound_ask_rows` applies to the
+       text budget, extended to the frame. Unlike that bound, the head does
+       NOT always survive here: a lone head that cannot fit goes at step 2
+       (with one row, step 1 has no tail to drop). While a row rides, an
+       ask-kind ``pending_gate`` mirror is suppressed by the client in
+       favour of the Asks panel, which is the surface that can answer a
+       remote ask;
     2. the rows go and the TALLY stays — the same absence form
        :func:`_bound_asks_in_place` ships (``asks_open`` is the capability
-       signal; ``asks_truncated`` goes with the rows it describes);
+       signal; ``asks_truncated`` goes with the rows it describes).
+       RESIDUAL BAND, not covered by this step: ``asks_open`` is core's
+       capability signal, but the shipped desktop client suppresses the
+       ask-kind ``pending_gate`` mirror on the ROWS only (local-operator-ui
+       ``ask-queue.ts`` ``sessionAsks`` returns null unless ``asks`` is an
+       array), so a frame that lands here still draws the legacy dock, which
+       cannot answer a remote ask. Because the receipt tail is trimmed first,
+       this band is only a frame over the line by MORE than the whole tail
+       can pay (~60 KB at the 200-row ``USAGE_COMPONENT_CAP``). Core cannot
+       close it alone — popping the mirror with the rows would leave the ask
+       with no answering surface — so the fix is UI-side: suppress on rows OR
+       tally and render from the aggregate ``GET /v1/desktop/asks``;
     3. only then the tally goes too.
 
     STEP 3 IS THE ONE PLACE THE TALLY YIELDS WITH THE ROWS (the WIRE FIX's
@@ -5085,10 +5099,11 @@ def _bound_goal_record_in_place(payload: dict[str, Any], snapshot: dict[str, Any
 #: is not. What bounds the BYTES of one huge head row is the frame, not this
 #: function, and each route has its own backstop. On the attach snapshot,
 #: ``_yield_asks_when_the_frame_has_no_room`` yields in steps (tail rows, then
-#: the head row, and the ``asks_open`` tally only last) and says so. On the delta route nothing yields the field
-#: alone: ``fit_frame_for_wire`` → ``relay_frame_or_degraded`` sheds the WHOLE
-#: ``frontend_update`` body — every other change in that delta with it — as a
-#: sequenced ``degraded`` placeholder, and the viewer re-syncs. Either way the
+#: the head row, and the ``asks_open`` tally only last) and says so. On the
+#: delta route nothing yields the field alone: ``fit_frame_for_wire`` →
+#: ``relay_frame_or_degraded`` sheds the WHOLE ``frontend_update`` body —
+#: every other change in that delta with it — as a sequenced ``degraded``
+#: placeholder, and the viewer re-syncs. Either way the
 #: ask stays answerable through the aggregate ``GET /v1/desktop/asks``.
 #:
 #: The ask field's text budget, and the allowance for the TAIL only. Spent in the

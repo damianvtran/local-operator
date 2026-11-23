@@ -1401,8 +1401,7 @@ def test_the_head_ask_outlives_the_tail_when_the_frame_is_full() -> None:
 def _crowded_mirror_state(*, receipts: int, cwd: int = 0) -> FrontendSessionState:
     """One open ask, its legacy ``pending_gate`` mirror, and a receipt tail."""
     from local_operator.asks.render import mirror_card
-    from local_operator.harness.types import Usage
-    from local_operator.session.frontend_state import PendingGateState
+    from local_operator.session.frontend_state import FrontendUsage, PendingGateState
 
     row = _ask_row(0, text="Ship the release?")
     card = mirror_card([row])
@@ -1419,7 +1418,7 @@ def _crowded_mirror_state(*, receipts: int, cwd: int = 0) -> FrontendSessionStat
             title=card["title"],
             options=card["options"],
         ),
-        usage_components=[Usage(input_tokens=index + 1) for index in range(receipts)],
+        usage_components=[FrontendUsage(input_tokens=index + 1) for index in range(receipts)],
     )
 
 
