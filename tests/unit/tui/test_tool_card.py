@@ -79,6 +79,8 @@ from local_operator.tui.widgets.tool_card import (
     ToolCard,
     _category_element,
     compact_path,
+    detail_indent,
+    row_indent,
 )
 from local_operator.tui.widgets.transcript import (
     NoticeBlock,
@@ -3548,7 +3550,7 @@ def test_a_running_rows_duration_advances_and_holds_the_settled_column() -> None
     use, so settling does not make the row jump.
     """
     card = ToolCard("t", "bash", {"command": "sleep 30"})
-    assert card._build_row(80).plain.rstrip().endswith("0s")
+    assert card._build_row(80).plain.rstrip().endswith("<0.1s")
 
     # A card built here started its own clock; ``_started`` is only ``None`` for
     # a card adopted through ``restore()``, which refuses to time a row it did
@@ -4024,6 +4026,40 @@ def test_a_settled_row_ignores_a_start_epoch() -> None:
     assert "27s" not in row, "the epoch has no part in a settled receipt"
 
 
+def test_duration_s_reports_the_measured_interval_or_the_live_age() -> None:
+    """The fold bars sum ``duration_s``; it must never invent a number.
+
+    Live: the age of a call that has started. Settled: the executor's measured
+    interval. Replayed: the persisted interval, restored rather than
+    recomputed from when the row was mounted. A card that cannot date itself
+    (restored ``running`` with no start epoch, a legacy row with no persisted
+    duration) reports ``None`` and the caller omits its time.
+    """
+    now = [1_000.0]
+    live = ToolCard("live", "bash", {"command": "sleep 3"}, clock=lambda: now[0])
+    live.begin_running("bash", {"command": "sleep 3"}, None)
+    now[0] = 1_002.5
+    assert live.duration_s == 2.5, "a running card reports its age so far"
+    live.mark_done("done")
+    assert live.duration_s == 2.5, "settling swaps the age for the measured interval"
+
+    replayed = ToolCard("replay", "bash", {"command": "sleep 3"}, clock=lambda: now[0])
+    replayed.restore(state="success", result_text="done", duration_s=6.0)
+    assert replayed.duration_s == 6.0, "replay restores the persisted interval"
+    assert not replayed.is_failed
+
+    unknown = ToolCard("unknown", "bash", {"command": "sleep 3"}, clock=lambda: now[0])
+    unknown.restore(state="running")
+    assert unknown.duration_s is None, "no start epoch, no number"
+
+    failed = ToolCard("failed", "bash", {"command": "false"})
+    failed.mark_failed("boom")
+    assert failed.is_failed
+    stopped = ToolCard("stopped", "bash", {"command": "sleep 3"})
+    stopped.mark_interrupted()
+    assert not stopped.is_failed, "interrupted is a stop, not a failure"
+
+
 def test_begin_running_arms_the_clock_from_the_epoch_when_it_has_one() -> None:
     """The re-entry arm, which the switch actually takes.
 
@@ -4082,7 +4118,7 @@ def test_an_unknown_start_mounts_clockless_where_none_still_means_begins_now() -
 
     ordinary = ToolCard("n", "bash", {"command": "sleep 30"}, clock=lambda: now[0])
     assert ordinary.started_at == 1_505.0, "the ordinary mount still takes the mount instant"
-    assert ordinary._build_row(80).plain.rstrip().endswith("0s")
+    assert ordinary._build_row(80).plain.rstrip().endswith("<0.1s")
 
 
 def test_a_row_that_watched_its_own_start_keeps_its_own_zero() -> None:
@@ -4097,7 +4133,7 @@ def test_a_row_that_watched_its_own_start_keeps_its_own_zero() -> None:
     card = ToolCard("t", "bash", {"command": "ls"}, clock=lambda: now[0])
     assert card.started_at == 3_000.0
     now[0] += 2.0
-    assert card._build_row(80).plain.rstrip().endswith("2s")
+    assert card._build_row(80).plain.rstrip().endswith("2.0s")
 
 
 def test_a_cut_off_turn_names_its_cards_cut_off() -> None:
@@ -4886,3 +4922,35 @@ def test_pending_stop_does_not_paint_as_a_completed_stop() -> None:
     # so the fix ambers the attention glyph and nothing else.
     refused.toggle_expanded()
     assert _triplet(_style_at(refused._build_content(80), "✗ stop accepted").color) == danger
+
+
+def test_detail_rows_follow_the_row_into_the_fold() -> None:
+    """An expanded call's body steps with its row, at every fold level.
+
+    The rows below the summary used the fixed ``OUTPUT_INDENT`` while the row
+    itself took ``row_indent(width, fold_depth)``, so a row revealed at col 6
+    of a 100-column frame sat above ``action:``/``target:``/``error:`` rows at
+    col 4 — the row walked right and left its own content behind, which reads
+    as another row's expansion. The body follows the row by the DELTA the row
+    took, so depth 0 is byte-identical to before the fold existed and every
+    deeper level keeps the one-cell drop the reader already knows.
+    """
+    card = ToolCard("t1", "bash", {"command": "pytest -q"})
+    card.restore(state="error", error="assert 1 == 2", duration_s=0.4)
+    assert card.toggle_expanded() is True
+
+    for depth in (0, 1, 2):
+        card.fold_depth = depth
+        card._built_width = 80
+        lines = card._build_content(80).plain.split("\n")
+        assert len(lines) > 2, "the expansion really has detail rows"
+        assert len(lines[0]) - len(lines[0].lstrip(" ")) == row_indent(80, depth)
+        for line in lines[1:]:
+            lead = len(line) - len(line.lstrip(" "))
+            assert lead == detail_indent(80, depth), (depth, line)
+        # One cell right of the row, exactly as the plain ledger had it, and
+        # the copy gutter reads the same cell the body drew at.
+        assert detail_indent(80, depth) - row_indent(80, depth) == OUTPUT_INDENT - ROW_INDENT
+        assert card.copy_gutter(1) == detail_indent(80, depth)
+
+    assert detail_indent(80, 0) == OUTPUT_INDENT
