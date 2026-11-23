@@ -109,5 +109,11 @@
   "cli.sessions_move_workset.deps_summary_unknown": "Không đọc được một số mục, nên trạng thái này chưa đầy đủ. Không có gì bị thay đổi.",
   "cli.sessions_move_workset.deps_summary_present_unverified": "Các thư mục phụ thuộc đã tồn tại, nhưng chưa được kiểm tra và có thể chưa đầy đủ.",
   "cli.sessions_move_workset.deps_summary_nothing_needed": "Ở đây không cần cây phụ thuộc nào.",
-  "cli.sessions_move_workset.deps_none": "Không có tập làm việc nào của {session} được khôi phục trên thiết bị này."
+  "cli.sessions_move_workset.deps_none": "Không có tập làm việc nào của {session} được khôi phục trên thiết bị này.",
+  "cli.sessions_move_workset.cwd_unknown": "Thư mục làm việc của cuộc trò chuyện này không được ghi lại, nên các thư mục mà nó nhắc đến không được tính vào và vẫn ở trên {source}: {paths}",
+  "cli.sessions_move_workset.cwd_unknown_advice": "Chúng có thể chứa công việc của cuộc trò chuyện này. Chỉ tiếp tục nếu bạn có thể hoàn tất hoặc push công việc đó trên {source}, hoặc không cần nó trên {device}.",
+  "cli.sessions_move_workset.yes_cwd_unknown": "--yes chưa xác nhận: lop không biết cuộc trò chuyện này đã làm việc trong thư mục nào, nên không thể biết các thư mục mà nó nhắc đến có chứa công việc của nó hay không, và --yes không quyết định điều đó thay bạn. Chưa chuyển gì. Xem lại chúng bằng --dry-run, rồi chạy lại với --confirm-working-set và digest mà --dry-run hiển thị để giữ chúng lại trên {source}, hoặc với --without-working-set.",
+  "cli.sessions_move_workset.needs_confirmation_cwd_unknown": "Xem lại các thư mục này bằng --dry-run, rồi chạy lại với --confirm-working-set {digest} để giữ chúng lại trên {source}, hoặc với --without-working-set.",
+  "cli.sessions_move_workset.receipt_cwd_unknown": "Các tệp làm việc chưa được chuyển: thư mục làm việc của cuộc trò chuyện này không được ghi lại, nên các thư mục mà nó nhắc đến vẫn ở trên {source}: {paths}",
+  "cli.sessions_move_workset.receipt_keep_cwd_unknown": "Bản sao trên {device} không có các thư mục mà cuộc trò chuyện này nhắc đến, vì thư mục làm việc của nó không được ghi lại; chúng vẫn ở trên {source}: {paths}"
 }

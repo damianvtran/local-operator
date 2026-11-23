@@ -1,0 +1,48 @@
+{
+ "slot": "independent slot 2",
+ "pr": 4403,
+ "freeze": "3030a5e5c47120191d3eb24ef78440d0170d4f2f",
+ "locale": "vi",
+ "namespace": "cli.sessions_move_workset",
+ "keys": [
+  "cwd_unknown",
+  "cwd_unknown_advice",
+  "yes_cwd_unknown",
+  "needs_confirmation_cwd_unknown",
+  "receipt_cwd_unknown",
+  "receipt_keep_cwd_unknown"
+ ],
+ "source_sha256": "d782f1ded36d43133e7a1c32db9bd89540030eecdba86be92e068b8a2850a480",
+ "context_sha256": "cc4712832270e6f8080a85343175b555f7db4378e58f9b4f844aacbc8ca26635",
+ "target_sha256": "15178cbc9a56c6c0c0986ee3c57ff893ada78fbdeea6c66f78995fd20532c9b4",
+ "target_method": "catalogue blob at 3030a5e5c + 6 translated values appended in en order, json.dumps(indent=2, ensure_ascii=False)+'\\n' (reproduces all 8 current catalogues byte-for-byte)",
+ "translations_file_sha256": "503d0deece06a0349573cbc9545bef6028dde9e98d87e87e6e83acce90178334",
+ "check_catalogues_only_on_merged": "2 problem(s): hi+ur needs_confirmation_cwd_unknown reordered (control: base catalogues = 42 missing-key problems)",
+ "findings": {
+  "T5-VI-1": {
+   "sev": "nit",
+   "locale": "vi",
+   "key": "cwd_unknown",
+   "current": "không được tính vào",
+   "proposed": "không được đưa vào",
+   "reason": "\"not counted in\" reads as accounting; \"not included\" is đưa vào."
+  }
+ },
+ "concurred_slot1": [
+  "L1-VI-1 (slot 1, nit): concur — nó can attach to the working folder"
+ ],
+ "blocker": 0,
+ "major": 0,
+ "verdict": "PASS",
+ "chained_on": {
+  "history_sha_at_freeze": "4d484f2393673ae1a2996e7616e50b501ef99aad3f6f70c046792f6ea32d862c",
+  "slot1_receipt_sha256": "f483dbc96d202bc7a0450569d298b979a02efc26358ab2c952894d43a02b788e",
+  "history_sha_after_slot1": "53fe769640caff5c539cb9f1a5ce80cbcb116000587c4c8aa6e88e64ab0a7856"
+ },
+ "auditor": {
+  "agent": "translation-auditor (lopdev) slot 2, session 6fd346121602",
+  "model": "anthropic/claude-opus-5-5",
+  "fallback": "none"
+ },
+ "limits": "no native-speaker review; no rendered terminal frame; agent-independent only (same model family as translator and slot 1)"
+}

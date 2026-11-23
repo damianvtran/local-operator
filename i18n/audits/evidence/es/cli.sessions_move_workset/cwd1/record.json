@@ -1,0 +1,58 @@
+{
+ "schema": 1,
+ "audit_id": "cwd1-es",
+ "audit_kind": "independent slot-1 semantic audit (PR #4403 cwd-unknown copy, 6 new keys)",
+ "pr": 4403,
+ "locale": "es",
+ "audit_date": "2026-11-21",
+ "freeze_head": "3030a5e5c47120191d3eb24ef78440d0170d4f2f",
+ "source_sha256": "d782f1ded36d43133e7a1c32db9bd89540030eecdba86be92e068b8a2850a480",
+ "context_sha256": "cc4712832270e6f8080a85343175b555f7db4378e58f9b4f844aacbc8ca26635",
+ "target_sha256": "e4af9cf3549b9aff531087516a3284a899d0a4e678c4bd73a62ca9377a5e0ccf",
+ "target_method": "catalogue at 3030a5e5c + 6 values appended in en order, json.dumps(ensure_ascii=False, indent=2)+'\\n' (verified to reproduce every current catalogue byte-for-byte)",
+ "translation_input": {
+  "path": "/home/ec2-user/.local-operator/sessions/9a6e88d78421/scratchpad/tr4403/es.json",
+  "sha256": "ec7a2a7f18850271c6870d45cb522056d11f1b21f6ff6f0a43dfe32a1864bc93",
+  "index_sha256": "51b82e36d16fcd24bf4147b57b458c0f34db006d0385753a9fa82b5e06b38201"
+ },
+ "keys_audited": [
+  "cwd_unknown",
+  "cwd_unknown_advice",
+  "yes_cwd_unknown",
+  "needs_confirmation_cwd_unknown",
+  "receipt_cwd_unknown",
+  "receipt_keep_cwd_unknown"
+ ],
+ "carried": "111 existing keys byte-identical to the catalogue certified at en 0f5602723eb9 (last receipt passed; en minus the 6 new keys hashes to 0f5602723eb9)",
+ "translator": {
+  "agent": "coder (lopdev)",
+  "session": "9a6e88d78421",
+  "model": "anthropic/claude-opus-5-5",
+  "fallback": "none",
+  "source": "session transcript (provider anthropic, model claude-opus-5-5 only)"
+ },
+ "auditor": {
+  "agent": "translation-auditor (lopdev)",
+  "session": "e507d894afb3",
+  "slot": 1,
+  "model": "anthropic/claude-opus-5-5",
+  "fallback": "none",
+  "model_independent": false
+ },
+ "result": "passed",
+ "unresolved_blocker_major": 0,
+ "findings_deferred": [],
+ "checks": [
+  "placeholder multiset parity 6/6",
+  "verbatim flags",
+  "no Cf/Cc",
+  "locale typography (fr U+202F, zh no CJK/Latin spaces, hi danda, ur ۔)",
+  "render_message with params, 0 unrendered",
+  "safety: listed folders stay on {source}; confirm = leave on {source}; yes refusal does not blame destination"
+ ],
+ "limitations": [
+  "no native-speaker review",
+  "no rendered terminal frame",
+  "agent-independent only (same model as translator)"
+ ]
+}

@@ -275,7 +275,7 @@ def test_sidecar_list_names_every_bookkeeping_file_the_harness_writes() -> None:
     from local_operator.asks import store
     from local_operator.session import compression, temporary
     from local_operator.session.auto_tag import AUTO_TAG_FILENAME
-    from local_operator.session.creation import CREATED_AT_NAME
+    from local_operator.session.creation import CREATED_AT_NAME, CWD_RECORD_NAME
     from local_operator.session.runtime import registry
     from local_operator.session.session import SUBAGENT_ROSTER_SIDECAR
     from local_operator.session_lease import LEASE_NAME, MIRROR_NAME, RECOVERY_LOCK_NAME
@@ -292,6 +292,7 @@ def test_sidecar_list_names_every_bookkeeping_file_the_harness_writes() -> None:
         resume.ORIGIN_CACHE_NAME,
         SUBAGENT_ROSTER_SIDECAR,
         CREATED_AT_NAME,
+        CWD_RECORD_NAME,
         # The durable stop marker a killer stages before an irreversible step:
         # evidence ABOUT the run, not content BY it, so it must not count as
         # activity (its canonical name lives in the registry module, which owns

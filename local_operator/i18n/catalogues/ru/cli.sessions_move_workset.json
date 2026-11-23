@@ -109,5 +109,11 @@
   "cli.sessions_move_workset.deps_summary_unknown": "Некоторые записи не удалось прочитать, поэтому это состояние неполное. Ничего не изменено.",
   "cli.sessions_move_workset.deps_summary_present_unverified": "Папки зависимостей существуют, но они не проверялись и могут быть неполными.",
   "cli.sessions_move_workset.deps_summary_nothing_needed": "Здесь деревья зависимостей не нужны.",
-  "cli.sessions_move_workset.deps_none": "Рабочий набор {session} на этом устройстве не восстанавливался."
+  "cli.sessions_move_workset.deps_none": "Рабочий набор {session} на этом устройстве не восстанавливался.",
+  "cli.sessions_move_workset.cwd_unknown": "Рабочий каталог этого разговора не записан, поэтому папки, упомянутые в разговоре, не включены и остаются на {source}: {paths}",
+  "cli.sessions_move_workset.cwd_unknown_advice": "В них может быть работа этого разговора. Продолжайте, только если вы можете закончить её или выполнить push на {source} или она не нужна вам на {device}.",
+  "cli.sessions_move_workset.yes_cwd_unknown": "--yes ничего не подтвердил: lop не знает, в каком каталоге работал этот разговор, поэтому не может определить, есть ли в упомянутых в разговоре папках его работа, и --yes не решает это за вас. Ничего не перенесено. Просмотрите их с --dry-run, затем запустите снова с --confirm-working-set и дайджестом, который выведет --dry-run, чтобы оставить их на {source}, либо с --without-working-set.",
+  "cli.sessions_move_workset.needs_confirmation_cwd_unknown": "Просмотрите эти папки с --dry-run, затем запустите снова с --confirm-working-set {digest}, чтобы оставить их на {source}, либо с --without-working-set.",
+  "cli.sessions_move_workset.receipt_cwd_unknown": "Рабочие файлы не переданы: рабочий каталог этого разговора не записан, поэтому папки, упомянутые в разговоре, остаются на {source}: {paths}",
+  "cli.sessions_move_workset.receipt_keep_cwd_unknown": "В копии на {device} нет папок, упомянутых в этом разговоре, потому что его рабочий каталог не записан; они остаются на {source}: {paths}"
 }

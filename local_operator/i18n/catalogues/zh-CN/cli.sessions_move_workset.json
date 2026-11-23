@@ -109,5 +109,11 @@
   "cli.sessions_move_workset.deps_summary_unknown": "有些条目无法读取，因此此状态不完整。未更改任何内容。",
   "cli.sessions_move_workset.deps_summary_present_unverified": "依赖文件夹已存在，但未经检查，可能不完整。",
   "cli.sessions_move_workset.deps_summary_nothing_needed": "这里不需要任何依赖树。",
-  "cli.sessions_move_workset.deps_none": "本设备上没有恢复{session}的工作集。"
+  "cli.sessions_move_workset.deps_none": "本设备上没有恢复{session}的工作集。",
+  "cli.sessions_move_workset.cwd_unknown": "此对话的工作目录未记录，因此它提及的文件夹不包含在内，仍留在{source}上：{paths}",
+  "cli.sessions_move_workset.cwd_unknown_advice": "这些文件夹中可能有此对话的工作。只有在你能在{source}上完成或推送这些工作，或在{device}上不需要它们时才继续。",
+  "cli.sessions_move_workset.yes_cwd_unknown": "--yes未确认：lop不知道此对话在哪个目录中工作，因此无法判断它提及的文件夹中是否有它的工作，而--yes不会替你做这个决定。没有移动任何内容。请先用--dry-run查看这些文件夹，然后使用--confirm-working-set加上--dry-run显示的摘要重新运行，以将它们留在{source}上；或使用--without-working-set重新运行。",
+  "cli.sessions_move_workset.needs_confirmation_cwd_unknown": "请先用--dry-run查看这些文件夹，然后使用--confirm-working-set {digest}重新运行，以将它们留在{source}上；或使用--without-working-set重新运行。",
+  "cli.sessions_move_workset.receipt_cwd_unknown": "工作文件未被传输：此对话的工作目录未记录，因此它提及的文件夹仍留在{source}上：{paths}",
+  "cli.sessions_move_workset.receipt_keep_cwd_unknown": "{device}上的副本没有此对话提及的文件夹，因为该对话的工作目录未记录；这些文件夹仍留在{source}上：{paths}"
 }

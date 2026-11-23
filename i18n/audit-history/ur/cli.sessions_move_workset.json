@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "cli.sessions_move_workset",
-  "history_sha256": "e2e4558f6d6523abcaa5123907cedbfa7c09c04f302258abf47bd3720aa1456b",
+  "history_sha256": "c11eee0c0ed9e31fc3c54b50a9b8593bab4146b2426564f4826f79853d78dc0d",
   "entries": [
     {
       "locale": "ur",
@@ -223,6 +223,66 @@
         {
           "path": "i18n/audits/evidence/ur/cli.sessions_move_workset/slot2-conv/report.md",
           "sha256": "f48487028f3468c4c48b4250728c71c6911126c0c3fbee52b785d5bb22207bf8"
+        }
+      ]
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.sessions_move_workset",
+      "source_sha256": "d782f1ded36d43133e7a1c32db9bd89540030eecdba86be92e068b8a2850a480",
+      "translator": {
+        "agent": "coder (lopdev) session 9a6e88d78421",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-21"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev) session e507d894afb3 — independent slot-1 audit",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-21",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Slot-1 independent audit of PR #4403 cwd-unknown copy (6 new keys) frozen at 3030a5e5c, merged target sha256 693aa70f1a1b5a40ad5cdcde3eae5036a6e71411ae9623e6314fd277edc2cfbc: PASS (Revision 1: needs_confirmation_cwd_unknown re-audited), 0 BLOCKER/0 MAJOR; 0 non-gating finding(s) deferred. 111 existing keys byte-identical to the catalogue certified at 0f5602723eb9. Agent-independent only (same model as translator). No native review, no rendered frame. Fallback: none. Evidence: i18n/audits/evidence/ur/cli.sessions_move_workset/cwd1/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/ur/cli.sessions_move_workset/cwd1/record.json",
+          "sha256": "4f6700b32fce149c292da9083b26eed8039af8a24b0a94e4534d70a91b8b34d5"
+        },
+        {
+          "path": "i18n/audits/evidence/ur/cli.sessions_move_workset/cwd1/report.md",
+          "sha256": "1ea1f87dcc3bcf91ef269ade07218dbd3e86eb590aede59eae7a29188c5adf9a"
+        }
+      ]
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.sessions_move_workset",
+      "source_sha256": "d782f1ded36d43133e7a1c32db9bd89540030eecdba86be92e068b8a2850a480",
+      "translator": {
+        "agent": "lopdev coder (i18n-translator), session 9a6e88d78421 (revision 1)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-21"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev) / SECOND independent safety i18n-auditor slot 2, session 6fd346121602 [ur]",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-21",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "SECOND independent safety audit (slot 2) of PR #4403's 6 cwd-unknown keys in ur `cli.sessions_move_workset` at copy freeze 3030a5e5c, translator revision 1: PASS, 0 BLOCKER/0 MAJOR. T5-UR-1 resolved: needs_confirmation_cwd_unknown keeps en order {digest},{source} and the leave-on-{source} meaning; check.py --catalogues-only 0 problems. Other 5 values byte-identical to the slot-2-audited revision 0. Independence caveat: the changed value's wording was proposed by slot 2 and adopted verbatim; slot 1's delta audit is the independent audit of that value. Target sha256 693aa70f1a1b5a40ad5cdcde3eae5036a6e71411ae9623e6314fd277edc2cfbc; context cc4712832270e6f8080a85343175b555f7db4378e58f9b4f844aacbc8ca26635. Chained after slot-1 cwd1 receipt (history b155b964d3220039…). No native review, no rendered frame. Fallback: none. Evidence: i18n/audits/evidence/ur/cli.sessions_move_workset/slot2-cwd/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/ur/cli.sessions_move_workset/slot2-cwd/record.json",
+          "sha256": "849922b8ab337ec9f8ff54cff71b145bca7ecdcd7ff1cd861338451477ab2a78"
+        },
+        {
+          "path": "i18n/audits/evidence/ur/cli.sessions_move_workset/slot2-cwd/report.md",
+          "sha256": "801a853b34dd8d19004c058df0b5098028b8b881f9c137234fd1c4f3e64ab583"
         }
       ]
     }

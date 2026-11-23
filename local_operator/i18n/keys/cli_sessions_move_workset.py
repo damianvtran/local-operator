@@ -73,6 +73,14 @@ def changed() -> Msg:
     return Msg("cli.sessions_move_workset.changed", {})
 
 
+def cwd_unknown(*, source: str, paths: str) -> Msg:
+    return Msg("cli.sessions_move_workset.cwd_unknown", {"source": source, "paths": paths})
+
+
+def cwd_unknown_advice(*, source: str, device: str) -> Msg:
+    return Msg("cli.sessions_move_workset.cwd_unknown_advice", {"source": source, "device": device})
+
+
 def deps_description() -> Msg:
     return Msg("cli.sessions_move_workset.deps_description", {})
 
@@ -198,6 +206,13 @@ def mentioned(*, paths: str) -> Msg:
 
 def needs_confirmation(*, source: str, digest: str) -> Msg:
     return Msg("cli.sessions_move_workset.needs_confirmation", {"source": source, "digest": digest})
+
+
+def needs_confirmation_cwd_unknown(*, digest: str, source: str) -> Msg:
+    return Msg(
+        "cli.sessions_move_workset.needs_confirmation_cwd_unknown",
+        {"digest": digest, "source": source},
+    )
 
 
 def none() -> Msg:
@@ -369,8 +384,19 @@ def receipt_branch_moved(*, branch: str, old: str, new: str) -> Msg:
     )
 
 
+def receipt_cwd_unknown(*, source: str, paths: str) -> Msg:
+    return Msg("cli.sessions_move_workset.receipt_cwd_unknown", {"source": source, "paths": paths})
+
+
 def receipt_keep(*, device: str, source: str) -> Msg:
     return Msg("cli.sessions_move_workset.receipt_keep", {"device": device, "source": source})
+
+
+def receipt_keep_cwd_unknown(*, device: str, source: str, paths: str) -> Msg:
+    return Msg(
+        "cli.sessions_move_workset.receipt_keep_cwd_unknown",
+        {"device": device, "source": source, "paths": paths},
+    )
 
 
 def receipt_left_row(*, path: str, source: str, reason: str) -> Msg:
@@ -504,6 +530,10 @@ def worktree_line(
 
 def yes_carry_unavailable(*, device: str) -> Msg:
     return Msg("cli.sessions_move_workset.yes_carry_unavailable", {"device": device})
+
+
+def yes_cwd_unknown(*, source: str) -> Msg:
+    return Msg("cli.sessions_move_workset.yes_cwd_unknown", {"source": source})
 
 
 def yes_preflight_failed(*, device: str) -> Msg:
