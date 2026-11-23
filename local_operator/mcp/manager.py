@@ -2182,6 +2182,25 @@ class McpManager:
     def get_connected_servers(self) -> list[str]:
         return sorted(self._connections)
 
+    def empty_catalogue_epoch(self) -> int | None:
+        """Attest an empty, live manager for the SDK's builtin-only warm hint.
+
+        No other origin qualifies yet. A missing tool array alone is not
+        proof: a configured server might still be connecting or held in the
+        startup cache. The caller checks the epoch again at publication.
+        """
+        if (
+            self._disposed
+            or self._configs
+            or self._connections
+            or self._tools_by_server
+            or self._connect_futures
+            or self._pending_reconnects
+            or self._pending_continuations
+        ):
+            return None
+        return self._epoch
+
     def get_all_server_names(self) -> list[str]:
         return sorted(self._configs)
 

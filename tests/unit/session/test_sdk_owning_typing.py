@@ -82,13 +82,10 @@ def test_open_session_overloads_are_the_typed_surface() -> None:
         "AbstractAsyncContextManager[ViewerSessionProtocol]",
         "AbstractAsyncContextManager[SessionProtocol]",
     ]
-    assert overloads[0].__kwdefaults__ == {
-        "mode": "own",
-        "allow_multi_root": False,
-        "verbose": False,
-    }
-    assert overloads[1].__kwdefaults__ == {"allow_multi_root": False, "verbose": False}
-    assert overloads[2].__kwdefaults__ == {"allow_multi_root": False, "verbose": False}
+    opts = {"allow_multi_root": False, "verbose": False, "warm_tool_prefix": False}
+    assert overloads[0].__kwdefaults__ == {"mode": "own", **opts}
+    assert overloads[1].__kwdefaults__ == opts
+    assert overloads[2].__kwdefaults__ == opts
     # functools.wraps chain left by asynccontextmanager
     implementation = getattr(sdk.open_session, "__wrapped__", None)
     assert implementation is not None

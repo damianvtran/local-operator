@@ -72,6 +72,19 @@ async with open_session(spec, roots=roots, verbose=True) as session:
 A tool status of `returned` means the tool did not report a tool-level error;
 it does not imply that a subprocess it ran exited successfully.
 
+### Preserve a warm built-in tool prefix on owner reopen (opt-in)
+
+Pass `warm_tool_prefix=True` to `open_session` on both the original owner and
+its reopen. The current implementation is intentionally limited to a confined
+`world_root`, the default `ApprovalPolicy.refuse()`, an undeclared tool inventory
+with no MCP servers configured, and Bedrock's native Claude Messages route.
+It can preserve only the shipped `library` schema after that schema reached a
+completed turn that reported a five-minute cache write. A live, unchanged
+inventory must reproduce the exact ordered tool array; otherwise the new owner
+publishes as usual. There is no extra readiness wait and no cached definition,
+execution permission, or approval is restored. Reopening alone does not extend
+the hint's lifetime, and a matching prefix does not guarantee a provider hit.
+
 ## Entry points
 
 | Entry point | What it does | Exec-parity reference |

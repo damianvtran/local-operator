@@ -1172,7 +1172,9 @@ def test_public_surface_is_pinned() -> None:
         ("mode", K),
         ("allow_multi_root", K),
         ("verbose", K),
+        ("warm_tool_prefix", K),
     ]
+    assert inspect.signature(sdk.open_session).parameters["warm_tool_prefix"].default is False
     assert params(sdk.spawn_session) == [
         ("spec", P),
         ("roots", K),

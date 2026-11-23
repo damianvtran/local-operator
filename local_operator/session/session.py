@@ -67,7 +67,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, AbstractSet, Any, Literal, TypedDict, cast
 
 from local_operator.asks.surfaces import PROFILE_CONSENT_SURFACES
 from local_operator.compaction.carry import (
@@ -4811,6 +4811,7 @@ class Session:
         #: callable, and the prompt's inventory block reports it through the
         #: usual ``[session-state]`` delta.
         self._published_tools: list[AgentTool] | None = None
+        self._on_first_tool_publication: Callable[[], tuple[AgentTool, ...] | None] | None = None
         #: DEFERRED SCHEMAS (``tools/deferral.py``). ``_deferral_pins`` are names
         #: a role's ``tools:`` list, a team manager's or a host declaration asked
         #: for, which stay published. ``_activated_tools`` is STICKY for the
@@ -16244,6 +16245,15 @@ class Session:
         latch decides.
         """
         if self._published_tools is None:
+            # SDK opt-in only. Side channels do not consume the warm hint,
+            # and a failed first-latch proof is never retried on a later turn.
+            before_publish = self._on_first_tool_publication
+            if before_publish is not None:
+                self._on_first_tool_publication = None
+                restored = before_publish()
+                if restored is not None:
+                    self._published_tools = list(restored)
+                    return self._published_tools
             self._published_tools = self._publishable(self._tools)
         return self._published_tools
 
@@ -16271,7 +16281,7 @@ class Session:
 
     # -- deferred tool schemas -------------------------------------------------
 
-    def _deferred_now(self) -> frozenset[str]:
+    def _deferred_now(self, *, activated: AbstractSet[str] | None = None) -> frozenset[str]:
         """Names whose schema is withheld from the array RIGHT NOW.
 
         The deferral set minus role pins and minus what the session has
@@ -16285,9 +16295,13 @@ class Session:
         """
         if not self._tool_deferral:
             return frozenset()
-        return deferred_tool_names(self._deferral_pins) - self._activated_tools
+        return deferred_tool_names(self._deferral_pins) - (
+            self._activated_tools if activated is None else activated
+        )
 
-    def _publishable(self, tools: Sequence[AgentTool]) -> list[AgentTool]:
+    def _publishable(
+        self, tools: Sequence[AgentTool], *, activated: AbstractSet[str] | None = None
+    ) -> list[AgentTool]:
         """``tools`` minus the deferred schemas — the array a provider is sent.
 
         THE one filter, applied by every reader of "what is advertised": the
@@ -16299,7 +16313,9 @@ class Session:
         an activated tool lands where it always sat rather than at the end
         (appending saves nothing under tools-first caching).
         """
-        deferred = self._deferred_now()
+        # A warm SDK owner can preview a proposed activation through this
+        # same selector without first mutating the live activation set.
+        deferred = self._deferred_now(activated=activated)
         if not deferred:
             return list(tools)
         return [tool for tool in tools if tool.name not in deferred]

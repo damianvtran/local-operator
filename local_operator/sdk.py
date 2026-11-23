@@ -950,6 +950,7 @@ def open_session(
     mode: Literal["own"] = "own",
     allow_multi_root: bool = False,
     verbose: bool = False,
+    warm_tool_prefix: bool = False,
 ) -> AbstractAsyncContextManager[OwningSessionProtocol]: ...
 
 
@@ -961,6 +962,7 @@ def open_session(
     mode: Literal["attach"],
     allow_multi_root: bool = False,
     verbose: bool = False,
+    warm_tool_prefix: bool = False,
 ) -> AbstractAsyncContextManager[ViewerSessionProtocol]: ...
 
 
@@ -972,6 +974,7 @@ def open_session(
     mode: Literal["own", "attach"],
     allow_multi_root: bool = False,
     verbose: bool = False,
+    warm_tool_prefix: bool = False,
 ) -> AbstractAsyncContextManager[SessionProtocol]: ...
 
 
@@ -983,6 +986,7 @@ async def open_session(
     mode: Literal["own", "attach"] = "own",
     allow_multi_root: bool = False,
     verbose: bool = False,
+    warm_tool_prefix: bool = False,
 ) -> AsyncIterator["SessionProtocol"]:
     """Open a session against explicit ``roots``; yield it; dispose on exit.
 
@@ -1000,6 +1004,14 @@ async def open_session(
     subscription. Configure a handler in your app (for example,
     ``logging.basicConfig()`` in a standalone script), then enable INFO with
     ``logging.getLogger("local_operator.sdk").setLevel(logging.INFO)``.
+
+    ``warm_tool_prefix=True`` opts a confined, refusal-policy owner into a
+    best-effort Bedrock Messages cache hint. Only a previously published
+    built-in ``library`` schema can be reconstituted, from the current tool
+    inventory, before the first turn's publication latch. Declared tools,
+    multi-root/ambient sessions, and worlds with MCP configured are ineligible.
+    There is no connection wait, permission restore, or guaranteed provider cache hit. Viewers and
+    owners without the option do not read or write the hint.
 
     The environment is scoped to ``roots`` for the whole ``async with`` body:
     construction, the caller's turns, and every lazy resolver in between see
@@ -1037,9 +1049,14 @@ async def open_session(
             _check_resolved_roots(roots)
             session = await _build_session(spec, roots, mode=mode, world_root=world_root)
             unsub_trace: Callable[[], None] | None = None
+            prefix_hint = None
             try:
                 if mode == "own":
                     _assert_session_dir_under_root(session, roots)
+                    if warm_tool_prefix and not allow_multi_root:
+                        from local_operator.session.warm_tool_prefix import enrol
+
+                        prefix_hint = enrol(session, spec, roots, world_root)
                 if verbose:
                     unsub_trace = trace_events(session)
                 yield session
@@ -1047,6 +1064,9 @@ async def open_session(
                 try:
                     if unsub_trace is not None:
                         unsub_trace()
+                    if prefix_hint is not None:
+                        # Persist while the owner still holds the session lease.
+                        prefix_hint.close()
                 finally:
                     await session.dispose()
 
