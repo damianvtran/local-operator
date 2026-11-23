@@ -65,23 +65,33 @@ const Prose = memo(function Prose({ text, from }: { text: string; from?: number 
 	const cut = (append || !before) && from !== undefined
 		? proseBoundary(text, Math.max(from, before?.text.length ?? 0)) : undefined;
 	const parts: ProsePart[] = [];
-	const selected: HTMLSpanElement[] = [];
+	const selected: Node[] = [];
 	let compacting: Node | null = null;
-	const keep = (part: ProsePart) => {
+	const keep = (part: ProsePart, next: ProsePart | undefined) => {
 		const reveal = part.reveal;
 		if (reveal?.settled) {
-			if (reveal.node && selects(reveal.node)) {
-				selected.push(reveal.node);
+			const node = reveal.node;
+			if (node && selects(node)) {
+				selected.push(node);
 			} else {
-				compacting ??= reveal.node?.parentNode ?? null;
-				part = { start: part.start };
+				// Retirement merges to the left. The following plain part loses
+				// its text node even if the range has already left this span.
+				// Only the next part of *this* prose run can be removed here;
+				// a wrapped neighbor decides whether to retire on its own.
+				const right = next && !next.reveal ? node?.nextSibling : null;
+				if (right?.nodeType === Node.TEXT_NODE && selects(right)) {
+					selected.push(right);
+				} else {
+					compacting ??= node?.parentNode ?? null;
+					part = { start: part.start };
+				}
 			}
 		}
-		// The rest is a steady plain-text run, not one element per delivered
-		// frame. A selected or still animating slice alone keeps its wrapper.
+		// The rest is a steady plain-text run, not one element per frame.
+		// Keep wrappers only for live fades or to protect a range at the seam.
 		if (part.reveal || parts.at(-1)?.reveal || !parts.length) parts.push(part);
 	};
-	if (append) for (const part of before.parts) keep(part);
+	if (append) for (const [i, part] of before.parts.entries()) keep(part, before.parts[i + 1]);
 	if (!parts.length && (cut ?? text.length) > 0) parts.push({ start: 0 });
 	if (cut !== undefined) {
 		const reveal: ProseReveal = {
@@ -102,7 +112,7 @@ const Prose = memo(function Prose({ text, from }: { text: string; from?: number 
 		if (!selected.length) return;
 		const doc = selected[0].ownerDocument;
 		// No polling and no listener for an unrelated selection/resting caret.
-		// Once the reader releases a retained slice it can join the steady run.
+		// Once the range leaves the affected node, retry the deferred merge.
 		const changed = () => { if (selected.some(node => !selects(node))) retire(); };
 		doc.addEventListener("selectionchange", changed);
 		return () => doc.removeEventListener("selectionchange", changed);

@@ -125,6 +125,53 @@ it("keeps joined RTL and emoji text intact and settles when reduced motion chang
 	expect(effects).toHaveLength(1);
 });
 
+it.each(["plain", "wrapped"] as const)("keeps both range endpoints when selection moves to the %s run after a retired fade", async (shape) => {
+	render(<Probe />);
+	await settleStream();
+	const source = Stream.instances[0];
+	const text = "Start here first second";
+	await frame(source, 1, [history, row("answer", "Start here")]);
+	const line = anchor("answer")!.querySelector("p > span")!;
+	const selection = document.getSelection()!;
+	await frame(source, 2, [history, row("answer", "Start here first")]);
+	const first = effects[0].target.firstChild!;
+	selection.setBaseAndExtent(first, 1, first, 6);
+	const settle = () => act(async () => { await vi.advanceTimersByTimeAsync(120); });
+	await settle();
+	expect(selection.anchorNode).toBe(first);
+	expect(first.isConnected).toBe(true);
+	await frame(source, 3, [history, row("answer", text)]);
+	const secondHost = effects[1].target;
+	if (shape === "wrapped") {
+		// Keep the second wrapper past animation settlement with a range
+		// spanning both suffixes, then narrow to the right endpoint alone.
+		selection.setBaseAndExtent(first, 1, secondHost.firstChild!, 7);
+	}
+	await settle();
+	const second = shape === "plain" ? line.lastChild! : secondHost.firstChild!;
+	expect(second.nodeType).toBe(Node.TEXT_NODE);
+	expect(second.textContent).toBe(" second");
+	expect(second.parentNode).toBe(shape === "plain" ? line : secondHost);
+	await act(async () => {
+		selection.setBaseAndExtent(second, 1, second, 7);
+		document.dispatchEvent(new Event("selectionchange"));
+	});
+	await settle();
+	expect(second.isConnected).toBe(true);
+	expect([selection.anchorNode, selection.anchorOffset, selection.focusNode, selection.focusOffset])
+		.toEqual([second, 1, second, 7]);
+	expect(selection.toString()).toBe("second");
+	expect(line.textContent).toBe(text);
+	expect(effects).toHaveLength(2);
+	await act(async () => {
+		selection.removeAllRanges();
+		document.dispatchEvent(new Event("selectionchange"));
+	});
+	expect(line.childNodes).toHaveLength(1);
+	expect(line.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+	expect(line.textContent).toBe(text);
+});
+
 it("retires finished suffix wrappers through a sustained paragraph and same-text final", async () => {
 	render(<Probe />);
 	await settleStream();
@@ -136,7 +183,7 @@ it("retires finished suffix wrappers through a sustained paragraph and same-text
 	link.focus();
 	const selection = document.getSelection()!;
 	let selected: Node | undefined;
-	for (let i = 0; i < 200; i++) {
+	for (let i = 0; i < 204; i++) {
 		text += ` word${i}`;
 		await frame(source, i + 2, [history, row("answer", text)]);
 		if (i === 0) {
@@ -144,11 +191,21 @@ it("retires finished suffix wrappers through a sustained paragraph and same-text
 			selection.setBaseAndExtent(selected, 1, selected, 5);
 		}
 		await act(async () => { await vi.advanceTimersByTimeAsync(120); });
+		if (i === 1) {
+			selected = paragraph.firstElementChild!.lastChild!;
+			expect(selected.nodeType).toBe(Node.TEXT_NODE);
+			expect(selected.textContent).toBe(" word1");
+			await act(async () => {
+				selection.setBaseAndExtent(selected!, 1, selected!, 5);
+				document.dispatchEvent(new Event("selectionchange"));
+			});
+		}
+		expect(paragraph.querySelectorAll("span")).toHaveLength(2);
 	}
-	await frame(source, 202, [history, row("answer", text, { final: true })], false);
+	await frame(source, 206, [history, row("answer", text, { final: true })], false);
 	expect(paragraph.textContent).toBe(text.replace("[Reference](https://example.test)", "Reference"));
-	// The sole extra wrapper contains the active selection. Later frames
-	// cannot accumulate wrappers, and a collapsed caret must not retain it.
+	// The sole extra wrapper protects the following selected plain node.
+	// A collapsed caret no longer blocks the merge at that seam.
 	expect(paragraph.querySelectorAll("span")).toHaveLength(2);
 	expect(selection.anchorNode).toBe(selected);
 	expect(selection.toString()).toBe("word");
@@ -158,7 +215,29 @@ it("retires finished suffix wrappers through a sustained paragraph and same-text
 		document.dispatchEvent(new Event("selectionchange"));
 	});
 	expect(paragraph.querySelectorAll("span")).toHaveLength(1);
-	expect(effects).toHaveLength(200);
+	expect(effects).toHaveLength(204);
+});
+
+it("does not retain fade hosts for a range elsewhere or a caret in the fade", async () => {
+	render(<Probe />);
+	await settleStream();
+	const source = Stream.instances[0];
+	await frame(source, 1, [history, row("answer", "Start here")]);
+	const line = anchor("answer")!.querySelector("p > span")!;
+	const elsewhere = anchor("history")!.querySelector("p > span")!.firstChild!;
+	const selection = document.getSelection()!;
+	selection.setBaseAndExtent(elsewhere, 1, elsewhere, 4);
+	await frame(source, 2, [history, row("answer", "Start here first")]);
+	await act(async () => { await vi.advanceTimersByTimeAsync(120); });
+	expect(line.childNodes).toHaveLength(1);
+	expect(selection.anchorNode).toBe(elsewhere);
+	expect(selection.toString()).toBe("rev");
+	await frame(source, 3, [history, row("answer", "Start here first second")]);
+	selection.collapse(effects[1].target.firstChild!, 1);
+	await act(async () => { await vi.advanceTimersByTimeAsync(120); });
+	expect(line.childNodes).toHaveLength(1);
+	expect(line.textContent).toBe("Start here first second");
+	expect(effects).toHaveLength(2);
 });
 
 it("seeds a reported outage's recovery frame without fading and reveals its first fresh append", async () => {
