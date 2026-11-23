@@ -1432,7 +1432,9 @@ def _exact_firm_ask(ask: Any, path: str, *, home: str, cwd: str | None) -> bool:
                 plural = any(w in _PICK_PLURAL for w in rest_words)
                 if plural and any(w in _PICK_DESCRIPTORS for w in rest_words):
                     counts = [int(n) for n in re.findall(r"\b\d+\b", rest)]
-                    plural = bool(counts) and max(counts) >= len(listed)
+                    # Exactly ONE count: "(1 of 2)" or "1 … of the 2" states a
+                    # subset whose largest number covers the list (SEC-R5-M1).
+                    plural = len(counts) == 1 and counts[0] >= len(listed)
             else:
                 plural = True  # a bare yes to "Delete <list>?" takes the list
             if (plural or len(listed) == 1) and names(question):

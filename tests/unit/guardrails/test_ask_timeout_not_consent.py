@@ -1134,6 +1134,17 @@ async def test_pick_that_approves_no_named_path_cannot_supersede_timeout(
         ("Delete ~/hyperplane-cpp/build or ~/other/x?", "Delete all caches", False),
         # Review SEC-R4-M1: only a size in parentheses is dropped.
         ("Delete ~/hyperplane-cpp/build or ~/other/x?", "Delete them (only x)", False),
+        # Review SEC-R5-M1: two numbers state a subset of the list.
+        (
+            "Delete ~/hyperplane-cpp/build (dirty) or ~/other/x (clean)?",
+            "Delete all clean worktrees (1 of 2)",
+            False,
+        ),
+        (
+            "Delete ~/hyperplane-cpp/build (dirty) or ~/other/x (clean)?",
+            "Delete all 1 clean worktree of the 2",
+            False,
+        ),
         # Controls: a stated count covering the list, a plain plural, and
         # (SEC-R4-m1) a single path ending in "?" counted once.
         (
@@ -1144,7 +1155,16 @@ async def test_pick_that_approves_no_named_path_cannot_supersede_timeout(
         ("Delete ~/hyperplane-cpp/build or ~/other/x?", "Delete both", True),
         ("Delete ~/hyperplane-cpp/build?", "Delete it", True),
     ],
-    ids=["clean-subset", "caches-subset", "paren-only", "counted", "both", "single-it"],
+    ids=[
+        "clean-subset",
+        "caches-subset",
+        "paren-only",
+        "one-of-two",
+        "one-of-the-two",
+        "counted",
+        "both",
+        "single-it",
+    ],
 )
 async def test_descriptor_and_parenthesis_picks_after_timeout(
     deep: Path, question: str, pick: str, allowed: bool
