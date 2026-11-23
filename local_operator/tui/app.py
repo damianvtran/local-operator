@@ -20296,7 +20296,20 @@ class OperatorApp(App[None]):
         """
         session_id = self._resumable_session_id()
         archived = session_id in self._archived_ids() if session_id else False
-        return [entry for entry in SLASH_COMMANDS if entry.name != "unarchive" or archived]
+        offered = [entry for entry in SLASH_COMMANDS if entry.name != "unarchive" or archived]
+        # The registry's descriptions are rendered ONCE (at import, or on a
+        # locale move) and some name a hotkey — `/effort` says "shift+tab
+        # cycles". The picker must not keep naming a key the user remapped, so
+        # the rows handed to the composer carry the live spelling; a row whose
+        # text does not change is returned as the SAME object, because the
+        # frozen dataclass is compared by value in several tests (R2).
+        live: list[SlashCommand] = []
+        for entry in offered:
+            text = _keymap.substitute_keys(entry.description, self._keymap)
+            live.append(
+                entry if text == entry.description else dataclasses.replace(entry, description=text)
+            )
+        return live
 
     def _refresh_offered_commands(self) -> None:
         """Re-hand the composer the filtered list. Silent when there is no editor."""
@@ -29883,7 +29896,11 @@ class OperatorApp(App[None]):
             return ASK_SECRET_REFUSAL_OPEN_CARD
         if self._ask_list is not None:
             return ASK_SECRET_REFUSAL_OPEN_LIST
-        return ASK_SECRET_REFUSAL_CLOSED
+        # The closed surface advertises the toggle's key; the two open-surface
+        # sentences name no chord. Substituted HERE rather than templated so the
+        # shipped sentence is byte-identical at the default (the test that pins
+        # "f4" keeps passing) and only a remap changes it (R2).
+        return _keymap.substitute_keys(ASK_SECRET_REFUSAL_CLOSED, self._keymap)
 
     def _say_ask_secret_refusal(self) -> None:
         """Say where a credential goes — ONE row, restated while the state lasts."""
@@ -48484,7 +48501,8 @@ class OperatorApp(App[None]):
         rendered = " ".join(
             f"{self.EFFORT_MARK}{name}" if name == marked else name for name in rungs
         )
-        return f"reasoning effort: {rendered} — shift+tab cycles, this conversation"
+        cycle_key = _keymap.painted_key("keymap.cycle_effort", self._keymap)
+        return f"reasoning effort: {rendered} — {cycle_key} cycles, this conversation"
 
     def _cmd_effort(self, arg: str, notice: NoticeFn) -> None:
         """``/effort`` — list this model's levels; ``/effort <level>`` — set one.
@@ -49504,6 +49522,44 @@ class OperatorApp(App[None]):
                 "using the default key",
                 "warning",
             )
+        # Widgets that cache paint-once text keep an equality guard, so a
+        # `set_keymap` alone leaves the OLD chord on screen until an unrelated
+        # event repaints them (R1: measured on the dock header, the todo footer
+        # and the ask bar). Each widget owns the cheapest way to forget.
+        self._refresh_keymap_hints()
+
+    def _refresh_keymap_hints(self) -> None:
+        """Repaint every hint that NAMES a hotkey, after a live remap (R1).
+
+        Called from `_apply_keymap` only. The widgets listed here paint text
+        that embeds a chord and some of them guard it with an equality cache
+        (`SubagentPanel._paint_header` keeps `(shown, compact, hint, scope)`;
+        `_paint_summary` a summary key; the todo footer lives in a `Static` and
+        only moves on a rebuild; the ask bar budgets its tail by key width; the
+        sidebar composes its chip per render), so moving the bindings without
+        this is a frame that keeps naming the key the user just replaced.
+
+        Duck-typed on `keymap_hints_changed` rather than a type list: a widget
+        that starts painting a chord opts in by defining the method, and this
+        stays correct as panels come and go. Safe before mount — the band
+        refresh tolerates a session-less app and the query is guarded.
+        """
+        from textual.css.query import NoMatches
+
+        try:
+            widgets = list(self.query("*"))
+        except Exception:  # noqa: BLE001 — not mounted yet (boot, teardown)
+            return
+        for widget in widgets:
+            hook = getattr(widget, "keymap_hints_changed", None)
+            if callable(hook):
+                try:
+                    hook()
+                except NoMatches:
+                    continue
+        # The dock panel's header is rebuilt by the band's own sync pass, so it
+        # runs AFTER every cache was dropped rather than before.
+        self._refresh_band()
 
     def action_toggle_todos(self) -> None:
         """``ctrl+t`` — flip the dock todo list between collapsed and expanded.
@@ -49693,24 +49749,37 @@ class OperatorApp(App[None]):
         # projects create form could therefore never see the chord. Delegating
         # the ONE key to the page keeps every other binding — including ctrl+c
         # — exactly where disarming the app's hotkeys would have moved them.
-        if self._team_form is not None:
-            self._team_form.action_previous_field()
-            return
-        if self._agent_form is not None:
-            self._agent_form.action_previous_field()
-            return
-        page = self._projects_view
-        if page is not None and getattr(page, "wants_field_tab", False):
-            page.form_focus_previous()
-            return
-        # The schedule form is the second page that owns a shift+tab meaning.
-        # Without this delegation the app-wide priority handler ran BEFORE the
-        # focused field and changed the conversation's reasoning effort (and its
-        # billable setting) while navigating the form (round-1 UX U1).
-        schedule = self._schedule_view
-        if schedule is not None and getattr(schedule, "wants_field_tab", False):
-            schedule.form_focus_previous()
-            return
+        #
+        # ONLY WHILE THE SHIPPED CHORD IS STILL ONE OF THIS ACTION'S KEYS (R5).
+        # Once `keymap.cycle_effort` is remapped to, say, `f12`, the app no
+        # longer holds `shift+tab` as a priority binding and the forms' own
+        # non-priority `shift+tab` bindings work again — so delegating would
+        # steal the chord the form just regained (and cycle a billable setting
+        # from `f12` while a form is open, which is exactly what the remap
+        # asked for). Alternates count: `f12,shift+tab` keeps the delegation.
+        live_keys = {
+            part.strip()
+            for part in _keymap.painted_key("keymap.cycle_effort", self._keymap).split(",")
+        }
+        if "shift+tab" in live_keys:
+            if self._team_form is not None:
+                self._team_form.action_previous_field()
+                return
+            if self._agent_form is not None:
+                self._agent_form.action_previous_field()
+                return
+            page = self._projects_view
+            if page is not None and getattr(page, "wants_field_tab", False):
+                page.form_focus_previous()
+                return
+            # The schedule form is the second page that owns a shift+tab meaning.
+            # Without this delegation the app-wide priority handler ran BEFORE the
+            # focused field and changed the conversation's reasoning effort (and its
+            # billable setting) while navigating the form (round-1 UX U1).
+            schedule = self._schedule_view
+            if schedule is not None and getattr(schedule, "wants_field_tab", False):
+                schedule.form_focus_previous()
+                return
         if self._session is None:
             # Not "this model has no levels": there is no model yet, and naming
             # the wrong reason is worse than naming none.
@@ -54020,8 +54089,10 @@ class OperatorApp(App[None]):
             # in the same verb they just learned, for the operation this is not
             # — left them with no route to the thing they actually wanted.
             self._system_notice(
-                "ctrl+f folds an open aside into the chat (F8 opens one) — "
-                "to branch this conversation, use /fork",
+                f"{_keymap.painted_key('keymap.fork_aside', self._keymap)} folds an"
+                " open aside into the chat"
+                f" ({_keymap.painted_key('keymap.aside', self._keymap)} opens one)"
+                " — to branch this conversation, use /fork",
                 "warning",
             )
             return
@@ -58840,7 +58911,7 @@ class OperatorApp(App[None]):
         for names, command in named_commands:
             command_rows.add_row(
                 Text(names, style=muted),
-                Text(command.description, style=dim),
+                Text(_keymap.substitute_keys(command.description, self._keymap), style=dim),
             )
         # Rows and notes share one Group, so the list holds renderables rather
         # than only Texts (the command table is the one non-Text entry).
@@ -59182,7 +59253,7 @@ class OperatorApp(App[None]):
                 _live("keymap.aside", "F8"),
                 "open an aside; "
                 f"{_live('keymap.fork_aside', 'ctrl+f')} forks or folds it "
-                f"({_live('keymap.focus_sidebar', 'f9')}: asks)",
+                f"({_live('keymap.toggle_asks', 'f4')}: asks)",
             )
         )
         # Directly under `F8`, because it is only meaningful once an aside

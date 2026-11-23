@@ -414,6 +414,16 @@ class KeysLegend(Static):
         screen_width, _ = overlay.screen_size(self)
         return min(natural_width(self._keymap_snapshot()), screen_width - 2)
 
+    def keymap_hints_changed(self) -> None:
+        """Recompose the card after a live remap (R1).
+
+        ``_repaint`` is the class's own composition path: the rows AND the key
+        column are functions of the keymap, so a plain ``refresh`` would repaint
+        the widget from the Text it was last given. A no-op while the card is
+        closed, which is why it is safe on every remap.
+        """
+        self._repaint()
+
     def _content_width(self) -> int:
         return max(1, self.panel_width() - PADDING_CELLS)
 

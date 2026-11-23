@@ -72,6 +72,7 @@ from local_operator.asks import store
 from local_operator.i18n.keys import tui_asks as _asks
 from local_operator.i18n.keys import tui_small as _x
 from local_operator.i18n.text import tr
+from local_operator.tui import hotkey_hints
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.ask_picker import TAB_HINT_KEY
 
@@ -122,10 +123,9 @@ def ask_toggle_display(widget: Widget) -> str:
     constant, so the tail follows a live remap; a stripped harness with no app
     keymap falls back to the shipped default.
     """
-    snapshot = getattr(getattr(widget, "app", None), "_keymap", None)
-    return _keymap.painted_key(
-        "keymap.toggle_asks", snapshot if isinstance(snapshot, dict) else None
-    )
+    # Via `hotkey_hints`: an UNMOUNTED bar raises NoActiveAppError on
+    # `widget.app`, and a hint must not be the thing that fails a paint (Q4).
+    return hotkey_hints.live_key(widget, "keymap.toggle_asks")
 
 
 #: The statuses a row can carry, re-exported from ``asks/store.py``'s fold rather
@@ -846,6 +846,14 @@ class AskBar(Widget):
         """
         event.stop()
         self.post_message(self.Toggled())
+
+    def keymap_hints_changed(self) -> None:
+        """Re-measure the tail after a live remap (R1).
+
+        The tail embeds the toggle's chord and is BUDGETED by its width, so a
+        longer remap has to give way inside the same row rather than overflow.
+        """
+        self.refresh(layout=True)
 
     def render(self) -> Text:
         """The bar, laid out against the width it actually has.

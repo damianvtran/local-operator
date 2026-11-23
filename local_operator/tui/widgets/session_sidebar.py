@@ -25,7 +25,6 @@ from textual.strip import Strip
 from textual.timer import Timer
 from textual.widget import Widget
 
-from local_operator import keymap as _keymap
 from local_operator.i18n.keys import tui_notifications as _inbox_keys
 from local_operator.i18n.keys import tui_session_sidebar as _ss
 from local_operator.i18n.keys import tui_small as _x
@@ -33,6 +32,7 @@ from local_operator.i18n.keys import tui_tags as _tag_keys
 from local_operator.i18n.text import tr
 from local_operator.resume import format_age, peer_reason_words
 from local_operator.session.preview import AGENT_OPENED_MARK, opener_role
+from local_operator.tui import hotkey_hints
 from local_operator.tui import notifications_model as model
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
@@ -3091,6 +3091,15 @@ class SessionSidebar(Widget, can_focus=True):
             result.append("\n" + footer, style=footer_style)
         return result
 
+    def keymap_hints_changed(self) -> None:
+        """Repaint the footer ladder and its hit spans after a live remap (R1).
+
+        `_footer_line` composes per render, so the only thing needed is a paint;
+        the chip's span moves with the text, and `_chip_hit` re-derives it from
+        the same function.
+        """
+        self.refresh(layout=True)
+
     def _footer_line(self, width: int) -> tuple[str, tuple[int, int] | None]:
         """The footer as painted, plus the `⌥N` chip's span within it, if any.
 
@@ -3120,13 +3129,24 @@ class SessionSidebar(Widget, can_focus=True):
         # what gives way: the position is discoverable by scrolling (the
         # cursor row is painted) and the panel's own toggle is on the frame
         # that opens it.
-        lead = (
-            _t(_x.session_sidebar_lead_return())
-            if self.has_focus
-            else _t(_x.session_sidebar_lead_focus())
+        # The LEAD is re-keyed HERE, at its definition, because every rung of the
+        # ladder below is built from it — including `head_plain`, which the
+        # paged branch composes as `f"{position} · {lead}"` with no separate
+        # substitution hook (Q1). Substituting the composed rungs instead left
+        # that one naming the shipped `f9` after a remap.
+        lead = hotkey_hints.live_copy(
+            self,
+            (
+                _t(_x.session_sidebar_lead_return())
+                if self.has_focus
+                else _t(_x.session_sidebar_lead_focus())
+            ),
         )
-        base = lead if self.has_focus else f"{lead}{_t(_x.session_sidebar_hide_suffix())}"
-        base = _keymap.substitute_keys(base, getattr(self.app, "_keymap", None))
+        base = (
+            lead
+            if self.has_focus
+            else hotkey_hints.live_copy(self, f"{lead}{_t(_x.session_sidebar_hide_suffix())}")
+        )
         # The chip is a PARTICIPANT in the ladder above, never an append after
         # it: appending past a candidate that has already been fit-tested voids
         # that test and the final `truncate_cells` then crops mid-word (the
@@ -3303,8 +3323,9 @@ class SessionSidebar(Widget, can_focus=True):
                 # see the unpaged branch below for the rule; the same order is
                 # applied to this two-template rung (hide-dropped full variants
                 # before the hub-free ones).
-                head_hide = f"{position} · {lead}{_t(_x.session_sidebar_hide_suffix())}"
-                head_hide = _keymap.substitute_keys(head_hide, getattr(self.app, "_keymap", None))
+                head_hide = hotkey_hints.live_copy(
+                    self, f"{position} · {lead}{_t(_x.session_sidebar_hide_suffix())}"
+                )
                 head_plain = f"{position} · {lead}"
                 # Every tail variant, widest first, each with and without the
                 # hide hint: the inbox note's yield-first rule (above) reaches

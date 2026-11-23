@@ -252,12 +252,12 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         action="",
         label="Start recording",
         default="primary+shift+s",
-        # i18n: ignore keymap row copy is not extracted yet: every KEY_ACTIONS
-        # label/help is a literal here and is recorded verbatim in the
-        # wire.settings golden (the 8 keymap rows were deliberately left to a
-        # later slice). Extracting only this row would split one table across
-        # two mechanisms, and new English copy in wire.settings stales the
-        # carried locales' audited ledger rows.
+        # i18n: ignore keymap REGISTRY English. The settings surfaces paint
+        # `settings_io._KEYMAP_COPY`, i.e. the translated `wire.settings.keymap`
+        # rows; these literals exist for group-conflict refusals ("<label>
+        # already uses …") and are pinned byte-for-byte against the catalogue's
+        # English by `tests/unit/i18n/test_tui_english_slice.py`, so translating
+        # them in place would fork one sentence into two sources.
         help="Starts speech-to-text recording in the desktop window.",
         tip="",
         scope="desktop",
@@ -273,12 +273,12 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         action="command_palette",
         label="Command palette",
         default="ctrl+p",
-        # i18n: ignore keymap row copy is not extracted yet: every KEY_ACTIONS
-        # label/help is a literal here and is recorded verbatim in the
-        # wire.settings golden (the 8 keymap rows were deliberately left to a
-        # later slice). Extracting only this row would split one table across
-        # two mechanisms, and new English copy in wire.settings stales the
-        # carried locales' audited ledger rows.
+        # i18n: ignore keymap REGISTRY English. The settings surfaces paint
+        # `settings_io._KEYMAP_COPY`, i.e. the translated `wire.settings.keymap`
+        # rows; these literals exist for group-conflict refusals ("<label>
+        # already uses …") and are pinned byte-for-byte against the catalogue's
+        # English by `tests/unit/i18n/test_tui_english_slice.py`, so translating
+        # them in place would fork one sentence into two sources.
         help="Searches every command, setting and conversation from one box.",
         tip="",
         # Textual injects its OWN priority binding on ctrl+p when no binding
@@ -288,8 +288,7 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         priority=True,
     ),
     KeyAction(
-        # i18n: ignore keymap row literals — see the block reason on
-        # keymap.command_palette: the row copy is not extracted yet.
+        # i18n: ignore keymap REGISTRY English — see keymap.command_palette.
         id="keymap.toggle_sidebar",
         action="toggle_sidebar",
         label="Sessions list",
@@ -298,8 +297,7 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         tip="",
     ),
     KeyAction(
-        # i18n: ignore keymap row literals — see the block reason on
-        # keymap.command_palette: the row copy is not extracted yet.
+        # i18n: ignore keymap REGISTRY English — see keymap.command_palette.
         id="keymap.focus_sidebar",
         action="focus_sidebar",
         label="Focus sessions",
@@ -308,8 +306,7 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         tip="",
     ),
     KeyAction(
-        # i18n: ignore keymap row literals — see the block reason on
-        # keymap.command_palette: the row copy is not extracted yet.
+        # i18n: ignore keymap REGISTRY English — see keymap.command_palette.
         id="keymap.aside",
         action="aside",
         label="Aside",
@@ -318,8 +315,7 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         tip="",
     ),
     KeyAction(
-        # i18n: ignore keymap row literals — see the block reason on
-        # keymap.command_palette: the row copy is not extracted yet.
+        # i18n: ignore keymap REGISTRY English — see keymap.command_palette.
         id="keymap.fork_aside",
         action="fork_aside",
         label="Fork aside",
@@ -328,8 +324,7 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         tip="",
     ),
     KeyAction(
-        # i18n: ignore keymap row literals — see the block reason on
-        # keymap.command_palette: the row copy is not extracted yet.
+        # i18n: ignore keymap REGISTRY English — see keymap.command_palette.
         id="keymap.toggle_todos",
         action="toggle_todos",
         label="Todo panel",
@@ -338,8 +333,7 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         tip="",
     ),
     KeyAction(
-        # i18n: ignore keymap row literals — see the block reason on
-        # keymap.command_palette: the row copy is not extracted yet.
+        # i18n: ignore keymap REGISTRY English — see keymap.command_palette.
         id="keymap.toggle_subagents",
         action="toggle_subagents",
         label="Subagent panel",
@@ -348,8 +342,7 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         tip="",
     ),
     KeyAction(
-        # i18n: ignore keymap row literals — see the block reason on
-        # keymap.command_palette: the row copy is not extracted yet.
+        # i18n: ignore keymap REGISTRY English — see keymap.command_palette.
         id="keymap.toggle_pin",
         action="toggle_pin",
         label="Pin session",
@@ -358,8 +351,7 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         tip="",
     ),
     KeyAction(
-        # i18n: ignore keymap row literals — see the block reason on
-        # keymap.command_palette: the row copy is not extracted yet.
+        # i18n: ignore keymap REGISTRY English — see keymap.command_palette.
         id="keymap.toggle_asks",
         action="toggle_asks",
         label="Queued asks",
@@ -368,8 +360,7 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         tip="",
     ),
     KeyAction(
-        # i18n: ignore keymap row literals — see the block reason on
-        # keymap.command_palette: the row copy is not extracted yet.
+        # i18n: ignore keymap REGISTRY English — see keymap.command_palette.
         id="keymap.prev_session",
         action="switch_session(-1)",
         label="Previous session",
@@ -382,8 +373,7 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         priority=True,
     ),
     KeyAction(
-        # i18n: ignore keymap row literals — see the block reason on
-        # keymap.command_palette: the row copy is not extracted yet.
+        # i18n: ignore keymap REGISTRY English — see keymap.command_palette.
         id="keymap.next_session",
         action="switch_session(1)",
         label="Next session",
@@ -393,8 +383,7 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         priority=True,
     ),
     KeyAction(
-        # i18n: ignore keymap row literals — see the block reason on
-        # keymap.command_palette: the row copy is not extracted yet.
+        # i18n: ignore keymap REGISTRY English — see keymap.command_palette.
         id="keymap.cycle_effort",
         action="cycle_effort",
         label="Reasoning effort",
@@ -408,8 +397,7 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         priority=True,
     ),
     KeyAction(
-        # i18n: ignore keymap row literals — see the block reason on
-        # keymap.command_palette: the row copy is not extracted yet.
+        # i18n: ignore keymap REGISTRY English — see keymap.command_palette.
         id="keymap.clear_transcript",
         action="clear_transcript",
         label="Clear transcript",
@@ -569,6 +557,36 @@ COMPOSER_KEYS: frozenset[str] = frozenset(
         "down",
         "left",
         "right",
+    }
+)
+
+#: App-level chords that are NOT registry rows, so the group check cannot see
+#: them and a remap can land on one.
+#:
+#: `COMPOSER_KEYS` covers the class where a non-priority hotkey silently loses
+#: to a focused widget; this is the sibling class at APP scope: the transcript
+#: scroll extremes, the todo/aside scroll chords, copy-aside and the darwin
+#: `super+b` alternate. Textual runs every binding registered for a key until
+#: one reports handled, and these actions return nothing — so two app bindings
+#: on one key BOTH answer it, which is the silent-pair failure `group_conflict`
+#: refuses inside the registry and cannot refuse here. Warn-and-allow, like the
+#: composer set: the user may genuinely want the chord and never use the other.
+#:
+#: Fixed by construction rather than derived: importing `OperatorApp` here is
+#: forbidden (module docstring), so `tests/unit/test_keymap.py` builds the set
+#: from the live `BINDINGS` and asserts this table matches it.
+FIXED_APP_KEYS: frozenset[str] = frozenset(
+    {
+        "ctrl+up",
+        "ctrl+down",
+        "ctrl+pageup",
+        "ctrl+pagedown",
+        "ctrl+r",
+        "ctrl+home",
+        "ctrl+end",
+        # The darwin-only alternate for `toggle_sidebar`; the registry stores one
+        # value per action, so a remap onto it would fight a fixed binding.
+        "super+b",
     }
 )
 
@@ -1103,6 +1121,14 @@ def conflict_note(action_id: str, key: str) -> str:
                     " away from typing"
                 )
             return f"the composer uses {part} — the hotkey will not fire while you are typing"
+        if part in FIXED_APP_KEYS:
+            # Same warn-and-allow. Both bindings answer the key (they share one
+            # map), so the cost is a second action firing that the user did not
+            # press for — named here because `group_conflict` only knows rows.
+            return (
+                f"the app already binds {part} — both shortcuts would answer it,"
+                " so rebind that one first or pick another"
+            )
     return ""
 
 
@@ -1291,23 +1317,29 @@ def substitute_keys(text: str, keymap: Mapping[str, str] | None) -> str:
     """
     if not isinstance(keymap, Mapping) or not keymap:
         return text
-    pairs = [
-        (action.default, keymap[action.id])
+    replacements = {
+        action.default.lower(): keymap[action.id]
         for action in KEY_ACTIONS
         if action.scope == "app"
         and action.id in keymap
         and keymap[action.id]
         and keymap[action.id] != action.default
-    ]
-    if not pairs:
+    }
+    if not replacements:
         return text
-    for shipped, live in sorted(pairs, key=lambda pair: len(pair[0]), reverse=True):
-        text = re.sub(
-            rf"(?<![A-Za-z0-9_+\-]){re.escape(shipped)}(?![A-Za-z0-9_+\-])",
-            live.replace("\\", "\\\\"),
-            text,
-        )
-    return text
+    # ONE pass over ONE alternation, then a dict lookup. Two earlier shapes were
+    # wrong and are recorded so they do not come back: a per-key `re.sub` loop
+    # rewrote in sequence, so a SWAP (A->B, B->A) turned every A into an A
+    # again, and a remap whose live value contained another shipped chord
+    # (ctrl+b -> "f9,ctrl+t") was rewritten a second time by that chord's own
+    # iteration. A single alternation cannot see its own output.
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9_+\-])(?:"
+        + "|".join(re.escape(part) for part in sorted(replacements, key=len, reverse=True))
+        + r")(?![A-Za-z0-9_+\-])",
+        re.IGNORECASE,
+    )
+    return pattern.sub(lambda match: replacements[match.group(0).lower()], text)
 
 
 def format_key_display(key: str) -> str:
@@ -1369,6 +1401,7 @@ def display_key(value: str, *, scope: str = "app", platform: str | None = None) 
 __all__ = [
     "BY_ID",
     "COMPOSER_KEYS",
+    "FIXED_APP_KEYS",
     "DESKTOP_RESERVED_COMBOS",
     "KEYMAP_PREFIX",
     "UNBOUND",

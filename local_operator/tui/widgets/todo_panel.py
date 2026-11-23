@@ -45,10 +45,10 @@ from textual.containers import Container, VerticalScroll
 from textual.dom import NoScreen
 from textual.widgets import Static
 
-from local_operator import keymap as _keymap
 from local_operator.ansi import strip_control_sequences
 from local_operator.i18n.keys import tui_small as _x
 from local_operator.i18n.text import tr
+from local_operator.tui import hotkey_hints
 from local_operator.tui import theme as theme_mod
 
 _t = tr("tui.small")
@@ -1376,13 +1376,25 @@ class TodoPanel(Container):
             else:
                 row.append(_t(_x.todo_panel_done_hidden(count=str(hidden_done))), style=dim)
         row.append(
-            _keymap.substitute_keys(
+            hotkey_hints.live_copy(
+                self,
                 _t(_x.todo_panel_collapse()) if self._expanded else _t(_x.todo_panel_expand()),
-                getattr(getattr(self, "app", None), "_keymap", None),
             ),
             style=muted,
         )
         return row
+
+    def keymap_hints_changed(self) -> None:
+        """Repaint the footer's chord after a live remap (R1).
+
+        The collapsed affordance and the expanded footer are both composed from
+        ``_affordance_row``, and neither is rewritten by a scroll or a store
+        sync — the panel only rebuilds when its own inputs move, and a remap is
+        not one of them.
+        """
+        if self._expanded:
+            self._repaint_expanded_footer()
+        self.refresh(layout=True)
 
     def _expanded_viewport(self) -> tuple[int, int, int]:
         """``(first_body_line, rows, max_scroll)`` for the expanded scroll region.

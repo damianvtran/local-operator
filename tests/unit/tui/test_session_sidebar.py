@@ -6052,3 +6052,29 @@ async def test_background_work_on_an_attached_unread_parent_paints_the_work_mark
         plain = sidebar.render().plain
         assert DELEGATING_MARKER not in plain
         assert COMPLETION_MARKERS["complete"][0] in plain
+
+
+@pytest.mark.asyncio
+async def test_the_paged_footer_head_names_the_live_focus_key() -> None:
+    """Q1: the paged ladder's `head_plain` rung is composed from `lead`.
+
+    `lead` was the one branch that skipped substitution (the focused/unfocused
+    candidates were substituted after composition, but `head_plain` is
+    `f"{position} · {lead}"` built later), so after remapping `focus_sidebar`
+    the paged footer still advertised `f9 focus`. Substituting `lead` at its
+    definition covers every rung, including this one.
+    """
+    entries = [_plain(str(index)) for index in range(120)]
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, entries, total=4)
+        footer = sidebar.render().plain.splitlines()[-1]
+        assert "f9 focus" in footer, footer
+        assert "1–" in footer or "120" in footer, footer
+
+        app._apply_keymap({"keymap.focus_sidebar": "f11"}, announce=False)
+        await pilot.pause()
+        painted = sidebar.render().plain.splitlines()[-1]
+        assert "f11 focus" in painted, painted
+        assert "f9 focus" not in painted, painted

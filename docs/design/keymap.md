@@ -1370,6 +1370,20 @@ naming `ctrl+g` after a remap.
 - `super+b` (darwin) stays a fixed alternate for `toggle_sidebar`; the registry
   stores one value per action, so it cannot be remapped and is not advertised
   as one.
-- The i18n obligation is per-namespace and NOT discharged by this slice: the 26
-  new `wire.settings.keymap` keys need translation plus independent audit in
-  every locale before the ledger rows can be appended (see the PR).
+- **Two actions on one key at LOAD time is not reported.** `lop config edit`
+  and the settings page refuse a shared key (`group_conflict`), but a config
+  written by hand — or saved by a build that predates a row — can put two
+  actions on one chord, and `resolved_keymap` applies it silently: both
+  bindings then answer the key (measured for the registry rows, review round
+  1). Not fixed here because the resolver is the wrong layer for a notice (it
+  is pure and called on every apply); the startup route would have to carry a
+  second channel beside `rejected`. Recorded rather than half-built.
+- **`lop config edit` warns but the desktop PATCH route does not.
+  The CLI now prints `keymap.conflict_note` after accepting a hotkey that lands
+  on a composer or fixed-app chord (Q8); `PATCH /v1/settings` returns the row's
+  own warning field, which no surface renders yet. The refusal path
+  (`group_conflict`) is shared by both writers, so a hard conflict is refused
+  everywhere.
+- The i18n obligation is per-namespace: the 26 `wire.settings.keymap` keys are
+  translated and audited in all seven carried locales (separate commits on this
+  branch: catalogue rows, context sidecar, ledger receipts, shipped set).

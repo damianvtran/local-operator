@@ -499,7 +499,11 @@ async def test_a_conflicting_key_names_its_victim_and_is_still_allowed() -> None
         await pilot.press("ctrl+home")  # the app's own "Transcript top"
         await pilot.pause()
         detail = view._detail_text.plain
-        assert "takes ctrl+home" in detail and "transcript" in detail.lower()
+        # The registry's own soft warning now owns this class (R4): `ctrl+home`
+        # is in `FIXED_APP_KEYS`, so the sentence is `conflict_note`'s rather
+        # than the page's "takes <key>" victim line — both describe the same
+        # cost, and one source is what stops them disagreeing.
+        assert "already binds ctrl+home" in detail, detail
         assert "enter confirms" in detail, "a soft conflict must still be committable"
 
 
@@ -1182,3 +1186,199 @@ async def test_a_second_remappable_row_holding_the_key_is_a_refusal_not_a_warnin
         assert (
             settings_io.read_setting(manager, settings_io.BY_KEY["keymap.new_session"]) == "ctrl+n"
         )
+
+
+@pytest.mark.asyncio
+async def test_a_live_remap_repaints_every_mounted_hint_that_names_a_chord() -> None:
+    """R1: `set_keymap` alone left the old chord painted (review round 1, major).
+
+    Each of these surfaces either caches its text behind an equality guard (the
+    dock header/summary, the todo affordance), holds it in a `Static` (the
+    legend, the sidebar chip) or budgets it by width (the ask bar tail), so the
+    repaint has to be triggered by the app rather than by the next unrelated
+    event.
+    """
+    from local_operator.tui.widgets.ask_queue import AskBar, ask_rows
+    from local_operator.tui.widgets.keys_legend import KeysLegend
+    from local_operator.tui.widgets.subagent_panel import SubagentPanel
+    from local_operator.tui.widgets.todo_panel import TodoPanel
+    from tests.unit.tui.test_ask_queue_surface import _row
+    from tests.unit.tui.test_session_sidebar import _plain, _sidebar_with
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 34)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)])
+        resting = sidebar.render().plain
+        assert "f9" in resting and "ctrl+b" in resting, resting
+
+        app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
+        await pilot.pause()
+        bar = app.query_one(AskBar)
+        calls: list[str] = []
+        original_hook = bar.keymap_hints_changed
+
+        def _spy_hook() -> None:
+            calls.append("ask-bar")
+            original_hook()
+
+        bar.keymap_hints_changed = _spy_hook  # type: ignore[method-assign]
+
+        app.action_toggle_keys_legend()
+        await pilot.pause()
+        legend = app.query_one(KeysLegend)
+        # The FULL composition, not the window: the dock's rows shrink the card's
+        # budget, so the todo row can be scrolled out of the painted window while
+        # still being what the card would paint.
+        assert any("ctrl+t" in row.plain for row in legend._compose_content())
+        original_legend_hook = legend.keymap_hints_changed
+
+        def _spy_legend() -> None:
+            calls.append("keys-legend")
+            original_legend_hook()
+
+        legend.keymap_hints_changed = _spy_legend  # type: ignore[method-assign]
+
+        dock = app.query_one(SubagentPanel)
+        todo = app.query_one(TodoPanel)
+        # The paint-once guards, set the way a mounted frame leaves them.
+        dock._header_shown = True
+        dock._summary_key = ("painted",)  # type: ignore[assignment]
+        assert "ctrl+t" in todo._affordance_row(0, 0).plain
+
+        app._apply_keymap(
+            {
+                "keymap.focus_sidebar": "f11",
+                "keymap.toggle_sidebar": "ctrl+o",
+                "keymap.toggle_asks": "ctrl+y",
+                "keymap.toggle_todos": "f12",
+                "keymap.toggle_subagents": "f13",
+            },
+            announce=False,
+        )
+        await pilot.pause()
+
+        after = sidebar.render().plain
+        assert "f11" in after and "ctrl+o" in after, after
+        assert "f9 focus" not in after and "ctrl+b" not in after, after
+        assert calls == [
+            "ask-bar",
+            "keys-legend",
+        ], "the app never ran the mounted repaint hooks"
+        assert keymap.painted_key("keymap.toggle_asks", app._keymap) == "ctrl+y"
+        lines = [row.plain for row in legend._compose_content()]
+        assert any("f12" in line for line in lines), lines
+        assert not any("ctrl+t" in line for line in lines), lines
+        assert dock._header_shown is False and dock._summary_key is None
+        assert dock._toggle_key() == "f13"
+        assert "f12" in todo._affordance_row(0, 0).plain
+
+
+@pytest.mark.asyncio
+async def test_the_fixed_hotkey_sentences_follow_a_live_remap() -> None:
+    """R2/Q3: the sentences that named a shipped chord, not a cached Text.
+
+    Each of these was a hardcoded string: the credential refusal's `(f4)`, the
+    `/effort` listing's `shift+tab cycles`, the fork-with-no-aside notice, the
+    aside card's footer and the slash rows (`/` picker + `/help` table). They
+    are asserted at the SAME default spelling first, so a remap is the only
+    thing that can change them.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 34)) as pilot:
+        await pilot.pause()
+        assert "(f4)" in app._ask_secret_refusal_text()
+        assert "shift+tab cycles" in app._effort_listing(("low", "high"), "low")
+        effort_row = next(row for row in app._offered_commands() if row.name == "effort")
+        assert "shift+tab cycles" in effort_row.description
+
+        notices: list[str] = []
+
+        def _capture(body: str, kind: Any = "info") -> None:
+            notices.append(body)
+
+        app._system_notice = _capture  # type: ignore[method-assign]
+        app.action_fork_aside()
+        assert notices and "ctrl+f" in notices[-1] and "f8" in notices[-1].lower(), notices
+
+        app._apply_keymap(
+            {
+                "keymap.toggle_asks": "ctrl+y",
+                "keymap.cycle_effort": "f12",
+                "keymap.fork_aside": "ctrl+o",
+                "keymap.aside": "f11",
+            },
+            announce=False,
+        )
+        await pilot.pause()
+        assert "ctrl+y" in app._ask_secret_refusal_text()
+        assert "(f4)" not in app._ask_secret_refusal_text()
+        assert "f12 cycles" in app._effort_listing(("low", "high"), "low")
+        remapped_effort = next(row for row in app._offered_commands() if row.name == "effort")
+        assert "f12 cycles" in remapped_effort.description
+        notices.clear()
+        app.action_fork_aside()
+        assert "ctrl+o" in notices[-1] and "f11" in notices[-1], notices
+
+
+@pytest.mark.asyncio
+async def test_the_aside_footer_names_the_live_fork_key() -> None:
+    """R2: the card taught `^f`; the row's default is `ctrl+f` and can move.
+
+    The footer is composed per repaint from `_hint_row`, so this drives the
+    composition directly with the fork hint enabled — the state a completed
+    exchange leaves — rather than replaying a whole aside turn.
+    """
+    from local_operator.tui.widgets.aside_panel import AsidePanel
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 34)) as pilot:
+        await pilot.pause()
+        app.action_aside()
+        await pilot.pause()
+        card = app.query_one(AsidePanel)
+        # A completed exchange is what enables every hint.
+        card._turns = [object()]  # type: ignore[list-item]
+        card._can_fork = True
+        assert "ctrl+f" in card._hint_row().plain, card._hint_row().plain
+
+        app._apply_keymap({"keymap.fork_aside": "ctrl+o"}, announce=False)
+        await pilot.pause()
+        assert "ctrl+o" in card._hint_row().plain, card._hint_row().plain
+        assert "^f" not in card._hint_row().plain
+
+
+@pytest.mark.asyncio
+async def test_a_remapped_cycle_effort_stops_delegating_shift_tab_to_forms() -> None:
+    """R5: the form delegation was unconditional, so a remap to `f12` kept it.
+
+    `shift+tab` is delegated to a focused form only BECAUSE the app holds it as
+    a priority binding and would otherwise shadow the form's own one. Remapped
+    away, the app no longer holds it — the delegation would steal the chord the
+    form regained, and `f12` would then have to move fields instead of cycling
+    effort. Default behaviour is byte-identical: the delegation still runs.
+    """
+
+    class _Form:
+        def __init__(self) -> None:
+            self.previous = 0
+
+        def action_previous_field(self) -> None:
+            self.previous += 1
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 34)) as pilot:
+        await pilot.pause()
+        form = _Form()
+        app._team_form = form
+        app.action_cycle_effort()
+        assert form.previous == 1, "the default chord must still reach the form"
+
+        app._apply_keymap({"keymap.cycle_effort": "f12"}, announce=False)
+        app._session = None  # the effort path stops at "still starting", quietly
+        app.action_cycle_effort()
+        assert form.previous == 1, "a remapped chord must not be delegated"
+
+        app._apply_keymap({"keymap.cycle_effort": "f12,shift+tab"}, announce=False)
+        app.action_cycle_effort()
+        assert form.previous == 2, "an alternate that still holds shift+tab delegates"

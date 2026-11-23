@@ -39,7 +39,6 @@ from textual.binding import Binding
 from textual.containers import Container, VerticalScroll
 from textual.widgets import Static
 
-from local_operator import keymap as _keymap
 from local_operator.ansi import strip_control_sequences
 from local_operator.harness.jobs import FALLBACK_MARKER, is_model_fallback
 
@@ -47,6 +46,7 @@ from local_operator.harness.jobs import FALLBACK_MARKER, is_model_fallback
 # tui.small with the other small shared TUI fragments.
 from local_operator.i18n.keys import tui_small as _x
 from local_operator.i18n.text import tr
+from local_operator.tui import hotkey_hints
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
 from local_operator.tui.costs import SubtreeComponents, subtree_components, subtree_cost
@@ -2565,16 +2565,12 @@ class SubagentPanel(Container):
         # trying to get back to a known shape (round 1, U1/D2). "Shrink" is
         # true of every forward step and names no destination.
         row.append(
-            _keymap.substitute_keys(
+            hotkey_hints.live_copy(
+                self,
                 _t(
                     _x.subagent_panel_ctrl_g_shrink()
                     if self._expanded
                     else _x.subagent_panel_ctrl_g_expand()
-                ),
-                (
-                    getattr(self.app, "_keymap", None)
-                    if isinstance(getattr(self.app, "_keymap", None), dict)
-                    else None
                 ),
             ),
             style=muted,
@@ -2955,10 +2951,23 @@ class SubagentPanel(Container):
         instead of pushing the hint off the row — the budget rule the module
         records above :data:`_HOTKEY`.
         """
-        snapshot = getattr(getattr(self, "app", None), "_keymap", None)
-        return _keymap.painted_key(
-            "keymap.toggle_subagents", snapshot if isinstance(snapshot, dict) else None
-        )
+        return hotkey_hints.live_key(self, "keymap.toggle_subagents")
+
+    def keymap_hints_changed(self) -> None:
+        """Forget the header/summary equality guards after a live remap (R1).
+
+        ``_paint_header`` skips its write when `(shown, compact, hint, scope)`
+        are unchanged and `_paint_summary` when its summary key is unchanged —
+        correct for a 1 Hz poll, wrong for a remap: the key is none of those
+        four inputs, so the old chord stayed painted until an unrelated event.
+        Dropping the flags here makes the app's band refresh repaint both.
+        """
+        self._header_shown = False
+        self._header_compact = False
+        self._header_hint = False
+        self._header_scope = ""
+        self._summary_key = None
+        self.refresh(layout=True)
 
     def _paint_header(self) -> None:
         """Paint the panel's identifying label.

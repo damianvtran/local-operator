@@ -898,3 +898,67 @@ def test_an_app_row_cannot_be_cleared_to_none() -> None:
     cleared state, so the grammar refuses it everywhere else."""
     for action_id in ("keymap.command_palette", "keymap.aside", "keymap.cycle_effort"):
         assert keymap.validate_key("none", action_id=action_id) is not None, action_id
+
+
+def test_substitute_keys_is_single_pass_so_swaps_and_chains_cannot_corrupt() -> None:
+    """A per-key `re.sub` loop rewrote its own output (R3/Q2).
+
+    Two shapes broke it, both reproduced against the loop this test replaced: a
+    SWAP (A->B and B->A) turned every A back into an A, and a remap whose live
+    value contained another shipped chord was rewritten again by that chord's
+    iteration. One alternation, one lookup, no second look at its own output.
+    """
+    swap = {"keymap.toggle_sidebar": "f9", "keymap.focus_sidebar": "ctrl+b"}
+    assert keymap.substitute_keys("ctrl+b hide · f9 focus", swap) == "f9 hide · ctrl+b focus"
+
+    chain = {"keymap.toggle_sidebar": "ctrl+t", "keymap.toggle_todos": "f12"}
+    assert keymap.substitute_keys("ctrl+b hide · ctrl+t todos", chain) == (
+        "ctrl+t hide · f12 todos"
+    )
+
+    # Case-insensitive: copy spells `F8` and the shipped chord is `f8`.
+    assert keymap.substitute_keys("F8 opens one", {"keymap.aside": "f12"}) == "f12 opens one"
+    # Token-bounded still holds with a swap in play.
+    assert keymap.substitute_keys("ctrl+backspace", swap) == "ctrl+backspace"
+
+
+def test_fixed_app_keys_are_the_app_bindings_that_are_not_rows() -> None:
+    """The soft-warn table must not drift from `OperatorApp.BINDINGS` (R4).
+
+    `keymap.py` cannot import the app, so the table is spelled here and this
+    test derives the expected set from the live bindings: every app-level key
+    that is NOT a registry row, not a reserved key, not a bare printable and not
+    the mouse/copy screen binding.
+    """
+    from textual.keys import key_to_character
+
+    from local_operator.tui.app import OperatorApp
+
+    def _is_printable(part: str) -> bool:
+        char = key_to_character(part)
+        return char is not None and char.isprintable()
+
+    row_keys = {action.default for action in keymap.KEY_ACTIONS if action.scope == "app"}
+    expected = set()
+    for binding in OperatorApp.BINDINGS:
+        raw = str(getattr(binding, "key", "") or "")
+        for part in raw.split(","):
+            if not part or part in row_keys or part in keymap.RESERVED_KEYS:
+                continue
+            # A bare printable (and every spelling of one: `p`, `question`,
+            # `left_square_bracket`) is TEXT, refused by `validate_key`, so it is
+            # not a binding a remap can land on.
+            if _is_printable(part) or part in {"question", "question_mark"}:
+                continue
+            expected.add(part)
+    assert keymap.FIXED_APP_KEYS == frozenset(expected)
+
+
+def test_conflict_note_warns_about_a_fixed_app_chord() -> None:
+    """A remap onto a fixed app binding is warn-and-allow, like the composer set."""
+    note = keymap.conflict_note("keymap.aside", "ctrl+home")
+    assert "already binds ctrl+home" in note
+    assert keymap.conflict_note("keymap.aside", "f5") == ""
+    # f6/f7 are still in the composer set: the one class QA asked to verify.
+    assert "f6" in keymap.COMPOSER_KEYS and "f7" in keymap.COMPOSER_KEYS
+    assert "composer" in keymap.conflict_note("keymap.aside", "f7")
