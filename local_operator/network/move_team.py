@@ -8,6 +8,7 @@ team can satisfy the comparison, and the runtime attaches that same object.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -29,6 +30,8 @@ CODE = "team_definition_unavailable"
 LOCAL_BINDING_NAME = "local-team-binding.json"
 _REAUTHORIZE = {"reauthorize": True}
 _UNREADABLE_STAMP = object()
+
+logger = logging.getLogger(__name__)
 
 
 class TeamIdentityRefused(ValueError):
@@ -69,8 +72,9 @@ def _digest(team: Team, *, structure_only: bool = False) -> str:
     from local_operator.network.definitions import digest_of
 
     # Identity is compared separately so a later hop can refresh the revision.
-    # Local display/address aliases are not part of that revision. Compare the full hydrated briefs (not a transport-truncated
-    # projection) and include the manager, roster and other definition fields.
+    # Local display/address aliases are not part of that revision. Compare the
+    # full hydrated briefs (not a transport-truncated projection) and include
+    # the manager, roster and other definition fields.
     exclude = {"id", "created_date", "label", "aliases"}
     if structure_only:
         # After admission, the same locally identified team may edit its briefs
@@ -102,11 +106,7 @@ def _local_binding(directory: Path) -> Any:
     except (OSError, ValueError):
         return _UNREADABLE_STAMP
     else:
-        if (
-            isinstance(record, dict)
-            and set(record) == {KEY}
-            and isinstance(record[KEY], dict)
-        ):
+        if isinstance(record, dict) and set(record) == {KEY} and isinstance(record[KEY], dict):
             return record[KEY]
         return _UNREADABLE_STAMP
 
@@ -114,11 +114,7 @@ def _local_binding(directory: Path) -> Any:
     # particular, an attachment sidecar supplied by a peer cannot set this key.
     try:
         raw = json.loads((directory / MESH_STAMP_NAME).read_text("utf-8"))
-        if (
-            isinstance(raw, dict)
-            and "origin" in raw
-            and not isinstance(raw["origin"], dict)
-        ):
+        if isinstance(raw, dict) and "origin" in raw and not isinstance(raw["origin"], dict):
             return _UNREADABLE_STAMP
         stamp = MeshStamp.from_json(raw)
     except FileNotFoundError:
@@ -138,17 +134,52 @@ def _local_binding(directory: Path) -> Any:
 def _write_local_binding(directory: Path, binding: Any) -> None:
     # Use an atomic local-only write so an interrupted explicit choice never
     # leaves a half-record that can be mistaken for authorization.
+    #
+    # FAILURE IS FAIL-CLOSED, SO IT PROPAGATES. Every caller treats an
+    # exception here as "no authority recorded": a fork is discarded
+    # (fork.py), a recovered replica is refused and quarantined (sync.py), an
+    # attach raises before the team is exposed (session.py). ``Path.replace``
+    # is atomic, so the previous binding (or its absence) survives intact and
+    # restore keeps refusing anything it does not match.
+    #
+    # WINDOWS. ``Path.replace`` onto an existing binding raises PermissionError
+    # while another process holds that file open without FILE_SHARE_DELETE
+    # (CPython's own ``open`` does not grant it), e.g. a concurrent reader of
+    # this session. That is the same fail-closed outcome, so it is NOT retried
+    # or swallowed: there is no measured contention to size a retry against,
+    # and a swallowed error would leave the caller believing authority was
+    # recorded. A note names the consequence on the propagating error.
+    #
+    # The temp cleanup runs only on failure (after a successful replace the
+    # temp no longer exists). On Windows its unlink can itself fail while a
+    # scanner/indexer holds the file; raising THAT would replace the real
+    # failure the caller must see, so it is logged by name and the original
+    # error propagates. A leftover temp is inert: readers open only
+    # ``LOCAL_BINDING_NAME``, and that journal is never admitted from a peer.
     path: Path | None = None
     try:
-        with NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=directory, delete=False
-        ) as temp:
+        with NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory, delete=False) as temp:
             path = Path(temp.name)
             json.dump({KEY: binding}, temp)
         path.replace(directory / LOCAL_BINDING_NAME)
-    finally:
+    except BaseException as error:
         if path is not None:
-            path.unlink(missing_ok=True)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as cleanup:
+                logger.warning(
+                    "left local team binding temp %s in %s after a failed write: %s",
+                    path.name,
+                    directory,
+                    cleanup,
+                )
+        if isinstance(error, OSError):
+            # i18n: ignore technical diagnostic attached to the propagating error
+            error.add_note(
+                f"{LOCAL_BINDING_NAME} was not written in {directory}; "
+                "no team authority was recorded (fail-closed)"
+            )
+        raise
 
 
 def inherit_fork_binding(parent: Path, child: Path) -> None:
@@ -183,9 +214,25 @@ def needs_reauthorization(directory: Path) -> bool:
     # Presence of attachment.json is not a commit marker. A legacy copy or
     # hard interruption between copying it and publishing the local binding
     # provides no authority, even on a session that appears locally owned.
-    return binding is None or (
-        isinstance(binding, dict) and "delegation" not in binding
-    )
+    return binding is None or (isinstance(binding, dict) and "delegation" not in binding)
+
+
+def has_local_authority(directory: Path, name: str) -> bool:
+    """Whether a completed local binding exists FOR ``name`` — the warm gates.
+
+    The complement of :func:`needs_reauthorization` restricted to a readable
+    record, plus the same case-insensitive name match :func:`_verify_name`
+    applies on the warm restore: a cold reader (``AttachedSession``) must not
+    show a team in force where the runtime would refuse it, whether as
+    name-only (no binding) or as a different team than the one bound (a
+    checkpoint naming ``admins`` beside a ``lopdev`` binding). An unreadable
+    journal is not authority either.
+    """
+    binding = _local_binding(directory)
+    if not isinstance(binding, dict) or needs_reauthorization(directory):
+        return False
+    bound = binding.get("name")
+    return isinstance(bound, str) and bound.casefold() == name.casefold()
 
 
 def was_authorized_locally(directory: Path) -> bool:
@@ -204,9 +251,7 @@ def _attachment(directory: Path, expected: Any) -> SessionAttachment | None:
         stored = read_session_attachment_evidence(directory)
     except SessionAttachmentUnreadable as error:
         if expected is None:
-            raise UnboundAttachmentUnreadable(
-                name, "attachment evidence is unreadable"
-            ) from error
+            raise UnboundAttachmentUnreadable(name, "attachment evidence is unreadable") from error
         raise TeamIdentityRefused(name, "attachment evidence is unreadable") from error
     if expected is _UNREADABLE_STAMP or (stored is None and expected is not None):
         raise TeamIdentityRefused(name, "attachment evidence is unavailable")
@@ -219,9 +264,7 @@ def read_local_attachment(directory: Path) -> SessionAttachment | None:
 
 def _verify_name(name: str, expected: Any, team: Team | None) -> Team:
     if not isinstance(expected, dict) or "delegation" not in expected:
-        raise TeamIdentityRefused(
-            name, "recorded authority is unavailable; re-attach via /team"
-        )
+        raise TeamIdentityRefused(name, "recorded authority is unavailable; re-attach via /team")
     expected_name = expected.get("name")
     if not isinstance(expected_name, str) or expected_name.casefold() != name.casefold():
         raise TeamIdentityRefused(name)
@@ -249,9 +292,7 @@ def _ceiling(name: str, allowed: Any, actual: dict[str, Any]) -> None:
     if allowed["name"] != actual["name"]:
         raise TeamIdentityRefused(name, f"would grant manager role {actual['name']!r}")
     if actual["unrestricted_tools"] and not allowed["unrestricted_tools"]:
-        raise TeamIdentityRefused(
-            name, f"would grant unrestricted tools to {actual['name']!r}"
-        )
+        raise TeamIdentityRefused(name, f"would grant unrestricted tools to {actual['name']!r}")
     added = sorted(set(actual["pins"]) - set(allowed["pins"]))
     if added and not allowed["unrestricted_tools"]:
         raise TeamIdentityRefused(name, f"would grant tool pins: {', '.join(added)}")
@@ -261,9 +302,7 @@ def _ceiling(name: str, allowed: Any, actual: dict[str, Any]) -> None:
         actual["kind"],
         actual["digest"],
     ):
-        raise TeamIdentityRefused(
-            name, f"role definition {actual['name']!r} is unavailable"
-        )
+        raise TeamIdentityRefused(name, f"role definition {actual['name']!r} is unavailable")
 
 
 def _role_authority(
@@ -301,12 +340,8 @@ def _role_authority(
             "digest": digest_of({"profile": profile_data, "prompt": prompt}),
             "pins": sorted(set(profile.tools or ())) if profile is not None else [],
             "unrestricted_tools": delegated and (profile is None or not profile.tools),
-            "may_delegate": profile.may_delegate
-            if profile is not None
-            else kind == "specialist",
-            "readonly_shell": is_readonly_shell_role(
-                role, profile.name if profile else None
-            ),
+            "may_delegate": profile.may_delegate if profile is not None else kind == "specialist",
+            "readonly_shell": is_readonly_shell_role(role, profile.name if profile else None),
         },
         profile,
         prompt,
@@ -395,9 +430,7 @@ def _snapshot(
             if current.manager == "task":
                 # The launch resolver reserves this name for an unprofiled
                 # generic child, so a role row cannot certify a nested lead.
-                raise TeamIdentityRefused(
-                    team.name, f"delegated manager of {key!r} is unavailable"
-                )
+                raise TeamIdentityRefused(team.name, f"delegated manager of {key!r} is unavailable")
             record_role(current.manager)
         height = 1
         for slot in current.members:
@@ -424,12 +457,8 @@ def _compare(
     expected: Any, actual: dict[str, Any], *, local: bool, exact_revision: bool = False
 ) -> None:
     name = actual["name"]
-    if not isinstance(expected, dict) or not isinstance(
-        expected.get("delegation"), dict
-    ):
-        raise TeamIdentityRefused(
-            name, "recorded authority is unavailable; re-attach via /team"
-        )
+    if not isinstance(expected, dict) or not isinstance(expected.get("delegation"), dict):
+        raise TeamIdentityRefused(name, "recorded authority is unavailable; re-attach via /team")
     _ceiling(name, expected.get("manager"), actual["manager"])
     if expected.get("name") != name or (local and expected.get("id") != actual["id"]):
         raise TeamIdentityRefused(name)
@@ -447,16 +476,12 @@ def _compare(
             )
         for slot, candidate in new[key].items():
             entry = allowed[slot]
-            if not isinstance(entry, dict) or (
-                local and entry.get("id") != candidate["id"]
-            ):
+            if not isinstance(entry, dict) or (local and entry.get("id") != candidate["id"]):
                 raise TeamIdentityRefused(name)
             if key == "roles":
                 _ceiling(name, entry, candidate)
             elif entry.get(revision) != candidate[revision]:
-                raise TeamIdentityRefused(
-                    name, f"team definition {slot!r} does not match"
-                )
+                raise TeamIdentityRefused(name, f"team definition {slot!r} does not match")
 
 
 def _recorded_limits(expected: Any, root: Path | None, role: str) -> tuple[int, bool]:
@@ -499,16 +524,13 @@ def _mirrored_origin(root: Path, team: Team) -> str:
     if (
         row is not None
         and row.get("id") == team.id
-        and row.get("digest")
-        == digest_of(_team_row_from_bundle(_team_row_from_team(team)))
+        and row.get("digest") == digest_of(_team_row_from_bundle(_team_row_from_team(team)))
     ):
         return str(row.get("origin") or "")
     return ""
 
 
-def _snapshot_at_root(
-    root: Path, team: Team, teams: TeamRegistry, expected: Any
-) -> TeamAuthority:
+def _snapshot_at_root(root: Path, team: Team, teams: TeamRegistry, expected: Any) -> TeamAuthority:
     from local_operator.agents import AgentRegistry
 
     depth, readonly_shell = _recorded_limits(expected, root, team.manager)
@@ -517,9 +539,7 @@ def _snapshot_at_root(
     )
 
 
-def source_offer(
-    root: Path, directory: Path, *, supported: bool
-) -> dict[str, Any] | None:
+def source_offer(root: Path, directory: Path, *, supported: bool) -> dict[str, Any] | None:
     from local_operator.teams import TeamRegistry
 
     prior = _local_binding(directory)
@@ -563,9 +583,7 @@ def _check_destination(
     stored = _attachment(directory, expected)
     if stored is None or not stored.team:
         if expected is not None:
-            name = (
-                str(expected.get("name") or "?") if isinstance(expected, dict) else "?"
-            )
+            name = str(expected.get("name") or "?") if isinstance(expected, dict) else "?"
             raise TeamIdentityRefused(name)
         return None
     if expected is None:
@@ -618,9 +636,7 @@ def authorize_named_team(root: Path, directory: Path, name: str) -> str:
     team = _resolve(registry, name)
     if team is None:
         raise TeamIdentityRefused(name, "team definition is unavailable")
-    bind_runtime_authority(
-        directory, team, registry, AgentRegistry(root), restoring=False
-    )
+    bind_runtime_authority(directory, team, registry, AgentRegistry(root), restoring=False)
     return team.name
 
 
@@ -658,8 +674,11 @@ def bind_runtime_authority(
             directory,
             {
                 **record,
+                # ``isinstance``: a restore only reaches here after _compare
+                # accepted ``expected`` as a record; anything else must never
+                # read as an explicit local choice.
                 "explicit_local": not restoring
-                or expected.get("explicit_local") is True,
+                or (isinstance(expected, dict) and expected.get("explicit_local") is True),
             },
         )
     return snapshot

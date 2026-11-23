@@ -400,7 +400,10 @@ def test_a_queued_retry_decides_from_its_own_attempt_not_a_remembered_refusal(
 
     from local_operator.network import mobility, projection
 
-    server = SimpleNamespace(root=tmp_path)
+    # Stub server/link: only the attributes the move path reads. ``Any`` says so
+    # to the type checker instead of pretending to be a RelayServer/PeerLink.
+    server: Any = SimpleNamespace(root=tmp_path)
+    link: Any = SimpleNamespace(device_id="d_b")
     monkeypatch.setattr(mobility, "_resolve_typed_peer", lambda *_a: ("d_b", "dev-b"))
     monkeypatch.setattr(mobility, "_link_for_move", lambda *_a: SimpleNamespace(device_id="d_b"))
     monkeypatch.setattr(mobility, "reconcile", lambda *_a, **_k: [])
@@ -418,7 +421,7 @@ def test_a_queued_retry_decides_from_its_own_attempt_not_a_remembered_refusal(
             # invite's attempt back, which is what scopes the sentence.
             mobility._source_refused(  # noqa: SLF001
                 server,
-                SimpleNamespace(device_id="d_b"),
+                link,
                 {
                     "session_id": SID,
                     "code": "team_definitions_pending",
@@ -430,7 +433,9 @@ def test_a_queued_retry_decides_from_its_own_attempt_not_a_remembered_refusal(
             # The commit lands AFTER the invite, as it does on a real move: the
             # refusal this test is about used to answer inside that window.
             timer = threading.Timer(
-                0.6, projection.write_tombstone, args=(SID,),
+                0.6,
+                projection.write_tombstone,
+                args=(SID,),
                 kwargs={"device_id": "d_b", "config_dir": tmp_path},
             )
             timers.append(timer)
@@ -528,8 +533,9 @@ class TestAttemptAttribution:
         monkeypatch.setattr(mobility, "progress_for", lambda _server: progress)
         # An expired wait over an empty store, without a transport or a handoff.
         # The refusal is local: no uncorrelated record supplies a code or message.
+        stub_server: Any = SimpleNamespace(root=tmp_path)
         assert mobility._await_own_progress(
-            SimpleNamespace(root=tmp_path), SID, budget=0.0, invited="dev-b", attempt=attempt
+            stub_server, SID, budget=0.0, invited="dev-b", attempt=attempt
         ) == ("move_attempt_unconfirmed", None)
 
     def test_a_completion_answers_only_the_attempt_it_reports(self) -> None:

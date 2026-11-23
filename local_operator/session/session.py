@@ -4852,6 +4852,14 @@ class Session:
         #: ``cache_read``/``cache_write`` on activation turns shows the resumed
         #: case paying more than that single turn.
         self._deferral_pins: frozenset[str] = frozenset()
+        #: Generic tool ceiling a team-bound subagent inherits from its parent
+        #: (set by ``harness/subagent.py`` at child build). ``None`` = unbounded.
+        #: Declared here, not only assigned there, so the type checker knows
+        #: the attribute and its value type at every reader below; the readers
+        #: keep their ``getattr`` default for reduced hosts that skip __init__.
+        self._team_generic_tool_ceiling: frozenset[str] | None = None
+        #: The pins (schema-published names) that same ceiling allows.
+        self._team_generic_pin_ceiling: frozenset[str] | None = None
         self._activated_tools: set[str] = set()
         self._tool_deferral = tool_deferral_enabled()
         #: True while a mid-session model selection has not reached the
@@ -9085,8 +9093,12 @@ class Session:
             # Journal before exposing the attachment and use exactly the
             # checked profiles and rosters, not another live registry lookup.
             authority = bind_runtime_authority(
-                getattr(self._transcript, "directory", None), team, self.team_registry,
-                self.agent_registry, restoring=_verified_bound, readonly_shell=self._readonly_shell,
+                getattr(self._transcript, "directory", None),
+                team,
+                self.team_registry,
+                self.agent_registry,
+                restoring=_verified_bound,
+                readonly_shell=self._readonly_shell,
             )
             team = authority.team
             manager, profile, specialist_prompt = authority.manager
@@ -9136,8 +9148,11 @@ class Session:
         elif kind == "specialist" and specialist_prompt:
             # Specialists have no role header: keep their voice distinct from
             # the team collaboration brief layered after it.
-            preamble = "<manager-profile>\n" + specialist_prompt + "\n</manager-profile>\n\n" + (
-                preamble or ""
+            preamble = (
+                "<manager-profile>\n"
+                + specialist_prompt
+                + "\n</manager-profile>\n\n"
+                + (preamble or "")
             )
         self._goal_state.team_brief = preamble or ""
         # Read BEFORE the claim, because the claim blanks it: this is the
@@ -9488,7 +9503,9 @@ class Session:
         if stored.goal and (not live_goal or live_goal == stored.goal):
             self._goal_state.set(stored.goal)
         if (
-            stored.team and not self.active_agent and not self.active_team_name
+            stored.team
+            and not self.active_agent
+            and not self.active_team_name
             and needs_reauthorization(directory)
         ):
             # Recovery preserves the attachment bytes as a hint, not a grant.
@@ -9496,7 +9513,9 @@ class Session:
             self._unresolved_team = stored.team
             self._unresolved_agent = stored.agent
             self.attachment_restore_notice = str(
-                TeamIdentityRefused(stored.team, "recorded authority is unavailable; re-attach via /team")
+                TeamIdentityRefused(
+                    stored.team, "recorded authority is unavailable; re-attach via /team"
+                )
             )
             return
         if stored.agent or stored.team:
@@ -9569,7 +9588,9 @@ class Session:
         # per slot, wherever the two slots are mutually exclusive.
         if stored.team and not live_agent and (not live_team or live_team == stored.team):
             from local_operator.network.move_team import (
-                TeamIdentityRefused, is_pending_definition, restore_bound,
+                TeamIdentityRefused,
+                is_pending_definition,
+                restore_bound,
                 was_authorized_locally,
             )
 
@@ -16420,13 +16441,14 @@ class Session:
         Takes effect at the next publish, like any inventory change.
         """
         if pins is not None:
-            inherited = getattr(self, "_team_generic_pin_ceiling", None)
+            requested = frozenset(pins)
+            inherited: frozenset[str] | None = getattr(self, "_team_generic_pin_ceiling", None)
             if inherited is not None:
-                pins = frozenset(pins) & inherited
+                requested &= inherited
             # ADDITIVE, for the reason activations are sticky: dropping a pin
             # (an ``/agent clear``, a role switch) would re-defer a schema the
             # cached prefix already carries and pay a second rewrite for it.
-            self._deferral_pins = self._deferral_pins | frozenset(pins)
+            self._deferral_pins = self._deferral_pins | requested
 
     def activate_deferred_tool(self, name: str) -> bool | None:
         """Publish a deferred tool's schema from the next publish on (sticky).

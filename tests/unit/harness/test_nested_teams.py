@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from local_operator.agent_profiles import load_seed
+from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.harness import subagent as subagent_mod
 from local_operator.harness.comms import SubagentComms
 from local_operator.harness.subagent import (
@@ -29,7 +31,6 @@ from local_operator.harness.subagent import (
     read_max_team_depth,
     resolve_launch_target,
 )
-from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.harness.types import ModelSpec
 from local_operator.network.move_team import TeamIdentityRefused
 from local_operator.session.session import Session
@@ -41,6 +42,18 @@ from local_operator.teams import (
     escalation_preamble,
 )
 from tests.unit.harness.test_comms import ChangeSignal, wait_for
+
+
+def _agent_fields(**fields: Any) -> AgentEditFields:
+    """``AgentEditFields`` from only the fields a test names.
+
+    Every unnamed field defaults to ``None`` (leave/unset) at runtime, but
+    pyright's synthesized pydantic ``__init__`` demands each ``Field(None, ...)``
+    field be spelled. Unpacking keeps the runtime model identical — the same
+    reason the repo's other ``_edit_fields(**overrides)`` helpers exist.
+    """
+    return AgentEditFields(**fields)
+
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 
@@ -138,7 +151,9 @@ def make_root(tmp_path: Path, registry: TeamRegistry | None, team: str | None = 
 def add_agent_slots(teams: TeamRegistry, name: str, *roles: str) -> None:
     team = teams.get_team_by_name(name)
     assert team is not None
-    teams.update_team(team.id, TeamEditFields(members=[*team.members, *[TeamMember(role=role) for role in roles]]))
+    teams.update_team(
+        team.id, TeamEditFields(members=[*team.members, *[TeamMember(role=role) for role in roles]])
+    )
 
 
 async def build(parent: Session, agent: str, job_id: str, prompt: str = "work"):
@@ -256,7 +271,7 @@ def test_a_bare_name_with_only_a_team_slot_is_a_team_launch(tmp_path, teams):
 
 
 def test_a_bare_name_with_an_agent_slot_too_stays_an_agent_launch(tmp_path, teams):
-    AgentRegistry(teams.config_dir).create_agent(AgentEditFields(name="pod", tags=["role"]))
+    AgentRegistry(teams.config_dir).create_agent(_agent_fields(name="pod", tags=["role"]))
     org = teams.get_team_by_name("org")
     assert org is not None
     teams.update_team(
@@ -355,7 +370,7 @@ def test_a_manager_that_cannot_delegate_is_an_error(tmp_path, teams, manager):
     assert pod is not None
     teams.update_team(pod.id, TeamEditFields(manager=manager))
     if manager == "quiet":
-        AgentRegistry(teams.config_dir).create_agent(AgentEditFields(name="quiet", tags=["role"]))
+        AgentRegistry(teams.config_dir).create_agent(_agent_fields(name="quiet", tags=["role"]))
     root = make_root(tmp_path, teams)
     with pytest.raises(TeamLaunchError, match="cannot delegate"):
         resolve_launch_target("team:pod", root)
@@ -625,6 +640,10 @@ def test_large_but_finite_fanout_refuses_with_a_named_bound(tmp_path, teams):
     assert org is not None
     # The hub accepts each individual roster, but the closure also includes
     # the leaves' manager definition and exceeds its overall budget by one.
-    teams.update_team(org.id, TeamEditFields(members=[TeamMember(role=n, kind="team") for n in names]))
-    with pytest.raises(TeamIdentityRefused, match=rf"org: delegation exceeds the {len(names)}-slot bound"):
+    teams.update_team(
+        org.id, TeamEditFields(members=[TeamMember(role=n, kind="team") for n in names])
+    )
+    with pytest.raises(
+        TeamIdentityRefused, match=rf"org: delegation exceeds the {len(names)}-slot bound"
+    ):
         make_root(tmp_path, teams)

@@ -6992,11 +6992,7 @@ def _destination_invite(
                         "message": str(refusal.get("message") or "this device refused the move"),
                         # THE ATTEMPT IT ANSWERS, so the owner's wait ends only if
                         # that is still the attempt waiting (R4-1).
-                        **(
-                            {"attempt": invite_attempt}
-                            if invite_attempt is not None
-                            else {}
-                        ),
+                        **({"attempt": invite_attempt} if invite_attempt is not None else {}),
                     },
                     # A NOTIFICATION, NOT AN OP WITH A BUDGET: the owner answers from
                     # memory in microseconds, and the move op's own slow-op deadline
@@ -8715,9 +8711,7 @@ def _await_own_progress(
             else:
                 # SCOPED TO THIS ATTEMPT (R4-1): the caller's token, so a refusal
                 # that answered an earlier try cannot end this wait.
-                refusal = progress.refusal(
-                    session_id, from_device=invited, attempt=attempt
-                )
+                refusal = progress.refusal(session_id, from_device=invited, attempt=attempt)
                 if refusal is not None:
                     return "none", refusal
                 if now >= deadline:

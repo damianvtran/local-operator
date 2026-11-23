@@ -23,6 +23,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.agents import AgentEditFields
 from local_operator.network import mobility, relay, sync
 from local_operator.session.placement import (
     HANDOFF_PHASE_HANDING_OFF,
@@ -39,6 +40,18 @@ from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures
     _pair_settled,
     devices,
 )
+
+
+def _agent_fields(**fields: Any) -> AgentEditFields:
+    """``AgentEditFields`` from only the fields a test names.
+
+    Every unnamed field defaults to ``None`` (leave/unset) at runtime, but
+    pyright's synthesized pydantic ``__init__`` demands each ``Field(None, ...)``
+    field be spelled. Unpacking keeps the runtime model identical — the same
+    reason the repo's other ``_edit_fields(**overrides)`` helpers exist.
+    """
+    return AgentEditFields(**fields)
+
 
 Devices = tuple[relay.RelayServer, relay.RelayServer, str, int]
 
@@ -589,9 +602,7 @@ def test_offload_admission_and_wait_require_different_peer_evidence(
             sent_invites.append(frame["attempt"])
         return send(link, frame, **kwargs)
 
-    def record(
-        link: relay.PeerLink, frame: dict[str, Any], **kwargs: Any
-    ) -> dict[str, Any] | None:
+    def record(link: relay.PeerLink, frame: dict[str, Any], **kwargs: Any) -> dict[str, Any] | None:
         if frame.get("op") == "net_session_move":
             if link.server is server_a and frame.get("phase") == "invite":
                 invite_frames.append(dict(frame))
@@ -1789,13 +1800,19 @@ def _open_team_session(root: Path, directory: Path):
 
     teams = TeamRegistry(root)
     return Session(
-        model=MODEL, stream_fn=ScriptedStream([[]]), tools=[], transcript=Transcript(directory),
-        system_blocks_provider=lambda: [], team_registry=teams, agent_registry=AgentRegistry(root),
+        model=MODEL,
+        stream_fn=ScriptedStream([[]]),
+        tools=[],
+        transcript=Transcript(directory),
+        system_blocks_provider=lambda: [],
+        team_registry=teams,
+        agent_registry=AgentRegistry(root),
     )
 
 
 def _authorize_source(root: Path, directory: Path, name: str) -> None:
     session = _open_team_session(root, directory)
+    assert session.team_registry is not None
     team = session.team_registry.get_team_by_name(name, require_loaded=True)
     assert team is not None
     session.attach_team(team)
@@ -1808,10 +1825,10 @@ def _create_source_team(server: relay.RelayServer, name: str) -> None:
     sync lands, which is the condition the queued-retry tests need: the first queued
     invite is refused ``team_definitions_pending`` rather than succeeding.
     """
-    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.agents import AgentRegistry
     from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
-    AgentRegistry(server.root).create_agent(AgentEditFields(name="offload-manager", tags=["role"]))
+    AgentRegistry(server.root).create_agent(_agent_fields(name="offload-manager", tags=["role"]))
     TeamRegistry(server.root).create_team(
         TeamEditFields(
             name=name,
@@ -1826,7 +1843,7 @@ def test_no_authority_conferring_install_before_invite_and_retry_after_sync(
     pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """No authority-conferring install may happen before the invite completes."""
-    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.agents import AgentRegistry
     from local_operator.network import definitions
     from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
@@ -1837,7 +1854,7 @@ def test_no_authority_conferring_install_before_invite_and_retry_after_sync(
     _pair_settled(pair, monkeypatch, role="admin", settings=server_b.settings)
     session_dir = _owned_session(server_a)
     manager = "offload-manager"
-    AgentRegistry(server_a.root).create_agent(AgentEditFields(name=manager, tags=["role"]))
+    AgentRegistry(server_a.root).create_agent(_agent_fields(name=manager, tags=["role"]))
     TeamRegistry(server_a.root).create_team(
         TeamEditFields(
             name="lopdev",
@@ -1877,9 +1894,9 @@ def test_no_authority_conferring_install_before_invite_and_retry_after_sync(
     # selectors only install instructions today" is an argument about arguments.
     invite = events.index(("ask", "invite"))
     assert [event for event in events[:invite] if event[0] == "apply"] == [], events
-    assert not (server_b.root / "system_prompt.md").exists(), (
-        "the destination's standing instructions were installed before the invite"
-    )
+    assert not (
+        server_b.root / "system_prompt.md"
+    ).exists(), "the destination's standing instructions were installed before the invite"
     assert TeamRegistry(server_b.root).get_team_by_name("lopdev") is None
     assert AgentRegistry(server_b.root).get_agent_by_name(manager) is None
     assert result["ok"] is False and result["code"] == "team_definitions_pending", result
@@ -1908,7 +1925,7 @@ def test_no_authority_conferring_install_before_invite_and_retry_after_sync(
 async def test_unbound_destination_declaration_requires_recorded_team_identity(
     pair: Devices, monkeypatch: pytest.MonkeyPatch, destination_tool: str
 ) -> None:
-    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.agents import AgentRegistry
     from local_operator.network import move_team
     from local_operator.teams import TeamEditFields, TeamRegistry
 
@@ -1919,7 +1936,7 @@ async def test_unbound_destination_declaration_requires_recorded_team_identity(
     team = "offload-team"
     for root, tool in ((owner.root, "read"), (receiver.root, destination_tool)):
         AgentRegistry(root).create_agent(
-            AgentEditFields(name=manager, tags=["role", f"tools:{tool}"])
+            _agent_fields(name=manager, tags=["role", f"tools:{tool}"])
         )
         TeamRegistry(root).create_team(TeamEditFields(name=team, manager=manager))
     _authorize_source(owner.root, source, team)
@@ -1977,7 +1994,7 @@ async def test_recall_requires_the_source_team_definition(
     pair: Devices, monkeypatch: pytest.MonkeyPatch, destination: str
 ) -> None:
     """Drive real relay recall and inspect runtime attachment in-process."""
-    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.agents import AgentRegistry
     from local_operator.network.move_team import TeamIdentityRefused, _digest
     from local_operator.session.goal import GoalState
     from local_operator.session.session import Session
@@ -2028,7 +2045,7 @@ async def test_recall_requires_the_source_team_definition(
         assert _digest(matching_team) == _digest(authored)
         if destination == "wider-manager":
             AgentRegistry(receiver.root).create_agent(
-                AgentEditFields(name="manager", tags=["role", "tools:edit"])
+                _agent_fields(name="manager", tags=["role", "tools:edit"])
             )
     existing_dir = _owned_session(receiver, "101010101010", rows=0)
     existing_team = "local-control" if destination == "missing" else "identity-test"
@@ -2148,7 +2165,11 @@ def test_a_failed_definitions_refresh_does_not_block_an_already_matching_team(
 
 
 def test_team_identity_refuses_unreadable_attachment_evidence(tmp_path: Path) -> None:
-    from local_operator.network.move_team import TeamIdentityRefused, check_arrival, source_offer
+    from local_operator.network.move_team import (
+        TeamIdentityRefused,
+        check_arrival,
+        source_offer,
+    )
     from local_operator.resume import ATTACHMENT_SIDECAR_NAME, write_session_attachment
 
     assert source_offer(tmp_path, tmp_path, supported=True) is None
@@ -2189,7 +2210,11 @@ def test_team_identity_uses_current_revision_on_the_second_hop(tmp_path: Path) -
 def test_team_identity_refuses_until_the_destination_definition_is_loaded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from local_operator.network.move_team import TeamIdentityRefused, check_arrival, source_offer
+    from local_operator.network.move_team import (
+        TeamIdentityRefused,
+        check_arrival,
+        source_offer,
+    )
     from local_operator.resume import write_session_attachment
     from local_operator.teams import TeamEditFields, TeamRegistry
 
@@ -2212,11 +2237,13 @@ def test_team_identity_refuses_until_the_destination_definition_is_loaded(
         assert not_loaded.value.code == "team_definitions_pending"
     assert check_arrival(peer, peer, offer) is not None
     with pytest.raises(TeamIdentityRefused, match="recorded authority is unavailable"):
-        check_arrival(peer, peer, {key: value for key, value in offer.items() if key != "delegation"})
+        check_arrival(
+            peer, peer, {key: value for key, value in offer.items() if key != "delegation"}
+        )
 
 
 def test_team_identity_refuses_a_different_manager_authority(tmp_path: Path) -> None:
-    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.agents import AgentRegistry
     from local_operator.network.move_team import (
         TeamIdentityRefused,
         _digest,
@@ -2233,7 +2260,7 @@ def test_team_identity_refuses_a_different_manager_authority(tmp_path: Path) -> 
     assert _digest(other) == _digest(team)
     for root, tool in ((author, "read"), (peer, "edit")):
         AgentRegistry(root).create_agent(
-            AgentEditFields(name="lead", description="Team manager", tags=["role", f"tools:{tool}"])
+            _agent_fields(name="lead", description="Team manager", tags=["role", f"tools:{tool}"])
         )
         write_session_attachment(root, team=team.name, agent="", goal="")
     _authorize_source(author, author, "identity-test")
@@ -2244,7 +2271,11 @@ def test_team_identity_refuses_a_different_manager_authority(tmp_path: Path) -> 
 
 
 def test_team_identity_names_shell_widening_before_any_attachment(tmp_path: Path) -> None:
-    from local_operator.network.move_team import TeamIdentityRefused, check_arrival, source_offer
+    from local_operator.network.move_team import (
+        TeamIdentityRefused,
+        check_arrival,
+        source_offer,
+    )
     from local_operator.resume import write_session_attachment
     from local_operator.teams import TeamEditFields, TeamRegistry
 
@@ -2260,7 +2291,7 @@ def test_team_identity_names_shell_widening_before_any_attachment(tmp_path: Path
 
 
 def test_arrival_accepts_strictly_narrower_manager_pins(tmp_path: Path) -> None:
-    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.agents import AgentRegistry
     from local_operator.network.move_team import KEY, check_arrival, source_offer
     from local_operator.resume import write_session_attachment
     from local_operator.session.placement import MeshStamp, write_stamp_into
@@ -2268,21 +2299,28 @@ def test_arrival_accepts_strictly_narrower_manager_pins(tmp_path: Path) -> None:
 
     source, target = tmp_path / "source", tmp_path / "target"
     for root, tags in ((source, ["tools:read,edit"]), (target, ["tools:read"])):
-        AgentRegistry(root).create_agent(AgentEditFields(name="lead", tags=["role", *tags]))
+        AgentRegistry(root).create_agent(_agent_fields(name="lead", tags=["role", *tags]))
         TeamRegistry(root).create_team(TeamEditFields(name="identity-test", manager="lead"))
     _authorize_source(source, source, "identity-test")
     write_session_attachment(target, team="identity-test", agent="", goal="")
     offer = source_offer(source, source, supported=True)
+    assert offer is not None
     assert offer["manager"]["pins"] == ["edit", "read"]
     admitted = check_arrival(target, target, offer)
+    assert admitted is not None
     assert admitted["manager"]["pins"] == ["read"]
     write_stamp_into(target, MeshStamp(session_id=SESSION, origin={KEY: admitted}))
     assert _open_team_session(target, target)._deferral_pins == {"read"}
 
 
 def test_intermediate_reopen_keeps_brief_update_and_tightens_next_hop(tmp_path: Path) -> None:
-    from local_operator.agents import AgentEditFields, AgentRegistry
-    from local_operator.network.move_team import KEY, TeamIdentityRefused, check_arrival, source_offer
+    from local_operator.agents import AgentRegistry
+    from local_operator.network.move_team import (
+        KEY,
+        TeamIdentityRefused,
+        check_arrival,
+        source_offer,
+    )
     from local_operator.resume import write_session_attachment
     from local_operator.session.placement import MeshStamp, write_stamp_into
     from local_operator.teams import TeamEditFields, TeamRegistry
@@ -2291,9 +2329,13 @@ def test_intermediate_reopen_keeps_brief_update_and_tightens_next_hop(tmp_path: 
     old = TeamEditFields(name="identity-test", manager="lead", instructions="old brief")
     new = TeamEditFields(name="identity-test", manager="lead", instructions="updated brief")
     managers = {}
-    for root, fields, tools in ((source, old, "read,edit"), (middle, old, "read,edit"), (target, new, "read")):
+    for root, fields, tools in (
+        (source, old, "read,edit"),
+        (middle, old, "read,edit"),
+        (target, new, "read"),
+    ):
         managers[root] = AgentRegistry(root).create_agent(
-            AgentEditFields(name="lead", tags=["role", f"tools:{tools}"])
+            _agent_fields(name="lead", tags=["role", f"tools:{tools}"])
         )
         TeamRegistry(root).create_team(fields)
         write_session_attachment(root, team="identity-test", agent="", goal="")
@@ -2302,22 +2344,32 @@ def test_intermediate_reopen_keeps_brief_update_and_tightens_next_hop(tmp_path: 
     previous = check_arrival(middle, middle, first)
     write_stamp_into(middle, MeshStamp(session_id=SESSION, origin={KEY: previous}))
     mid_teams, mid_agents = TeamRegistry(middle), AgentRegistry(middle)
-    mid_teams.update_team(mid_teams.get_team_by_name("identity-test").id, new)
-    mid_agents.update_agent(managers[middle].id, AgentEditFields(tags=["role", "tools:read"]))
+    mid_team = mid_teams.get_team_by_name("identity-test")
+    assert mid_team is not None
+    mid_teams.update_team(mid_team.id, new)
+    mid_agents.update_agent(managers[middle].id, _agent_fields(tags=["role", "tools:read"]))
     reopened = _open_team_session(middle, middle)
     assert "updated brief" in reopened._goal_state.team_brief
     assert reopened._deferral_pins == {"read"}
     second = source_offer(middle, middle, supported=True)
+    assert first is not None and second is not None
     assert second["digest"] != first["digest"]
-    assert check_arrival(target, target, second)["manager"]["pins"] == ["read"]
-    mid_agents.update_agent(managers[middle].id, AgentEditFields(tags=["role", "tools:read,edit"]))
+    arrived = check_arrival(target, target, second)
+    assert arrived is not None
+    assert arrived["manager"]["pins"] == ["read"]
+    mid_agents.update_agent(managers[middle].id, _agent_fields(tags=["role", "tools:read,edit"]))
     with pytest.raises(TeamIdentityRefused, match="would grant tool pins: edit"):
         source_offer(middle, middle, supported=True)
 
 
 def test_matching_top_team_refuses_wider_nested_member(tmp_path: Path) -> None:
-    from local_operator.agents import AgentEditFields, AgentRegistry
-    from local_operator.network.move_team import TeamIdentityRefused, _digest, check_arrival, source_offer
+    from local_operator.agents import AgentRegistry
+    from local_operator.network.move_team import (
+        TeamIdentityRefused,
+        _digest,
+        check_arrival,
+        source_offer,
+    )
     from local_operator.resume import write_session_attachment
     from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
@@ -2325,11 +2377,13 @@ def test_matching_top_team_refuses_wider_nested_member(tmp_path: Path) -> None:
     teams = []
     for root, pins in ((source, "read"), (target, "read,edit")):
         agents, registry = AgentRegistry(root), TeamRegistry(root)
-        agents.create_agent(AgentEditFields(name="helper", tags=["role", f"tools:{pins}"]))
+        agents.create_agent(_agent_fields(name="helper", tags=["role", f"tools:{pins}"]))
         registry.create_team(TeamEditFields(name="pod", members=[TeamMember(role="helper")]))
-        teams.append(registry.create_team(TeamEditFields(
-            name="identity-test", members=[TeamMember(role="pod", kind="team")]
-        )))
+        teams.append(
+            registry.create_team(
+                TeamEditFields(name="identity-test", members=[TeamMember(role="pod", kind="team")])
+            )
+        )
     assert _digest(teams[0]) == _digest(teams[1])
     _authorize_source(source, source, "identity-test")
     write_session_attachment(target, team="identity-test", agent="", goal="")
@@ -2417,9 +2471,8 @@ async def test_a_queued_retry_is_decided_by_its_own_attempt(
     record, or a refusal that actually crossed for it. At ``cf453abae`` the second
     drive folded ``team_definitions_pending`` again with NO second refusal arriving.
     """
-    from local_operator.network import definitions
+    from local_operator.network import definitions, mobility
     from local_operator.network import move_queue as mq
-    from local_operator.network import mobility
     from local_operator.teams import TeamRegistry
 
     # The explicit drive() calls below own this record, not the startup scheduler.
@@ -2574,8 +2627,11 @@ async def test_no_attempt_inherits_a_previous_attempts_success(
     assert delivered["token"] > 0, "no earlier attempt to inherit from"
     inherited = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
     print(
-        "control (unattributed):", inherited["ok"], inherited.get("code"),
-        "| invites:", len(invites),
+        "control (unattributed):",
+        inherited["ok"],
+        inherited.get("code"),
+        "| invites:",
+        len(invites),
     )
     assert invites, "the probe never invited the peer"
     assert inherited["ok"] is True, (
@@ -2607,7 +2663,7 @@ async def test_the_ceiling_is_load_bearing_for_a_wider_destination(
     path weakened: bypassed, an otherwise-disallowed WIDER move PROCEEDS and the
     destination owns the conversation; restored, the same move REFUSES BY NAME.
     """
-    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.agents import AgentRegistry
     from local_operator.network import move_team
     from local_operator.session.placement import read_stamp
     from local_operator.teams import TeamEditFields, TeamRegistry
@@ -2620,7 +2676,7 @@ async def test_the_ceiling_is_load_bearing_for_a_wider_destination(
     # edit-capable profile: strictly wider authority than the source recorded.
     TeamRegistry(server_b.root).create_team(fields)
     AgentRegistry(server_b.root).create_agent(
-        AgentEditFields(name="manager", tags=["role", "tools:edit"])
+        _agent_fields(name="manager", tags=["role", "tools:edit"])
     )
 
     real_ceiling = move_team._ceiling
@@ -2668,3 +2724,58 @@ async def test_the_ceiling_is_load_bearing_for_a_wider_destination(
     assert blocked_dir.is_dir()
     assert not (server_b.root / "sessions" / "303030303030").exists()
     print("ceiling restored:", refused["code"], refused["message"])
+
+
+# -- local binding write failures (Windows replace/unlink semantics) ----------
+# ``_write_local_binding`` is the one writer of the local team-identity journal.
+# A failed write must PROPAGATE (every caller treats it as "no authority
+# recorded" and fails closed), and a failed cleanup of its own temp must not
+# REPLACE that error. Windows is where both happen in practice: ``replace``
+# onto a binding another process holds open, ``unlink`` of a temp a scanner
+# holds. Simulated here with PermissionError, which is what CPython raises
+# for both on Windows.
+
+
+def test_failed_binding_replace_propagates_with_note_and_removes_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.network import move_team
+
+    real_replace = Path.replace
+
+    def refuse(self: Path, target: Any) -> Path:
+        if Path(target).name == move_team.LOCAL_BINDING_NAME:
+            raise PermissionError(5, "Access is denied", str(target))
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", refuse)
+    with pytest.raises(PermissionError) as raised:
+        move_team._write_local_binding(tmp_path, {"reauthorize": True})
+    assert any("fail-closed" in note for note in raised.value.__notes__)
+    # Fail-closed: no binding published and no temp left behind.
+    assert sorted(p.name for p in tmp_path.iterdir()) == []
+
+
+def test_failed_temp_cleanup_does_not_mask_the_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from local_operator.network import move_team
+
+    def refuse_replace(self: Path, target: Any) -> Path:
+        raise PermissionError(5, "Access is denied", str(target))
+
+    def refuse_unlink(self: Path, missing_ok: bool = False) -> None:
+        raise PermissionError(32, "being used by another process", str(self))
+
+    monkeypatch.setattr(Path, "replace", refuse_replace)
+    monkeypatch.setattr(Path, "unlink", refuse_unlink)
+    with caplog.at_level("WARNING", logger=move_team.__name__):
+        with pytest.raises(PermissionError) as raised:
+            move_team._write_local_binding(tmp_path, {"reauthorize": True})
+    # The REPLACE failure is the one the caller sees, not the cleanup's.
+    assert raised.value.errno == 5
+    assert "left local team binding temp" in caplog.text
+    # The leftover is inert: it is never the binding name readers open.
+    leftovers = [p.name for p in tmp_path.iterdir()]
+    assert len(leftovers) == 1 and leftovers[0] != move_team.LOCAL_BINDING_NAME
+    assert move_team._local_binding(tmp_path) is None

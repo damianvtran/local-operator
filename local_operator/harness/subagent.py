@@ -1749,8 +1749,10 @@ def resolve_launch_target(
         if authority is not None:
             # An orphan generic child cannot reconstruct the narrower
             # inventory of its missing real parent from the root session.
-            orphan_generic = not sub_name and role == "task" and (
-                carried.depth != _session_depth(parent_session) + 1
+            orphan_generic = (
+                not sub_name
+                and role == "task"
+                and (carried.depth != _session_depth(parent_session) + 1)
             )
             if team is None or not 1 <= carried.depth <= authority.max_depth or orphan_generic:
                 raise TeamLaunchError("recorded delegation does not match; re-attach via /team")
@@ -4695,7 +4697,9 @@ async def _construct_child_session(
     # can only ever preserve a denial and never clear one the live computation
     # would have found.
     generic_bound = target is not None and inherits_bound_team_authority(agent, target)
-    inherited_names = frozenset(tool.name for tool in parent_session._tools) if generic_bound else None
+    inherited_names = (
+        frozenset(tool.name for tool in parent_session._tools) if generic_bound else None
+    )
     restricted = (
         restricted
         or generic_bound
@@ -4839,7 +4843,9 @@ async def _construct_child_session(
     elif inherited_names is not None:
         # Rebuilding default tools is not inheritance when the parent actually
         # has a different inventory. Carry only the reach it currently holds.
-        tools = create_tools(tool_context, enabled=[n for n in DEFAULT_TOOL_NAMES if n in inherited_names])
+        tools = create_tools(
+            tool_context, enabled=[n for n in DEFAULT_TOOL_NAMES if n in inherited_names]
+        )
     else:
         # Unrestricted/freeform children retain the full default inventory,
         # even when sticky MCP denial is inherited from a restricted ancestor.

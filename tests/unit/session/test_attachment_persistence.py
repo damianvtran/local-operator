@@ -710,10 +710,15 @@ class TestLateAdoptionBeforeTheFirstTurn:
 
 @pytest.mark.parametrize("damage", ["missing", "unreadable", "manager-pins"])
 def test_moved_team_reopen_refuses_unverified_authority(tmp_path, registries, damage):
-    from local_operator.network.move_team import KEY, TeamIdentityRefused, check_arrival, source_offer
-    from local_operator.session.placement import MeshStamp, write_stamp_into
-
     from shutil import copyfile
+
+    from local_operator.network.move_team import (
+        KEY,
+        TeamIdentityRefused,
+        check_arrival,
+        source_offer,
+    )
+    from local_operator.session.placement import MeshStamp, write_stamp_into
 
     source = _session(tmp_path, registries)
     source.attach_team(registries[1].get_team_by_name("lopdev"))
@@ -753,8 +758,12 @@ def test_local_restore_does_not_reauthorize_manager_pins(tmp_path, registries):
     assert "would grant tool pins: edit" in resumed.attachment_restore_notice
 
 
-@pytest.mark.parametrize("forked", [False, True], ids=["partial-copy", "fork-without-parent-binding"])
-def test_present_attachment_without_completed_binding_is_not_authority(tmp_path, registries, forked):
+@pytest.mark.parametrize(
+    "forked", [False, True], ids=["partial-copy", "fork-without-parent-binding"]
+)
+def test_present_attachment_without_completed_binding_is_not_authority(
+    tmp_path, registries, forked
+):
     from local_operator.fork import fork_session
     from local_operator.resume import TRANSCRIPT_NAME
 
@@ -774,7 +783,11 @@ def test_present_attachment_without_completed_binding_is_not_authority(tmp_path,
 
 @pytest.mark.asyncio
 async def test_generic_child_of_moved_team_cannot_gain_tools_or_pins(tmp_path, registries):
-    from local_operator.harness.subagent import TeamLaunchError, _build_child_session, resolve_launch_target
+    from local_operator.harness.subagent import (
+        TeamLaunchError,
+        _build_child_session,
+        resolve_launch_target,
+    )
     from local_operator.harness.types import AgentTool
     from local_operator.network.move_team import KEY, check_arrival, source_offer
     from local_operator.session.placement import MeshStamp, write_stamp_into
@@ -792,9 +805,14 @@ async def test_generic_child_of_moved_team_cannot_gain_tools_or_pins(tmp_path, r
 
     async def not_called(*args, **kwargs):
         raise AssertionError("no tools are executed")
+
     moved.refresh_tools([AgentTool(name="read", execute=not_called)])
     child = await _build_child_session(
-        label="bound", prompt="inspect", parent_session=moved, model_spec=None, job_id="job-generic",
+        label="bound",
+        prompt="inspect",
+        parent_session=moved,
+        model_spec=None,
+        job_id="job-generic",
         target=resolve_launch_target("task", moved),
     )
     try:

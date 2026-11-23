@@ -2500,6 +2500,15 @@ async def test_a_cursor_cut_read_leaves_the_cold_seed_unset(tmp_path: Path, monk
         await viewer.dispose()
 
 
+def _bind_team_locally(config_dir: Path, directory: Path, name: str) -> None:
+    """Attach ``name`` explicitly on this machine: attachment + local binding."""
+    from local_operator.network.move_team import authorize_named_team
+    from local_operator.resume import write_session_attachment
+
+    write_session_attachment(directory, team=name, agent="", goal="")
+    authorize_named_team(config_dir, directory, name)
+
+
 def _write_team(config_dir: Path, name: str, *, manager: str) -> None:
     """A real registry row, so the cold identity lookup has something to read."""
     from datetime import datetime, timezone
@@ -2557,6 +2566,10 @@ async def test_a_cold_resume_derives_the_identity_the_team_binds(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     directory = _seed_transcript(tmp_path, SESSION_ID)
     _write_team(tmp_path, "lopdev", manager="manager")
+    # TEAM-BOUND means a completed local binding, made by the real explicit
+    # attach path. Without one the team is a name-only hint and both halves
+    # publish the empty statement — pinned by the name-only test below.
+    _bind_team_locally(tmp_path, directory, "lopdev")
 
     from local_operator.harness.types import Message
     from local_operator.session.frontend_state import FrontendSessionState
@@ -2630,6 +2643,133 @@ async def test_a_cold_resume_derives_the_identity_the_team_binds(
         "team": "lopdev",
         "role_of_speaker": "manager",
     }
+
+
+@pytest.mark.asyncio
+async def test_a_name_only_team_reads_unattached_cold_and_warm_alike(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """No name-only recovery, and the cold pane must not pretend otherwise.
+
+    A checkpoint and ``attachment.json`` that NAME a team, with no completed
+    local binding (an interrupted move/fork copy, a legacy journal), grant no
+    authority: the warm restore keeps the name as an unresolved hint. The cold
+    frame used to derive the triple from the checkpoint's name alone, so the
+    pane showed the team until the runtime engaged and then lost it. Both halves
+    must publish the explicit empty statement.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+    _write_team(tmp_path, "lopdev", manager="manager")
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.harness.types import Message
+    from local_operator.resume import write_session_attachment
+    from local_operator.session.frontend_state import FrontendSessionState
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+    from local_operator.teams import TeamRegistry
+    from tests.unit.session.test_session import MODEL, ScriptedStream
+
+    write_session_attachment(directory, team="lopdev", agent="", goal="")
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("carry the roster"))
+    await _checkpoint(
+        directory,
+        FrontendSessionState(
+            session_id=SESSION_ID,
+            epoch="previous-owner",
+            active_agent="manager",
+            active_team="lopdev",
+        ),
+    )
+    empty = {"speaker": "", "team": "", "role_of_speaker": ""}
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        cold = viewer.frontend_state
+        assert cold.effective_identity == empty
+        # Not only the triple: the slots a client could read the team from are
+        # empty too, exactly as the warm frame publishes them.
+        assert (cold.active_team, cold.active_agent) == ("", "")
+    finally:
+        await viewer.dispose()
+
+    warm = Session(
+        model=MODEL,
+        stream_fn=ScriptedStream([[]]),
+        tools=[],
+        transcript=Transcript(directory),
+        system_blocks_provider=lambda: [],
+        agent_registry=AgentRegistry(tmp_path),
+        team_registry=TeamRegistry(tmp_path),
+    )
+    assert warm.effective_identity == empty
+    assert (warm.active_team_name or "", warm.active_agent or "") == ("", "")
+    assert warm.attachment_restore_notice
+
+
+@pytest.mark.asyncio
+async def test_a_checkpoint_naming_another_team_reads_the_bound_team_cold_and_warm(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The cold frame names the team the runtime will attach, not the checkpoint's.
+
+    Review (MINOR-1): the cold gate checked THAT a binding existed, not WHICH
+    team it binds. With ``lopdev`` bound and a checkpoint (lagging, or written
+    elsewhere) naming ``admins``, cold painted ``admins``/``root-lead`` while the
+    warm restore attached ``lopdev``/``manager``. Both frames must now agree on
+    all three cells.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+    _write_team(tmp_path, "lopdev", manager="manager")
+    _write_team(tmp_path, "admins", manager="root-lead")
+    _bind_team_locally(tmp_path, directory, "lopdev")
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import FrontendSessionState
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+    from local_operator.teams import TeamRegistry
+    from tests.unit.session.test_session import MODEL, ScriptedStream
+
+    await Transcript(directory).append_message(Message.user("carry the roster"))
+    await _checkpoint(
+        directory,
+        FrontendSessionState(
+            session_id=SESSION_ID,
+            epoch="previous-owner",
+            active_agent="root-lead",
+            active_team="admins",
+        ),
+    )
+    expected = {"speaker": "manager", "team": "lopdev", "role_of_speaker": "manager"}
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        cold = viewer.frontend_state
+        assert cold.effective_identity == expected
+        assert (cold.active_team, cold.active_agent) == ("lopdev", "manager")
+    finally:
+        await viewer.dispose()
+
+    warm = Session(
+        model=MODEL,
+        stream_fn=ScriptedStream([[]]),
+        tools=[],
+        transcript=Transcript(directory),
+        system_blocks_provider=lambda: [],
+        agent_registry=AgentRegistry(tmp_path),
+        team_registry=TeamRegistry(tmp_path),
+    )
+    assert warm.effective_identity == expected
+    assert (warm.active_team_name, warm.active_agent) == ("lopdev", "manager")
 
 
 @pytest.mark.asyncio
@@ -2707,6 +2847,9 @@ async def test_a_pre_fix_checkpoint_carrying_the_sentinel_still_derives(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     directory = _seed_transcript(tmp_path, SESSION_ID)
     _write_team(tmp_path, "lopdev", manager="manager")
+    # "Beside a bound team": a completed local binding, or the team is a
+    # name-only hint and no producer may publish it as in force.
+    _bind_team_locally(tmp_path, directory, "lopdev")
 
     from local_operator.harness.types import Message
     from local_operator.session.frontend_state import FrontendSessionState
@@ -2761,6 +2904,14 @@ async def test_the_cold_fallback_names_the_team_when_the_registry_cannot_be_read
     directory = _seed_transcript(tmp_path, SESSION_ID)
     # No _write_team: the checkpoint knows the team's NAME, this machine cannot
     # resolve it, and the open must still succeed.
+    #
+    # The session itself is BOUND (the binding was completed against the
+    # definition where the team was attached), so the team is in force and only
+    # the manager's NAME is missing here. Without a binding the checkpoint's
+    # name is a name-only hint and the triple is empty, cold and warm alike.
+    elsewhere = tmp_path / "attaching-root"
+    _write_team(elsewhere, "lopdev", manager="manager")
+    _bind_team_locally(elsewhere, directory, "lopdev")
     from local_operator.harness.types import Message
     from local_operator.session.frontend_state import FrontendSessionState
     from local_operator.session.transcript import Transcript

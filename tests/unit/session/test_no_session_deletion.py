@@ -456,6 +456,32 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes only the failed write's own mkstemp temp FILE beside approvals.json; "
         "never a directory",
     ),
+    # The local team-identity binding journal. `directory` IS A SESSION
+    # DIRECTORY (callers: move_team.inherit_fork_binding with the fork,
+    # require_replica_reauthorization with the recovered replica,
+    # bind_runtime_authority with the transcript's directory; fork.py passes
+    # the new fork directory), so the argument is about the call SHAPE, not the
+    # receiver's neighbourhood: the directory is only the CONTAINER. The temp
+    # FILE is created by this same call with NamedTemporaryFile(dir=directory,
+    # delete=False); `replace` moves it onto the single fixed basename
+    # LOCAL_BINDING_NAME ("local-team-binding.json"), never onto the directory
+    # or a transcript; `unlink` runs only on failure and only on that temp.
+    (
+        "local_operator/network/move_team.py::_write_local_binding",
+        "<path>.replace",
+        "Renames this call's own NamedTemporaryFile(dir=<session>) temp FILE onto the fixed "
+        "<session>/local-team-binding.json; the session directory is the container, never "
+        "the source or target, and a transcript name is never the destination",
+        1,
+    ),
+    (
+        "local_operator/network/move_team.py::_write_local_binding",
+        "<path>.unlink",
+        "On a failed write only, removes this call's own NamedTemporaryFile temp FILE "
+        "(missing_ok); the receiver is set from temp.name and nothing else, so it can be "
+        "neither the session directory nor a transcript",
+        1,
+    ),
     # -- permissions_cli: the team-signing opt-in record ----------------------
     (
         "local_operator/permissions_cli.py::_restore_optin",

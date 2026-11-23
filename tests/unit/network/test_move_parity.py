@@ -637,9 +637,11 @@ def _moved_here(session_dir: Path, source_root: Path, team: str) -> dict[str, An
     from local_operator.teams import TeamRegistry
 
     teams = TeamRegistry(source_root)
+    loaded = teams.get_team_by_name(team, require_loaded=True)
+    assert loaded is not None
     authority = move_team.bind_runtime_authority(
         None,
-        teams.get_team_by_name(team, require_loaded=True),
+        loaded,
         teams,
         AgentRegistry(source_root),
         restoring=False,
@@ -670,9 +672,7 @@ class TestANameIsNotAuthority:
     a hint, which the move's receipt reports and which can never attach.
     """
 
-    def test_an_unattested_offer_travels_as_nothing_and_binds_nothing(
-        self, tmp_path: Path
-    ) -> None:
+    def test_an_unattested_offer_travels_as_nothing_and_binds_nothing(self, tmp_path: Path) -> None:
         from local_operator.network import move_team
         from local_operator.resume import write_session_attachment
 
@@ -717,9 +717,11 @@ class TestANameIsNotAuthority:
                 project="local-operator",
             )
         )
+        lopdev = TeamRegistry(source).get_team_by_name("lopdev", require_loaded=True)
+        assert lopdev is not None
         move_team.bind_runtime_authority(
             directory,
-            TeamRegistry(source).get_team_by_name("lopdev", require_loaded=True),
+            lopdev,
             TeamRegistry(source),
             AgentRegistry(source),
             restoring=False,

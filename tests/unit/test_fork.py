@@ -109,7 +109,10 @@ class TestTheCloneItself:
         directory copy — which would bring across every file added to a session
         directory from now on, not just the ones known today.
         """
-        from local_operator.network.move_team import LOCAL_BINDING_NAME, needs_reauthorization
+        from local_operator.network.move_team import (
+            LOCAL_BINDING_NAME,
+            needs_reauthorization,
+        )
 
         parent = _seed_parent(tmp_path)
         (parent / ATTACHMENT_SIDECAR_NAME).write_text('{"team": "lopdev"}', encoding="utf-8")
@@ -1603,7 +1606,11 @@ def test_fork_carries_team_identity_without_carrying_mesh_ownership(
     from local_operator import fork
     from local_operator.network.move_team import KEY, LOCAL_BINDING_NAME, source_offer
     from local_operator.resume import read_session_attachment, write_session_attachment
-    from local_operator.session.placement import MESH_STAMP_NAME, MeshStamp, write_stamp_into
+    from local_operator.session.placement import (
+        MESH_STAMP_NAME,
+        MeshStamp,
+        write_stamp_into,
+    )
     from local_operator.teams import TeamEditFields, TeamRegistry
     from tests.unit.network.test_mobility import _authorize_source, _open_team_session
 

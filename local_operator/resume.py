@@ -954,7 +954,6 @@ def read_session_attachment(session_dir: Path) -> SessionAttachment | None:
     return SessionAttachment(team=_text("team"), agent=_text("agent"), goal=_text("goal"))
 
 
-
 class SessionAttachmentUnreadable(ValueError):
     """Attachment evidence exists but does not establish either slot's state."""
 
@@ -983,6 +982,7 @@ def read_session_attachment_evidence(session_dir: Path) -> SessionAttachment | N
     ):
         raise SessionAttachmentUnreadable
     return SessionAttachment(*(payload.get(key, "").strip() for key in ("team", "agent", "goal")))
+
 
 def write_session_attachment(session_dir: Path, *, team: str, agent: str, goal: str) -> None:
     """Journal the session's attached identity so a resume can rebuild it.
@@ -1062,14 +1062,19 @@ def bind_session_attachment(
     roster on the first turn rather than after it.
     """
     if team:
-        from local_operator.network.move_team import TeamIdentityRefused, authorize_named_team
+        from local_operator.network.move_team import (
+            TeamIdentityRefused,
+            authorize_named_team,
+        )
         from local_operator.paths import config_dir
 
         try:
             session_dir.mkdir(parents=True, exist_ok=True)
             # This is an explicit CREATE, not a file-copy or restore. Publish
             # its authorization first so a warm runtime can safely adopt it.
-            team = authorize_named_team(root if root is not None else config_dir(), session_dir, team)
+            team = authorize_named_team(
+                root if root is not None else config_dir(), session_dir, team
+            )
         except (OSError, TeamIdentityRefused):
             return False
     write_session_attachment(session_dir, agent=agent, team=team, goal="")
