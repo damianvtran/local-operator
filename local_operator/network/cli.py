@@ -708,7 +708,7 @@ def add_parser(
         "--around-id", default=None, metavar="ID", help="with --peek: the steps around that entry"
     )
     net_sessions.add_argument(
-        "--query", default=None, metavar="TEXT", help="with --peek: window around the newest match"
+        "--query", default=None, metavar="TEXT", help="with --peek: window and count for a search"
     )
     net_sessions.add_argument(
         "--regex", action="store_true", default=None, help="with --peek --query: match as a regex"
@@ -8365,7 +8365,7 @@ def _peek_journal_receipt(
     ``_peek_body`` is the function ``sessions op='peek'`` prints locally, fed
     the window the owner's readers produced — so the two outputs cannot drift.
     """
-    from local_operator.session.peek import _peek_body, window_from_wire
+    from local_operator.session.peek import _peek_body, digest_receipt, window_from_wire
 
     mode = str(answer.get("mode") or "")
     name = str(answer.get("name") or f"session {session_id}")
@@ -8382,12 +8382,22 @@ def _peek_journal_receipt(
         "request": answer.get("request") if isinstance(answer.get("request"), dict) else {},
     }
     if mode == "digest":
-        raw_digest = answer.get("digest")
-        digest: dict[str, Any] = raw_digest if isinstance(raw_digest, dict) else {}
+        digest, text = digest_receipt(answer.get("digest"))
         payload["digest"] = digest
-        return payload, [str(digest.get("text") or "")]
-    window = window_from_wire(answer.get("window") or {})
-    payload["window"] = answer.get("window") or {}
+        return payload, text.splitlines()
+    raw_window = answer.get("window") or {}
+    window = window_from_wire(raw_window, mode=mode)
+    if mode == "search" and window.match_count is None:
+        # JSON consumers (including the sessions tool) need the same notice
+        # as the human-readable receipt, not a raw legacy match on its own.
+        raw_window = dict(
+            raw_window,
+            match_count=None,
+            match_count_complete=False,
+            note=window.note,
+            miss=window.miss,
+        )
+    payload["window"] = raw_window
     if window.miss:
         return payload, [window.miss]
     raw_request = answer.get("request")

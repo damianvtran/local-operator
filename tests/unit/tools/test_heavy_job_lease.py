@@ -370,6 +370,75 @@ def test_incident_shapes_are_heavy(command: str, reason: str) -> None:
     assert heavy is not None and heavy.reason == reason, command
 
 
+# A newline ends a simple command in the shell. shlex swallowed it, so these were
+# one segment (`echo`, `cd`, `for`…) and the heavy command after it was never seen.
+MULTILINE_HEAVY = [
+    ("echo hi\npytest tests/unit", "pytest <directory>"),
+    ("cd x\npytest tests/unit", "pytest <directory>"),
+    ("echo hi\r\npytest tests/unit\r\n", "pytest <directory>"),
+    # Backslash-newline is a continuation, not a boundary: one pytest, one target.
+    ("pytest \\\n  tests/unit", "pytest <directory>"),
+    ("echo hi\nvitest run", "vitest"),
+    ("ls\nxcodebuild -scheme App\ncat log", "xcodebuild"),
+    ("for f in a b; do\n  pytest tests/unit\ndone", "pytest <directory>"),
+    ("if true; then pytest tests/unit; fi", "pytest <directory>"),
+    ("while false; do :; done; until true; do vitest run; done", "vitest"),
+    ("if pytest tests/unit; then echo ok; else echo bad; fi", "pytest <directory>"),
+    ("echo a # don't\nvitest run", "vitest"),
+    ("echo 'a\nb'\nvitest run", "vitest"),
+    # A heredoc body is read as command lines: it errs toward leasing.
+    ("cat <<EOF\nhello\nEOF\nvitest run", "vitest"),
+]
+
+MULTILINE_LIGHT = [
+    "ls\ngrep x y\ncat f",
+    # A newline inside quotes is part of the argument, not a command boundary.
+    "git commit -m 'a\npytest tests/unit'",
+    'echo "x\nvitest run"',
+    # A comment's apostrophe must not open a quote that swallows the next lines.
+    "# don't\nls",
+    "# run pytest later\nls",
+    "ls # run vitest run later",
+    "echo pytest",
+    "echo hi\npytest --collect-only",
+    "pytest --collect-only\n",
+    "echo hi \\\n  pytest",
+    "for f in a b; do\n  echo $f\ndone",
+]
+
+
+@pytest.mark.parametrize("command,reason", MULTILINE_HEAVY)
+def test_a_heavy_command_on_its_own_line_is_heavy(command: str, reason: str) -> None:
+    heavy = heavy_lease.is_heavy(command)
+    assert heavy is not None and heavy.reason == reason, command
+    assert not heavy.long_lived
+
+
+@pytest.mark.parametrize("command", MULTILINE_LIGHT)
+def test_multiline_commands_with_no_heavy_command_stay_light(command: str) -> None:
+    assert heavy_lease.is_heavy(command) is None, command
+
+
+def test_a_watcher_on_its_own_line_is_long_lived_not_leased() -> None:
+    assert heavy_lease.is_heavy("echo hi\nvitest --watch") is None
+    assert heavy_lease.is_heavy("echo hi\nvitest --watch\nvitest run") == heavy_lease.HeavyClass(
+        "vitest", long_lived=True
+    )
+
+
+def test_an_unbalanced_quote_still_splits_per_line() -> None:
+    # The fallback keeps newlines as boundaries, so the heavy line still queues.
+    assert heavy_lease.is_heavy("echo it's\nvitest run") == heavy_lease.HeavyClass("vitest")
+
+
+def test_segments_split_on_newlines_outside_quotes_only() -> None:
+    assert heavy_lease._segments("a b\nc 'd\ne' \\\nf # g'h\n\ni") == [
+        ["a", "b"],
+        ["c", "d\ne", "f"],
+        ["i"],
+    ]
+
+
 @pytest.mark.parametrize("command", LONG_LIVED)
 def test_watchers_and_dev_servers_never_take_the_slot(command: str) -> None:
     assert heavy_lease.is_heavy(command) is None, command

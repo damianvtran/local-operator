@@ -1043,7 +1043,7 @@ export function Transcript({
 
 		   A reader in history is HELD, not merely left alone: with native anchoring
 		   off, "leave scrollTop alone" lets their row slide down by the drawing's
-		   growth (up to the 32rem inline cap), and the next unrelated commit then
+		   growth (up to the inline cap plus tolerance, `lib/diagram-clip.ts`), and the next unrelated commit then
 		   applied that stale delta and jumped them (PR #4149 R3 F1). The row's own
 		   commit never re-runs the anchor-follow below, so this tick joins its deps
 		   and the one existing measurement holds the row — no second mechanism. */

@@ -177,9 +177,18 @@ from local_operator.supplements.contract import (
 )
 
 if TYPE_CHECKING:
+    from typing import TypedDict
+
     # Type-only: the ``cast`` on each ``diff_bindings`` unpack names it as a string, so
     # this route module keeps its lazy ``tools.diff_archive`` import at runtime.
     from local_operator.tools.diff_archive import DiffBindingReadOptions
+
+    class _AnswerSessionOptions(TypedDict, total=False):
+        control_only: bool
+
+    class _EventsSessionOptions(TypedDict, total=False):
+        ingress_trace: open_trace.DesktopEventsIngressTrace
+
 
 logger = logging.getLogger(__name__)
 
@@ -5342,7 +5351,11 @@ async def answer(session_id: str, body: Answer, request: Request):
     # A queued ask is addressed by durable ID, not by the display epoch. Its
     # control transport must remain usable when an older owner's canonical
     # snapshot exceeds the line limit; the pool still owns lookup and retirement.
-    session_options = {"control_only": True} if body.ask_id is not None else {}
+    # Keep the key absent for gate answers, and don't infer that this bool can
+    # fill unrelated pool keywords (such as the events-only ingress trace).
+    session_options: _AnswerSessionOptions = (
+        {"control_only": True} if body.ask_id is not None else {}
+    )
     async with errors(request), host(request).session(session_id, **session_options) as bridge:
         assert bridge.remote is not None
         if body.ask_id is not None:
@@ -6833,6 +6846,14 @@ async def events(
     # write/edit binding rows sends 1; default 0 serves today's rows exactly.
     diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
 ):
+    scope = getattr(request, "scope", None)
+    ingress_trace = (
+        scope.get(early_paint_hold.TRACE_SCOPE_KEY)
+        if open_trace.enabled() and scope is not None and open_frame == 1
+        else None
+    )
+    if ingress_trace is not None:
+        ingress_trace.start()
     # Acquire BEFORE returning response headers: invalid identity/capacity must
     # return JSON status, not a misleading 200 followed by a broken SSE stream.
     # ``allow_draft``: the pane's subscription is the bridge user that holds a
@@ -6862,8 +6883,14 @@ async def events(
     # middleware stack (``server.early_paint_hold``). Dropped only AFTER the
     # route's hold is taken, so the count never reaches zero in between, and
     # from here on the snapshot-frame release above is the only one owed.
-    early_paint_hold.hand_off(getattr(request, "scope", None))
-    context = pool.session(session_id, read=True, allow_draft=True)
+    early_paint_hold.hand_off(scope)
+    # Keep one acquire for the OPEN handshake. Omit the trace keyword on the
+    # untraced path; otherwise carry this request's trace explicitly because the
+    # single-flight lookup and bridge are shared by concurrent streams.
+    session_options: _EventsSessionOptions = (
+        {} if ingress_trace is None else {"ingress_trace": ingress_trace}
+    )
+    context = pool.session(session_id, read=True, allow_draft=True, **session_options)
     try:
         async with errors(request):
             bridge: DesktopSessionBridge = await context.__aenter__()

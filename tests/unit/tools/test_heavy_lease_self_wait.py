@@ -41,11 +41,16 @@ POLLING = [
     "vitest run\nwhile lop services status | grep held; do sleep 5; done",
     "{ while lop services status; do sleep 1; done; }; vitest run",
     "if true; then :; else while lop services status; do sleep 1; done; fi; vitest run",
+    # The heavy command on its own line was not seen as heavy at all (#4477 follow-up).
+    "while lop services status | grep '1/1 slots held'; do sleep 50; done\nvitest run",
+    "while lop services status | grep -q held; do sleep 5; done\ncd app\npnpm build",
 ]
 
 # Heavy, but NOT a poll: one status read, no loop, or a loop with no lease read.
 ALLOWED = [
     "lop services status; vitest run",
+    "lop services status\nvitest run",
+    "echo hi\nlop services status\npytest -n 4 tests/unit",
     "lop services status && pytest -n 4 tests/unit",
     "for f in a b; do echo $f; done; vitest run",
     "vitest run; while sleep 5; do echo waiting; done",
@@ -99,3 +104,22 @@ def test_the_bash_tool_refuses_the_incident_line_and_takes_no_slot(lease_env: Pa
     # Refused before the lease: no slot was taken, so nobody queued behind it.
     assert heavy_lease.read_holders(lease_env) == []
     assert heavy_lease.try_acquire(lease_env, 1) is not None
+
+
+def test_the_bash_tool_refuses_a_newline_split_poll_and_takes_no_slot(lease_env: Path) -> None:
+    result = _bash(
+        "while lop services status | grep '1/1 slots held'; do sleep 50; done\nvitest run"
+    )
+    assert result.is_error
+    assert "HEAVY JOB NOT STARTED" in _text(result)
+    assert heavy_lease.read_holders(lease_env) == []
+    assert heavy_lease.try_acquire(lease_env, 1) is not None
+
+
+def test_one_status_read_on_its_own_line_beside_a_heavy_command_is_not_refused(
+    lease_env: Path,
+) -> None:
+    result = _bash("lop services status\ntrue")
+    assert "HEAVY JOB NOT STARTED" not in _text(result)
+    heavy = heavy_lease.is_heavy("lop services status\nvitest run")
+    assert heavy is not None and not heavy.polls_lease
