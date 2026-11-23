@@ -186,6 +186,9 @@ if TYPE_CHECKING:
     class _AnswerSessionOptions(TypedDict, total=False):
         control_only: bool
 
+    class _EventsSessionOptions(TypedDict, total=False):
+        ingress_trace: open_trace.DesktopEventsIngressTrace
+
 
 logger = logging.getLogger(__name__)
 
@@ -6837,12 +6840,13 @@ async def events(
     # route's hold is taken, so the count never reaches zero in between, and
     # from here on the snapshot-frame release above is the only one owed.
     early_paint_hold.hand_off(scope)
-    if ingress_trace is None:
-        context = pool.session(session_id, read=True, allow_draft=True)
-    else:
-        # Carry the request explicitly; single-flight lookups and the bridge
-        # itself are shared by concurrent streams of the same conversation.
-        context = pool.session(session_id, read=True, allow_draft=True, ingress_trace=ingress_trace)
+    # Keep one acquire for the OPEN handshake. Omit the trace keyword on the
+    # untraced path; otherwise carry this request's trace explicitly because the
+    # single-flight lookup and bridge are shared by concurrent streams.
+    session_options: _EventsSessionOptions = (
+        {} if ingress_trace is None else {"ingress_trace": ingress_trace}
+    )
+    context = pool.session(session_id, read=True, allow_draft=True, **session_options)
     try:
         async with errors(request):
             bridge: DesktopSessionBridge = await context.__aenter__()
