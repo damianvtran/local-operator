@@ -37,6 +37,10 @@ POLLING = [
     "for i in 1 2; do /usr/local/bin/lop services status; sleep 9; done; vitest run",
     "bash -c 'while lop services status | grep -q held; do sleep 5; done; vitest run'",
     "while true; do\n  lop services status\n  sleep 5\ndone; vitest run",
+    "cd app\nfor i in 1 2; do lop services status; sleep 9; done; pnpm build",
+    "vitest run\nwhile lop services status | grep held; do sleep 5; done",
+    "{ while lop services status; do sleep 1; done; }; vitest run",
+    "if true; then :; else while lop services status; do sleep 1; done; fi; vitest run",
 ]
 
 # Heavy, but NOT a poll: one status read, no loop, or a loop with no lease read.
@@ -45,7 +49,8 @@ ALLOWED = [
     "lop services status && pytest -n 4 tests/unit",
     "for f in a b; do echo $f; done; vitest run",
     "vitest run; while sleep 5; do echo waiting; done",
-    "lop services status | grep -c held",
+    "lop services status; for p in a b; do pnpm --filter $p test; done",
+    "git commit -m 'docs: lop services status'; for f in a b; do echo $f; done; vitest run",
 ]
 
 
@@ -79,7 +84,7 @@ def _bash(command: str) -> ToolResult:
     from local_operator.tools import builtin
 
     async def call() -> ToolResult:
-        return await builtin.execute_bash("t", {"command": command}, None, None, None)
+        return await builtin.execute_bash("t", {"command": command, "timeout": 5}, None, None, None)
 
     return asyncio.run(call())
 

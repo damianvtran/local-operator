@@ -2905,9 +2905,9 @@ async def _acquire_heavy_lease(
             "HEAVY JOB NOT STARTED: this command is heavy and also polls the heavy-job "
             "lease in a loop (`lop services status`). A heavy command holds the slot for "
             "its whole run, so the loop would wait for the slot it is holding and never "
-            "finish.\nRun the heavy command on its own: the bash tool queues it for the "
-            "slot and runs it when free, so no polling loop is needed. To wait first and "
-            "run after, use `lop services heavy run -- <command>`.",
+            "finish.\nRun the heavy command on its own, without the loop: the bash tool "
+            "queues it for the slot and runs it when free, so no polling is needed. "
+            "Or run only the heavy part as `lop services heavy run -- <heavy command>`.",
         )
     session_id = (getattr(context, "session_id", None) if context else None) or os.environ.get(
         "LOCAL_OPERATOR_SESSION_ID", ""

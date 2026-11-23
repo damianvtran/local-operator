@@ -1165,9 +1165,12 @@ _LEASE_READ = re.compile(
     r"(?:^|[\s;&|(`'\"])(?:\S*/)?(?:lop|lo|local-operator)(?=\s)[^;&|\n]*?"
     r"\bservices\s+(?:heavy\s+)?status\b"
 )
-#: A shell loop keyword in command position (start of the line or after a
-#: separator or quote), so an argument that merely reads ``for`` is not one.
-_SHELL_LOOP = re.compile(r"(?:^|[;&|(`'\"]|\bdo\b|\bthen\b)\s*(?:while|until|for)\s")
+#: A shell loop keyword in command position: start of a line, or after a
+#: separator, newline, brace, ``!``, quote, ``do``/``then``/``else``/``elif``,
+#: so an argument that merely reads ``for`` is not one.
+_SHELL_LOOP = re.compile(
+    r"(?:^|[;&|(){!`'\"\n]|\b(?:do|then|else|elif)\b)[ \t]*(?:while|until|for)\s"
+)
 
 
 def polls_lease(command: str) -> bool:
@@ -1177,9 +1180,18 @@ def polls_lease(command: str) -> bool:
     the slot to free (``while lop services status | grep "1/1 slots held"; do
     sleep 50; done; vitest run``) waits for ITSELF. Only a loop counts: one
     status read beside a heavy command (``lop services status; pytest -n 4``)
-    returns at once and is harmless.
+    returns at once and is harmless, so the read must come AFTER a loop keyword.
+
+    Best effort, not a parser: it can still refuse an unrelated loop that
+    follows a loop keyword and a status read in one line (the refusal says to
+    split the call), and it does not see a renamed or variable binary
+    (``$LOP services status``), ``watch lop services status`` or a script that
+    shells out to ``lop``.
     """
-    return bool(_LEASE_READ.search(command) and _SHELL_LOOP.search(command))
+    return any(
+        _LEASE_READ.search(command, loop.end() - 1) is not None
+        for loop in _SHELL_LOOP.finditer(command)
+    )
 
 
 # -- slot sizing ------------------------------------------------------------
