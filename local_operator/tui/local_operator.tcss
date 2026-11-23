@@ -296,7 +296,11 @@ TranscriptView > JumpToLatestChip {
     width: auto;
     height: 1;
     padding: 0 1;
-    margin: 0;
+    /* Nothing here declares the property at all — not even a zero value.
+     * The sheet has exactly ONE vertical-spacing declaration (.gap-above) and
+     * `test_minimalism` pins that count, because a second one is how adaptive
+     * spacing decays back into a blank row everywhere; a widget that declares
+     * none already has zero. */
     background: $lo-overlay;
     color: $lo-fg;
     /* A click target answers the pointer before the click, like ToolCard.
