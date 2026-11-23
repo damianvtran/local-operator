@@ -242,6 +242,11 @@ def test_a_whole_episode_runs_offline_and_scores(
 
     kinds = _record_kinds(run_root)
     assert kinds.count("action_output_epoch") == 3
+    (budget,) = _record_payloads(run_root, "session_budget")
+    assert budget["provider_usd_cap_micros"] is None
+    assert budget["per_cycle_usd_cap_micros"] is None
+    assert budget["session_turn_wall_s"] is None
+    assert budget["decision_groups_limit"] >= outcome["steps"]
     # The request observer's ONE serialized flush (blueprint §2): the real
     # session tree's request finals land in the record with the two money
     # figures kept separate, even on this zero-cost rig.

@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from local_operator.evaluation.receipts import CappedAllowance, UncappedAllowance
 from scripts import run_episode
 
 _BASIS = ("openrouter", "deepseek/deepseek-v4.1-flash")
@@ -227,10 +228,161 @@ def test_the_derivation_rides_into_the_spec_metadata(tmp_path) -> None:
     assert spec.metadata["usd_cap_configured_micros"] == 3_000_000
     assert spec.metadata["usd_cap_price_factor_micros"] == 1_000_000
     assert spec.metadata["usd_cap_at"] is None
+    assert "session_budget" not in spec.metadata
+    assert {
+        allowance.resource: allowance.value
+        for allowance in spec.budget.allowances
+        if isinstance(allowance, CappedAllowance)
+    } == {
+        "provider_usd_micros": 3_000_000,
+        "wall_milliseconds": 1_000,
+        "guest_actions": 8,
+        "model_cycles": 2,
+    }
 
 
-def test_main_refuses_an_unpriceable_basis_before_allocating(tmp_path, monkeypatch, capsys) -> None:
-    """End to end at the CLI: the refusal is a preflight exit, not a traceback."""
+@pytest.mark.parametrize(
+    ("session_wall_s", "max_usd", "requested_micros"),
+    [(None, "3", 3_000_000), (12.5, "3", 3_000_000), (None, "0.000001", 1)],
+)
+def test_session_cli_discloses_limits_before_dispatch(
+    tmp_path, monkeypatch, capsys, session_wall_s, max_usd, requested_micros
+) -> None:
+    from local_operator.evaluation import source_pin
+
+    (tmp_path / "tasks").mkdir()
+    (tmp_path / "tasks" / "task.py").write_text("TASK = {}\n")
+    selector = _write_tiny_selector(tmp_path)
+    # No host, worker, or credential store is needed to inspect what this CLI
+    # passes to the arm. The separate offline rig covers the on-disk record.
+    monkeypatch.setattr(source_pin, "verify_core_source", lambda _pin: None)
+    monkeypatch.setattr(
+        run_episode,
+        "build_config",
+        lambda *args, **kwargs: SimpleNamespace(completion_verifier=SimpleNamespace(enabled=False)),
+    )
+
+    def assert_diagnostic():
+        diagnostic = capsys.readouterr().err
+        assert "session_budget=" in diagnostic
+        disclosure = json.loads(diagnostic.split("session_budget=", 1)[1])
+        assert disclosure == {
+            "provider_usd_cap_micros": None,
+            "per_cycle_usd_cap_micros": None,
+            "guest_actions_limit": None,
+            "model_cycles_limit": None,
+            "session_turn_wall_s": session_wall_s,
+            "decision_groups_limit": 7,
+            "requested_provider_usd_micros": requested_micros,
+            "requested_per_cycle_usd_micros": 250_000,
+            "lease_and_frontend_wall_basis_s": 19,
+        }
+        return disclosure
+
+    async def managed_frontend(*args, **kwargs):
+        assert_diagnostic()
+        return 0
+
+    async def session_arm(*, args, spec, **_kwargs):
+        assert assert_diagnostic() == spec.metadata["session_budget"]
+        assert args.session_wall_s == session_wall_s
+        assert spec.metadata["usd_cap_configured_micros"] == requested_micros
+        assert spec.metadata["usd_cap_reference_micros"] == requested_micros
+        assert "usd_cap_effective_micros" not in spec.metadata
+        for resource in run_episode.BUDGET_RESOURCES:
+            allowance = spec.budget.allowance_for(resource)
+            assert isinstance(allowance, UncappedAllowance)
+            assert allowance.reporting == "required"
+        assert {item.resource for item in spec.reservations[0].amounts} == set(
+            run_episode.BUDGET_RESOURCES
+        )
+        return 0
+
+    monkeypatch.setattr(run_episode, "_run_managed_frontend", managed_frontend)
+    monkeypatch.setattr(run_episode, "_run_session_arm", session_arm)
+    argv = [
+        "--selector",
+        str(selector),
+        "--task-id",
+        "task",
+        "--route",
+        "/".join(_ROUTE),
+        "--run-root",
+        str(tmp_path / "run"),
+        "--no-store",
+        "--engagement",
+        "session",
+        "--max-usd",
+        max_usd,
+        "--max-cycle-usd",
+        "0.25",
+        "--max-wall-s",
+        "19",
+        "--max-steps",
+        "7",
+    ]
+    if session_wall_s is not None:
+        argv += ["--session-wall-s", str(session_wall_s)]
+    assert run_episode.main(argv) == 0
+    assert run_episode.main([*argv, "--in-process-host"], internal_test_support=True) == 0
+
+
+@pytest.mark.parametrize(
+    ("flag", "value", "message"),
+    [
+        ("--max-usd", "0", "at least one USD micro"),
+        ("--max-usd", "-1", "at least one USD micro"),
+        ("--max-usd", "0.0000005", "at least one USD micro"),
+        ("--max-usd", "nan", "finite"),
+        ("--max-usd", "1e308", "finite"),
+        ("--max-cycle-usd", "inf", "finite"),
+        ("--max-cycle-usd", "1e308", "finite"),
+        ("--session-wall-s", "inf", "finite"),
+        ("--session-wall-s", "nan", "finite"),
+        ("--session-wall-s", "-inf", "finite"),
+    ],
+)
+@pytest.mark.parametrize("in_process", [False, True], ids=["managed", "in-process"])
+def test_invalid_session_budget_is_refused_before_disclosure_or_dispatch(
+    tmp_path, monkeypatch, capsys, flag, value, message, in_process
+) -> None:
+    from local_operator.evaluation import source_pin
+
+    selector = _write_tiny_selector(tmp_path)
+    run_root = tmp_path / "run"
+    monkeypatch.setattr(source_pin, "verify_core_source", lambda _pin: None)
+
+    def unexpected_step(*args, **kwargs):
+        pytest.fail("an invalid budget must be refused before setup or dispatch")
+
+    monkeypatch.setattr(run_episode, "build_config", unexpected_step)
+    monkeypatch.setattr(run_episode, "_run_managed_frontend", unexpected_step)
+    monkeypatch.setattr(run_episode, "_run_session_arm", unexpected_step)
+    argv = [
+        "--selector",
+        str(selector),
+        "--task-id",
+        "task",
+        "--route",
+        "/".join(_ROUTE),
+        "--run-root",
+        str(run_root),
+        "--no-store",
+        "--engagement",
+        "session",
+        f"{flag}={value}",
+    ]
+    if in_process:
+        argv.append("--in-process-host")
+    assert run_episode.main(argv, internal_test_support=in_process) == run_episode.EXIT_PREFLIGHT
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert flag in captured.err and message in captured.err
+    assert "session_budget=" not in captured.err
+    assert not run_root.exists()
+
+
+def _write_tiny_selector(tmp_path: Path) -> Path:
     selector = tmp_path / "selector.json"
     selector.write_text(
         json.dumps(
@@ -246,9 +398,16 @@ def test_main_refuses_an_unpriceable_basis_before_allocating(tmp_path, monkeypat
                 "workspace": str(tmp_path),
                 "workspace_digest": "c" * 64,
                 "route_capability": "computer",
+                "core_source": {"commit": "a" * 40, "module_hashes": {}},
             }
         )
     )
+    return selector
+
+
+def test_main_refuses_an_unpriceable_basis_before_allocating(tmp_path, monkeypatch, capsys) -> None:
+    """End to end at the CLI: the refusal is a preflight exit, not a traceback."""
+    selector = _write_tiny_selector(tmp_path)
     _stub_listing(monkeypatch, {})
     status = run_episode.main(
         [
