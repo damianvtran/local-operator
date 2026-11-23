@@ -10806,6 +10806,14 @@ class RelayServer:
         if stale:
             raise MeshRefusal("definition_stale", stale)
 
+        from local_operator.skills.manifest import parse_skill_manifest
+
+        skill_manifest = parse_skill_manifest(frame.get("skill_manifest"))
+        if "skill_manifest" in frame and skill_manifest is None:
+            raise MeshRefusal(
+                "protocol_error", "the create frame carried an invalid skill manifest"
+            )
+
         wanted_model = _model_choice(frame.get("model"))
         credential_refusal = _model_credential_refusal(
             self.root, frame.get("model"), identity.birth
@@ -10947,19 +10955,23 @@ class RelayServer:
         # field. It is written BEFORE the engage below, because that is the runtime
         # whose construction reads it.
         #
-        # ONLY A NAMED, ATTACHABLE IDENTITY WRITES ONE. An unnamed create writes no
-        # file at all, which is what keeps today's create byte-for-byte identical; and
-        # an agent row that is not attachable (a legacy conversational row: see
+        # Only an attachable identity or an explicit skill pin writes one. An
+        # agent row that is not attachable (a legacy conversational row: see
         # ``definitions.resolve_create_identity``) is NOT written, because a name the
         # runtime cannot resolve would be reported as a failed restore. That half is
         # reported in the reply instead — silence about it is the one thing the
         # requirement rules out.
         attachment_agent = identity.agent_name if identity.instructions_attachable else ""
-        if attachment_agent or identity.team_name:
+        if attachment_agent or identity.team_name or skill_manifest is not None:
             from local_operator.resume import write_session_attachment
 
             write_session_attachment(
-                session_dir, team=identity.team_name, agent=attachment_agent, goal=""
+                session_dir,
+                team=identity.team_name,
+                agent=attachment_agent,
+                goal="",
+                skill_manifest=skill_manifest,
+                skill_manifest_pinned=True,
             )
         if name:
             # THROUGH ``resume.write_session_title``, never a hand-rolled
@@ -16681,8 +16693,8 @@ class RelayServer:
             }
         # SKILLS TRAVEL BEFORE THE CREATE, so a brief that names ``skill://x`` resolves
         # on the session's FIRST turn rather than after the next cadence tick (up to
-        # a minute later). Unconditional — unlike definitions, nothing in the frame
-        # names which skills a session will read — and BOUNDED
+        # a minute later). The selection pin below is metadata, not a change to
+        # which bodies this existing unconditional push mirrors. It remains BOUNDED
         # (``skillsync.CREATE_PUSH_BUDGET_S``): a large first sync continues in the
         # background and the receipt says so, so it can never stall the create.
         # Best-effort: a peer that is unreachable or predates skill sync answers the
@@ -16733,6 +16745,15 @@ class RelayServer:
                 fields[key] = value
         if expect:
             fields["expect"] = expect
+        # Local tool/CLI attribution names the source session on THIS device;
+        # only its exact selection (no ID, paths or bodies) crosses the link.
+        from local_operator.network.approvals import filing_session
+        from local_operator.resume import read_session_attachment
+
+        if source_session := filing_session(frame.get("source_session")):
+            attachment = read_session_attachment(self.root / "sessions" / source_session)
+            if attachment is not None and attachment.skill_manifest is not None:
+                fields["skill_manifest"] = attachment.skill_manifest
         # THE CREATE KEY (``network/create_keys.py``): minted here unless the caller
         # brought one (a retry of a create whose reply was lost brings the key it
         # was told), so the owner can answer a replay with the session it already

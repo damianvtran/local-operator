@@ -183,6 +183,29 @@ def test_a_move_is_allowed_and_does_not_carry_the_approval_choice(
     ).exists(), "the copy inherited the source conversation's approval choice"
 
 
+def test_move_promotes_and_pins_the_skill_manifest(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.resume import read_session_attachment, write_session_attachment
+
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    source = _owned_session(server_a)
+    manifest = {"carry-alpha": "a" * 64, "carry-beta": "b" * 64}
+    write_session_attachment(source, team="", agent="", goal="Keep this", skill_manifest=manifest)
+    before = read_session_attachment(source)
+    assert before is not None and not before.skill_manifest_pinned
+
+    result = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    assert result["ok"] is True, result
+    stored = read_session_attachment(server_b.root / "sessions" / SESSION)
+    assert stored is not None
+    assert stored.skill_manifest == manifest
+    assert stored.skill_manifest_pinned is True
+    assert stored.goal == "Keep this"
+
+
 def test_a_recall_moves_the_session_and_leaves_a_tombstone(
     pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:

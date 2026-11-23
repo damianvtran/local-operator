@@ -310,7 +310,9 @@ def short_description(description: str, limit: int = SKILL_LISTING_MAX_CHARS) ->
     return clipped.rstrip(" ,;:—-") + "…"
 
 
-def render_block(skills: list[Skill], *, conditional_skills: bool = False) -> str:
+def render_block(
+    skills: list[Skill], *, conditional_skills: bool = False, skill_notes: tuple[str, ...] = ()
+) -> str:
     """Render selected guides and skills without rendering private hints.
 
     The stable base prompt still owns the ``guide://`` protocol rule in full;
@@ -365,8 +367,12 @@ def render_block(skills: list[Skill], *, conditional_skills: bool = False) -> st
         lines.extend(
             f"- {skill.name}: {short_description(skill.description)}" for skill in user_skills
         )
+        lines.extend(skill_notes)
         lines.append("</skills>")
         sections.append("\n".join(lines))
+    elif skill_notes:
+        # An entirely missing carried selection must still be visible.
+        sections.append("\n".join(("<skills>", *skill_notes, "</skills>")))
     return "\n\n".join(sections)
 
 

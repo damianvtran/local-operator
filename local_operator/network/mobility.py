@@ -3275,6 +3275,13 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
     except OSError as exc:
         logger.warning("mobility: could not adopt %s on this device: %s", target_id, exc)
         return _PROMOTE_REFUSED
+    # Pin the verified sidecar on arrival, not on the source: a refused move
+    # must not change local routing, and editing staging would break its digest.
+    from local_operator.resume import read_session_attachment, record_session_skill_manifest
+
+    attachment = read_session_attachment(target)
+    if attachment is not None and attachment.skill_manifest is not None:
+        record_session_skill_manifest(target, attachment.skill_manifest, pinned=True)
     # ``ready.json`` is the move's own boot marker, not session content: it exists
     # so a crash before the promote can be settled, and inside the session it would
     # be a file every future reader has to learn to ignore. IT IS READ FIRST, and

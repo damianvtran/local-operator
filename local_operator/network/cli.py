@@ -9857,6 +9857,11 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
 
         from local_operator.network.relay import CREATE_CLIENT_BOUND_S
 
+        # Shell/tool attribution is only a local metadata lookup for this verb.
+        # A standalone operator create has no source conversation to pin.
+        source_session = _env_filing_session()
+        source_fields = {"source_session": source_session} if source_session else {}
+
         def _create(yolo: bool) -> dict[str, Any]:
             # ONE BUILDER FOR BOTH ATTEMPTS, so the fallback differs in nothing
             # but ``yolo``. The retry is a CHANGED BODY — a changed intent — and
@@ -9895,6 +9900,7 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                 # confirm-by-key window after a lost reply: a client that gave up
                 # first would lose the id the relay was about to confirm.
                 timeout=CREATE_CLIENT_BOUND_S,
+                **source_fields,
             )
 
         unattended_notice = ""

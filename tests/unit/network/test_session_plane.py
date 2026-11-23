@@ -841,6 +841,98 @@ def test_a_peer_can_create_a_session_on_this_device_and_prompt_it(
         _stop_all(served)
 
 
+@pytest.mark.parametrize("receiver_missing", [False, True])
+def test_peer_spawn_pins_exact_source_skills_and_names_omissions(
+    peer_pair: Devices,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    receiver_missing: bool,
+) -> None:
+    """Drive CLI → control → authenticated mesh → sidecar → session prompt."""
+    import hashlib
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.network import cli
+    from local_operator.session_factory import build_initial_blocks
+    from local_operator.skills import api as skills_api
+
+    source, receiver, _host, _port = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host, port = _listen(receiver)
+    served = _serve(monkeypatch, receiver.root)
+    descriptions = {"carry-alpha": "Alpha source skill.", "carry-beta": "Beta source skill."}
+    manifest = {
+        name: hashlib.sha256(text.encode()).hexdigest() for name, text in descriptions.items()
+    }
+    source_dir = source.root / "sessions" / SESSION
+    source_dir.mkdir(parents=True)
+    # A previous source turn wrote this selection, not its entire catalogue.
+    (source_dir / "attachment.json").write_text(json.dumps({"skill_manifest": manifest}))
+    for name, text in {**descriptions, "receiver-only": "A local extra skill."}.items():
+        if receiver_missing and name == "carry-beta":
+            continue
+        directory = receiver.root / ".local-operator" / "skills" / name
+        directory.mkdir(parents=True)
+        (directory / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {text}\n---\nBody\n")
+
+    link = _dial_to(source, record, host, port)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(source.root))
+    monkeypatch.setenv("LOCAL_OPERATOR_SESSION_ID", SESSION)
+    capsys.readouterr()  # Pairing printed its own JSON before the create receipt.
+    try:
+        rc = cli._cmd_sessions(
+            argparse.Namespace(
+                peer=receiver.identity.device_id,
+                create=True,
+                json=True,
+                cwd=str(receiver.root),
+                prompt="test mesh skill selection",
+            )
+        )
+        output = capsys.readouterr()
+        assert rc == 0, output
+        session_id = json.loads(output.out)["session_id"]
+        sidecar = receiver.root / "sessions" / session_id / "attachment.json"
+        delivered = json.loads(sidecar.read_text()) if sidecar.exists() else {}
+        assert delivered.get("skill_manifest") == manifest
+        assert delivered["skill_manifest_pinned"] is True
+    finally:
+        link.close("test")
+        _stop_all(served)
+
+    # The receiving factory (not the relay fixture) must turn the sidecar
+    # into an actual prompt, using the normal receiver-local discovery roots.
+    _seed_journal(receiver.root, session_id, ["A local extra skill."])
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(receiver.root))
+    monkeypatch.chdir(receiver.root)
+    # The scratch directory itself lives beneath the operator's config. Use the
+    # real discovery walk with its world boundary so only fixture roots are read.
+    roots = skills_api.default_skill_roots
+    monkeypatch.setattr(
+        skills_api, "default_skill_roots", lambda cwd, **_: roots(cwd, boundary=receiver.root)
+    )
+    blocks = asyncio.run(
+        build_initial_blocks(
+            argparse.Namespace(resume=session_id, hosting="test", model="test"),
+            ConfigManager(receiver.root),
+            AgentRegistry(receiver.root),
+        )
+    )
+    skills_block = "\n".join(blocks).split("\n<skills>\n", 1)[1].split("\n</skills>", 1)[0]
+    available = {
+        line.split(":", 1)[0][2:]
+        for line in skills_block.splitlines()
+        if line.startswith("- ") and not line.startswith("- Unavailable on this device:")
+    }
+    if receiver_missing:
+        assert available == {"carry-alpha"}
+        assert "- Unavailable on this device: carry-beta" in skills_block
+    else:
+        assert available == set(manifest)
+    assert "receiver-only" not in skills_block
+
+
 def test_a_promptless_create_is_still_a_row_on_both_devices(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:

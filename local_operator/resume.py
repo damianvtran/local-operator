@@ -923,6 +923,8 @@ class SessionAttachment(NamedTuple):
     #: The standing ``/goal`` text; "" when unset. Stored here rather than left
     #: to the transcript because it shares the volatile tail's fate exactly.
     goal: str
+    skill_manifest: dict[str, str] | None = None
+    skill_manifest_pinned: bool = False
 
 
 def read_session_attachment(session_dir: Path) -> SessionAttachment | None:
@@ -951,10 +953,27 @@ def read_session_attachment(session_dir: Path) -> SessionAttachment | None:
         value = payload.get(key)
         return value.strip() if isinstance(value, str) else ""
 
-    return SessionAttachment(team=_text("team"), agent=_text("agent"), goal=_text("goal"))
+    from local_operator.skills.manifest import parse_skill_manifest
+
+    manifest = parse_skill_manifest(payload.get("skill_manifest"))
+    return SessionAttachment(
+        team=_text("team"),
+        agent=_text("agent"),
+        goal=_text("goal"),
+        skill_manifest=manifest,
+        skill_manifest_pinned=manifest is not None and payload.get("skill_manifest_pinned") is True,
+    )
 
 
-def write_session_attachment(session_dir: Path, *, team: str, agent: str, goal: str) -> None:
+def write_session_attachment(
+    session_dir: Path,
+    *,
+    team: str,
+    agent: str,
+    goal: str,
+    skill_manifest: dict[str, str] | None = None,
+    skill_manifest_pinned: bool = False,
+) -> None:
     """Journal the session's attached identity so a resume can rebuild it.
 
     Called on CHANGE (attach, detach, goal set/clear), never per turn: the
@@ -991,11 +1010,22 @@ def write_session_attachment(session_dir: Path, *, team: str, agent: str, goal: 
     # resume and told the user it had been renamed or deleted (R2). Normalising
     # is right for a title (the sidecar this shape was copied from) and wrong
     # for a key: what is stored has to be what the resolver will compare.
-    payload = {
+    # Persona/goal edits also rewrite this file. Keep the transfer data when
+    # those callers supply no manifest; an explicit {} is a real selection.
+    if skill_manifest is None:
+        stored = read_session_attachment(session_dir)
+        if stored is not None:
+            skill_manifest = stored.skill_manifest
+            skill_manifest_pinned = stored.skill_manifest_pinned
+    payload: dict[str, Any] = {
         "team": (team or "").strip(),
         "agent": (agent or "").strip(),
         "goal": (goal or "").strip(),
     }
+    if skill_manifest is not None:
+        payload["skill_manifest"] = skill_manifest
+        if skill_manifest_pinned:
+            payload["skill_manifest_pinned"] = True
     try:
         try:
             previous = session_dir.stat().st_mtime
@@ -1010,6 +1040,23 @@ def write_session_attachment(session_dir: Path, *, team: str, agent: str, goal: 
             os.utime(session_dir, (previous, previous))
     except (OSError, TypeError, ValueError):
         return
+
+
+def record_session_skill_manifest(
+    session_dir: Path, manifest: dict[str, str], *, pinned: bool = False
+) -> None:
+    """Update only skill metadata; local snapshots are not local routing pins."""
+    stored = read_session_attachment(session_dir) or SessionAttachment("", "", "")
+    if stored.skill_manifest == manifest and stored.skill_manifest_pinned == pinned:
+        return
+    write_session_attachment(
+        session_dir,
+        team=stored.team,
+        agent=stored.agent,
+        goal=stored.goal,
+        skill_manifest=manifest,
+        skill_manifest_pinned=pinned,
+    )
 
 
 def bind_session_attachment(session_dir: Path, *, agent: str, team: str) -> bool:

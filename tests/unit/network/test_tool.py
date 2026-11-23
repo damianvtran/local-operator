@@ -2131,6 +2131,34 @@ def test_a_non_completing_send_keeps_its_receipt_and_marks_the_call(
     assert _text(result).endswith("on it")
 
 
+def test_the_tools_create_names_its_own_source_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from local_operator.harness.types import ToolContext
+
+    source = "aabbeeff1122"
+    monkeypatch.setenv("LOCAL_OPERATOR_SESSION_ID", "000000000000")
+    forwarded: list[str | None] = []
+
+    async def fake_cli(
+        argv: list[str], timeout: float, *, source_session: str | None = None
+    ) -> tuple[int, str, str]:
+        assert "--create" in argv
+        forwarded.append(source_session)
+        return 0, json.dumps({"ok": True, "session_id": "112233445566"}), ""
+
+    monkeypatch.setattr(net_tool, "_run_cli", fake_cli)
+    result = asyncio.run(
+        net_tool.execute_network(
+            "create",
+            {"action": "sessions", "peer": "device-b", "create": True},
+            context=ToolContext(session_dir=str(tmp_path / "sessions" / source)),
+        )
+    )
+    assert not result.is_error
+    assert forwarded == [source]
+
+
 def test_the_tools_create_is_attributed_to_an_agent() -> None:
     """The ``network`` tool is an AGENT's: its subprocess carries no agent-shell
     marker, so without ``--origin agent`` the CLI read the create as the

@@ -207,6 +207,40 @@ class _CountingIndex:
         return []
 
 
+@pytest.mark.asyncio
+async def test_local_routing_records_only_the_current_selection(tmp_path: Path) -> None:
+    from local_operator.resume import read_session_attachment, write_session_attachment
+    from local_operator.skills.manifest import description_fingerprint
+
+    alpha = _make_skill(tmp_path, "alpha", "First skill")
+    beta = _make_skill(tmp_path, "beta", "Next skill")
+
+    class Index:
+        async def select(self, query: str) -> list[Skill]:
+            return [alpha if query == "first" else beta]
+
+    directory = tmp_path / "session"
+    hooks = session_factory._KnowledgeHooks(
+        index=Index(),  # type: ignore[arg-type]
+        skills_by_name={"alpha": alpha, "beta": beta},
+        skill_manifest_dir=directory,
+    )
+    first = await session_factory._select_knowledge_block(hooks, "first", task_id="one")
+    assert "- alpha:" in first and "- beta:" not in first
+    assert (stored := read_session_attachment(directory)) is not None
+    assert stored.skill_manifest == {"alpha": description_fingerprint(alpha)}
+    assert not stored.skill_manifest_pinned
+
+    write_session_attachment(directory, team="", agent="", goal="keep the goal")
+    assert (stored := read_session_attachment(directory)) is not None
+    assert stored.skill_manifest == {"alpha": description_fingerprint(alpha)}
+    second = await session_factory._select_knowledge_block(hooks, "next", task_id="two")
+    assert "- beta:" in second and "- alpha:" not in second
+    assert (stored := read_session_attachment(directory)) is not None
+    assert stored.skill_manifest == {"beta": description_fingerprint(beta)}
+    assert stored.goal == "keep the goal"
+
+
 class TestCompactionRefreeze:
     """The knowledge block freezes after the first query — unless the
     transcript's latest compaction entry id changed, which re-opens

@@ -660,7 +660,9 @@ def _describe_approval(args: dict[str, Any], _cwd: str) -> str:
     return f"{detail}{f' ({target})' if target else ''}"
 
 
-async def _run_cli(argv: list[str], timeout: float) -> tuple[int, str, str]:
+async def _run_cli(
+    argv: list[str], timeout: float, *, source_session: str | None = None
+) -> tuple[int, str, str]:
     """``(returncode, stdout, stderr)`` from one CLI invocation.
 
     The child's stdin is /dev/null on purpose: the CLI's own human step (``join``)
@@ -668,15 +670,20 @@ async def _run_cli(argv: list[str], timeout: float) -> tuple[int, str, str]:
     happens to be. A timed-out child is killed AND reaped — a killed-but-unwaited
     subprocess is how a tool leaves a process behind on the fleet.
     """
+    # A child of a model tool call: never hand it the desktop plane bearer
+    # (#3022 r2 M2 sweep). Only create needs the owning session's attribution.
+    env = _withheld_env()
+    if source_session is not None:
+        from local_operator.secrets.access import SESSION_ID_ENV
+
+        env[SESSION_ID_ENV] = source_session
     process = await asyncio.create_subprocess_exec(
         *_cli_argv(),
         *argv,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        # A child of a model tool call: never hand it the desktop plane bearer
-        # (#3022 r2 M2 sweep). `lop network` reaches the mesh, not the desktop plane.
-        env=_withheld_env(),
+        env=env,
     )
     try:
         out, err = await asyncio.wait_for(process.communicate(), timeout)
@@ -1537,6 +1544,9 @@ async def execute_network(
     try:
         if parked:
             code, stdout, stderr = await _start_parked_join(argv)
+        elif params.action == "sessions" and params.create and context is not None:
+            source_session = Path(context.session_dir).name if context.session_dir else ""
+            code, stdout, stderr = await _run_cli(argv, timeout, source_session=source_session)
         else:
             code, stdout, stderr = await _run_cli(argv, timeout)
     except (asyncio.TimeoutError, TimeoutError):
