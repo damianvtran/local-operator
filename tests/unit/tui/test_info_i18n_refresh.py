@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from textual.pilot import Pilot
 
 from local_operator.config_watch import _reset_for_tests, process_watcher
 from local_operator.i18n import text
@@ -45,6 +46,59 @@ def test_external_language_writer_imports_only_installed_modules() -> None:
     assert imports == {"pathlib", "sys", "local_operator", "local_operator.config"}
 
 
+async def _await_scrollable(pilot: Pilot, screen: InfoScreen, *, minimum: float) -> None:
+    """Wait until the seeded readout is laid out tall enough to scroll.
+
+    A scroll request issued before the readout has been measured is clamped (or
+    dropped) against ``max_scroll_y == 0``, which is how a request can look like
+    it never happened. Establish the geometry first, then ask.
+    """
+    scroll = screen._scroll
+    for _ in range(200):
+        if scroll.max_scroll_y >= minimum:
+            return
+        await pilot.pause()
+    raise AssertionError(
+        "the seeded readout is too short to scroll, so the scroll premise has no "
+        "meaning; this is a fixture fault, not a repaint bug",
+        (scroll.scroll_y, scroll.max_scroll_y, minimum),
+    )
+
+
+async def _scroll_request_landed(
+    pilot: Pilot, screen: InfoScreen, *, target: float | None
+) -> None:
+    """Wait until a scroll request has actually moved ``scroll_y``.
+
+    ``scroll_to``/``scroll_end`` set a TARGET; ``scroll_y`` only follows on a
+    later event-loop turn, and on a loaded worker that can take more than the
+    single turn one bare ``pause()`` allowed. Reading the baseline before then
+    compares a settled post-repaint scroll against a pre-state that was never the
+    intended one. That is the exact 2026-11-23 main failure: ``old_scroll`` was
+    0.0 although the test had asked for y=5, and the value after the repaint was
+    5, so the assertion read as "the repaint moved the reader" when all that had
+    happened was this test's own pending scroll landing late.
+
+    The real property is untouched: the caller still asserts ``scroll_y`` is
+    unchanged across the repaint, so a repaint that actually moves the reader
+    still fails.
+    """
+    scroll = screen._scroll
+    # Bounded, not timed: 200 turns is far beyond what a laid-out screen needs,
+    # and an unbounded wait would burn the shard timeout instead of failing here.
+    for _ in range(200):
+        if target is None:
+            if scroll.scroll_y >= scroll.max_scroll_y:
+                return
+        elif scroll.scroll_y >= target:
+            return
+        await pilot.pause()
+    raise AssertionError(
+        "the scroll request never landed before the baseline was read",
+        (scroll.scroll_y, scroll.max_scroll_y, target),
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route", ["command", "watcher", "external"])
 @pytest.mark.parametrize("at_end", [False, True])
@@ -69,10 +123,13 @@ async def test_mounted_info_repaints_without_refetching(
             await app.push_screen(screen)
             await pilot.pause()
             if at_end:
+                await _await_scrollable(pilot, screen, minimum=1.0)
                 screen._scroll.scroll_end(animate=False)
+                await _scroll_request_landed(pilot, screen, target=None)
             else:
+                await _await_scrollable(pilot, screen, minimum=5.0)
                 screen._scroll.scroll_to(y=5, animate=False)
-            await pilot.pause()
+                await _scroll_request_landed(pilot, screen, target=5.0)
             old_scroll = screen._scroll.scroll_y
             before = str(screen._title.content)
             evidence = os.environ.get("INFO_READOUT_EVIDENCE")
