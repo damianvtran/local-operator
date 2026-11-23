@@ -18,6 +18,7 @@ This module pins:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -25,7 +26,9 @@ import random
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
+from typing_extensions import TypedDict
 
 from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge import screening
@@ -170,7 +173,9 @@ def test_drifted_v6_bytes_disable_the_offer(monkeypatch: pytest.MonkeyPatch) -> 
     assert tb_client.screening_addressed_version(status) == ""
 
 
-def test_v6_offered_renders_v6_and_reports_its_hash(rig, prompts) -> None:  # noqa: F811
+def test_v6_offered_renders_v6_and_sends_its_hash(
+    rig, prompts, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
     config_dir, _store, owner = rig
     out = _screen(
         config_dir,
@@ -186,7 +191,79 @@ def test_v6_offered_renders_v6_and_reports_its_hash(rig, prompts) -> None:  # no
     assert out.rendered_version == SCREENING_VERSION_V6
     assert out.rendered_template_sha256 == SCREENING_TEMPLATE_V6_PIN
     assert out.receipt is not None and out.receipt.prompt_version == SCREENING_VERSION_V2
-    assert conversation._text_admit_template(out) == SCREENING_TEMPLATE_V6_PIN
+    template = conversation._text_admit_template(out)
+    assert template == SCREENING_TEMPLATE_V6_PIN
+
+    from tests.unit.team_bridge.test_client import _make_client, _ok
+
+    monkeypatch.setattr(tb_client, "org_oauth_destination_allowed", lambda base: True)
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok({"verdict": "allow"})
+
+    reply = asyncio.run(
+        _make_client(handler).conversation_admit(
+            "bcv_synthetic",
+            "bcmsg_synthetic",
+            verdict="allow",
+            body_hash="0" * 64,
+            template_sha256=template,
+        )
+    )
+    assert reply == {"verdict": "allow"}
+    (request,) = seen
+    assert request.method == "POST"
+    assert request.url.path == (
+        "/v1/messaging/conversations/bcv_synthetic/messages/bcmsg_synthetic/admit"
+    )
+    assert json.loads(request.content) == {
+        "verdict": "allow",
+        "body_hash": "0" * 64,
+        "template_sha256": SERVER_V6_SHA256,
+    }
+
+
+class _AdmitGrantKwargs(TypedDict, total=False, closed=True):
+    files_hash: str
+    attachments_hash: str
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("verdict", "template", "grant", "error"),
+    [
+        ("allow", SCREENING_TEMPLATE_V6_PIN.upper(), {}, "a grant and template_sha256"),
+        ("reject", SCREENING_TEMPLATE_V6_PIN, {}, "template"),
+        ("allow", SCREENING_TEMPLATE_V6_PIN, {"files_hash": "1" * 64}, "only under the v4"),
+        ("allow", None, {"attachments_hash": "1" * 64}, "a grant and template_sha256"),
+    ],
+    ids=["wrong-pin", "reject-with-pin", "file-with-text-pin", "image-without-pin"],
+)
+async def test_invalid_admit_evidence_never_reaches_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    verdict: str,
+    template: str | None,
+    grant: _AdmitGrantKwargs,
+    error: str,
+) -> None:
+    from tests.unit.team_bridge.test_client import _make_client
+
+    monkeypatch.setattr(tb_client, "org_oauth_destination_allowed", lambda base: True)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        pytest.fail("invalid admit reached the transport")
+
+    with pytest.raises(ValueError, match=error):
+        await _make_client(handler).conversation_admit(
+            "bcv_synthetic",
+            "bcmsg_synthetic",
+            verdict=verdict,
+            body_hash="0" * 64,
+            template_sha256=template,
+            **grant,
+        )
 
 
 def test_a_v6_label_with_another_hash_is_not_forwarded_to_the_hub() -> None:
