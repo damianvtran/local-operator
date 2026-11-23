@@ -277,8 +277,9 @@ def test_peer_query_keeps_a_good_hit_with_an_unrenderable_neighbor(
         # Invalid journal bytes, not a valid JSON escape for a surrogate.
         raw = raw.replace(b"BAD_VALUE", b"\xff")
     elif shape == "deep-json":
-        # Fail in the JSON decoder itself, independently of any field's type.
-        raw = raw.replace(b'"BAD_VALUE"', b"[" * 10_000 + b"0" + b"]" * 10_000)
+        # Leave one array unclosed: 3.14 can decode deeper JSON than 3.12,
+        # so depth alone does not guarantee a decoder failure.
+        raw = raw.replace(b'"BAD_VALUE"', b"[" * 10_000 + b"0" + b"]" * 9_999)
     lines[bad_index] = raw
     path.write_bytes(b"\n".join(lines) + b"\n")
 
@@ -293,7 +294,7 @@ def test_peer_query_keeps_a_good_hit_with_an_unrenderable_neighbor(
     bodies = [step["body"] for step in window["steps"]]
     assert bodies == (["row 2", "row 3"] if bad_index == 0 else ["row 1", "row 2"])
     assert bodies[window["match_step"] - 1] == "row 2"
-    if bad_index == 0 and shape in {"escaped-surrogate", "deep-json"}:
+    if bad_index == 0 and shape == "escaped-surrogate":
         assert answer["name"] == f"session {SESSION}"
     print(f"{shape}: {bodies}; {window['note']}")
 
@@ -314,6 +315,39 @@ def test_peer_query_counts_skips_outside_its_window_and_on_a_miss(tmp_path: Path
         assert window["match_count_complete"] is False
         receipt = window["note"] if expected_count else window["miss"]
         assert "2 unrenderable rows skipped; count is a lower bound" in receipt
+
+
+@pytest.mark.parametrize("shape", ["null-id", "object-id", "nested-text-array", "clean"])
+def test_peer_query_counts_only_raw_identity_and_text(tmp_path: Path, shape: str) -> None:
+    path = _journal(tmp_path, rows=3) / "transcript.jsonl"
+    lines = path.read_text(encoding="utf-8").splitlines()
+    first = json.loads(lines[0])
+    if shape == "null-id":
+        first["id"] = None
+    elif shape == "object-id":
+        first["id"] = {"not": "a cursor"}
+    if shape != "clean":
+        text = [["row 2"]] if shape == "nested-text-array" else "row 2"
+        first["payload"]["content"] = [{"text": text}]
+    lines[0] = json.dumps(first)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    answer = net_peek.serve(
+        tmp_path, {"session_id": SESSION, "query": "row 2", "steps": 3}, own_label="b"
+    )
+    window = answer["window"]
+    assert window["match_count"] == 1
+    assert window["match_count_complete"] is (shape == "clean")
+    assert window["match_id"] == f"{2:032x}"
+    assert window["before_cursor"] == f"{1 if shape == 'clean' else 2:032x}"
+    assert window["after_cursor"] == f"{3:032x}"
+    bodies = [step["body"] for step in window["steps"]]
+    assert bodies == (["row 1", "row 2", "row 3"] if shape == "clean" else ["row 2", "row 3"])
+    scope = "whole transcript"
+    if shape != "clean":
+        scope += "; 1 unrenderable row skipped; count is a lower bound"
+    assert window["note"] == f"match count: 1 ({scope}); first match, up to 1 before and 1 after"
+    print(f"{shape}: {window['note']}")
 
 
 def test_peer_query_clean_journal_has_a_complete_count(tmp_path: Path) -> None:
@@ -351,6 +385,7 @@ def test_peer_query_receipt_discloses_a_legacy_owner_without_count(tmp_path: Pat
 
     tool = _sessions_peek_mesh_journal("peek", payload, SESSION, "b", None)
     assert not tool.is_error and tool.text.count(diagnostic) == 1
+    assert tool.details is not None, "expected legacy match count details"
     assert tool.details["match_count"] is None and tool.details["match_count_complete"] is False
 
 
@@ -372,7 +407,9 @@ def test_peer_digest_receipt_discloses_a_legacy_owner(tmp_path: Path) -> None:
         assert text.count(diagnostic) == (1 if version is None else 0)
 
         tool = _sessions_peek_mesh_journal("peek", payload, SESSION, "b", None)
-        assert not tool.is_error and tool.details["fold_version"] == version
+        assert not tool.is_error
+        assert tool.details is not None, "expected digest fold version details"
+        assert tool.details["fold_version"] == version
         assert tool.text.count(diagnostic) == (1 if version is None else 0)
 
 

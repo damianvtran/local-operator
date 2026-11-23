@@ -22,6 +22,7 @@ over-budget request refuses with the same sentence on either path.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
@@ -604,6 +605,62 @@ def _peer_search_row_renderable(payload: Mapping[str, Any]) -> bool:
     return calls is None or (isinstance(calls, list) and all(isinstance(c, dict) for c in calls))
 
 
+def _peer_search_has_raw_text(payload: Mapping[str, Any]) -> bool:
+    """A formatter's ``str()`` fallback must not invent searchable text.
+
+    Validate the fields read by the shared display formatter, not arbitrary
+    metadata. Raw strings may still be assembled with fixed display labels.
+    """
+    from local_operator.harness.message_types import (
+        HUB_MESSAGE_TYPE,
+        PEER_MESSAGE_MESSAGE_TYPE,
+    )
+
+    if payload.get("kind") == "custom":
+        custom_type = payload.get("custom_type", "custom")
+        details = payload.get("details") or {}
+        if not isinstance(custom_type, str):
+            return False
+        if custom_type == "compaction_summary":
+            return isinstance(details.get("summary", ""), str)
+        if custom_type in (HUB_MESSAGE_TYPE, PEER_MESSAGE_MESSAGE_TYPE):
+            if custom_type == PEER_MESSAGE_MESSAGE_TYPE:
+                sender = details.get("sender") or {}
+                who = sender.get("conversation_name") or sender.get("pid") or "another session"
+                if not isinstance(who, str):
+                    return False
+            if "body" in details and not isinstance(details["body"], str):
+                return False
+            if details.get("body"):
+                return True
+        return isinstance(details.get("text", ""), str)
+
+    for block in payload.get("content") or ():
+        if isinstance(block, dict) and "text" in block and not isinstance(block["text"], str):
+            return False
+    role = payload.get("role", "user")
+    if not isinstance(role, str):
+        return False
+    if role == "tool":
+        return isinstance(payload.get("tool_name", "tool"), str)
+    if role == "assistant":
+        for call in payload.get("tool_calls") or ():
+            if not isinstance(call.get("name"), str):
+                return False
+            args = call.get("arguments")
+            if not isinstance(args, dict):
+                continue
+            if not isinstance(args.get("i") or "", str):
+                return False
+            for key in ("path", "file", "command", "url", "query", "label", "prompt"):
+                value = args.get(key)
+                if value:
+                    if not isinstance(value, str):
+                        return False
+                    break
+    return True
+
+
 def _peer_peek_search(
     directory: Path, *, needle: str, pattern: RowMatcher | None, need: int
 ) -> _PeekWindow:
@@ -613,7 +670,11 @@ def _peer_peek_search(
     for the first chronological hit and a count, so retain its neighbours as
     we walk forward; re-locating by id would price a second read from the tail.
     """
-    from local_operator.harness.comms import _clip, _render_message_step, is_peek_step_entry
+    from local_operator.harness.comms import (
+        _clip,
+        _render_message_step,
+        is_peek_step_entry,
+    )
     from local_operator.session import compression
     from local_operator.session.transcript import (
         TranscriptEntry,
@@ -643,13 +704,32 @@ def _peer_peek_search(
                 # The byte bound may bisect a row. Never count its prefix.
                 break
             try:
-                entry = TranscriptEntry.from_json(raw.decode("utf-8"))
-                if entry is None or not entry.id or not math.isfinite(entry.ts):
+                # Identity and searchable text come from raw stored JSON types,
+                # never from the replay decoder's or renderer's coerced values.
+                # Reject before a malformed row can consume a cursor or make the
+                # count look complete. Replay and non-query display stay lenient.
+                stored = json.loads(raw.decode("utf-8"))
+                row_id = stored["id"]
+                row_type = stored["type"]
+                ts = stored.get("ts", 0.0)
+                payload = stored.get("payload", {})
+                if (
+                    not isinstance(row_id, str)
+                    or not row_id
+                    or not isinstance(row_type, str)
+                    or type(ts) not in (int, float)
+                    or not math.isfinite(ts)
+                    or not isinstance(payload, dict)
+                ):
                     skipped += 1
                     continue
+                entry = TranscriptEntry(id=row_id, ts=ts, type=row_type, payload=payload)
                 if not is_peek_step_entry(entry):
                     continue
                 if not _peer_search_row_renderable(entry.payload):
+                    skipped += 1
+                    continue
+                if not _peer_search_has_raw_text(entry.payload):
                     skipped += 1
                     continue
                 step = _render_message_step(0, entry.payload, body_limit=None)
