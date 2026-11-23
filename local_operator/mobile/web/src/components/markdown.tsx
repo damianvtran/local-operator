@@ -12,8 +12,8 @@
  * Links are forced https? and open in a new tab: this is a remote-control
  * surface, and a javascript: URL in agent output must never be clickable.
  */
-import { Component, Fragment, memo, useLayoutEffect, useRef, useState } from "react";
-import type { ReactNode, RefObject } from "react";
+import { Component, Fragment, memo, useLayoutEffect, useReducer, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { cn } from "../lib/cn";
 import { isolateTechnicalRuns } from "../lib/bidi";
 import { diagramKey, shouldDrawDiagram } from "../lib/diagram-fence";
@@ -32,7 +32,17 @@ import { allowsReveal, revealText, settleReveals } from "../lib/stream-reveal";
 const INLINE_RE =
 	/(`[^`]+`)|\[([^\]]+)\]\(([^)\s]+)\)|\*\*([^*]+)\*\*|__([^_]+)__|~~([^~]+)~~|\*([^*\n]+)\*|_([^_\n]+)_/g;
 
-type ProsePart = { key: number; text: string; reveal: boolean };
+type ProseReveal = { node: HTMLSpanElement | null; settled: boolean; attach: (node: HTMLSpanElement | null) => void };
+type ProsePart = { start: number; reveal?: ProseReveal };
+
+function selects(node: Node): boolean {
+	const selection = node.ownerDocument?.getSelection();
+	if (!selection || selection.isCollapsed) return false;
+	for (let i = 0; i < selection.rangeCount; i++) {
+		if (selection.getRangeAt(i).intersectsNode(node)) return true;
+	}
+	return false;
+}
 
 /** Don't split a grapheme, a shaping word, or an FSI/PDI technical isolate.
  * Deltas inside a word are visible immediately; the next safe word boundary
@@ -49,20 +59,60 @@ function proseBoundary(text: string, at: number): number | undefined {
 
 const Prose = memo(function Prose({ text, from }: { text: string; from?: number }) {
 	const committed = useRef<{ text: string; parts: ProsePart[] } | null>(null);
+	const [, retire] = useReducer((version: number) => version + 1, 0);
 	const before = committed.current;
 	const append = before && text.startsWith(before.text);
-	const parts = append ? before.parts.slice() : [];
 	const cut = (append || !before) && from !== undefined
 		? proseBoundary(text, Math.max(from, before?.text.length ?? 0)) : undefined;
-	const split = cut ?? text.length;
-	const tail = parts.pop();
-	if (tail) parts.push({ ...tail, text: text.slice(tail.key, split) });
-	else if (split > 0) parts.push({ key: 0, text: text.slice(0, split), reveal: false });
-	if (cut !== undefined) parts.push({ key: cut, text: text.slice(cut), reveal: true });
+	const parts: ProsePart[] = [];
+	const selected: HTMLSpanElement[] = [];
+	let compacting: Node | null = null;
+	const keep = (part: ProsePart) => {
+		const reveal = part.reveal;
+		if (reveal?.settled) {
+			if (reveal.node && selects(reveal.node)) {
+				selected.push(reveal.node);
+			} else {
+				compacting ??= reveal.node?.parentNode ?? null;
+				part = { start: part.start };
+			}
+		}
+		// The rest is a steady plain-text run, not one element per delivered
+		// frame. A selected or still animating slice alone keeps its wrapper.
+		if (part.reveal || parts.at(-1)?.reveal || !parts.length) parts.push(part);
+	};
+	if (append) for (const part of before.parts) keep(part);
+	if (!parts.length && (cut ?? text.length) > 0) parts.push({ start: 0 });
+	if (cut !== undefined) {
+		const reveal: ProseReveal = {
+			node: null, settled: false,
+			attach(node) {
+				reveal.node = node;
+				if (node) revealText(node, () => {
+					if (reveal.node !== node) return;
+					reveal.settled = true;
+					retire();
+				});
+			},
+		};
+		parts.push({ start: cut, reveal });
+	}
 	useLayoutEffect(() => { committed.current = { text, parts }; });
-	return parts.map((part) => part.reveal
-		? <span key={part.key} ref={revealText}>{part.text}</span>
-		: <Fragment key={part.key}>{part.text}</Fragment>);
+	useLayoutEffect(() => {
+		if (!selected.length) return;
+		const doc = selected[0].ownerDocument;
+		// No polling and no listener for an unrelated selection/resting caret.
+		// Once the reader releases a retained slice it can join the steady run.
+		const changed = () => { if (selected.some(node => !selects(node))) retire(); };
+		doc.addEventListener("selectionchange", changed);
+		return () => doc.removeEventListener("selectionchange", changed);
+	});
+	return <SelectionGuard scope={() => compacting}>
+		{parts.map(({ start, reveal }, i) => {
+			const piece = text.slice(start, parts[i + 1]?.start);
+			return reveal ? <span key={start} ref={reveal.attach}>{piece}</span> : <Fragment key={start}>{piece}</Fragment>;
+		})}
+	</SelectionGuard>;
 });
 
 function renderInline(text: string, from?: number): ReactNode[] {
@@ -620,7 +670,7 @@ const MarkdownBlock = memo(function MarkdownBlock({ block: b, from }: {
 				</pre>
 			);
 			if (!shouldDrawDiagram({ lang: b.lang, closed: b.closed === true, source })) return plain;
-			return <DiagramBlock key={diagramKey(source, 0)} source={source} fallback={plain} />;
+			return <DiagramBlock source={source} fallback={plain} />;
 		}
 		case "heading":
 			return <div ref={ref} className={HEADING_CLASSES[(b.level ?? 1) - 1]}>{inline(0)}</div>;
@@ -649,25 +699,24 @@ const MarkdownBlock = memo(function MarkdownBlock({ block: b, from }: {
 	}
 });
 
-type MarkdownBodyProps = { root: RefObject<HTMLDivElement | null>; preserveSelection: boolean; children: ReactNode };
+type SelectionGuardProps = { scope: () => Node | null; children: ReactNode };
 type SelectionSnapshot = { selection: Selection; anchor: Node; focus: Node; anchorOffset: number; focusOffset: number };
 
 /** React writes CharacterData for an append inside a word. The browser keeps
  * the node but can reset its Selection offsets to zero. Take the snapshot
  * before that write and restore only ranges whose original endpoints survived;
  * don't guess a new range across a genuine Markdown structure change. */
-class MarkdownBody extends Component<MarkdownBodyProps> {
+class SelectionGuard extends Component<SelectionGuardProps> {
 	getSnapshotBeforeUpdate(): SelectionSnapshot | null {
-		const root = this.props.root.current;
-		if (!this.props.preserveSelection || !root) return null;
-		const selection = root.ownerDocument.getSelection();
+		const root = this.props.scope();
+		const selection = root?.ownerDocument?.getSelection();
 		if (!selection || selection.isCollapsed) return null;
 		const { anchorNode: anchor, focusNode: focus, anchorOffset, focusOffset } = selection;
-		if (!anchor || !focus || (!root.contains(anchor) && !root.contains(focus))) return null;
+		if (!root || !anchor || !focus || (!root.contains(anchor) && !root.contains(focus))) return null;
 		return { selection, anchor, focus, anchorOffset, focusOffset };
 	}
 
-	componentDidUpdate(_props: MarkdownBodyProps, _state: unknown, snapshot: SelectionSnapshot | null) {
+	componentDidUpdate(_props: SelectionGuardProps, _state: unknown, snapshot: SelectionSnapshot | null) {
 		if (!snapshot) return;
 		const { selection, anchor, focus, anchorOffset, focusOffset } = snapshot;
 		const length = (node: Node) => node.nodeType === Node.TEXT_NODE ? node.textContent?.length ?? 0 : node.childNodes.length;
@@ -679,8 +728,22 @@ class MarkdownBody extends Component<MarkdownBodyProps> {
 	}
 
 	render() {
-		return <div ref={this.props.root} className="flex min-w-0 flex-col gap-1.5 break-words">{this.props.children}</div>;
+		return this.props.children;
 	}
+}
+
+// Settled block objects are shared by the incremental parser. Reuse the
+// closed fence's source and keys instead of joining and hashing it per token.
+const diagramOwners = new WeakMap<Block, { source: string; keys: string[] }>();
+function diagramOwner(block: Block) {
+	if (block.kind !== "code" || !block.closed || block.lang?.toLowerCase() !== "mermaid") return;
+	const previous = diagramOwners.get(block);
+	if (previous) return previous;
+	const source = block.lines.join("\n");
+	if (!shouldDrawDiagram({ lang: block.lang, closed: true, source })) return;
+	const owner = { source, keys: [] as string[] };
+	diagramOwners.set(block, owner);
+	return owner;
 }
 
 export const Markdown = memo(function Markdown({ text, live = false }: { text: string; live?: boolean }) {
@@ -695,10 +758,24 @@ export const Markdown = memo(function Markdown({ text, live = false }: { text: s
 		if (!live || (previous && !append)) settleReveals(root.current);
 		committed.current = { text, blocks };
 	}, [text, live, blocks, previous, append]);
-	return <MarkdownBody root={root} preserveSelection={grew}>
-		{/* A burst can complete pages in one snapshot. Reveal the tail, not a
-		    separate animation on every just-arrived block or line. */}
-		{blocks.map((block, i) => <MarkdownBlock key={block.start} block={block}
-			from={i === blocks.length - 1 && block !== previous?.blocks[i] ? from : undefined} />)}
-	</MarkdownBody>;
+	const diagramSeen = new Map<string, number>();
+	return <div ref={root} className="flex min-w-0 flex-col gap-1.5 break-words">
+		<SelectionGuard scope={() => grew ? root.current : null}>
+			{/* A burst can complete pages in one snapshot. Reveal the tail, not a
+			    separate animation on every just-arrived block or line. */}
+			{blocks.map((block, i) => {
+				let key: string | number = block.start;
+				const owner = diagramOwner(block);
+				if (owner) {
+					// Key the owner, not only the drawing: corrections before the
+					// fence must not close its viewer or lose its copy/focus state.
+					const occurrence = diagramSeen.get(owner.source) ?? 0;
+					diagramSeen.set(owner.source, occurrence + 1);
+					key = owner.keys[occurrence] ??= diagramKey(owner.source, occurrence);
+				}
+				return <MarkdownBlock key={key} block={block}
+					from={i === blocks.length - 1 && block !== previous?.blocks[i] ? from : undefined} />;
+			})}
+		</SelectionGuard>
+	</div>;
 });

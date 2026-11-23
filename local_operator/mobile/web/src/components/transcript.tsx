@@ -603,6 +603,7 @@ export function Transcript({
 	pending = [],
 	streaming = false,
 	revealEpoch,
+	journalArrivals,
 	topInset = 0,
 	supplements,
 	projectionPid = 0,
@@ -646,6 +647,8 @@ export function Transcript({
 	streaming?: boolean;
 	/** Present only for accepted live transport frames, never a history page. */
 	revealEpoch?: object;
+	/** Finalized arrivals proven by the selected child's newest journal poll. */
+	journalArrivals?: ReadonlySet<string>;
 	/** The height of anything OVERLAYING this scroller's top edge (the session
 	 *  view's state ladder), reserved INSIDE the scroller so the first row can
 	 *  never sit under a strip (round 2, U23 = D7). The strip is an overlay so
@@ -734,6 +737,12 @@ export function Transcript({
 		for (const id of motion.advanced) settleReveals(anchor(id), false);
 		for (const id of motion.arrivals) revealRow(anchor(id));
 	}, [entries, motion, revealEpoch, scrollKey, streaming]);
+	useLayoutEffect(() => {
+		if (!streaming || !journalArrivals) return;
+		for (const id of journalArrivals) {
+			revealRow(scrollRef.current?.querySelector<HTMLElement>(`[data-completion-anchor="${CSS.escape(id)}"]`) ?? null);
+		}
+	}, [journalArrivals, streaming]);
 	useLayoutEffect(() => listenForReducedMotion(() => scrollRef.current), []);
 
 	const scrollCue = useScrollCues();
@@ -1249,7 +1258,8 @@ export function Transcript({
 	   reader moved by the rung's height). When the row the reader was nearest
 	   is gone (it was the one the window dropped), the next-nearest surviving
 	   row answers instead; when nothing survives, nothing is written. */
-	const anchorRows = useRef<{ id: string; top: number }[] | null>(null);
+	type AnchorRow = { id: string; top: number; bottom: number };
+	const anchorRows = useRef<AnchorRow[] | null>(null);
 	const prevFollowScrollTop = useRef(0);
 	const prevReserve = useRef(0);
 	useLayoutEffect(() => {
@@ -1276,12 +1286,13 @@ export function Transcript({
 		}
 		const reserveEdge = reserve !== prevReserve.current;
 		prevReserve.current = reserve;
-		const rows: { id: string; top: number }[] = [];
+		const rows: AnchorRow[] = [];
+		const shiftRows = (shift: number) => {
+			for (const row of rows) { row.top -= shift; row.bottom -= shift; }
+		};
 		for (const candidate of el.querySelectorAll("[data-completion-anchor]")) {
-			rows.push({
-				id: candidate.getAttribute("data-completion-anchor") ?? "",
-				top: candidate.getBoundingClientRect().top - box.top,
-			});
+			const rect = candidate.getBoundingClientRect();
+			rows.push({ id: candidate.getAttribute("data-completion-anchor") ?? "", top: rect.top - box.top, bottom: rect.bottom - box.top });
 		}
 		const pressed = pressedHeaderRef.current;
 		if (pressed) {
@@ -1297,18 +1308,23 @@ export function Transcript({
 				   undoes this scroll and sends the pressed bar off-screen. Read the
 				   actual displacement so boundary clamping stays honest. */
 				const shift = el.scrollTop - scrollTop;
-				for (const row of rows) row.top -= shift;
+				shiftRows(shift);
 			}
 		}
 		const prev = anchorRows.current;
 		if (!pressed && prev) {
 			const now = new Map(rows.map((r) => [r.id, r.top]));
-			const nearEdge = [...prev].sort((a, b) => Math.abs(a.top) - Math.abs(b.top));
-			for (const row of nearEdge) {
-				const top = now.get(row.id);
-				if (top === undefined) continue;
+			const scrolled = scrollTop - prevFollowScrollTop.current;
+			// A tall answer can contain the reader even when the next tool's top
+			// is closer. Rebase the stored interval for any intervening user scroll.
+			const containing = !pinnedRef.current
+				? prev.find((row) => row.top <= scrolled && row.bottom > scrolled && now.has(row.id))
+				: undefined;
+			const row = containing ?? [...prev].sort((a, b) => Math.abs(a.top) - Math.abs(b.top)).find((r) => now.has(r.id));
+			if (row) {
+				const top = now.get(row.id)!;
 				const next = followScrollTop({
-					domDelta: top - row.top + (scrollTop - prevFollowScrollTop.current),
+					domDelta: top - row.top + scrolled,
 					scrollTop,
 					max,
 					reserveEdge,
@@ -1318,9 +1334,8 @@ export function Transcript({
 					/* The recorded offsets describe the frame the writer just
 					   left: a scroll write moves every row by the same amount. */
 					const shift = next - scrollTop;
-					for (const r of rows) r.top -= shift;
+					shiftRows(shift);
 				}
-				break;
 			}
 		}
 		anchorRows.current = rows;

@@ -95,6 +95,34 @@ describe("a row that grows after it painted", () => {
 		expect(el.scrollTop).toBe(1240);
 	});
 
+	it("uses the tall row containing the reader after manual scrolling, not the following tool", () => {
+		let growth = 0;
+		vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+			const id = this.getAttribute("data-completion-anchor");
+			const scroll = this.closest<HTMLElement>(".lo-scroll")?.scrollTop ?? 0;
+			if (!id) return { top: 0, bottom: 0, height: 0 } as DOMRect;
+			const top = (id === "answer" ? 100 : 1400 + growth) - scroll;
+			const height = id === "answer" ? 1300 + growth : 100;
+			return { top, bottom: top + height, height } as DOMRect;
+		});
+		const answer = entry("answer", "assistant", "Tall answer");
+		const tool = entry("tool", "tool", "Following tool");
+		const props = { pid: "tall-answer", streaming: true };
+		const view = render(<Transcript {...props} entries={[answer, tool]} />);
+		const el = view.container.querySelector<HTMLElement>(".lo-scroll")!;
+		Object.defineProperties(el, {
+			scrollHeight: { get: () => 2000 + growth }, clientHeight: { value: 500 },
+		});
+		el.scrollTop = 900;
+		fireEvent.scroll(el);
+		view.rerender(<Transcript {...props} entries={[answer, tool]} />);
+		el.scrollTop = 1200;
+		fireEvent.scroll(el);
+		growth = 48;
+		view.rerender(<Transcript {...props} entries={[{ ...answer, text: answer.text + "\n\nAppended" }, tool]} />);
+		expect(el.scrollTop).toBe(1200);
+	});
+
 	it("keeps a pinned reader at the tail", () => {
 		const view = render(<Transcript pid="content-resized-pinned" entries={rows} />);
 		const el = view.container.querySelector<HTMLElement>(".lo-scroll")!;

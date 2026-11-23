@@ -1052,7 +1052,10 @@ export function retainProjectionStream(sessionId: string): () => void {
 				}
 				if (current?.projection?.pid !== incoming.pid) revealEpoch = {};
 				awaitingSnapshot = false;
-				if (connected && incoming.pid > 0) projectionEpochs.set(incoming, revealEpoch);
+				// Tag the accepted recovery seed even while it is still hidden
+				// from motion. onRecovered reuses this snapshot as the baseline;
+				// lookup still requires a connected, authenticated projection.
+				if (incoming.pid > 0) projectionEpochs.set(incoming, revealEpoch);
 				projections.set(sessionId, { projection: incoming, connected });
 				emitStream();
 				return true;
