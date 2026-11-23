@@ -493,8 +493,10 @@ async def test_text_reads_the_agents_message_through_speakable(rig: Any) -> None
     response = await _text(rig, SESSION_A, {"kind": "message", "message_id": ASSISTANT_ID})
     assert response.status_code == 200, response.text
     result = response.json()["result"]
-    assert set(result) == {"text", "spoken_chars", "truncated", "segments"}
+    assert set(result) == {"text", "spoken_chars", "truncated", "segments", "full_text"}
     assert "".join(result["segments"]) == result["text"]
+    assert result["full_text"] == speakable.display_text("Here are the files. ```\nls\n``` Done.")
+    assert "(code block omitted)" in result["full_text"] and "```" not in result["full_text"]
     expected = speakable.speakable("Here are the files. ```\nls\n``` Done.").text
     assert result["text"] == expected
     assert "ls" not in result["text"].split() and "```" not in result["text"]
@@ -530,6 +532,78 @@ async def test_text_honours_the_configured_cap_read_from_disk(rig: Any) -> None:
     assert result["text"].endswith(speakable.TRUNCATION_TAIL)
     assert result["truncated"] is True
     assert result["text"] == speakable.speakable(long_reply, max_chars=100).text
+    # The audio stays capped; the screen text is the whole display-cleaned reply.
+    assert result["full_text"] == speakable.display_text(long_reply)
+    assert len(result["full_text"]) > 100
+    assert speakable.TRUNCATION_TAIL not in result["full_text"]
+    assert result["spoken_chars"] == len(result["text"])
+
+
+@pytest.mark.asyncio
+async def test_text_full_text_keeps_a_table_as_lines_while_text_stays_flat(rig: Any) -> None:
+    from local_operator.voice import speakable
+
+    table = (
+        "Status:\r\n\r\n| Hook | Fires | Fixes today? |\r\n|---|---|---|\r\n"
+        "| **Pre** | yes | no |\r\n| Post | no | yes |\r\n\r\n- one\r\n- two"
+    )
+    rows = rig.pool.bridge.history
+
+    async def history(*, around_id: str, **kwargs: Any) -> dict[str, Any]:
+        page = await rows(around_id=around_id, **kwargs)
+        for entry in page["entries"]:
+            entry["payload"]["content"] = [{"type": "text", "text": table}]
+        return page
+
+    rig.pool.bridge.history = history
+    await _enable(rig, SESSION_A)
+    result = (await _text(rig, SESSION_A, {"kind": "message", "message_id": ASSISTANT_ID})).json()[
+        "result"
+    ]
+    assert result["full_text"] == (
+        "Status:\n\nHook · Fires · Fixes today?\nPre · yes · no\nPost · no · yes\n\n- one\n- two"
+    )
+    # The spoken fields are the flat string they always were.
+    assert result["text"] == speakable.speakable(table).text
+    assert "\n" not in result["text"] and "|" not in result["text"]
+    assert result["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_text_full_text_uses_the_active_locales_code_placeholder(
+    rig: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``display_text`` is handed the locale's stand-in, as ``text`` is."""
+    from local_operator.i18n.text import set_active_locale
+
+    reply = "Before.\n```\nx = 1\n```\nAfter."
+    monkeypatch.setattr(FakeBridge, "history", _history_with(ASSISTANT_ID, reply), raising=True)
+    await _enable(rig, SESSION_A)
+    english = desktop_voice._spoken_words("en")["code_omitted"]
+    set_active_locale("es")
+    try:
+        spanish = desktop_voice._spoken_words("es")["code_omitted"]
+        assert spanish != english
+        result = (
+            await _text(rig, SESSION_A, {"kind": "message", "message_id": ASSISTANT_ID})
+        ).json()["result"]
+    finally:
+        set_active_locale("en")
+    assert result["full_text"] == f"Before.\n{spanish}\nAfter."
+    assert spanish in result["text"] and english not in result["full_text"]
+
+
+@pytest.mark.asyncio
+async def test_text_a_reply_carrying_the_display_sentinel_is_still_a_200(
+    rig: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The private-use pair ``display_text`` parks spans behind was a 500 (IndexError)."""
+    reply = "before \ue000999\ue001 https://a.com \ue0000\ue001 after `my_var_name`"
+    monkeypatch.setattr(FakeBridge, "history", _history_with(ASSISTANT_ID, reply), raising=True)
+    await _enable(rig, SESSION_A)
+    response = await _text(rig, SESSION_A, {"kind": "message", "message_id": ASSISTANT_ID})
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["full_text"] == "before 999 https://a.com 0 after my_var_name"
 
 
 @pytest.mark.asyncio

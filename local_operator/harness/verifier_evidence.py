@@ -151,7 +151,17 @@ class VerifierEvidence:
             "The example shows the shape only: give each row the status your own "
             "observation of the evidence supports.",
             "Assess each requirement you identify independently. UNMET means observed failure; "
-            "UNVERIFIED means insufficient evidence. A MET row must cite at least one Evidence "
+            "UNVERIFIED means insufficient evidence. "
+            # Two row rules that RAISE the bar, each from recorded checks. A
+            # row went UNMET because its source could not be read (an
+            # unreadable PDF) -- a failure of the check, not of the work -- and
+            # rows went MET on a filename or a mean-colour statistic, which
+            # say a file exists, not that its content is right; those were the
+            # rows that were actually wrong.
+            "UNMET requires an observed failure; a missing justification or an unreadable "
+            "source is UNVERIFIED. MET requires observed content, not a filename, size or "
+            "summary statistic. "
+            "A MET row must cite at least one Evidence "
             "ID of its own modality (an image row cites an image ID, not only text ones). "
             "Required modalities must actually be used. Do not infer unseen pixels from text. "
             "Successful inspections return additional Evidence IDs you may cite. "
