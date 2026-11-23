@@ -945,7 +945,7 @@ def test_every_test_file_lands_in_exactly_one_shard(job: str) -> None:
     weights, fallback = shard_tests.load_weights(shard_tests.TREES[tree].manifest)
     assert files, f"no {tree} test files collected; the glob is wrong"
 
-    shards = shard_tests.partition(files, weights, fallback, total)
+    shards = shard_tests.partition(files, weights, fallback, total, tree=tree)
     assigned = [f for shard in shards for f in shard]
 
     assert len(assigned) == len(set(assigned)), "a test file was assigned twice"
@@ -973,7 +973,7 @@ def test_unmeasured_test_files_are_still_scheduled(job: str) -> None:
     unknown = f"{shard_tests.TREES[tree].root}/test_not_in_the_manifest_at_all.py"
     assert unknown not in weights
 
-    shards = shard_tests.partition(files + [unknown], weights, fallback, total)
+    shards = shard_tests.partition(files + [unknown], weights, fallback, total, tree=tree)
     holders = [i for i, shard in enumerate(shards) if unknown in shard]
     assert (
         len(holders) == 1
@@ -996,9 +996,9 @@ def test_shard_partition_is_deterministic(job: str) -> None:
     tree, total = _shard_plan(job)
     files = shard_tests.collect_test_files(tree=tree)
     weights, fallback = shard_tests.load_weights(shard_tests.TREES[tree].manifest)
-    first = shard_tests.partition(files, weights, fallback, total)
+    first = shard_tests.partition(files, weights, fallback, total, tree=tree)
     for _ in range(5):
-        assert shard_tests.partition(files, weights, fallback, total) == first
+        assert shard_tests.partition(files, weights, fallback, total, tree=tree) == first
 
 
 @pytest.mark.parametrize("job", SHARD_JOB_IDS)
@@ -1059,10 +1059,10 @@ def test_each_shard_job_timeout_exceeds_its_projected_wall(job: str) -> None:
     more than it did with one serial e2e leg, because the e2e matrix now
     multiplies whatever ceiling that job carries by six jobs.
 
-    The bound is expressed against the SERIAL weight of the heaviest shard,
-    divided by the workers that job really gets, rather than against a wall
-    time recorded in this file. A recorded wall is a fact about yesterday's
-    tree; this is a fact about the tree the partition just read, so a suite
+    The bound uses each shard's file weight divided by the job's workers,
+    plus any serial wall-time ceiling, rather than a wall time recorded in
+    this file. A recorded wall is a fact about yesterday's tree; this is a
+    fact about the tree the partition just read, so a suite
     that grows by a factor of two fails here before it fails CI. What validates
     the divisor: run 35416005688's heaviest 3.12 unit shard reported 1031 s of
     pytest time for 2084 s of serial weight (ratio 2.0 against the modelled
@@ -1072,11 +1072,9 @@ def test_each_shard_job_timeout_exceeds_its_projected_wall(job: str) -> None:
     tree, total = _shard_plan(job)
     files = shard_tests.collect_test_files(tree=tree)
     weights, fallback = shard_tests.load_weights(shard_tests.TREES[tree].manifest)
-    shards = shard_tests.partition(files, weights, fallback, total)
-    heaviest = max(sum(weights.get(f, fallback) for f in shard) for shard in shards)
-
+    shards = shard_tests.partition(files, weights, fallback, total, tree=tree)
     workers = 1 if tree == "e2e" else CI_UNIT_WORKERS
-    projected_wall = heaviest / workers
+    projected_walls = [sum(weights.get(f, fallback) for f in shard) / workers for shard in shards]
     if job == "test":
         # SHARD 0 ALSO RUNS THE SERIAL CONTROLS, after its ordinary run, and that
         # step's whole declared ceiling is added undivided — not spread across the
@@ -1084,20 +1082,17 @@ def test_each_shard_job_timeout_exceeds_its_projected_wall(job: str) -> None:
         # tests the ordinary run no longer executes (their weight is not itemised
         # in the manifest, so subtracting would be invention). The ceiling is a
         # declared bound, not a measurement; the first CI run reports the real time.
-        serial_s = _serial_step_ceiling_seconds()
-        projected_wall = max(
-            heaviest / workers,
-            sum(weights.get(f, fallback) for f in shards[0]) / workers + serial_s,
-        )
+        projected_walls[0] += _serial_step_ceiling_seconds()
 
+    heaviest = max(range(total), key=projected_walls.__getitem__)
+    projected_wall = projected_walls[heaviest]
     timeout = _ci_jobs()[job]["timeout-minutes"]
     assert isinstance(timeout, int)
     budget = timeout * 60 - SHARD_JOB_OVERHEAD_SECONDS
     assert budget >= projected_wall, (
         f"{job}'s {timeout}-minute ceiling leaves {budget:.0f}s for tests after "
-        f"{SHARD_JOB_OVERHEAD_SECONDS}s of job overhead, but its heaviest {tree} "
-        f"shard is {heaviest:.0f}s of serial weight — {projected_wall:.0f}s on "
-        f"{workers} worker(s)"
+        f"{SHARD_JOB_OVERHEAD_SECONDS}s of job overhead, but {tree} shard "
+        f"{heaviest} projects {projected_wall:.0f}s with {workers} worker(s)"
     )
 
 
@@ -1589,20 +1584,45 @@ def test_a_third_or_misnamed_pytest_step_is_rejected(monkeypatch: pytest.MonkeyP
             _pytest_steps("test")
 
 
-def test_the_serial_budget_is_accounted_in_full_and_fits_the_unchanged_job_ceiling() -> None:
-    """Shard 0 must fit its weight/4 PLUS the whole 420 s in the unit job.
+@pytest.mark.parametrize(
+    ("job", "delta", "first_shard", "last_shard"),
+    [("test", -1, 1, 1), ("test", 0, 1, 0), ("tui-e2e", -1, 0, 1)],
+)
+def test_lpt_reserves_serial_load_before_assigning_files(
+    job: str, delta: int, first_shard: int, last_shard: int
+) -> None:
+    """At the exact preload, shard 0 wins the first tie; one second below, it waits.
 
-    The serial step is not divided by four (it runs ``-n0``) and nothing is subtracted
-    for the six deselected tests. Read the declared job ceiling rather than
-    inferring one from observed runtimes. Every other shard uses the existing rule.
+    Five equal files fill shards 1–5. This distinguishes a real initial load
+    from a reservation made only in reporting; e2e still starts at zero.
     """
-    assert _serial_step_ceiling_seconds() == 420
+    tree, total = _shard_plan(job)
+    load = _serial_step_ceiling_seconds() * CI_UNIT_WORKERS
+    files = [f"test_{i}.py" for i in range(total)]
+    shards = shard_tests.partition(files, {}, load + delta, total, tree=tree)
+    assert files[0] in shards[first_shard]
+    assert files[-1] in shards[last_shard]
+
+
+def test_the_serial_budget_is_accounted_in_full_and_fits_the_unchanged_job_ceiling() -> None:
+    """Shard 0 must fit its file weight/4 PLUS the full serial step ceiling.
+
+    The serial step runs ``-n0`` and nothing is subtracted for the six deselected
+    tests. Check the scheduler's preload against the workflow bound, not against
+    observed runtimes or a value read back from the scheduler itself.
+    """
+    job = _ci_jobs()["test"]
+    assert job["runs-on"] == "ubuntu-latest", "recheck the worker model if the runner changes"
+    serial_seconds = _serial_step_ceiling_seconds()
+    assert serial_seconds == 420
     tree, total = _shard_plan("test")
+    assert shard_tests.TREES[tree].shard_zero_fixed_load_seconds == serial_seconds * CI_UNIT_WORKERS
+    assert shard_tests.TREES["e2e"].shard_zero_fixed_load_seconds == 0
     files = shard_tests.collect_test_files(tree=tree)
     weights, fallback = shard_tests.load_weights(shard_tests.TREES[tree].manifest)
-    shards = shard_tests.partition(files, weights, fallback, total)
-    zero = sum(weights.get(f, fallback) for f in shards[0]) / CI_UNIT_WORKERS + 420
-    timeout = _ci_jobs()["test"]["timeout-minutes"]
+    shards = shard_tests.partition(files, weights, fallback, total, tree=tree)
+    zero = sum(weights.get(f, fallback) for f in shards[0]) / CI_UNIT_WORKERS + serial_seconds
+    timeout = job["timeout-minutes"]
     assert zero <= timeout * 60 - SHARD_JOB_OVERHEAD_SECONDS, (
         f"shard 0 projects {zero:.0f}s with the serial step against a "
         f"{timeout * 60 - SHARD_JOB_OVERHEAD_SECONDS}s budget"

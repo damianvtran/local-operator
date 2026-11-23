@@ -436,12 +436,10 @@ jobs:
     # test/coverage path. Three complete attempt-bound CI runs supply per-file
     # p75 weights; their LPT test-time sums are NOT wall-time margin evidence.
     # See docs/ci-test-durations.md for provenance and post-change limits.
-    # #4472's seven new test files take the existing 30.724s fallback each.
-    # The six-shard model in CI now projects 2228.12s including shard zero's
-    # 420s serial lane; at 38m, 60s of setup leaves 2220s. Provision the next
-    # whole minute (2280s; 51.88s of modelled margin), not a smaller suite,
-    # synthetic timing weights, changed workers or relaxed step watchdogs.
-    timeout-minutes: 39
+    # The partitioner reserves the full serial-control ceiling on shard 0
+    # before placing parallel work. That leaves the 38-minute cap in place
+    # without reducing weights, the test inventory or any watchdog budget.
+    timeout-minutes: 38
     # Pass-through only, for `coverage-report` (whose `needs` must stay
     # `test`). Every leg carries the same value from `changes`, so the
     # last-leg-wins rule for matrix outputs cannot pick a different base.
@@ -663,8 +661,8 @@ jobs:
         #
         # THE BOUND. `timeout-minutes: 7` is a declared, UNMEASURED ceiling (the
         # six cases build a 60-directory synthetic store three times and two relay
-        # pairs), not a speed claim: shard 0's budget is the heaviest shard's
-        # modelled wall plus this full 420 s, asserted by test_ci_hygiene. Inside
+        # pairs), not a speed claim: the partitioner reserves the full 420 s on
+        # shard 0, and test_ci_hygiene checks the resulting job budget. Inside
         # it, `run_bounded` puts pytest in its own process group and escalates
         # SIGTERM -> SIGKILL on the bound (--timeout 400 --grace 10 fits under the
         # 420 s step). The store-walk child is in a NEW SESSION by design and is
