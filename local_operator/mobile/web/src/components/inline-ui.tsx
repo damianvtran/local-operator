@@ -120,17 +120,19 @@ function InlineUiPreview({ value }: { value: InlineUi }) {
 	}
 }
 
-export function AssistantContent({ text, overlay }: {
+export function AssistantContent({ text, overlay, live = false }: {
 	text: string;
 	overlay?: readonly AssistantPart[];
+	live?: boolean;
 }) {
 	// Only the authenticated renderer contract can create widgets. In its
 	// absence the row is prose, including literal fences in older journals.
-	if (!overlay?.length) return <Markdown text={text} />;
+	if (!overlay?.length) return <Markdown text={text} live={live} />;
 	return (
 		<div className="flex min-w-0 flex-col gap-2">
+			{/* Keep each prose segment's own append boundary; a widget is never a Markdown fade span. */}
 			{overlay.map((part, i) => part.kind === "markdown"
-				? <Markdown key={`prose-${i}`} text={part.text} />
+				? <Markdown key={`prose-${i}`} text={part.text} live={live} />
 				: <InlineUiPreview key={`preview-${i}`} value={part.value} />)}
 		</div>
 	);

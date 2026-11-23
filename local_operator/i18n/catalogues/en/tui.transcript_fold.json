@@ -1,0 +1,19 @@
+{
+  "tui.transcript_fold.failed": "✗ {label} failed",
+  "tui.transcript_fold.foot_actions": "{count, plural, one {{label} action} other {{label} actions}} · {time}",
+  "tui.transcript_fold.foot_actions_no_time": "{count, plural, one {{label} action} other {{label} actions}}",
+  "tui.transcript_fold.foot_failed": "turn failed · {reason}",
+  "tui.transcript_fold.foot_failed_no_reason": "turn failed",
+  "tui.transcript_fold.kind_messages": "messages",
+  "tui.transcript_fold.kind_shell": "shell",
+  "tui.transcript_fold.kind_subagents": "subagents",
+  "tui.transcript_fold.legend_all": "+ opens every level of this turn; - resets it",
+  "tui.transcript_fold.legend_enter": "open or close the bar",
+  "tui.transcript_fold.legend_failed": "f/F jump to the next/previous failed call",
+  "tui.transcript_fold.legend_heading": "the transcript fold",
+  "tui.transcript_fold.legend_left_right": "left closes or steps out; right opens or steps in",
+  "tui.transcript_fold.no_failed": "No failed calls in this turn",
+  "tui.transcript_fold.times": "×{label}",
+  "tui.transcript_fold.turn": "turn",
+  "tui.transcript_fold.work": "work"
+}

@@ -423,6 +423,17 @@ MonitorDeltaBlock.monitor-expanded, TeamBridgeBlock.bridge-expanded {
     height: auto;
 }
 
+/* The fold bar's one-row guarantee, PINNED for the same reason a ToolCard's is
+ * (see the collapsed rule above): a bar is built before it is laid out, so its
+ * first measurement can be a cell or two wide and `auto` resolves that to two
+ * rows — which is what a 40-column frame showed (U10). Pinned, the worst case
+ * is a clipped cell for one frame, and the row builder already spends its
+ * cells in the order that keeps the failure count (see
+ * `FoldBarBlock._build_row`). */
+FoldBarBlock {
+    height: 1;
+}
+
 /* COMFORTABLE DENSITY (`display.comfortable_rows`, default ON changed to OFF by maintainer). One padding
  * row above and below an action's summary.
  *
@@ -529,7 +540,7 @@ ToolCard.tool-error {
  * so the whole row lights on hover. Last rule wins over the state tints —
  * pointing at a row should always look the same. */
 ToolCard:hover, WakeBlock:hover, PeerMessageBlock:hover, QuietGroupBlock:hover,
-.interactive-notice:hover {
+FoldBarBlock:hover, .interactive-notice:hover {
     background: $lo-overlay;
 }
 
@@ -547,7 +558,7 @@ ToolCard:hover, WakeBlock:hover, PeerMessageBlock:hover, QuietGroupBlock:hover,
  * where the keyboard is, is the more load-bearing fact. Still no border —
  * elevation is a background step here as everywhere. */
 ToolCard:focus, WakeBlock:focus, PeerMessageBlock:focus, QuietGroupBlock:focus,
-.interactive-notice:focus {
+FoldBarBlock:focus, .interactive-notice:focus {
     background: $lo-tint-select;
 }
 

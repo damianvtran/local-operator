@@ -335,6 +335,66 @@ def test_cli_and_server_sanity_still_wait_on_the_cheap_gates() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("case", "expected_exit", "message"),
+    [
+        ("exact", 0, "CLI sanity test passed successfully"),
+        ("newline", 0, "CLI sanity test passed successfully"),
+        ("scratchpad", 1, "Probe file was not created"),
+        ("cwd", 1, "Probe file was not created"),
+        ("missing", 1, "Probe file was not created"),
+        ("wrong", 1, "does not contain exactly 'hello world'"),
+        ("tool-error", 1, "synthetic CLI error"),
+    ],
+)
+def test_cli_sanity_checks_the_destination_named_in_the_live_prompt(
+    tmp_path: Path, case: str, expected_exit: int, message: str
+) -> None:
+    # Exercise the actual workflow shell, not a copy of its assertions. The
+    # stand-in gets the destination only from the prompt; CI owns the live call.
+    step = next(step for step in _steps("cli-sanity") if step.get("name") == "Run CLI Sanity Test")
+    run = tmp_path / "run.sh"
+    run.write_text(step["run"], encoding="utf-8")
+    subprocess.run(["bash", "-n", str(run)], check=True, timeout=10)
+
+    runner_temp = tmp_path / "runner temp"
+    runner_temp.mkdir()
+    stub = tmp_path / "local-operator"
+    stub.write_text(
+        """#!/usr/bin/env bash
+        set -euo pipefail
+        [[ "$*" == *"exec --yolo"* ]] || exit 90
+        IFS="'" read -r _ probe _ <<< "${!#}"
+        [[ "$probe" == "$RUNNER_TEMP"/cli-sanity.*/probe.txt ]] || exit 91
+        case "$PROBE_CASE" in
+          exact) printf 'hello world' > "$probe" ;;
+          newline) printf 'hello world\\n' > "$probe" ;;
+          scratchpad) mkdir scratchpad; printf 'hello world' > scratchpad/probe.txt ;;
+          cwd) printf 'hello world' > probe.txt; cp probe.txt test.txt ;;
+          missing) ;;
+          wrong) printf 'not hello world\\n' > "$probe" ;;
+          tool-error) printf 'hello world' > "$probe"; echo 'synthetic CLI error'; exit 3 ;;
+        esac
+        """,
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(run)],
+        cwd=tmp_path,
+        env={
+            "PATH": f"{tmp_path}:{os.defpath}",
+            "RUNNER_TEMP": str(runner_temp),
+            "PROBE_CASE": case,
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == expected_exit, (result.stdout, result.stderr)
+    assert message in result.stdout
+
+
 def test_type_check_does_not_force_latest_pyright() -> None:
     """FORCE_VERSION=latest ignores the bundled analyzer.
 

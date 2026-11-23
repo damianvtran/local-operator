@@ -3797,6 +3797,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         2,
     ),
     (
+        "local_operator/tui/tool_fold.py::ToolFoldLayer._remove_bar",
+        "<path>.remove",
+        "widget.remove() on a FoldBarBlock the layer mounted; no filesystem path",
+    ),
+    (
+        "local_operator/tui/tool_fold.py::ToolFoldLayer._remove_foot",
+        "<path>.remove",
+        "widget.remove() on a TurnFootBlock the layer mounted; no filesystem path",
+    ),
+    (
         "local_operator/mcp/credentials.py::store_credentials.persist",
         "<path>.remove",
         "list.remove(key) — drops a written id from the failed-ids list",

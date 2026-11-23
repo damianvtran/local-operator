@@ -2260,6 +2260,12 @@ export type MessageParams = {
   "wire.settings.keymap.resume.label": undefined;
   "wire.settings.keymap.start_recording.help": undefined;
   "wire.settings.keymap.start_recording.label": undefined;
+  "wire.settings.transcript_display.choice.by_response.description": undefined;
+  "wire.settings.transcript_display.choice.by_response.label": undefined;
+  "wire.settings.transcript_display.choice.by_turn.description": undefined;
+  "wire.settings.transcript_display.choice.by_turn.label": undefined;
+  "wire.settings.transcript_display.help": undefined;
+  "wire.settings.transcript_display.label": undefined;
   "wire.skill_adoption.alias_occupied": undefined;
   "wire.skill_adoption.backup_label": { "path": string; "hash": string };
   "wire.skill_adoption.cancelled": undefined;

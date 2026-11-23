@@ -70,6 +70,7 @@ from local_operator.tui.widgets.transcript import (
     TranscriptView,
     UserBlock,
 )
+from tests.unit.tui.conftest import open_all_folds
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 #: Frame the tests run at. Wide enough that the docked sidebar is a real lane
@@ -275,6 +276,7 @@ async def test_closing_the_sidebar_behind_a_scroll_refits_every_row() -> None:
         await pilot.pause()
         view = app.query_one(TranscriptView)
         await _seed_ledger(pilot, view)
+        await open_all_folds(view, pilot)
 
         await pilot.press("ctrl+b")  # sidebar open: the lane narrows
         await _settle(pilot)
@@ -295,6 +297,7 @@ async def test_opening_the_sidebar_behind_a_scroll_refits_every_row() -> None:
         await pilot.pause()
         view = app.query_one(TranscriptView)
         await _seed_ledger(pilot, view)
+        await open_all_folds(view, pilot)
         widened = view.scrollable_content_region.width
         await _scroll_frame(app, pilot)
 
@@ -515,6 +518,7 @@ async def test_a_gutter_only_lane_move_leaves_one_right_edge() -> None:
         await pilot.pause()
         view = app.query_one(TranscriptView)
         await _seed_ledger(pilot, view)
+        await open_all_folds(view, pilot)
         assert view.show_vertical_scrollbar, "no thumb to remove: the fixture does not overflow"
 
         lane_before = view.scrollable_content_region.width

@@ -1163,6 +1163,15 @@ _FRONTEND_LOCAL_SLASHES = {
     # on the runtime's host where nobody is sitting.
     "fork",
     "theme",
+    # The transcript layout is a standing preference written to THIS machine's
+    # config.yml (`display.transcript_display`) and painted by THIS terminal, so
+    # it is `/theme`'s rule exactly: routed to a runtime it would persist a
+    # default governing a host the user is not sitting at, and the fold it
+    # changes is drawn here. (Slice 1 registered the command and the setting but
+    # left the scope at the default, which advertised it as authoritative and
+    # made the runtime's dispatcher the one thing expected to answer it —
+    # `test_the_runtime_dispatches_every_slash_command_it_advertises` caught it.)
+    "transcript",
     # The settings page reads and writes THIS machine's config.yml, exactly
     # like `/theme` and `/search` above it. Routed to the runtime it would open
     # against the runtime's config and persist a default governing a machine the

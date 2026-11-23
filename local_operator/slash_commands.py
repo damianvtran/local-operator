@@ -22,6 +22,7 @@ from local_operator.i18n.keys import (
     tui_schedule,
     tui_sound,
     tui_tags,
+    tui_transcript_display,
     tui_viewer,
     wire_memory,
     wire_radient_saver,
@@ -1732,6 +1733,40 @@ SLASH_COMMANDS: list[SlashCommand] = [
         prefixes_text=True,
         argument_shape=ArgumentShape.ANY,
         desktop_destination="appearance",
+    ),
+    # Beside `/language` and `/theme` because it is the third command whose
+    # whole business is the app's own presentation, and a layout is a standing
+    # preference like a theme: a switch persists AND applies live, with no
+    # restart. The COMMAND is the discoverable half of the
+    # `display.transcript_display` setting; the /settings row (appearance) is
+    # the other, and both write the same config key through
+    # `settings_io.write_setting` — one truth.
+    SlashCommand(
+        "transcript",
+        # Names both modes, because the words are the value space: nothing else
+        # on the command row could teach a user that "by response" exists.
+        #
+        # Its copy lives in the TUI-only `tui.transcript_display` namespace, NOT
+        # in the audited `wire.slash` catalogue: a new key there would void every
+        # translated locale's audited ledger hash for all sixty-odd command
+        # descriptions, which is the `/sound`, `/tag`, `/library` and
+        # `/notifications` precedent stated in `tests/unit/i18n/test_wire_slash.py`.
+        **_desc(tui_transcript_display.slash()),
+        # OPTIONAL: a bare `/transcript` reports the mode in force — the
+        # settings-row label for it plus the two accepted tokens — and the
+        # space opens them as the choice list, current row marked.
+        arguments=ArgumentMode.OPTIONAL,
+        # Trailing text is a mode token, a value this command owns — the
+        # desktop's `inline` list, the second half of the union the field
+        # docstring describes.
+        prefixes_text=True,
+        argument_shape=ArgumentShape.ANY,
+        # NOT offered on the desktop: the setting is TUI-only (operator
+        # decision, 2026-11-22), and this row's copy lives in
+        # `tui.transcript_display` while the desktop/phone bundles are typed
+        # and built from `wire.*` alone — a published row would hand those
+        # surfaces a code they cannot resolve, the defect
+        # `tests/unit/i18n/test_slash_description_locale.py` pins.
     ),
     # The listing is the receipt.
     SlashCommand(

@@ -1,0 +1,7 @@
+{
+  "cli.network_send.still_starting": {
+    "role": "CLI send refusal after a cold runtime has not published within the ready deadline",
+    "tone": "factual and direct; explicitly negate queueing, do not imply any future delivery",
+    "note": "{session_id} is the conversation ID and {peer} is the owning device name or ID; preserve both verbatim. The command returns without writing a message or scheduling a retry. Preserve the strong negation of NOT queued; uppercase is not required in scripts that do not use it. No final period."
+  }
+}

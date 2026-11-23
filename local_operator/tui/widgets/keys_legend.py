@@ -46,6 +46,7 @@ from textual.message import Message
 from textual.widgets import Static
 
 from local_operator.i18n.keys import tui_chrome_bindings as _x
+from local_operator.i18n.keys import tui_transcript_fold
 from local_operator.i18n.text import register_refresh, tr
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets import overlay
@@ -55,6 +56,14 @@ from local_operator.tui.widgets.transcript import wrap_cells
 #: (``f9``, ``esc``, ``ctrl+a`` …) is a chord the terminal delivers, never prose,
 #: so it stays Latin in every locale.
 _t = tr("tui.chrome.bindings")
+#: The fold's legend rows resolve from the fold's OWN en-only namespace, not
+#: `tui.chrome.bindings`. A key added to a translated namespace changes its en
+#: source hash, which stalenesses every locale's audit entry for that namespace
+#: and un-ships all seven locales (measured: the generated shipped set collapsed
+#: to `en`). `tui.transcript_fold` is carried by `en` alone, so new copy there
+#: rides the per-namespace §2.5 fallback until its translation wave — the same
+#: trade the namespace list in `scripts/i18n/generate.py` records.
+_tf = tr("tui.transcript_fold")
 
 #: Horizontal padding cells, mirroring the ``padding: 1 2`` the stylesheet pins
 #: on ``KeysLegend``. Textual sizes BORDER-BOX, so every width/height pinned in
@@ -189,6 +198,19 @@ def _legend_sections() -> tuple[LegendSection, ...]:
                 ("ctrl+l", _t(_x.legend_app_ctrl_l())),
                 ("ctrl+home/end", _t(_x.legend_app_ctrl_home_end())),
                 ("ctrl+n/ctrl+s", _t(_x.legend_app_ctrl_n_ctrl_s())),
+            ),
+        ),
+        # The fold's own keyboard vocabulary. It cannot live in /help: every row
+        # here is scoped to a FOCUSED FOLD BAR (the printable `f`/`F`/`+`/`-`
+        # deliberately mean nothing while a composer has the keys), and a bare key
+        # row has no way to say that. A section heading does.
+        LegendSection(
+            heading=_tf(tui_transcript_fold.legend_heading()),
+            rows=(
+                ("enter/space", _tf(tui_transcript_fold.legend_enter())),
+                ("left/right", _tf(tui_transcript_fold.legend_left_right())),
+                ("f/F", _tf(tui_transcript_fold.legend_failed())),
+                ("+/-", _tf(tui_transcript_fold.legend_all())),
             ),
         ),
     )

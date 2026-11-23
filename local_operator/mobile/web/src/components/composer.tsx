@@ -181,19 +181,55 @@ export function isSlashDraft(text: string, imageCount: number): boolean {
 type DictationState = "idle" | "recording" | "transcribing";
 
 /**
- * The failure copy for one transcription attempt.
+ * The relay's own request-body cap, BELOW the daemon's audio cap.
  *
- * 402/413/422/503 carry the DAEMON's own actionable sentence (top up, shorten,
- * wrong format, no path) and are shown verbatim — the user can act on every
- * one. 502/500 and transport failures are transient or diagnostic, so they get
- * the one retry sentence; the server's upstream diagnostics belong in a log,
- * not on a phone.
+ * The tunnel gateway answers 413 to any body over 10 MiB
+ * (`local_operator/tunnels/gateway.py`), while the daemon accepts 20 MiB of
+ * audio — so a take in between can never reach the daemon at all, and an offer
+ * to "try again" with it would be a lie the user pays for twice.
  */
-function dictationErrorCopy(error: unknown): string {
-	if (error instanceof HttpError && [402, 413, 422, 503].includes(error.status)) {
-		return error.message;
+const TUNNEL_MAX_BODY_BYTES = 10 * 1024 * 1024;
+/** The failure row's own sentence for a transient refusal (shown WITH Retry). */
+const DICTATION_FAILED = "Transcription failed";
+/** Said instead of a retry when the take can never fit through the tunnel. */
+const DICTATION_TOO_LONG = "That recording is too long to send. Discard it and record a shorter one.";
+
+/** The focus ring both failure-row actions paint for a KEYBOARD (D6). The shape
+    matches the app's document-level 2px accent outline, spelled out here so the
+    two actions never depend on a default focus paint to be visible. */
+const DICTATION_ACTION_FOCUS =
+	"focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent";
+
+/** One failed take as the status row presents it: the sentence, and whether a
+    retry can honestly help. */
+type DictationFailure = { message: string; retry: boolean };
+
+/** Classify one failed transcription attempt for the failure row.
+
+    402/422/503 carry the DAEMON's own actionable sentence (top up, wrong
+    format, no path) and are shown verbatim: a retry would answer them word for
+    word, so they get Discard alone. 413, and any retained take over the
+    tunnel's own cap, can never be sent, so they say that instead of pretending
+    a retry could work. Every OTHER 5xx is transient — the same rule the desktop
+    applies (500-599) — so a tunnel's 504 gets a Retry too, and the row says
+    "Transcription failed" rather than repeating the server's diagnostics (those
+    belong in a log, not on a phone). An unknown status outside 5xx (a 418, a
+    stray 409) keeps Discard alone and says the same short sentence: "Try
+    again" would offer a retry the row does not draw. */
+function dictationFailureFor(error: unknown, blob: Blob): DictationFailure {
+	if ((error instanceof HttpError && error.status === 413) || blob.size > TUNNEL_MAX_BODY_BYTES) {
+		return { message: DICTATION_TOO_LONG, retry: false };
 	}
-	return "Couldn't transcribe that. Try again.";
+	if (error instanceof HttpError) {
+		if ([401, 402, 422, 503].includes(error.status)) return { message: error.message, retry: false };
+		if (error.status >= 500 && error.status <= 599) return { message: DICTATION_FAILED, retry: true };
+		return { message: DICTATION_FAILED, retry: false };
+	}
+	/* fetch rejects with a TypeError when it never reached the daemon (offline,
+	   DNS, a dropped connection): the one class where the same bytes are worth
+	   sending again. */
+	if (error instanceof TypeError) return { message: DICTATION_FAILED, retry: true };
+	return { message: DICTATION_FAILED, retry: false };
 }
 
 /**
@@ -891,6 +927,10 @@ export function Composer({
 	imagesRef.current = images;
 	const [dragOver, setDragOver] = useState(false);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
+	/* The dictation status row, focusable by script only (`tabIndex={-1}` while a
+	   failure is shown): the Retry press removes the button that had focus, and
+	   focus must land here rather than fall to <body>. */
+	const dictationRowRef = useRef<HTMLDivElement>(null);
 	/* THE PRIMARY SLOT'S ROLE (slot B of the action cluster). One occupant, so
 	   send / steer / stop are never drawn together; see `primaryRole`. */
 	const [dictation, setDictation] = useState<DictationState>("idle");
@@ -1041,6 +1081,16 @@ export function Composer({
 	/* U5: the in-flight transcribe request, so the status row's cancel aborts
 	   it rather than only hiding the wait. Null whenever nothing is in flight. */
 	const transcribeAbortRef = useRef<AbortController | null>(null);
+	/* THE LAST COMPLETE TAKE, kept while its transcription is REFUSED so Retry
+	   resends exactly those bytes instead of asking the user to speak again. A
+	   ref, not state: handlers read it and the row renders through
+	   `dictationFailure`. Released on success, Discard, a new take, a cancel, a
+	   route change and unmount, so a recording never outlives its attempt. */
+	const lastTakeRef = useRef<Blob | null>(null);
+	/* The failed take as the status row presents it (message + whether Retry is
+	   honest). Lives in the status row, NOT the danger alert: a failed take is
+	   recoverable in place, and the alert row's dismiss would throw it away. */
+	const [dictationFailure, setDictationFailure] = useState<DictationFailure | null>(null);
 	/* U1: set when a transcript has just been committed, consumed by the [text]
 	   layout effect to reveal the appended span (scroll, never focus). */
 	const revealAppendRef = useRef(false);
@@ -1325,6 +1375,9 @@ export function Composer({
 		}
 		releaseDictationTracks();
 		chunksRef.current = [];
+		/* A cancel is a discard: the retained take goes with it. */
+		lastTakeRef.current = null;
+		setDictationFailure(null);
 		setDictation("idle");
 		setRecordSeconds(0);
 		setDictationNotice("");
@@ -1332,6 +1385,10 @@ export function Composer({
 
 	const startDictation = async () => {
 		if (dictationRef.current !== "idle" || !micAvailable) return;
+		/* A fresh take replaces a failed one: the retained blob is released, so a
+		   Retry can never resend speech the user has already moved past. */
+		lastTakeRef.current = null;
+		setDictationFailure(null);
 		setError("");
 		setNotice("");
 		setDictationNotice("");
@@ -1438,19 +1495,41 @@ export function Composer({
 			setRecordSeconds(0);
 			return;
 		}
-		const blob = new Blob(chunks, { type: recorder.mimeType });
+		await transcribeTake(new Blob(chunks, { type: recorder.mimeType }));
+	};
+
+	/** Transcribe ONE complete take and put its words in the box.
+
+	    The single path a fresh recording AND a Retry run: the blob is the only
+	    input, so a retry resends the same bytes through the same append, the same
+	    provenance note and the same completion notice. `dictationCancelledRef` is
+	    the attempt's guard, so a cancel or a send during a retry drops the result
+	    exactly as it does during a first attempt. */
+	const transcribeTake = async (blob: Blob) => {
+		setDictationFailure(null);
+		setDictation("transcribing");
+		setRecordSeconds(0);
 		/* U5: the request is abortable, so the status row's own cancel reaches
 		   the network rather than only hiding the wait. */
 		const controller = new AbortController();
 		transcribeAbortRef.current = controller;
 		let result: { text: string; path: string };
 		try {
-			result = await transcribeAudio(blob, controller.signal);
+			result = await transcribeAudio(blob, {
+				signal: controller.signal,
+				sessionId: projection.session_id,
+			});
 		} catch (e) {
 			if (dictationCancelledRef.current) return;
 			dictationActiveRef.current = false;
 			endDictatedSend();
-			setError(dictationErrorCopy(e));
+			/* KEEP THE TAKE: a refusal that answers the same way twice still gets
+			   a Discard, and the transient classes get a Retry that resends these
+			   exact bytes. The blob is released by success, Discard, a new take,
+			   a cancel, a route change or unmount — never left to linger. */
+			lastTakeRef.current = blob;
+			setDictationNotice("");
+			setDictationFailure(dictationFailureFor(e, blob));
 			setDictation("idle");
 			setRecordSeconds(0);
 			return;
@@ -1464,6 +1543,9 @@ export function Composer({
 		   a clobber by another name. */
 		if (dictationCancelledRef.current) return;
 		dictationActiveRef.current = false;
+		/* The take is spent: the words are in the box, so there is nothing left
+		   for a Retry to resend. */
+		lastTakeRef.current = null;
 		const previous = textRef.current;
 		const joined = joinDraft(previous, result.text);
 		const cleaned = result.text.trim();
@@ -1507,6 +1589,39 @@ export function Composer({
 		setRecordSeconds(0);
 	};
 
+	/** Resend the retained take through the SAME path a fresh one uses.
+
+	    It NEVER sends, even when the take came from a "Send recording" press:
+	    the press is dropped first (`endDictatedSend`, idempotent), so a retry
+	    after a failed send APPENDS the words and the user reviews them. A retry
+	    of a failed send must not turn into the message they thought had failed. */
+	const retryDictation = () => {
+		const take = lastTakeRef.current;
+		if (take === null || dictationRef.current !== "idle") return;
+		/* This is a FRESH attempt: clear the previous attempt's cancel guard
+		   before the request goes out (a cancel after this still wins). */
+		dictationCancelledRef.current = false;
+		dictationActiveRef.current = true;
+		endDictatedSend();
+		setDictationNotice("");
+		void transcribeTake(take);
+		/* The Retry button unmounts with the failure row: hand focus to the status
+		   row that outlives it, or the browser drops focus to <body> and a hardware
+		   keyboard loses its place in the form. The row, not the field: focusing
+		   the textarea here would raise the soft keyboard over the wait. */
+		dictationRowRef.current?.focus();
+	};
+
+	/** Throw the failed take away. Quiet, like every other deliberate discard:
+	    the user knows what they tapped, and the words are gone by design. */
+	const discardDictationTake = () => {
+		lastTakeRef.current = null;
+		setDictationFailure(null);
+		dictationActiveRef.current = false;
+		setDictation("idle");
+		setRecordSeconds(0);
+	};
+
 	/** "SEND RECORDING": stop the take, transcribe it and submit the words in one
 	    press. Only the PRESS lives here; the send is the effect below, run against
 	    the render in which the transcript is in the box. */
@@ -1546,6 +1661,15 @@ export function Composer({
 		return () => cancelDictation();
 		// eslint-disable-next-line react-hooks/exhaustive-deps -- refs + stable setters only
 	}, []);
+
+	/* A different conversation is a different composer: the failed take was
+	   recorded into this one, so a route change releases it. Unmount (a sign-out
+	   reloads the SPA) is covered by the cleanup above. */
+	useEffect(() => {
+		lastTakeRef.current = null;
+		setDictationFailure(null);
+		// eslint-disable-next-line react-hooks/exhaustive-deps -- a ref and a stable setter
+	}, [pid]);
 
 	const send = async (raw: string, op?: "prompt" | "steer") => {
 		/* SEND CANCELS AN IN-FLIGHT DICTATION: tracks released and a result still
@@ -2143,9 +2267,81 @@ export function Composer({
 			    move the line (design round 1, D3). `role="status"` (polite) so a
 			    screen reader hears the state without stealing focus; colour is never
 			    the only carrier (dot + word + timer). */}
-			{dictation !== "idle" || dictationNotice ? (
-				<div className="flex min-h-11 items-center gap-2 px-0.5">
-					{dictation === "recording" ? (
+			{dictation !== "idle" || dictationFailure !== null || dictationNotice ? (
+				<div
+					ref={dictationRowRef}
+					/* Focusable by script only, for the row's WHOLE life: the state
+					   change that REMOVES the focused Retry button hands focus here, or
+					   the browser drops it to <body> and a hardware keyboard loses its
+					   place in the form. The attribute must outlive the failure row:
+					   Retry clears `dictationFailure` while this same row stays (the
+					   transcribing line, then the outcome notice), and Chrome resets
+					   activeElement to <body> the moment the FOCUSED element loses its
+					   tabIndex — Gecko keeps it, so only a real Chrome shows it. */
+					tabIndex={-1}
+					className={cn(
+						"flex min-h-11 items-center gap-2 px-0.5",
+						/* A long sentence and two 44 px actions cannot share one line at
+						   200% text: unwrapped, the message was squeezed to one letter per
+						   line at 320 px (Q1/Q2/D5). Wrapped, the actions move to a second
+						   line, right-aligned, only when they do not fit on the first. */
+						dictationFailure !== null && "flex-wrap",
+					)}
+				>
+					{dictationFailure !== null ? (
+						<>
+							{/* The failed take is recoverable IN PLACE: the row keeps the same
+							    min-h-11 line the live states use (D3), so retrying does not move
+							    anything, and role="alert" is preserved from the alert row this
+							    moved out of. */}
+							{/* `flex-auto` (auto basis), not `flex-1` (zero basis): a zero basis
+							    fits itself beside the actions and then grows, so the row would
+							    ALWAYS wrap onto two lines. Auto basis lets a short sentence keep
+							    one line at 100%, and the min-width forces the wrap before the
+							    message can be squeezed narrow. `min()` keeps that floor inside
+							    the row when 200% text grows 12rem past a 320 px viewport. */}
+							<p
+								role="alert"
+								aria-live="assertive"
+								className="min-w-[min(12rem,100%)] flex-auto break-words text-body-sm text-danger"
+							>
+								{dictationFailure.message}
+							</p>
+							{/* One group for both actions (D1): `gap-4` keeps Retry and Discard
+							    apart, `ml-auto` right-aligns the group on its own line, and
+							    `self-end` bottoms it against a multi-line message instead of
+							    vertically centring Discard against the text. */}
+							<div className="ml-auto flex items-end gap-4 self-end">
+								{dictationFailure.retry ? (
+									/* A quiet bordered pill (D1): the retry is the row's only
+									   positive action, so it reads as a control without the accent
+									   fill of Send. */
+									<button
+										type="button"
+										onClick={retryDictation}
+										aria-label="retry transcription"
+										className={cn(
+											"flex min-h-11 shrink-0 items-center rounded-full border border-control px-3 text-body-sm text-ink active:bg-elevated",
+											DICTATION_ACTION_FOCUS,
+										)}
+									>
+										Retry
+									</button>
+								) : null}
+								<button
+									type="button"
+									onClick={discardDictationTake}
+									aria-label="discard recording"
+									className={cn(
+										"flex min-h-11 shrink-0 items-center rounded-sm px-2 text-body-sm text-ink-muted active:text-ink",
+										DICTATION_ACTION_FOCUS,
+									)}
+								>
+									Discard
+								</button>
+							</div>
+						</>
+					) : dictation === "recording" ? (
 						<>
 							<p
 								role="status"

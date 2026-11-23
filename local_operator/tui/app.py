@@ -393,7 +393,7 @@ from local_operator.tui.session_presentation import (
     tool_result_image_blocks,
 )
 from local_operator.tui.session_workspace import SessionWorkspace
-from local_operator.tui.settings import settings_get
+from local_operator.tui.settings import settings_get, transcript_display_mode
 from local_operator.tui.terminal_modes import (
     InBandResizeReclaimer,
     pixel_mouse_gate_installed,
@@ -12944,6 +12944,12 @@ class OperatorApp(App[None]):
         # then removed. Straight after the band exists, before the first
         # session is asked for.
         self._apply_composer_settings()
+        # The stored transcript layout, for the same reason and at the same
+        # point: the view starts on the class default, and until now only a
+        # CHANGE reached it. A setting that says "By response" survived on disk
+        # but the transcript drew By turn until the next `/transcript` press —
+        # the page and the command each stated a mode the boot frame ignored.
+        self._apply_transcript_display()
         # Attached AFTER the first `update`, so the first STABLE title already
         # carries the working directory it falls back to while the conversation
         # is unnamed. Attaching first would leave a bare `lo ›` on screen for
@@ -28656,6 +28662,11 @@ class OperatorApp(App[None]):
                 taint_raised=taint_raised,
             )
             self._approval = prompt
+            # The LIVE transcript card for this call is still `running`, so the
+            # fold's derive can only learn about the gate by re-reading the
+            # session's pending ids. Ask it to, at BOTH edges: a collapse while
+            # the prompt is open must never hide the row the prompt names.
+            self._refresh_tool_fold()
             # The QUESTION goes in the dock, where it cannot scroll away from
             # the turn it is blocking and where it reliably owns its own answer
             # keys. The transcript gets a RECEIPT instead, and only once the
@@ -28685,6 +28696,7 @@ class OperatorApp(App[None]):
             if self._approval is prompt:
                 self._approval = None
             self._unmount_prompt(prompt)
+            self._refresh_tool_fold()
             if self._is_current(source):
                 self._notify_mobile_approval_settled(prompt)
                 # THE BAND SAID WHICH SENTENCE THE CARD OWED; the card is gone
@@ -44040,6 +44052,13 @@ class OperatorApp(App[None]):
                 # `display` flags and the repaint are owed — the segments
                 # re-read themselves on it.
                 self._apply_composer_settings()
+            if "display.transcript_display" in changed:
+                # The /settings row's and `/transcript`'s live half, silent like
+                # the other local applies: both surfaces already showed their
+                # own result. NOT folded into the composer arm above — the
+                # transcript mode is not a band widget and must also apply from
+                # the disk branch below.
+                self._apply_transcript_display()
             if "language" in changed:
                 # The /settings row's live half. Silent, like the other local
                 # applies: the page (or the /language command, whose echo this
@@ -44212,6 +44231,11 @@ class OperatorApp(App[None]):
             self._apply_sidebar_settings()
         if "display.dock" in changed:
             self._apply_dock_density()
+        if "display.transcript_display" in changed:
+            # After the `settings_reload` above, deliberately: the mode is read
+            # through `tui.settings`, whose cache that reload just dropped, so
+            # applying before it would hand the view the PREVIOUS mode.
+            self._apply_transcript_display()
         if any(key.startswith(_keymap.KEYMAP_PREFIX) for key in changed):
             # The other half of the pair above: a write from ANOTHER pane or
             # from `lop config edit`. Announces, because this user did not act
@@ -45761,6 +45785,8 @@ class OperatorApp(App[None]):
             self._cmd_theme(arg, notice)
         elif command == "/language":
             self._cmd_language(arg, notice)
+        elif command == "/transcript":
+            self._cmd_transcript(arg, notice)
         elif command == "/provider":
             self._cmd_providers(notice)
         elif command == "/sidebar":
@@ -48838,6 +48864,68 @@ class OperatorApp(App[None]):
         # Composed AFTER the switch, so the receipt itself is in the new language.
         notice(_lang_t(_lang_keys.saved(key=key, tag=active, name=language_native_name(active))))
 
+    def _cmd_transcript(self, arg: str, notice: NoticeFn) -> None:
+        """``/transcript`` — show the layout mode; ``/transcript <mode>`` — set it.
+
+        The command is the DISCOVERABLE half of the ``display.transcript_display``
+        setting; the ``/settings`` row (Appearance) is the other, and both write
+        the same config key through ``settings_io.write_setting`` — one truth, so
+        the row, this command and the transcript layer cannot disagree. A switch
+        PERSISTS and applies live: ``_apply_transcript_display`` runs here for
+        the no-watcher case (a headless test, a CLI-hosted app) and again from
+        ``_on_config_change``'s local branch, where being handed the same value
+        twice is a no-op.
+
+        The receipt names the mode's LABEL ("By response"), never the stored
+        token: the label is the words the settings row paints, so the two
+        surfaces spell a mode the same way in every language. A value outside
+        the enum gets the two accepted tokens rather than a traceback, the same
+        shape ``/language`` uses for an unknown tag.
+        """
+        from local_operator import settings_io
+        from local_operator.i18n.keys import tui_transcript_display as display_copy
+        from local_operator.i18n.keys import (
+            wire_settings_transcript_display as setting_copy,
+        )
+        from local_operator.tui.settings import (
+            TRANSCRIPT_DISPLAY_MODES,
+            transcript_display_mode,
+        )
+
+        say = tr("tui.transcript_display")
+        # The setting's own child namespace, not its parent: a `tr` resolver
+        # reads ONE catalogue file, so `tr("wire.settings")` would not see a
+        # key that lives in `wire.settings.transcript_display`.
+        describe_mode = tr("wire.settings.transcript_display")
+        labels = {
+            "by-turn": describe_mode(setting_copy.choice_by_turn_label()),
+            "by-response": describe_mode(setting_copy.choice_by_response_label()),
+        }
+        wanted = arg.strip().casefold()
+        if not wanted:
+            notice(say(display_copy.usage(mode=str(labels[transcript_display_mode()]))))
+            return
+        if wanted not in TRANSCRIPT_DISPLAY_MODES:
+            notice(
+                say(display_copy.unknown(echo=_quoted_echo_within_cells(arg.strip()))),
+                "warning",
+            )
+            return
+        setting = settings_io.resolve_key("display.transcript_display")
+        if setting is None:  # pragma: no cover - the registry owns the key
+            notice(say(display_copy.save_failed(reason="unregistered key")), "warning")
+            return
+        try:
+            from local_operator.config import ConfigManager
+            from local_operator.paths import config_dir
+
+            settings_io.write_setting(ConfigManager(config_dir()), setting, wanted)
+        except Exception as error:  # noqa: BLE001 - reported to the user verbatim
+            notice(say(display_copy.save_failed(reason=str(error))), "warning")
+            return
+        self._apply_transcript_display()
+        notice(say(display_copy.set(mode=str(labels[wanted]))))
+
     def _apply_language(self, locale: str) -> None:
         """Point every rendering surface at ``locale``, live (slice C).
 
@@ -49096,6 +49184,36 @@ class OperatorApp(App[None]):
             for spec in (theme_mod.theme_spec(name) for name in theme_mod.available_themes())
         ]
 
+    def _transcript_choices(self) -> list[ArgumentChoice]:
+        """The two transcript layouts, the one in force marked.
+
+        Sourced from ``tui.settings.TRANSCRIPT_DISPLAY_MODES`` — the same tuple
+        the setting's own choices and the command's validation read — so the
+        list can never offer a token the handler refuses. The description is
+        the settings row's for that mode (one spelling per mode in every
+        language) and ``detail`` carries the current marker only; the value a
+        selection writes is the row's name.
+        """
+        from local_operator.i18n.keys import (
+            wire_settings_transcript_display as setting_copy,
+        )
+        from local_operator.tui.settings import TRANSCRIPT_DISPLAY_MODES
+
+        descriptions = {
+            "by-turn": setting_copy.choice_by_turn_description(),
+            "by-response": setting_copy.choice_by_response_description(),
+        }
+        describe = tr("wire.settings.transcript_display")
+        current = transcript_display_mode()
+        return [
+            ArgumentChoice(
+                mode,
+                str(describe(descriptions[mode])),
+                detail="← current" if mode == current else "",
+            )
+            for mode in TRANSCRIPT_DISPLAY_MODES
+        ]
+
     def on_argument_highlight_changed(self, message: ArgumentHighlightChanged) -> None:
         """Live-preview the highlighted theme; restore when the list closes.
 
@@ -49204,6 +49322,36 @@ class OperatorApp(App[None]):
             logger.debug("display.dock live apply failed", exc_info=True)
             return
         self._refresh_band()
+
+    def _apply_transcript_display(self) -> None:
+        """Hand a changed ``display.transcript_display`` to the transcript view.
+
+        LIVE for the same reason ``display.dock`` is: the `/settings` row, the
+        `/transcript` command and an edit from another process all repaint
+        without a relaunch. The mode is read through ``tui.settings`` (which
+        maps anything unrecognised to the shipped layout) rather than off the
+        change payload, so a hand-edited file and a registry write take the one
+        path. What the mode then DOES is the fold layer's (slice 4); this hook
+        only stops the view holding the previous mode.
+        """
+        try:
+            self._transcript_view().set_display_mode(transcript_display_mode())
+        except Exception:  # noqa: BLE001 — the write landed; the apply is a bonus
+            logger.debug("display.transcript_display live apply failed", exc_info=True)
+
+    def _refresh_tool_fold(self) -> None:
+        """Re-derive the transcript fold after a fact outside the rows moved.
+
+        The one such fact today is the approval gate: the live card stays
+        `running` while the question is open, so the layer reads the session's
+        pending ids — and only a re-derive notices them changing. Called at both
+        edges of ``request_tool_approval``; a failure to reach the view (an
+        unmounted transcript) is not worth failing the gate over.
+        """
+        try:
+            self._transcript_view().invalidate_tool_fold()
+        except Exception:  # noqa: BLE001 — the gate itself is what matters
+            logger.debug("tool fold approval refresh failed", exc_info=True)
 
     def _apply_composer_settings(self) -> None:
         """Apply the ``display.composer.*`` widget-visibility flags.
@@ -54673,6 +54821,13 @@ class OperatorApp(App[None]):
             # Opens on the row the setting is ON (`auto` when absent), the same
             # landing `/theme` gives a browse.
             picker.set_choices(self._language_choices(), highlight=self._language_current())
+            picker.set_notice("")
+            return
+        if message.command == "transcript":
+            # Opens on the mode in force, the same landing `/language` gives a
+            # browse: two rows, the current one marked, so the list answers
+            # "what am I on" as well as "what may I pick".
+            picker.set_choices(self._transcript_choices(), highlight=transcript_display_mode())
             picker.set_notice("")
             return
         if message.command in ("credential", "cred"):

@@ -56,6 +56,9 @@ ECHO_POLICY = {
     "network": False,
     # The notification-sound controls answer with their own notice receipt.
     "sound": False,
+    # The layout switch answers with a one-line receipt naming the new mode; the
+    # argument is a stored setting, never words the model is given.
+    "transcript": False,
     "exit": False,
     "clear": False,
     # Opens a picker, and nothing here reaches the model. The receipt is
@@ -231,6 +234,8 @@ PROMPT_POLICY = {
     "network": False,
     # A verb plus an id/value; nothing is a prompt.
     "sound": False,
+    # A layout token, a value this command owns.
+    "transcript": False,
     "help": False,
     # The listing/painting IS the receipt; the argument (none exists — the
     # handler refuses one) never becomes a prompt.
