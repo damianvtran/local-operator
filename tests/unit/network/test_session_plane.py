@@ -3867,6 +3867,7 @@ def test_peer_peek_shapes_over_a_real_link(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Exercise the actual CLI parser, relay, authorization and owner journal."""
+    from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
     from local_operator.network import cli as network_cli
     from local_operator.network.peek import SESSION_PEEK_REPLY_BUDGET_BYTES
 
@@ -3916,23 +3917,44 @@ def test_peer_peek_shapes_over_a_real_link(
         ] == ["stored"]
         print(f"read-only relay: head={texts[:2]!r}; {window['note']}; {fold.splitlines()[0]}")
 
-        # A row beyond the one-step window must not replace the answer with a
-        # handler error. Keep it on the owner, just as a damaged journal is.
+        # Numeric sender decoration must not hide a real hit; array-valued
+        # searchable text beyond the one-step window must still be skipped.
         journal = owner.root / "sessions" / SESSION / "transcript.jsonl"
-        bad_row = {
-            "id": "malformed-neighbor",
+        good_row = {
+            "id": "peer-hit",
             "ts": 1_700_001_000,
             "type": "message",
-            "payload": {"kind": "message", "role": "assistant", "tool_calls": ["not-a-tool-call"]},
+            "payload": {
+                "kind": "custom",
+                "custom_type": PEER_MESSAGE_MESSAGE_TYPE,
+                "details": {"sender": {"pid": 27182}, "body": "real peer hit"},
+            },
+        }
+        bad_row = {
+            "id": "malformed-neighbor",
+            "ts": 1_700_001_001,
+            "type": "message",
+            "payload": {
+                "kind": "message",
+                "role": "user",
+                "content": [{"text": ["real peer hit"]}],
+            },
         }
         with journal.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(bad_row) + "\n")
-        window = ask("--query=opening brief", "--steps=1")["window"]
-        assert [step["body"] for step in window["steps"]] == ["opening brief"]
-        assert (window["match_count"], window["match_count_complete"]) == (1, False)
+            for row in (good_row, bad_row):
+                handle.write(json.dumps(row) + "\n")
+        window = ask("--query=real peer hit", "--steps=1")["window"]
+        assert [(step["heading"], step["body"]) for step in window["steps"]] == [
+            ("peer ← 27182", "real peer hit")
+        ]
+        assert (window["match_id"], window["match_count"], window["match_count_complete"]) == (
+            "peer-hit",
+            1,
+            False,
+        )
         assert "1 unrenderable row skipped; count is a lower bound" in window["note"]
         print(
-            f"read-only relay, malformed neighbor: {window['steps'][0]['body']}; {window['note']}"
+            f"read-only relay, PID and malformed neighbor: {window['steps'][0]}; {window['note']}"
         )
     finally:
         link.close("test")

@@ -23,7 +23,6 @@ over-budget request refuses with the same sentence on either path.
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 import time
@@ -575,90 +574,95 @@ def _peek_search(
     return window._replace(scanned_bytes=scanned)
 
 
-def _peer_search_row_renderable(payload: Mapping[str, Any]) -> bool:
-    """Check the nested JSON shapes that the shared step renderer traverses.
+def _peer_search_has_raw_text(payload: Mapping[str, Any]) -> bool:
+    """Reject coercion of message text, not missing or malformed decoration.
 
-    The transcript decoder validates the row envelope, not these fields. Keep
-    this check at the counted-search boundary: scanning past the returned
-    window must not turn corrupt journal data into a failed request.
+    Inspect only the slots the renderer uses as prose. In particular, an
+    array/object in a text slot fails on its outer type; we never walk it.
     """
-    from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
+    from local_operator.harness.message_types import HUB_MESSAGE_TYPE, PEER_MESSAGE_MESSAGE_TYPE
 
     if payload.get("kind") == "custom":
+        custom_type = payload.get("custom_type")
         details = payload.get("details")
         if details is None:
             return True
         if not isinstance(details, dict):
             return False
-        sender = details.get("sender")
-        return (
-            payload.get("custom_type") != PEER_MESSAGE_MESSAGE_TYPE
-            or sender is None
-            or isinstance(sender, dict)
-        )
-    content = payload.get("content")
-    if content is not None and not isinstance(content, list):
-        return False
-    if payload.get("role") != "assistant":
-        return True
-    calls = payload.get("tool_calls")
-    return calls is None or (isinstance(calls, list) and all(isinstance(c, dict) for c in calls))
-
-
-def _peer_search_has_raw_text(payload: Mapping[str, Any]) -> bool:
-    """A formatter's ``str()`` fallback must not invent searchable text.
-
-    Validate the fields read by the shared display formatter, not arbitrary
-    metadata. Raw strings may still be assembled with fixed display labels.
-    """
-    from local_operator.harness.message_types import (
-        HUB_MESSAGE_TYPE,
-        PEER_MESSAGE_MESSAGE_TYPE,
-    )
-
-    if payload.get("kind") == "custom":
-        custom_type = payload.get("custom_type", "custom")
-        details = payload.get("details") or {}
-        if not isinstance(custom_type, str):
-            return False
         if custom_type == "compaction_summary":
             return isinstance(details.get("summary", ""), str)
         if custom_type in (HUB_MESSAGE_TYPE, PEER_MESSAGE_MESSAGE_TYPE):
-            if custom_type == PEER_MESSAGE_MESSAGE_TYPE:
-                sender = details.get("sender") or {}
-                who = sender.get("conversation_name") or sender.get("pid") or "another session"
-                if not isinstance(who, str):
-                    return False
             if "body" in details and not isinstance(details["body"], str):
                 return False
             if details.get("body"):
                 return True
         return isinstance(details.get("text", ""), str)
 
-    for block in payload.get("content") or ():
-        if isinstance(block, dict) and "text" in block and not isinstance(block["text"], str):
-            return False
-    role = payload.get("role", "user")
-    if not isinstance(role, str):
-        return False
+    content = payload.get("content")
+    return content is None or (
+        isinstance(content, list)
+        and all(
+            not isinstance(block, dict) or isinstance(block.get("text", ""), str)
+            for block in content
+        )
+    )
+
+
+def _peer_search_display_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], int | None]:
+    """Give the shared formatter safe decoration without losing real text.
+
+    Valid string labels still match as before. If a peer's sender is identified
+    only by an integer PID, use the placeholder for matching and keep the PID
+    separately for display. Never stringify a container: its contents are not
+    a label, and stringifying it could recurse or expand unseen metadata.
+    """
+    from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
+
+    def label(value: object, default: str) -> str:
+        if isinstance(value, str):
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError:
+                pass
+            else:
+                return value
+        return default
+
+    if payload.get("kind") == "custom":
+        custom_type = label(payload.get("custom_type"), "custom")
+        if custom_type != PEER_MESSAGE_MESSAGE_TYPE:
+            return {**payload, "custom_type": custom_type}, None
+        details = payload.get("details") or {}
+        sender = details.get("sender")
+        if not isinstance(sender, dict):
+            sender = {}
+        name = label(sender.get("conversation_name"), "")
+        raw_pid = sender.get("pid")
+        pid = raw_pid if not name and type(raw_pid) is int and raw_pid else None
+        safe_sender = {"conversation_name": name, "pid": label(raw_pid, "")}
+        return {**payload, "details": {**details, "sender": safe_sender}}, pid
+
+    role = payload.get("role")
     if role == "tool":
-        return isinstance(payload.get("tool_name", "tool"), str)
+        return {**payload, "tool_name": label(payload.get("tool_name"), "tool")}, None
     if role == "assistant":
-        for call in payload.get("tool_calls") or ():
-            if not isinstance(call.get("name"), str):
-                return False
-            args = call.get("arguments")
-            if not isinstance(args, dict):
-                continue
-            if not isinstance(args.get("i") or "", str):
-                return False
-            for key in ("path", "file", "command", "url", "query", "label", "prompt"):
-                value = args.get(key)
-                if value:
-                    if not isinstance(value, str):
-                        return False
-                    break
-    return True
+        calls = payload.get("tool_calls")
+        safe_calls = []
+        if isinstance(calls, list):
+            for call in calls:
+                if not isinstance(call, dict):
+                    continue
+                args = call.get("arguments")
+                # The formatter only uses string intent and arguments; dropping
+                # other values here cannot hide any real searchable tool text.
+                safe_args = (
+                    {k: label(v, "") for k, v in args.items() if isinstance(v, str)}
+                    if isinstance(args, dict)
+                    else {}
+                )
+                safe_calls.append({"name": label(call.get("name"), "?"), "arguments": safe_args})
+        return {**payload, "tool_calls": safe_calls}, None
+    return {**payload, "role": "user"}, None
 
 
 def _peer_peek_search(
@@ -690,7 +694,7 @@ def _peer_peek_search(
     selected: list[tuple[str, PeekStep]] = []
     hit_id = ""
     match_step = None
-    count = skipped = 0
+    count = skipped = depth_skips = 0
     older = newer = False
     eligible = 0
     consumed = 0
@@ -708,40 +712,43 @@ def _peer_peek_search(
                 # never from the replay decoder's or renderer's coerced values.
                 # Reject before a malformed row can consume a cursor or make the
                 # count look complete. Replay and non-query display stay lenient.
-                stored = json.loads(raw.decode("utf-8"))
+                try:
+                    stored = json.loads(raw.decode("utf-8"))
+                except RecursionError:
+                    skipped += 1
+                    depth_skips += 1
+                    continue
+                row_type = stored.get("type")
+                # The journal discriminator controls visibility, not whether a
+                # message with usable identity and text can be displayed. A
+                # timestamp never participates in a counted query.
+                if row_type != "message":
+                    continue
                 row_id = stored["id"]
-                row_type = stored["type"]
-                ts = stored.get("ts", 0.0)
                 payload = stored.get("payload", {})
-                if (
-                    not isinstance(row_id, str)
-                    or not row_id
-                    or not isinstance(row_type, str)
-                    or type(ts) not in (int, float)
-                    or not math.isfinite(ts)
-                    or not isinstance(payload, dict)
-                ):
+                if not isinstance(row_id, str) or not row_id or not isinstance(payload, dict):
                     skipped += 1
                     continue
-                entry = TranscriptEntry(id=row_id, ts=ts, type=row_type, payload=payload)
+                entry = TranscriptEntry(id=row_id, ts=0.0, type=row_type, payload=payload)
                 if not is_peek_step_entry(entry):
-                    continue
-                if not _peer_search_row_renderable(entry.payload):
-                    skipped += 1
                     continue
                 if not _peer_search_has_raw_text(entry.payload):
                     skipped += 1
                     continue
-                step = _render_message_step(0, entry.payload, body_limit=None)
-                # Strict journal decoding catches corrupt bytes; JSON escapes can
-                # still introduce unpaired surrogates. Check every row-derived
-                # wire string (including the cursor) before clipping or counting,
-                # so neither the ACK encoder nor display elision decides which
-                # malformed rows are omitted.
-                for value in (entry.id, step.kind, step.heading, step.body):
-                    value.encode("utf-8")
-                row = (entry.id, replace(step, body=_clip(step.body)))
+                display_payload, display_pid = _peer_search_display_payload(entry.payload)
+                step = _render_message_step(0, display_payload, body_limit=None)
+                # JSON escapes can introduce unpaired surrogates. Identity and
+                # actual prose must survive the wire; decoration was already
+                # given a safe display fallback without touching the prose.
+                entry.id.encode("utf-8")
+                step.body.encode("utf-8")
                 text = f"{step.heading}\n{step.body}"
+                if display_pid is not None:
+                    details = {**display_payload["details"], "sender": {"pid": display_pid}}
+                    step = _render_message_step(0, {**display_payload, "details": details})
+                else:
+                    step = replace(step, body=_clip(step.body))
+                row = (entry.id, step)
             except Exception:
                 # This guard is deliberately per row, not a list of known parser
                 # and renderer exceptions. File I/O and query-wide errors (e.g.
@@ -776,6 +783,8 @@ def _peer_peek_search(
         scope.append(f"{skipped} unrenderable {'row' if skipped == 1 else 'rows'} skipped")
     if not count_complete:
         scope.append("count is a lower bound")
+    if depth_skips:
+        scope.append(f"JSON decoding depth bound reached ({depth_skips} skipped)")
     note = f"match count: {count} ({'; '.join(scope)})"
     if not hit_id:
         return _PeekWindow(
