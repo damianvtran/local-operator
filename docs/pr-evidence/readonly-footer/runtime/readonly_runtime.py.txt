@@ -1,0 +1,82 @@
+import sys, os, json, asyncio, hashlib, socket, subprocess
+from pathlib import Path
+ROOT=Path('/Users/damian/local-operator/.worktrees/i18n-readonly-footer')
+OUT=Path(__file__).parent/'readonly-runtime'; OUT.mkdir(exist_ok=True)
+sys.path.insert(0,str(ROOT))
+# Cache font measurement with the real HOME, before isolating the application.
+from scripts.visual_capture import CaptureProfile, font_provenance, save_capture
+PROFILE=CaptureProfile(); FONT=font_provenance(PROFILE)
+HOME=OUT/'home'; HOME.mkdir(exist_ok=True)
+keep={k:v for k,v in os.environ.items() if k in ('PATH','LANG','LC_ALL','TMPDIR','SYSTEMROOT')}
+os.environ.clear();os.environ.update(keep)
+os.environ.update(HOME=str(HOME),LOCAL_OPERATOR_CONFIG_DIR=str(HOME/'config'),TERM='xterm-256color',LOP_LANG='en',LOCAL_OPERATOR_NO_SHIMMER='1',LOCAL_OPERATOR_NO_NOTIFICATIONS='1',LOCAL_OPERATOR_NO_DESKTOP_LAUNCH='1',LOCAL_OPERATOR_NO_TERMINAL_TITLE='1')
+(HOME/'config').mkdir(exist_ok=True);os.chdir(HOME)
+from unittest.mock import patch
+import local_operator
+from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.editor import Editor, read_only_placeholder
+from local_operator.i18n import text
+from tests.unit.tui.test_app_pilot import FakeSession, _factory
+from rich.cells import cell_len
+from scripts.visual_capture import terminal_svg
+
+LOCALES=['en','zh-CN','fr','es','ru','vi','hi','ur']
+def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
+def lines(editor):
+    return [''.join(seg.text for seg in editor.render_line(y)) for y in range(editor.size.height)]
+def geom(app, editor):
+    return dict(screen=list(app.screen.size), screen_virtual=list(app.screen.virtual_size), screen_scrollbar=[app.screen.show_horizontal_scrollbar,app.screen.show_vertical_scrollbar], editor_size=list(editor.size), editor_content=list(editor.content_size), editor_virtual=list(editor.virtual_size), editor_scrollbar=[editor.show_horizontal_scrollbar,editor.show_vertical_scrollbar], editor_region=list(editor.region), focused=type(app.focused).__name__ if app.focused else None)
+def capture(app,stem):
+    # Preserve the public app screenshot as requested, plus calibrated capture.
+    app.save_screenshot(filename=stem+'-rich.svg',path=str(OUT))
+    save_capture(app,OUT/(stem+'.svg'),profile=PROFILE)
+def deny(*args,**kwargs):raise AssertionError('Private runtime rig forbids network/process creation')
+
+async def main():
+    assert str(ROOT) in local_operator.__file__
+    assert not any(k.startswith('CMUX_') or (k.startswith('LOP_') and k != 'LOP_LANG') for k in os.environ)
+    app=OperatorApp(lambda:_factory(FakeSession()))
+    rows=[]
+    async with app.run_test(size=(40,24)) as pilot:
+        await pilot.pause()
+        assert app.CSS_PATH
+        editor=app.query_one(Editor);editor.focus();await pilot.pause()
+        # Open a real production read-only page; no direct placeholder assignment.
+        app._open_settings_view();await pilot.pause()
+        assert app._settings_view is not None and editor.read_only and not editor.can_focus
+        for locale in LOCALES:
+            app._apply_language(locale)
+            await pilot.pause()
+            native=json.loads((ROOT/'local_operator/i18n/catalogues'/locale/'tui.editor_readonly.json').read_text())['tui.editor_readonly.hint'].replace('{key}','esc')
+            actual=editor.placeholder
+            assert actual==native,(locale,actual,native)
+            assert actual.count('esc')==1 and editor.read_only and not editor.can_focus
+            first=lines(editor);g1=geom(app,editor)
+            capture(app,locale+'-first')
+            await pilot.pause()
+            settled=lines(editor);g2=geom(app,editor)
+            capture(app,locale+'-settled')
+            assert first==settled and g1==g2,(locale,'reflow')
+            assert editor.content_size.width>=cell_len(actual),(locale,'hint wider than editor',g2,cell_len(actual))
+            # Verify actual compositor contains the hint, not merely the property.
+            painted=''.join(settled)
+            assert 'esc' in painted,(locale,'key missing from painted cells',settled)
+            before=editor.text;await pilot.press('x');assert editor.text==before
+            row=dict(locale=locale,placeholder=actual,cells=cell_len(actual),painted_lines=settled,geometry=g2,stable=True,input_refused=True,source_sha256=sha(ROOT/'local_operator/i18n/catalogues'/locale/'tui.editor_readonly.json'))
+            rows.append(row);print(json.dumps(row,ensure_ascii=False),flush=True)
+        await pilot.press('escape');await pilot.pause()
+        assert app._settings_view is None and not editor.read_only and editor.can_focus
+        assert app.focused is editor
+        print('PASS Escape: closed settings, restored editable composer and focus',flush=True)
+        capture(app,'returned')
+        # Neighbor contract: custom hint from a different mode is not overwritten.
+        editor.placeholder='[credential prompt sentinel]'
+        app._apply_language('fr');await pilot.pause()
+        assert editor.placeholder=='[credential prompt sentinel]'
+        print('PASS custom-placeholder negative control',flush=True)
+    receipt=dict(head='3fca695e29bafbf0ea8539dd7a147f2f87183c6d',module=local_operator.__file__,css=[str(p) for p in app.CSS_PATH],font=FONT,rows=rows,escape='PASS',custom_placeholder='PASS',native_shaping='UNVERIFIED: SVG/librsvg is not a native terminal renderer',model='openai/gpt-6.1-sol fallback after anthropic/claude-opus-5-5 quota failure')
+    (OUT/'runtime.json').write_text(json.dumps(receipt,ensure_ascii=False,indent=2))
+    print('PASS mounted all8 runtime; app context exited',flush=True)
+
+with patch.object(socket.socket,'connect',deny),patch.object(subprocess,'Popen',deny):
+    asyncio.run(main())

@@ -497,6 +497,20 @@ def static_feature_flags() -> dict[str, Any]:
         # alone, because the UI's reaction hold was lifted on exactly that
         # condition. A renderer that does not see it shows no reaction controls.
         "team_bridge_reactions": 1,
+        # RENAME: `POST .../conversations/{id}/rename` with body `{name}` plus
+        # the optional captured-owner receipt (`expected_account_id` +
+        # `tenant_id`) in the BODY, under the same rules as create/send. It
+        # gates the conversation menu's Rename item: a renderer that does not
+        # see this key offers no Rename, because on an older daemon the call
+        # would 404 (or 405) instead of renaming. The upstream decides authority
+        # (the same as archive) and every rule, and its refusals
+        # (`conversation_name_taken` with `details`, `conversation_archived`,
+        # `invalid_transition` with `rule`, 403, 404, 503) pass through as-is.
+        "team_bridge_conversation_rename": 1,
+        # Atomic metadata PATCH, including explicit empty-topic clear. This is
+        # a daemon-route capability, not upstream version negotiation: deploy
+        # and verify the additive hub endpoint BEFORE releasing this runtime.
+        "team_bridge_conversation_update": 1,
         # TYPING INDICATORS (typing-indicators design §5): `GET|PUT|DELETE
         # .../conversations/{id}/typing` for the signed-in HUMAN only (no actor
         # endpoint on this plane). Both writes REQUIRE the captured-owner
@@ -1141,6 +1155,20 @@ def static_feature_flags() -> dict[str, Any]:
         # renderer reads this key). Two faces, deliberately separate: they
         # gate two different wires, and neither implies the other.
         "input_mode": 1,
+        # THE BUSY-SEND DELIVERY MODES: the optional ``delivery`` enum on a
+        # message body (`POST /v1/desktop/sessions/{id}/messages`,
+        # ``Prompt.delivery``) -- ``steer`` (today's urgent behaviour),
+        # ``queue`` (never cancels a running tool), ``both`` (``queue`` until it
+        # has waited, then urgent). WHY A KEY -- the `input_mode` argument
+        # verbatim: `Prompt` is `extra="forbid"`, so an ungated send to an older
+        # backend would 422 the user's own message. Gated, the composer omits
+        # the field and steers exactly as today; absence is the legacy path.
+        #
+        # THE ATTACH-WIRE HALF is `busy-delivery-v1` in the owner record (the
+        # mobile stream reads that string; the desktop renderer reads this
+        # key). Two faces, deliberately separate: they gate two different
+        # wires, and neither implies the other.
+        "busy_delivery": 1,
         # IMAGES ON A QUEUED-ASK ANSWER: the optional ``images`` list on
         # ``POST /v1/desktop/sessions/{id}/answers`` (``Answer.images``, the
         # Other door's attachments), plus the ``attachments`` refs the folded ask
@@ -1420,6 +1448,16 @@ def live_feature_flags() -> dict[str, Any]:
         # Absent ⇒ no remote destination and no request to build — the
         # pre-feature state, not a degraded one.
         **({"remote_compute": 1} if remote_compute_enabled() else {}),
+        # PER-SESSION VOICE MODE (docs/design/qwen-voice.md): the three
+        # `/v1/desktop/voice*` routes and the `type: "voice"` frame on
+        # `/v1/desktop/events`. Its own key for the rule `code_requests` states:
+        # the routes are additive, and this is how a renderer learns they exist
+        # before it mounts the voice toggle. Absent, the renderer shows no
+        # voice affordance and makes no voice request.
+        # 2 (session-voice-groq D3): `/voice/text` returns `segments`, `/voice/speech`
+        # returns one WAV segment by `(source, segment)`, and 429s carry
+        # `voice_rate_limited`. A renderer on 1 has no speech route.
+        "voice": 2,
         # ``@path`` in an ordinary submitted message, which
         # :meth:`Session.prompt` expands into an
         # ``<operator-references>`` block before the model sees the turn

@@ -1,0 +1,934 @@
+{
+  "kind": "translation-author-repair-not-audit",
+  "locale": "fr",
+  "namespace": "wire.settings",
+  "round": 1,
+  "agent": {
+    "role": "translator",
+    "session": "a81f7a3e8d73",
+    "actual_model": "openai/gpt-6.1-sol",
+    "fallback": "Explicit host model-switch card from anthropic/claude-opus-5-5: provider failure quota; authoring here uses fallback."
+  },
+  "head": "90009effa833836ce4471e99d90d3b6438de7f60",
+  "source_head": "90009effa833836ce4471e99d90d3b6438de7f60",
+  "inherited_ledger_head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+  "source_evidence": {
+    "english_envelope": "i18n/audits/evidence/approval-full-inputs/Englishvoiceconstant-full-en-approved-capture.json",
+    "english_envelope_sha256": "c17b1262dc76d312cfa21313bd0d1414e2b4132d9900265119d4c1d8d9c237f6",
+    "french_envelope": "i18n/audits/evidence/approval-full-inputs/fr-approved-envelope.json",
+    "french_envelope_sha256": "447eb746d2587c0a9f9e751de50ac1eab3f0ca86fd1304c1b4556e2ea3fcdbd3",
+    "finding_ledger": "i18n/audits/evidence/approval-full-deduplicated-ledger.json",
+    "root_decision": "i18n/audits/evidence/approval-full-root-adjudication.json"
+  },
+  "protected_before_sha256": {
+    "local_operator/i18n/catalogues/en/wire.settings.json": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+    "local_operator/i18n/catalogues/en/wire.settings.context.json": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+    "local_operator/settings_io.py": "c61477a612061c86b70c8626813ad2f21b4a6d4e1e05f477640e420ae51deb59",
+    "local_operator/i18n/runtime.py": "50b11f4266c77f0eb74b65c9feb308530e15b06152564a865f84abbb58c757d5"
+  },
+  "protected_after_sha256": {
+    "local_operator/i18n/catalogues/en/wire.settings.json": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+    "local_operator/i18n/catalogues/en/wire.settings.context.json": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+    "local_operator/settings_io.py": "c61477a612061c86b70c8626813ad2f21b4a6d4e1e05f477640e420ae51deb59",
+    "local_operator/i18n/runtime.py": "50b11f4266c77f0eb74b65c9feb308530e15b06152564a865f84abbb58c757d5"
+  },
+  "target_before_sha256": "8a6fcb21ed6799b4ff69f52d8f61bf70256b40f2bc10e7d9ee72dd799f8f8876",
+  "target_after_sha256": "e093d4481ac0d477c86b562ff8ab1f59c2a00e948fddce1b3f34c1da73064ffa",
+  "key_count_before": 895,
+  "key_count_after": 895,
+  "changed_key_count": 34,
+  "changed_keys": [
+    {
+      "key": "wire.settings.bash_memory_mode.choice.manual.label",
+      "before": "manual",
+      "after": "manuel",
+      "backtranslation": "manual"
+    },
+    {
+      "key": "wire.settings.bash_memory_mode.help",
+      "before": "'auto' dérive le plafond de la mémoire actuellement libre sur cet appareil, il se resserre donc tout seul quand la machine est occupée. 'manual' le fixe au nombre ci-dessous.",
+      "after": "Le mode « auto » déduit le plafond de la mémoire actuellement libre sur cet appareil : il se resserre donc tout seul quand la machine est occupée. Le mode « manuel » le fixe au nombre ci-dessous.",
+      "backtranslation": "Auto mode derives the ceiling from currently free memory on this device: it tightens on its own when the machine is busy. Manual mode fixes it to the number below."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+      "before": "false",
+      "after": "non",
+      "backtranslation": "no"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+      "before": "default",
+      "after": "par défaut",
+      "backtranslation": "default"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.help",
+      "before": "'default' n’envoie rien (OpenRouter passe à un autre hôte quand l’hôte préféré échoue) ; 'false' échoue plutôt que de passer à un hôte hors de vos préférences.",
+      "after": "« par défaut » n’envoie rien (OpenRouter passe à un autre hôte quand l’hôte préféré échoue) ; « non » fait échouer l’appel plutôt que de passer à un hôte hors de vos préférences.",
+      "backtranslation": "Default sends nothing (OpenRouter switches to another host when the preferred host fails); no makes the call fail rather than switching to a host outside your preferences."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "before": "allow",
+      "after": "autoriser",
+      "backtranslation": "allow"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "before": "deny",
+      "after": "refuser",
+      "backtranslation": "refuse"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+      "before": "default",
+      "after": "par défaut",
+      "backtranslation": "default"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.help",
+      "before": "'deny' exclut les hôtes susceptibles d’entraîner leurs modèles sur vos prompts ou de les conserver. 'default' n’envoie aucune préférence (défaut d’OpenRouter : allow).",
+      "after": "« refuser » exclut les hôtes susceptibles d’entraîner leurs modèles sur vos prompts ou de les conserver. « par défaut » n’envoie aucune préférence (OpenRouter autorise cette collecte par défaut).",
+      "backtranslation": "Refuse excludes hosts that may train their models on your prompts or retain them. Default sends no preference (OpenRouter allows this collection by default)."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+      "before": "true",
+      "after": "oui",
+      "backtranslation": "yes"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+      "before": "default",
+      "after": "par défaut",
+      "backtranslation": "default"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.help",
+      "before": "'true' : restreint aux endpoints dont la sortie texte peut être distillée. 'default' : rien n’est envoyé.",
+      "after": "« oui » restreint aux endpoints dont la sortie texte peut être distillée. « par défaut » n’envoie rien.",
+      "backtranslation": "Yes restricts to endpoints whose text output can be distilled. Default sends nothing."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+      "before": "true",
+      "after": "oui",
+      "backtranslation": "yes"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+      "before": "default",
+      "after": "par défaut",
+      "backtranslation": "default"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.help",
+      "before": "'true' restreint aux hôtes qui prennent en charge tous les paramètres que vous envoyez (outils, sortie structurée) ; 'default' laisse OpenRouter ignorer silencieusement les paramètres non pris en charge.",
+      "after": "« oui » restreint aux hôtes qui prennent en charge tous les paramètres que vous envoyez (outils, sortie structurée) ; « par défaut » laisse OpenRouter ignorer silencieusement les paramètres non pris en charge.",
+      "backtranslation": "Yes restricts to hosts supporting all parameters you send (tools, structured output); default lets OpenRouter silently ignore unsupported parameters."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+      "before": "default",
+      "after": "par défaut",
+      "backtranslation": "default"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.help",
+      "before": "Comment OpenRouter classe les hôtes pour cet appel. Peut vous éloigner de l’hôte qui détient votre cache de prompt chaud (démarrage à froid sur les longues conversations) ; 'default' n’envoie aucune préférence.",
+      "after": "Comment OpenRouter classe les hôtes pour cet appel. Peut vous éloigner de l’hôte qui détient votre cache de prompt chaud (démarrage à froid sur les longues conversations) ; « par défaut » n’envoie aucune préférence.",
+      "backtranslation": "How OpenRouter ranks hosts for this call. May move you away from the host holding your warm prompt cache (cold start for long conversations); default sends no preference."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+      "before": "true",
+      "after": "oui",
+      "backtranslation": "yes"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+      "before": "default",
+      "after": "par défaut",
+      "backtranslation": "default"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.help",
+      "before": "'true' : restreint aux endpoints sans rétention de données. 'default' : rien n’est envoyé.",
+      "after": "« oui » restreint aux endpoints sans rétention de données. « par défaut » n’envoie rien.",
+      "backtranslation": "Yes restricts to endpoints with no data retention. Default sends nothing."
+    },
+    {
+      "key": "wire.settings.shell_environment_inherit.help",
+      "before": "Vide = l’ensemble sûr seul. Noms que le mode allowlist garde EN PLUS de l’ensemble sûr — par ex. LOCAL_OPERATOR_CONFIG_DIR pour un shell qui doit encore résoudre $(lop secret get NAME), ou LANG. Sans effet en mode inherit.",
+      "after": "Vide = l’ensemble sûr seul. Noms ajoutés à la liste d’autorisation EN PLUS de l’ensemble sûr — par ex. LOCAL_OPERATOR_CONFIG_DIR pour un shell qui doit encore résoudre $(lop secret get NAME), ou LANG. Sans effet en mode « hériter ».",
+      "backtranslation": "Empty = safe set alone. Names added to the allowlist ON TOP of the safe set, e.g. LOCAL_OPERATOR_CONFIG_DIR for a shell that must still resolve $(lop secret get NAME), or LANG. Inactive in inherit mode."
+    },
+    {
+      "key": "wire.settings.shell_environment_inherit.label",
+      "before": "…gardés en mode allowlist",
+      "after": "…ajouts à la liste d’autorisation",
+      "backtranslation": "…additions to the allowlist"
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "before": "allowlist",
+      "after": "liste d’autorisation",
+      "backtranslation": "allowlist"
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+      "before": "inherit",
+      "after": "hériter",
+      "backtranslation": "inherit"
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.help",
+      "before": "'inherit' laisse une commande exécutée par l’agent voir votre environnement (gh, aws, npm gardent leurs tokens). 'allowlist' ne transmet que PATH/HOME/SHELL/TERM/USER/LOGNAME plus les deux listes à côté de ce réglage : la clé du fournisseur avec laquelle cette session a été lancée n’est donc pas transmise à une commande écrite par le modèle. Lu une fois par session : la modification prend effet au prochain lancement.",
+      "after": "« hériter » laisse une commande exécutée par l’agent voir votre environnement (gh, aws, npm gardent leurs tokens). « liste d’autorisation » ne transmet que PATH/HOME/SHELL/TERM/USER/LOGNAME plus les deux listes à côté de ce réglage : la clé du fournisseur avec laquelle cette session a été lancée n’est donc pas transmise à une commande écrite par le modèle. Lu une fois par session : la modification prend effet au prochain lancement.",
+      "backtranslation": "Inherit lets a command the agent runs see your environment (gh, aws, npm keep their tokens). Allowlist only passes PATH/HOME/SHELL/TERM/USER/LOGNAME plus the two lists next to this setting, so the provider key this session launched with is not passed to a model-written command. Read once per session: changes apply at the next launch."
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+      "before": "off",
+      "after": "désactivé",
+      "backtranslation": "disabled"
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+      "before": "provider",
+      "after": "fournisseur",
+      "backtranslation": "provider"
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.help",
+      "before": "Comment la dictée retire les mots parasites et les signaux non verbaux. auto utilise le nettoyage natif côté fournisseur lorsqu’il est disponible, sinon les règles conservatrices côté client ; provider et client appliquent chacun un seul des deux mécanismes ; off conserve la transcription telle quelle. Un champ `cleanup` par requête reste prioritaire.",
+      "after": "Comment la dictée retire les mots parasites et les signaux non verbaux. Le mode « auto » utilise le nettoyage natif côté fournisseur lorsqu’il est disponible, sinon les règles conservatrices côté client ; les modes « fournisseur » et « client » appliquent chacun un seul des deux mécanismes ; « désactivé » conserve la transcription telle quelle. Un champ `cleanup` par requête reste prioritaire.",
+      "backtranslation": "How dictation removes filler words and non-speech cues. Auto mode uses native provider cleanup where available, otherwise conservative client rules; provider and client modes each use just one mechanism; disabled keeps the transcript verbatim. A per-request `cleanup` field still takes priority."
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+      "before": "La constante actuelle.",
+      "after": "Diction habituelle.",
+      "backtranslation": "Usual vocal delivery."
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.female.label",
+      "before": "female",
+      "after": "féminine",
+      "backtranslation": "female (voice)"
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.male.label",
+      "before": "male",
+      "after": "masculine",
+      "backtranslation": "male (voice)"
+    },
+    {
+      "key": "wire.settings.team_bridge_session.label",
+      "before": "Session CoS",
+      "after": "Session de la cheffe de cabinet",
+      "backtranslation": "Chief of staff’s session"
+    },
+    {
+      "key": "wire.settings.web_search_strategy.choice.ordered.label",
+      "before": "ordered",
+      "after": "par priorité",
+      "backtranslation": "by priority"
+    },
+    {
+      "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+      "before": "round_robin",
+      "after": "à tour de rôle",
+      "backtranslation": "in turn"
+    }
+  ],
+  "accepted_major_findings": [
+    {
+      "id": "I18N-WS-802B8268724D",
+      "key": "wire.settings.bash_memory_mode.choice.manual.label",
+      "status": "fixed by authored candidate; independent delta audit pending",
+      "auditor_sources": [
+        {
+          "side": "A",
+          "source": "i18n/audits/evidence/approval-full-fr-A-completion-original.json",
+          "original_id": "FR-A-M01"
+        },
+        {
+          "side": "B",
+          "source": "i18n/audits/evidence/approval-full-fr-B-original.json",
+          "original_id": "FR-B-M01"
+        }
+      ]
+    },
+    {
+      "id": "I18N-WS-513A71CB406C",
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+      "status": "fixed by authored candidate; independent delta audit pending",
+      "auditor_sources": [
+        {
+          "side": "A",
+          "source": "i18n/audits/evidence/approval-full-fr-A-completion-original.json",
+          "original_id": "FR-A-M10"
+        },
+        {
+          "side": "B",
+          "source": "i18n/audits/evidence/approval-full-fr-B-original.json",
+          "original_id": "FR-B-M02"
+        }
+      ]
+    },
+    {
+      "id": "I18N-WS-32DB6C298E5C",
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+      "status": "fixed by authored candidate; independent delta audit pending",
+      "auditor_sources": [
+        {
+          "side": "A",
+          "source": "i18n/audits/evidence/approval-full-fr-A-completion-original.json",
+          "original_id": "FR-A-M11"
+        },
+        {
+          "side": "B",
+          "source": "i18n/audits/evidence/approval-full-fr-B-original.json",
+          "original_id": "FR-B-M03"
+        }
+      ]
+    },
+    {
+      "id": "I18N-WS-DD21D2852FC7",
+      "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "status": "fixed by authored candidate; independent delta audit pending",
+      "auditor_sources": [
+        {
+          "side": "A",
+          "source": "i18n/audits/evidence/approval-full-fr-A-completion-original.json",
+          "original_id": "FR-A-M12"
+        },
+        {
+          "side": "B",
+          "source": "i18n/audits/evidence/approval-full-fr-B-original.json",
+          "original_id": "FR-B-M04"
+        }
+      ]
+    },
+    {
+      "id": "I18N-WS-961F6FF2DA51",
+      "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "status": "fixed by authored candidate; independent delta audit pending",
+      "auditor_sources": [
+        {
+          "side": "A",
+          "source": "i18n/audits/evidence/approval-full-fr-A-completion-original.json",
+          "original_id": "FR-A-M13"
+        },
+        {
+          "side": "B",
+          "source": "i18n/audits/evidence/approval-full-fr-B-original.json",
+          "original_id": "FR-B-M05"
+        }
+      ]
+    },
+    {
+      "id": "I18N-WS-EAD73985D2C9",
+      "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+      "status": "fixed by authored candidate; independent delta audit pending",
+      "auditor_sources": [
+        {
+          "side": "A",
+          "source": "i18n/audits/evidence/approval-full-fr-A-completion-original.json",
+          "original_id": "FR-A-M14"
+        },
+        {
+          "side": "B",
+          "source": "i18n/audits/evidence/approval-full-fr-B-original.json",
+          "original_id": "FR-B-M06"
+        }
+      ]
+    },
+    {
+      "id": "I18N-WS-378BA7328B99",
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+      "status": "fixed by authored candidate; independent delta audit pending",
+      "auditor_sources": [
+        {
+          "side": "A",
+          "source": "i18n/audits/evidence/approval-full-fr-A-completion-original.json",
+          "original_id": "FR-A-M15"
+        },
+        {
+          "side": "B",
+          "source": "i18n/audits/evidence/approval-full-fr-B-original.json",
+          "original_id": "FR-B-M07"
+        }
+      ]
+    },
+    {
+      "id": "I18N-WS-CD06C73F8E78",
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+      "status": "fixed by authored candidate; independent delta audit pending",
+      "auditor_sources": [
+        {
+          "side": "A",
+          "source": "i18n/audits/evidence/approval-full-fr-A-completion-original.json",
+          "original_id": "FR-A-M16"
+        },
+        {
+          "side": "B",
+          "source": "i18n/audits/evidence/approval-full-fr-B-original.json",
+          "original_id": "FR-B-M08"
+        }
+      ]
+    },
+    {
+      "id": "I18N-WS-2B7797E9A40D",
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+      "status": "fixed by authored candidate; independent delta audit pending",
+      "auditor_sources": [
+        {
+          "side": "A",
+          "source": "i18n/audits/evidence/approval-full-fr-A-completion-original.json",
+          "original_id": "FR-A-M17"
+        },
+        {
+          "side": "B",
+          "source": "i18n/audits/evidence/approval-full-fr-B-original.json",
+          "original_id": "FR-B-M09"
+        }
+      ]
+    },
+    {
+      "id": "I18N-WS-653D8954B431",
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+      "status": "fixed by authored candidate; independent delta audit pending",
+      "auditor_sources": [
+        {
+          "side": "A",
+          "source": "i18n/audits/evidence/approval-full-fr-A-completion-original.json",
+          "original_id": "FR-A-M18"
+        },
+        {
+          "side": "B",
+          "source": "i18n/audits/evidence/approval-full-fr-B-original.json",
+          "original_id": "FR-B-M10"
+        }
+      ]
+    },
+    {
+      "id": "I18N-WS-8DDA7C4D87CB",
+      "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+      "status": "fixed by authored candidate; independent delta audit pending",
+      "auditor_sources": [
+        {
+          "side": "A",
+          "source": "i18n/audits/evidence/approval-full-fr-A-completion-original.json",
+          "original_id": "FR-A-M19"
+        },
+        {
+          "side": "B",
+          "source": "i18n/audits/evidence/approval-full-fr-B-original.json",
+          "original_id": "FR-B-M11"
+        }
+      ]
+    },
+    {
+      "id": "I18N-WS-3DE117B6A717",
+      "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+      "status": "fixed by authored candidate; independent delta audit pending",
+      "auditor_sources": [
+        {
+          "side": "A",
+          "source": "i18n/audits/evidence/approval-full-fr-A-completion-original.json",
+          "original_id": "FR-A-M20"
+        },
+        {
+          "side": "B",
+          "source": "i18n/audits/evidence/approval-full-fr-B-original.json",
+          "original_id": "FR-B-M12"
+        }
+      ]
+    },
+    {
+      "id": "I18N-WS-A73734B5D1A9",
+      "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+      "status": "fixed by authored candidate; independent delta audit pending",
+      "auditor_sources": [
+        {
+          "side": "A",
+          "source": "i18n/audits/evidence/approval-full-fr-A-completion-original.json",
+          "original_id": "FR-A-M21"
+        },
+        {
+          "side": "B",
+          "source": "i18n/audits/evidence/approval-full-fr-B-original.json",
+          "original_id": "FR-B-M13"
+        }
+      ]
+    },
+    {
+      "id": "I18N-WS-990B74AC45EF",
+      "key": "wire.settings.shell_environment_inherit.label",
+      "status": "fixed by authored candidate; independent delta audit pending",
+      "auditor_sources": [
+        {
+          "side": "B",
+          "source": "i18n/audits/evidence/approval-full-fr-B-original.json",
+          "original_id": "FR-B-M23"
+        }
+      ]
+    },
+    {
+      "id": "I18N-WS-B7F88E3953BA",
+      "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "status": "fixed by authored candidate; independent delta audit pending",
+      "auditor_sources": [
+        {
+          "side": "A",
+          "source": "i18n/audits/evidence/approval-full-fr-A-completion-original.json",
+          "original_id": "FR-A-M08"
+        },
+        {
+          "side": "B",
+          "source": "i18n/audits/evidence/approval-full-fr-B-original.json",
+          "original_id": "FR-B-M14"
+        }
+      ]
+    },
+    {
+      "id": "I18N-WS-3CD94E41B2B7",
+      "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+      "status": "fixed by authored candidate; independent delta audit pending",
+      "auditor_sources": [
+        {
+          "side": "A",
+          "source": "i18n/audits/evidence/approval-full-fr-A-completion-original.json",
+          "original_id": "FR-A-M09"
+        },
+        {
+          "side": "B",
+          "source": "i18n/audits/evidence/approval-full-fr-B-original.json",
+          "original_id": "FR-B-M15"
+        }
+      ]
+    },
+    {
+      "id": "I18N-WS-B66F879551DE",
+      "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+      "status": "fixed by authored candidate; independent delta audit pending",
+      "auditor_sources": [
+        {
+          "side": "A",
+          "source": "i18n/audits/evidence/approval-full-fr-A-completion-original.json",
+          "original_id": "FR-A-M04"
+        },
+        {
+          "side": "B",
+          "source": "i18n/audits/evidence/approval-full-fr-B-original.json",
+          "original_id": "FR-B-M16"
+        }
+      ]
+    },
+    {
+      "id": "I18N-WS-9F37CDCBD6ED",
+      "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+      "status": "fixed by authored candidate; independent delta audit pending",
+      "auditor_sources": [
+        {
+          "side": "A",
+          "source": "i18n/audits/evidence/approval-full-fr-A-completion-original.json",
+          "original_id": "FR-A-M05"
+        },
+        {
+          "side": "B",
+          "source": "i18n/audits/evidence/approval-full-fr-B-original.json",
+          "original_id": "FR-B-M17"
+        }
+      ]
+    },
+    {
+      "id": "I18N-WS-C3F93F5552D5",
+      "key": "wire.settings.speech_voice_gender.choice.female.label",
+      "status": "fixed by authored candidate; independent delta audit pending",
+      "auditor_sources": [
+        {
+          "side": "A",
+          "source": "i18n/audits/evidence/approval-full-fr-A-completion-original.json",
+          "original_id": "FR-A-M02"
+        },
+        {
+          "side": "B",
+          "source": "i18n/audits/evidence/approval-full-fr-B-original.json",
+          "original_id": "FR-B-M18"
+        }
+      ]
+    },
+    {
+      "id": "I18N-WS-6E07BEFC2F49",
+      "key": "wire.settings.speech_voice_gender.choice.male.label",
+      "status": "fixed by authored candidate; independent delta audit pending",
+      "auditor_sources": [
+        {
+          "side": "A",
+          "source": "i18n/audits/evidence/approval-full-fr-A-completion-original.json",
+          "original_id": "FR-A-M03"
+        },
+        {
+          "side": "B",
+          "source": "i18n/audits/evidence/approval-full-fr-B-original.json",
+          "original_id": "FR-B-M19"
+        }
+      ]
+    },
+    {
+      "id": "I18N-WS-EED64BE5C06E",
+      "key": "wire.settings.team_bridge_session.label",
+      "status": "fixed by authored candidate; independent delta audit pending",
+      "auditor_sources": [
+        {
+          "side": "B",
+          "source": "i18n/audits/evidence/approval-full-fr-B-original.json",
+          "original_id": "FR-B-M22"
+        }
+      ]
+    },
+    {
+      "id": "I18N-WS-21B6A15BD737",
+      "key": "wire.settings.web_search_strategy.choice.ordered.label",
+      "status": "fixed by authored candidate; independent delta audit pending",
+      "auditor_sources": [
+        {
+          "side": "A",
+          "source": "i18n/audits/evidence/approval-full-fr-A-completion-original.json",
+          "original_id": "FR-A-M06"
+        },
+        {
+          "side": "B",
+          "source": "i18n/audits/evidence/approval-full-fr-B-original.json",
+          "original_id": "FR-B-M20"
+        }
+      ]
+    },
+    {
+      "id": "I18N-WS-3886CD8B7B42",
+      "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+      "status": "fixed by authored candidate; independent delta audit pending",
+      "auditor_sources": [
+        {
+          "side": "A",
+          "source": "i18n/audits/evidence/approval-full-fr-A-completion-original.json",
+          "original_id": "FR-A-M07"
+        },
+        {
+          "side": "B",
+          "source": "i18n/audits/evidence/approval-full-fr-B-original.json",
+          "original_id": "FR-B-M21"
+        }
+      ]
+    }
+  ],
+  "medium_reconciliation": {
+    "old": "La constante actuelle.",
+    "new": "Diction habituelle.",
+    "reason": "Old French is a mathematical/current constant, not the established standard vocal delivery. New English and unchanged context explicitly resolve that ambiguity. Habituelle expresses normal/standard vocal delivery, not monotony or price."
+  },
+  "glossary_choices": {
+    "manual": "manuel",
+    "default": "par défaut",
+    "boolean_choice_labels": "oui/non avoids gender mismatch across policy rows",
+    "allowlist": "liste d’autorisation",
+    "inherit": "hériter",
+    "CoS": "cheffe de cabinet, matching existing aida.description; Aida proper name untouched",
+    "ordered": "par priorité",
+    "round_robin": "à tour de rôle",
+    "gender": "féminine/masculine agrees with voix",
+    "medium_description": "Diction habituelle.",
+    "kept_technical_terms": "endpoints, prompts, cache, tokens: i18n/style-guides/fr.md kept-English list; endpoints are specifically OpenRouter inference endpoints, prompts/cache specifically model prompt caching and training inputs; token references in shell help are auth tokens."
+  },
+  "direct_neighbor_decision": "Ten paired help values updated in the same pass to reference actual translated display labels, not obsolete English UI names. These are explanatory choice references, not executable commands/config examples; default maps to empty string in Choice and is not a literal default API token. Serialized Choice values and settings_io.py unchanged. cleanup field, PATH/HOME/SHELL/TERM/USER/LOGNAME, gh/aws/npm, LOCAL_OPERATOR_CONFIG_DIR, LANG and $(lop secret get NAME) preserved exactly.",
+  "mechanical_checks": {
+    "exact_895_key_parity_and_order": true,
+    "unmodified_861_values_byte_compatible": 861,
+    "byte_preserving_reverse_reconstruction_sha256": "8a6fcb21ed6799b4ff69f52d8f61bf70256b40f2bc10e7d9ee72dd799f8f8876",
+    "existing_pure_ICU_parser": "runtime.py source through parse_message, standard-library imports only, no application import",
+    "changed_icu_signatures_match_old_and_new_english": true,
+    "malformed_brace_negative_control_rejected": true,
+    "renamed_placeholder_negative_control_detected": true,
+    "NFC": true,
+    "no_bidi_controls_added": true,
+    "CLDR": "No changed string has a plural/select branch or argument; signatures identical, locale rules untouched. No new CLDR execution claimed.",
+    "RTL": "French LTR; Urdu and isolation code untouched; no RTL shaping claim.",
+    "pseudo": "Not run; root integration owns pseudo/render checks. No synthetic or native clearance claimed.",
+    "code_protocol_tokens_preserved": true
+  },
+  "width_measurements": [
+    {
+      "key": "wire.settings.bash_memory_mode.choice.manual.label",
+      "en_cells": 6,
+      "fr_cells": 6,
+      "relative_expansion": 1.0
+    },
+    {
+      "key": "wire.settings.bash_memory_mode.help",
+      "en_cells": 164,
+      "fr_cells": 195,
+      "relative_expansion": 1.189
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+      "en_cells": 5,
+      "fr_cells": 3,
+      "relative_expansion": 0.6
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+      "en_cells": 7,
+      "fr_cells": 10,
+      "relative_expansion": 1.429
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.help",
+      "en_cells": 171,
+      "fr_cells": 178,
+      "relative_expansion": 1.041
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "en_cells": 5,
+      "fr_cells": 9,
+      "relative_expansion": 1.8
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "en_cells": 4,
+      "fr_cells": 7,
+      "relative_expansion": 1.75
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+      "en_cells": 7,
+      "fr_cells": 10,
+      "relative_expansion": 1.429
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.help",
+      "en_cells": 124,
+      "fr_cells": 195,
+      "relative_expansion": 1.573
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+      "en_cells": 4,
+      "fr_cells": 3,
+      "relative_expansion": 0.75
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+      "en_cells": 7,
+      "fr_cells": 10,
+      "relative_expansion": 1.429
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.help",
+      "en_cells": 90,
+      "fr_cells": 103,
+      "relative_expansion": 1.144
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+      "en_cells": 4,
+      "fr_cells": 3,
+      "relative_expansion": 0.75
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+      "en_cells": 7,
+      "fr_cells": 10,
+      "relative_expansion": 1.429
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.help",
+      "en_cells": 149,
+      "fr_cells": 209,
+      "relative_expansion": 1.403
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+      "en_cells": 7,
+      "fr_cells": 10,
+      "relative_expansion": 1.429
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.help",
+      "en_cells": 177,
+      "fr_cells": 215,
+      "relative_expansion": 1.215
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+      "en_cells": 4,
+      "fr_cells": 3,
+      "relative_expansion": 0.75
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+      "en_cells": 7,
+      "fr_cells": 10,
+      "relative_expansion": 1.429
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.help",
+      "en_cells": 75,
+      "fr_cells": 88,
+      "relative_expansion": 1.173
+    },
+    {
+      "key": "wire.settings.shell_environment_inherit.help",
+      "en_cells": 206,
+      "fr_cells": 232,
+      "relative_expansion": 1.126
+    },
+    {
+      "key": "wire.settings.shell_environment_inherit.label",
+      "en_cells": 23,
+      "fr_cells": 33,
+      "relative_expansion": 1.435
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "en_cells": 9,
+      "fr_cells": 20,
+      "relative_expansion": 2.222
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+      "en_cells": 7,
+      "fr_cells": 7,
+      "relative_expansion": 1.0
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.help",
+      "en_cells": 344,
+      "fr_cells": 435,
+      "relative_expansion": 1.265
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+      "en_cells": 3,
+      "fr_cells": 9,
+      "relative_expansion": 3.0
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+      "en_cells": 8,
+      "fr_cells": 11,
+      "relative_expansion": 1.375
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.help",
+      "en_cells": 293,
+      "fr_cells": 396,
+      "relative_expansion": 1.352
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+      "en_cells": 24,
+      "fr_cells": 19,
+      "relative_expansion": 0.792
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.female.label",
+      "en_cells": 6,
+      "fr_cells": 8,
+      "relative_expansion": 1.333
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.male.label",
+      "en_cells": 4,
+      "fr_cells": 9,
+      "relative_expansion": 2.25
+    },
+    {
+      "key": "wire.settings.team_bridge_session.label",
+      "en_cells": 11,
+      "fr_cells": 31,
+      "relative_expansion": 2.818
+    },
+    {
+      "key": "wire.settings.web_search_strategy.choice.ordered.label",
+      "en_cells": 7,
+      "fr_cells": 12,
+      "relative_expansion": 1.714
+    },
+    {
+      "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+      "en_cells": 11,
+      "fr_cells": 14,
+      "relative_expansion": 1.273
+    }
+  ],
+  "width_risks": [
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "en_cells": 5,
+      "fr_cells": 9,
+      "relative_expansion": 1.8
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "en_cells": 4,
+      "fr_cells": 7,
+      "relative_expansion": 1.75
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "en_cells": 9,
+      "fr_cells": 20,
+      "relative_expansion": 2.222
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+      "en_cells": 3,
+      "fr_cells": 9,
+      "relative_expansion": 3.0
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.male.label",
+      "en_cells": 4,
+      "fr_cells": 9,
+      "relative_expansion": 2.25
+    },
+    {
+      "key": "wire.settings.team_bridge_session.label",
+      "en_cells": 11,
+      "fr_cells": 31,
+      "relative_expansion": 2.818
+    },
+    {
+      "key": "wire.settings.web_search_strategy.choice.ordered.label",
+      "en_cells": 7,
+      "fr_cells": 12,
+      "relative_expansion": 1.714
+    }
+  ],
+  "width_status": "Static rich.cells measurements and relative expansion only, not observed clipping or proof of fit; no fixed maxCells context for changed labels. Larger French labels need integration rendering.",
+  "remaining_major_authoring_keys": [],
+  "rejected_major_findings": [],
+  "deferred_minor": "Unrelated style/width findings and all nonadjacent prose retained; previous Bedrock help not touched. Static width risks deferred to integration, not a new repair wave.",
+  "invariants": "This author wrote only the assigned French catalogue and this new receipt in the worktree (plus own scratch script). No other locale, English/context, application code, history, eligibility, generated output, baseline, staging, branch or HEAD was written. Concurrent other authors may independently modify their disjoint files; no claim that their files are globally unchanged.",
+  "not_claimed": [
+    "independent semantic approval",
+    "native clearance",
+    "whole interface free of English",
+    "rendered fit",
+    "full 895-key re-audit",
+    "tests/build/native/browser runs",
+    "PR/commit/push"
+  ],
+  "date": "2026-11-21",
+  "source_usage_evidence": [
+    "local_operator/settings_io.py:2370-2425: Choice values separately defined from localized labels; unset is empty string, not literal default",
+    "local_operator/settings_io.py:5258-5290: stable inherit/allowlist values distinct from translated labels and help",
+    "local_operator/settings_io.py:6388-6404: cleanup field can override configured mode; labels independently translated",
+    "local_operator/i18n/catalogues/en/wire.settings.context.json: medium voice explanation is standard delivery, not a constant"
+  ]
+}

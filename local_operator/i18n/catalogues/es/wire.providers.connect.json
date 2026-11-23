@@ -1,0 +1,7 @@
+{
+  "wire.providers.connect.key_invalid_characters": "Esta clave tiene caracteres no válidos en una clave de API. Cópiala de nuevo y vuelve a intentarlo.",
+  "wire.providers.connect.key_rejected": "{label} rechazó esta clave de API. Compruébala y vuelve a intentarlo.",
+  "wire.providers.connect.key_unreachable": "No se pudo contactar con {label} para comprobar esta clave. Se guardó sin verificar.",
+  "wire.providers.connect.key_unverified": "{label} no pudo comprobar esta clave en este momento (HTTP {status}). Se guardó sin verificar.",
+  "wire.providers.connect.suggested_automatic": "Automático"
+}

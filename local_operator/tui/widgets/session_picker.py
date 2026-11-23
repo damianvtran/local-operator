@@ -3257,6 +3257,8 @@ class SessionPickerScreen(ModalScreen[str | None]):
     #: * `pending_queued` / `remote_asks_unknown` qualify a remote row's
     #:   `pending` and its forwarded asks for the park detector and the ask
     #:   settle (PR #3934); `pending` itself is the painted fact.
+    #: * `remote_started_by_agent_on` labels a forwarded ask's inbox body
+    #:   (`notifications/remote_attention`); no picker pixel paints it.
     #: * `temporary` is the scan's temporary-chat verdict. The resume picker
     #:   never asks for temporary rows (``include_temporary`` defaults off), so
     #:   every row it holds carries ``False`` and the field cannot differ
@@ -3276,6 +3278,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
         "temporary",
         "pending_queued",
         "remote_asks_unknown",
+        "remote_started_by_agent_on",
     )
 
     # BIDIRECTIONAL, and that is the whole point of it. The previous form

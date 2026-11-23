@@ -1,0 +1,945 @@
+{
+  "locale": "vi",
+  "side": "B",
+  "namespace": "wire.settings",
+  "round": 1,
+  "status": "failed",
+  "source_sha256": "298fc1100cb10bfa34909aa245307a735dad318f456e5bbfb5337fbcdb1e8962",
+  "target_sha256": "830fc55bf9a1df0dfb3d915574800b0aa563b83a95a9ed36caf7ebeb9ecbf28b",
+  "context_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+  "head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+  "scope": "fa4fb006..a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+  "translator": {
+    "agent": "approval-labels-author-vi",
+    "model": "openai/gpt-6.1-sol",
+    "source": "i18n/audits/evidence/approval-choice-translator-vi.json",
+    "scope": "Authored automatic label only; ask label retained, prior author unknown; original other 893 authors unknown."
+  },
+  "auditor": {
+    "agent": "approval-full-vi-B-cached / translation-auditor",
+    "session_id": "6501d77e8fa2",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_evidence": "Host model-switch message: temporary fallback from anthropic/claude-opus-5-5 due provider failure: quota, before semantic catalogue audit.",
+    "independent_of_translator": true,
+    "findings": [
+      {
+        "id": "VI-B-M1",
+        "severity": "major",
+        "origin": "inherited_namespace",
+        "category": "untranslated_human_display_copy",
+        "affected_key_count": 38,
+        "entries": [
+          {
+            "message_key": "wire.settings.bash_memory_mode.choice.auto.label",
+            "current": "auto",
+            "proposed": "Tự động",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.bash_memory_mode.choice.manual.label",
+            "current": "manual",
+            "proposed": "Thủ công",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.classification_vendor.choice.auto.label",
+            "current": "auto",
+            "proposed": "Tự động",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.compaction_strategy.choice.auto.label",
+            "current": "auto",
+            "proposed": "Tự động",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.display_nerd_icons.choice.none.label",
+            "current": "auto",
+            "proposed": "Tự động",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.model_effort.choice.unset.label",
+            "current": "auto",
+            "proposed": "Tự động",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.network_rollout_on_update.choice.auto.label",
+            "current": "auto",
+            "proposed": "Tự động",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+            "current": "false",
+            "proposed": "Tắt",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+            "current": "default",
+            "proposed": "Mặc định",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+            "current": "allow",
+            "proposed": "Cho phép",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+            "current": "deny",
+            "proposed": "Không cho phép",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+            "current": "default",
+            "proposed": "Mặc định",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+            "current": "true",
+            "proposed": "Bật",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+            "current": "default",
+            "proposed": "Mặc định",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+            "current": "true",
+            "proposed": "Bật",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+            "current": "default",
+            "proposed": "Mặc định",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+            "current": "default",
+            "proposed": "Mặc định",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+            "current": "true",
+            "proposed": "Bật",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+            "current": "default",
+            "proposed": "Mặc định",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+            "current": "allowlist",
+            "proposed": "Danh sách cho phép",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.shell_environment_mode.choice.inherit.label",
+            "current": "inherit",
+            "proposed": "Kế thừa",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+            "current": "auto",
+            "proposed": "Tự động",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+            "current": "client",
+            "proposed": "Máy khách",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+            "current": "off",
+            "proposed": "Tắt",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+            "current": "provider",
+            "proposed": "Nhà cung cấp",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.speech_voice_gender.choice.auto.label",
+            "current": "auto",
+            "proposed": "Tự động",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.speech_voice_gender.choice.female.label",
+            "current": "female",
+            "proposed": "Nữ",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.speech_voice_gender.choice.male.label",
+            "current": "male",
+            "proposed": "Nam",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.web_fetch_render_backend.choice.auto.label",
+            "current": "auto",
+            "proposed": "Tự động",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.web_search_strategy.choice.ordered.label",
+            "current": "ordered",
+            "proposed": "Theo thứ tự",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.web_search_strategy.choice.round_robin.label",
+            "current": "round_robin",
+            "proposed": "Luân phiên",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.fork.title",
+            "current": "Fork",
+            "proposed": "Tách nhánh",
+            "reason": "A human settings-section title, not the literal /fork command."
+          },
+          {
+            "message_key": "wire.settings.session_scratchpad.title",
+            "current": "Scratchpad",
+            "proposed": "Vùng nháp",
+            "reason": "A human heading for session scratch storage, not the scratchpad:// protocol token; fits the 12-cell budget."
+          },
+          {
+            "message_key": "wire.settings.session_scratchpad_max_bytes.label",
+            "current": "Giới hạn scratchpad (byte)",
+            "proposed": "Giới hạn vùng nháp (byte)",
+            "reason": "Translate the same human storage noun as the section heading; the byte unit remains."
+          },
+          {
+            "message_key": "wire.settings.session_scratchpad_max_bytes.help",
+            "current": "Số byte scratchpad của một phiên có thể lưu trữ: từ 16 MiB đến 8 GiB. Mặc định 256 MiB.",
+            "proposed": "Số byte vùng nháp của một phiên có thể lưu: từ 16 MiB đến 8 GiB. Mặc định 256 MiB.",
+            "reason": "The human storage noun is not a protocol or code identifier; preserve the binary units and bounds."
+          },
+          {
+            "message_key": "wire.settings.team_bridge_session.label",
+            "current": "Phiên CoS",
+            "proposed": "Phiên chánh văn phòng",
+            "reason": "CoS is an untranslated human role abbreviation; the locale already uses chánh văn phòng in aida.description and aida_enabled.label."
+          },
+          {
+            "message_key": "wire.settings.fork_cmux_placement.choice.surface.label",
+            "current": "surface mới",
+            "proposed": "thẻ mới",
+            "reason": "The English source description identifies an actual UI tab; the human label surface mới leaves an English UI noun."
+          },
+          {
+            "message_key": "wire.settings.fork_cmux_placement.help",
+            "current": "Dưới cmux, liệu nhánh mới có không gian làm việc riêng hay một surface ở đây.",
+            "proposed": "Trong cmux, nhánh mới có không gian làm việc riêng hay một thẻ ở đây.",
+            "reason": "Translate the human surface noun consistently with its tab choice while retaining the actual brand cmux."
+          }
+        ],
+        "reason": "The current request forbids English human labels/descriptions; historic vi style-guide config-token exemptions do not turn independently localized UI labels into machine values. Choice(value, localized label, localized description) is independently verified in settings_io.py at 2359-2375, 4714-4724, 5147-5157, 5270-5280 and 6399-6419. New approval labels are not affected."
+      },
+      {
+        "id": "VI-B-M2",
+        "severity": "major",
+        "origin": "inherited_namespace",
+        "category": "accuracy_wrong_unit",
+        "message_key": "wire.settings.monitor_classifymaxchars.help",
+        "current": "Giới hạn số dòng thay đổi mà bước kiểm tra mức độ quan trọng nhận được (tên và mục đích của giám sát đi kèm, được cắt riêng).",
+        "proposed": "Giới hạn số ký tự của phần văn bản chứa các dòng thay đổi mà bước kiểm tra mức độ quan trọng nhận được (tên và mục đích của giám sát đi kèm, được cắt riêng).",
+        "reason": "Giới hạn số dòng explicitly tells the user this character-count setting limits a number of lines, conflating it with monitor.maxDeltaLines; the sibling label says ký tự and monitors/classify.py:149-152 truncates len(delta_text) and character slices, not line counts.",
+        "source_evidence": [
+          "settings_io.py:4258-4265",
+          "local_operator/monitors/classify.py:130-152"
+        ]
+      }
+    ],
+    "minor_count": 8,
+    "blocker_count": 0,
+    "major_count": 2
+  },
+  "fresh_semantic_keys_read": 895,
+  "retained_semantic_keys": 0,
+  "available_context_entries_read": 104,
+  "per_key_subgroups": {
+    "description": 256,
+    "title": 48,
+    "help": 244,
+    "label": 325,
+    "placeholder": 17,
+    "windows": 1,
+    "off": 1,
+    "on": 1,
+    "warning": 2
+  },
+  "namespace_verdict": "FAILED: full fresh read complete, inherited unresolved major findings prevent a whole-namespace pass.",
+  "new_source_label_verdict": {
+    "status": "passed",
+    "keys": [
+      "wire.settings.tool_approval_mode.choice.ask.label",
+      "wire.settings.tool_approval_mode.choice.auto.label"
+    ],
+    "key_count": 2,
+    "reason": "hỏi trước naturally names asking beforehand; Tự động naturally names the automatic display mode. Neither adds every-tool prompting, unconditional authorization, guardrail bypass, or a person-only exception. Both have zero ICU arguments. Ask expands from 3 to 9 cells: rendered fit remains unverified."
+  },
+  "current_semantic_findings": {
+    "major_groups": [
+      {
+        "id": "VI-B-M1",
+        "severity": "major",
+        "origin": "inherited_namespace",
+        "category": "untranslated_human_display_copy",
+        "affected_key_count": 38,
+        "entries": [
+          {
+            "message_key": "wire.settings.bash_memory_mode.choice.auto.label",
+            "current": "auto",
+            "proposed": "Tự động",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.bash_memory_mode.choice.manual.label",
+            "current": "manual",
+            "proposed": "Thủ công",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.classification_vendor.choice.auto.label",
+            "current": "auto",
+            "proposed": "Tự động",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.compaction_strategy.choice.auto.label",
+            "current": "auto",
+            "proposed": "Tự động",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.display_nerd_icons.choice.none.label",
+            "current": "auto",
+            "proposed": "Tự động",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.model_effort.choice.unset.label",
+            "current": "auto",
+            "proposed": "Tự động",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.network_rollout_on_update.choice.auto.label",
+            "current": "auto",
+            "proposed": "Tự động",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+            "current": "false",
+            "proposed": "Tắt",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+            "current": "default",
+            "proposed": "Mặc định",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+            "current": "allow",
+            "proposed": "Cho phép",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+            "current": "deny",
+            "proposed": "Không cho phép",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+            "current": "default",
+            "proposed": "Mặc định",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+            "current": "true",
+            "proposed": "Bật",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+            "current": "default",
+            "proposed": "Mặc định",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+            "current": "true",
+            "proposed": "Bật",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+            "current": "default",
+            "proposed": "Mặc định",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+            "current": "default",
+            "proposed": "Mặc định",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+            "current": "true",
+            "proposed": "Bật",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+            "current": "default",
+            "proposed": "Mặc định",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+            "current": "allowlist",
+            "proposed": "Danh sách cho phép",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.shell_environment_mode.choice.inherit.label",
+            "current": "inherit",
+            "proposed": "Kế thừa",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+            "current": "auto",
+            "proposed": "Tự động",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+            "current": "client",
+            "proposed": "Máy khách",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+            "current": "off",
+            "proposed": "Tắt",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+            "current": "provider",
+            "proposed": "Nhà cung cấp",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.speech_voice_gender.choice.auto.label",
+            "current": "auto",
+            "proposed": "Tự động",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.speech_voice_gender.choice.female.label",
+            "current": "female",
+            "proposed": "Nữ",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.speech_voice_gender.choice.male.label",
+            "current": "male",
+            "proposed": "Nam",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.web_fetch_render_backend.choice.auto.label",
+            "current": "auto",
+            "proposed": "Tự động",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.web_search_strategy.choice.ordered.label",
+            "current": "ordered",
+            "proposed": "Theo thứ tự",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.web_search_strategy.choice.round_robin.label",
+            "current": "round_robin",
+            "proposed": "Luân phiên",
+            "reason": "This is localized Choice.label display copy, not Choice.value or a typed config token; the operator explicitly disallows the historical blanket enum-label exemption."
+          },
+          {
+            "message_key": "wire.settings.fork.title",
+            "current": "Fork",
+            "proposed": "Tách nhánh",
+            "reason": "A human settings-section title, not the literal /fork command."
+          },
+          {
+            "message_key": "wire.settings.session_scratchpad.title",
+            "current": "Scratchpad",
+            "proposed": "Vùng nháp",
+            "reason": "A human heading for session scratch storage, not the scratchpad:// protocol token; fits the 12-cell budget."
+          },
+          {
+            "message_key": "wire.settings.session_scratchpad_max_bytes.label",
+            "current": "Giới hạn scratchpad (byte)",
+            "proposed": "Giới hạn vùng nháp (byte)",
+            "reason": "Translate the same human storage noun as the section heading; the byte unit remains."
+          },
+          {
+            "message_key": "wire.settings.session_scratchpad_max_bytes.help",
+            "current": "Số byte scratchpad của một phiên có thể lưu trữ: từ 16 MiB đến 8 GiB. Mặc định 256 MiB.",
+            "proposed": "Số byte vùng nháp của một phiên có thể lưu: từ 16 MiB đến 8 GiB. Mặc định 256 MiB.",
+            "reason": "The human storage noun is not a protocol or code identifier; preserve the binary units and bounds."
+          },
+          {
+            "message_key": "wire.settings.team_bridge_session.label",
+            "current": "Phiên CoS",
+            "proposed": "Phiên chánh văn phòng",
+            "reason": "CoS is an untranslated human role abbreviation; the locale already uses chánh văn phòng in aida.description and aida_enabled.label."
+          },
+          {
+            "message_key": "wire.settings.fork_cmux_placement.choice.surface.label",
+            "current": "surface mới",
+            "proposed": "thẻ mới",
+            "reason": "The English source description identifies an actual UI tab; the human label surface mới leaves an English UI noun."
+          },
+          {
+            "message_key": "wire.settings.fork_cmux_placement.help",
+            "current": "Dưới cmux, liệu nhánh mới có không gian làm việc riêng hay một surface ở đây.",
+            "proposed": "Trong cmux, nhánh mới có không gian làm việc riêng hay một thẻ ở đây.",
+            "reason": "Translate the human surface noun consistently with its tab choice while retaining the actual brand cmux."
+          }
+        ],
+        "reason": "The current request forbids English human labels/descriptions; historic vi style-guide config-token exemptions do not turn independently localized UI labels into machine values. Choice(value, localized label, localized description) is independently verified in settings_io.py at 2359-2375, 4714-4724, 5147-5157, 5270-5280 and 6399-6419. New approval labels are not affected."
+      },
+      {
+        "id": "VI-B-M2",
+        "severity": "major",
+        "origin": "inherited_namespace",
+        "category": "accuracy_wrong_unit",
+        "message_key": "wire.settings.monitor_classifymaxchars.help",
+        "current": "Giới hạn số dòng thay đổi mà bước kiểm tra mức độ quan trọng nhận được (tên và mục đích của giám sát đi kèm, được cắt riêng).",
+        "proposed": "Giới hạn số ký tự của phần văn bản chứa các dòng thay đổi mà bước kiểm tra mức độ quan trọng nhận được (tên và mục đích của giám sát đi kèm, được cắt riêng).",
+        "reason": "Giới hạn số dòng explicitly tells the user this character-count setting limits a number of lines, conflating it with monitor.maxDeltaLines; the sibling label says ký tự and monitors/classify.py:149-152 truncates len(delta_text) and character slices, not line counts.",
+        "source_evidence": [
+          "settings_io.py:4258-4265",
+          "local_operator/monitors/classify.py:130-152"
+        ]
+      }
+    ],
+    "minor_findings": [
+      {
+        "id": "VI-B-m1",
+        "severity": "minor",
+        "origin": "inherited_namespace",
+        "message_key": "wire.settings.network.description",
+        "current": "Nơi thiết bị này lắng nghe, những gì nó báo cho thiết bị ngang hàng kết nối, và các giới hạn cho `lop network`: thời gian giữ nhật ký kiểm toán, số kết nối chưa xác thực mà relay giữ cùng lúc, nhịp sao chép phiên và thời gian tồn tại của đăng nhập đi mượn. Tất cả có hiệu lực khi relay khởi động lại.",
+        "proposed": "Nơi thiết bị này nhận kết nối, địa chỉ nó báo cho thiết bị ngang hàng kết nối tới, và các giới hạn cho `lop network`: thời gian giữ nhật ký kiểm toán, số kết nối chưa xác thực mà bộ chuyển tiếp giữ cùng lúc, nhịp sao chép phiên và thời gian tồn tại của thông tin đăng nhập mượn. Tất cả có hiệu lực khi bộ chuyển tiếp khởi động lại.",
+        "reason": "Glossary drift: source relay remains relay twice here versus required chuyển tiếp; identifiers and lop command remain unchanged."
+      },
+      {
+        "id": "VI-B-m2",
+        "severity": "minor",
+        "origin": "inherited_namespace",
+        "message_key": "wire.settings.network_max_handshakes.help",
+        "current": "Số kết nối chưa xác thực mà relay này giữ cùng lúc. Một lần ghép nối giữ một kết nối trong vài giây cho đến khi mã được nhập; phần vượt trần bị loại ngay khi chấp nhận, không có khung hồi đáp.",
+        "proposed": "Số kết nối chưa xác thực mà bộ chuyển tiếp này giữ cùng lúc. Một lần ghép nối giữ một kết nối cho đến khi mã được nhập; kết nối vượt trần bị loại ngay khi chấp nhận, không có khung hồi đáp.",
+        "reason": "Glossary drift relay versus chuyển tiếp; the extra vài giây also unnecessarily suggests a short fixed pairing duration."
+      },
+      {
+        "id": "VI-B-m3",
+        "severity": "minor",
+        "origin": "inherited_namespace",
+        "message_key": "wire.settings.hooks.description",
+        "current": "Chạy các hook PostToolUse bản địa và chuyển tiếp của Claude Code / Codex.",
+        "proposed": "Chạy các hook riêng của lop và hook PostToolUse được chuyển tiếp từ Claude Code / Codex.",
+        "reason": "Native hooks means implemented by this harness, not bản địa (indigenous); the literal rendering is an avoidable false friend."
+      },
+      {
+        "id": "VI-B-m4",
+        "severity": "minor",
+        "origin": "inherited_namespace",
+        "message_key": "wire.settings.hooks_native.label",
+        "current": "Hook bản địa",
+        "proposed": "Hook riêng của lop",
+        "reason": "The same native→bản địa false friend occurs in the row label; it should distinguish harness-owned hooks from forwarded ones."
+      },
+      {
+        "id": "VI-B-m5",
+        "severity": "minor",
+        "origin": "inherited_namespace",
+        "message_key": "wire.settings.supplements_maxfeatured.help",
+        "current": "Cần bật Điểm nhấn. Số tệp được nêu tên trước khi phần còn lại gộp thành 'N more'.",
+        "proposed": "Cần bật Điểm nhấn. Số tệp được nêu tên trước khi phần còn lại gộp thành ‘N mục khác’.",
+        "reason": "N more is an English human UI-summary phrase, not a command or config token; N must remain the count metavariable."
+      },
+      {
+        "id": "VI-B-m6",
+        "severity": "minor",
+        "origin": "inherited_namespace",
+        "message_key": "wire.settings.runtime_keep_alive_max.label",
+        "current": "Số cuộc trò chuyện ấm tối đa",
+        "proposed": "Số cuộc trò chuyện giữ sẵn tối đa",
+        "reason": "Cuộc trò chuyện ấm is a word-for-word warm-conversation calque, not natural Vietnamese for a retained live runtime."
+      },
+      {
+        "id": "VI-B-m7",
+        "severity": "minor",
+        "origin": "inherited_namespace",
+        "message_key": "wire.settings.runtime_keep_alive_seconds.label",
+        "current": "Giữ cuộc trò chuyện đã đóng ấm (giây)",
+        "proposed": "Giữ sẵn phiên đã đóng (giây)",
+        "reason": "Giữ cuộc trò chuyện đã đóng ấm is an unidiomatic adjective-order calque; giữ sẵn conveys warm runtime retention without changing the seconds unit."
+      },
+      {
+        "id": "VI-B-m8",
+        "severity": "minor",
+        "origin": "inherited_namespace",
+        "message_key": "wire.settings.speech_voice_instructions.help",
+        "current": "Văn bản tự do cho cách giọng nói cần nghe (chỉ OpenAI). Để trống sẽ không gửi hướng dẫn riêng nào.",
+        "proposed": "Văn bản tự do mô tả cách thể hiện giọng nói (chỉ OpenAI). Để trống sẽ không gửi hướng dẫn riêng nào.",
+        "reason": "Cách giọng nói cần nghe literally makes the voice the listener; the source describes how generated speech should sound."
+      }
+    ],
+    "width_risk_group": {
+      "severity": "minor",
+      "origin": "inherited_namespace",
+      "entries": [
+        {
+          "message_key": "wire.settings.agents_auto_update_seeds.label",
+          "current": "Tự động cập nhật vai trò tích hợp sẵn",
+          "proposed": "Tự cập nhật vai trò có sẵn",
+          "source_cells": 26,
+          "target_cells": 37,
+          "proposed_cells": 26,
+          "reason": "Material expansion and >29 cells: request rendered check; no observed clipping is claimed."
+        },
+        {
+          "message_key": "wire.settings.compaction_idle_min_growth_tokens.label",
+          "current": "Mức tăng tối thiểu khi rảnh (token)",
+          "proposed": "Tăng tối thiểu lúc rảnh (token)",
+          "source_cells": 24,
+          "target_cells": 35,
+          "proposed_cells": 31,
+          "reason": "Material expansion and >29 cells: request rendered check; no observed clipping is claimed."
+        },
+        {
+          "message_key": "wire.settings.display_reasoning.label",
+          "current": "Suy luận trực tiếp của mô hình",
+          "proposed": "Suy luận trực tiếp",
+          "source_cells": 20,
+          "target_cells": 30,
+          "proposed_cells": 18,
+          "reason": "Material expansion and >29 cells: request rendered check; no observed clipping is claimed."
+        },
+        {
+          "message_key": "wire.settings.librarian_cadence_paused.label",
+          "current": "Lượt chạy hằng ngày đã tạm dừng",
+          "proposed": "Tạm dừng lượt hằng ngày",
+          "source_cells": 17,
+          "target_cells": 31,
+          "proposed_cells": 23,
+          "reason": "Material expansion and >29 cells: request rendered check; no observed clipping is claimed."
+        },
+        {
+          "message_key": "wire.settings.mesh_move_working_set_max_bytes.label",
+          "current": "Giới hạn tệp làm việc mỗi lần di chuyển (byte)",
+          "proposed": "Giới hạn tệp mỗi lần (byte)",
+          "source_cells": 34,
+          "target_cells": 46,
+          "proposed_cells": 27,
+          "reason": "Material expansion and >29 cells: request rendered check; no observed clipping is claimed."
+        },
+        {
+          "message_key": "wire.settings.network_rollout_on_update.label",
+          "current": "Cập nhật cuốn chiếu cả mesh sau khi cập nhật",
+          "proposed": "Cuốn chiếu sau cập nhật",
+          "source_cells": 29,
+          "target_cells": 44,
+          "proposed_cells": 23,
+          "reason": "Material expansion and >29 cells: request rendered check; no observed clipping is claimed."
+        },
+        {
+          "message_key": "wire.settings.retry_pinnedfallback.label",
+          "current": "Dự phòng cho tác nhân con được ghim",
+          "proposed": "Dự phòng tác nhân con ghim",
+          "source_cells": 21,
+          "target_cells": 35,
+          "proposed_cells": 26,
+          "reason": "Material expansion and >29 cells: request rendered check; no observed clipping is claimed."
+        },
+        {
+          "message_key": "wire.settings.retry_usageawareaccountpick.label",
+          "current": "Chọn tài khoản theo lượng sử dụng",
+          "proposed": "Chọn tài khoản theo hạn mức",
+          "source_cells": 24,
+          "target_cells": 33,
+          "proposed_cells": 27,
+          "reason": "Material expansion and >29 cells: request rendered check; no observed clipping is claimed."
+        },
+        {
+          "message_key": "wire.settings.session_cleanup_max_inactive_days.label",
+          "current": "↳ số ngày không hoạt động tối đa",
+          "proposed": "↳ số ngày không hoạt động",
+          "source_cells": 19,
+          "target_cells": 32,
+          "proposed_cells": 25,
+          "reason": "Material expansion and >29 cells: request rendered check; no observed clipping is claimed."
+        },
+        {
+          "message_key": "wire.settings.subagents_slim_child_knowledge.label",
+          "current": "Tinh gọn kiến thức tác nhân con",
+          "proposed": "Gọn kiến thức tác nhân con",
+          "source_cells": 20,
+          "target_cells": 31,
+          "proposed_cells": 26,
+          "reason": "Material expansion and >29 cells: request rendered check; no observed clipping is claimed."
+        },
+        {
+          "message_key": "wire.settings.tui_sidebar_show_subagents.label",
+          "current": "Lớp tác nhân con trong thanh bên",
+          "proposed": "Tác nhân con ở thanh bên",
+          "source_cells": 22,
+          "target_cells": 32,
+          "proposed_cells": 24,
+          "reason": "Material expansion and >29 cells: request rendered check; no observed clipping is claimed."
+        },
+        {
+          "message_key": "wire.settings.wakes_triggers_max_per_day.label",
+          "current": "Số lần thức dậy hỏi thăm tối đa mỗi ngày",
+          "proposed": "Lần thức dậy hỏi thăm/ngày",
+          "source_cells": 26,
+          "target_cells": 40,
+          "proposed_cells": 26,
+          "reason": "Material expansion and >29 cells: request rendered check; no observed clipping is claimed."
+        },
+        {
+          "message_key": "wire.settings.web_fetch_blocked_retry.label",
+          "current": "Thử lại theo hồ sơ trình duyệt",
+          "proposed": "Thử lại như trình duyệt",
+          "source_cells": 21,
+          "target_cells": 30,
+          "proposed_cells": 23,
+          "reason": "Material expansion and >29 cells: request rendered check; no observed clipping is claimed."
+        }
+      ]
+    }
+  },
+  "passed_vs_uncleared": {
+    "full_read_complete": true,
+    "structural_controls": "passed",
+    "new_two_label_semantics": "passed",
+    "whole_namespace_semantics": "failed",
+    "uncleared_major_groups": 2,
+    "uncleared_major_affected_keys": 39,
+    "minor_finding_count": 8,
+    "width_flag_count": 13,
+    "renderer": "not run / prohibited"
+  },
+  "named_exceptions": {
+    "wire.settings.aida.title": "Aida is a persona proper name.",
+    "wire.settings.aida_name.placeholder": "Aida is the example persona proper name.",
+    "wire.settings.hub.title": "Agent Hub is the named product surface.",
+    "wire.settings.runtime.title": "Runtime is the deliberately retained technical execution-environment noun in vi guide lines 75-76.",
+    "wire.settings.classification_vendor.choice.openrouter.label": "OpenRouter provider brand/identifier.",
+    "wire.settings.classification_vendor.choice.radient.label": "Radient provider brand/identifier.",
+    "wire.settings.classification_vendor.choice.typesafe.label": "TypeSafe provider brand/identifier.",
+    "wire.settings.compaction_strategy.choice.context_full.label": "context-full identifies the actual named compaction mechanism.",
+    "wire.settings.compaction_strategy.choice.snapcompact.label": "snapcompact identifies the actual named compaction mechanism.",
+    "wire.settings.providers_openai_api.choice.chat_completions.label": "chat_completions identifies the actual Chat Completions API surface, not a general human adjective.",
+    "wire.settings.providers_openai_api.choice.responses.label": "responses identifies the actual Responses API surface.",
+    "wire.settings.web_fetch_render_backend.choice.stdlib.label": "stdlib identifies the actual standard-library renderer implementation.",
+    "wire.settings.aida_cadence_at.placeholder": "Actual command/path/URL/config-variable/provider-slug/JSON example or fixed clock digits: preserve literal bytes.",
+    "wire.settings.desktop_launch_command.placeholder": "Actual command/path/URL/config-variable/provider-slug/JSON example or fixed clock digits: preserve literal bytes.",
+    "wire.settings.display_composer_command.placeholder": "Actual command/path/URL/config-variable/provider-slug/JSON example or fixed clock digits: preserve literal bytes.",
+    "wire.settings.librarian_cadence_at.placeholder": "Actual command/path/URL/config-variable/provider-slug/JSON example or fixed clock digits: preserve literal bytes.",
+    "wire.settings.network_advertise_hosts.placeholder": "Actual command/path/URL/config-variable/provider-slug/JSON example or fixed clock digits: preserve literal bytes.",
+    "wire.settings.network_credentials_github_repositories.placeholder": "Actual command/path/URL/config-variable/provider-slug/JSON example or fixed clock digits: preserve literal bytes.",
+    "wire.settings.providers_openrouter_ignore.placeholder": "Actual command/path/URL/config-variable/provider-slug/JSON example or fixed clock digits: preserve literal bytes.",
+    "wire.settings.providers_openrouter_max_price.placeholder": "Actual command/path/URL/config-variable/provider-slug/JSON example or fixed clock digits: preserve literal bytes.",
+    "wire.settings.providers_openrouter_only.placeholder": "Actual command/path/URL/config-variable/provider-slug/JSON example or fixed clock digits: preserve literal bytes.",
+    "wire.settings.providers_openrouter_order.placeholder": "Actual command/path/URL/config-variable/provider-slug/JSON example or fixed clock digits: preserve literal bytes.",
+    "wire.settings.providers_openrouter_quantizations.placeholder": "Actual command/path/URL/config-variable/provider-slug/JSON example or fixed clock digits: preserve literal bytes.",
+    "wire.settings.shell_environment_exclude.placeholder": "Actual command/path/URL/config-variable/provider-slug/JSON example or fixed clock digits: preserve literal bytes.",
+    "wire.settings.shell_environment_inherit.placeholder": "Actual command/path/URL/config-variable/provider-slug/JSON example or fixed clock digits: preserve literal bytes.",
+    "wire.settings.static_roots.placeholder": "Actual command/path/URL/config-variable/provider-slug/JSON example or fixed clock digits: preserve literal bytes.",
+    "wire.settings.supplements_denyprefixes.placeholder": "Actual command/path/URL/config-variable/provider-slug/JSON example or fixed clock digits: preserve literal bytes.",
+    "wire.settings.display_time_format.choice.12h.description": "Literal time-format example including timezone abbreviation, not untranslated human prose.",
+    "wire.settings.display_time_format.choice.24h.description": "Literal time-format example including timezone abbreviation, not untranslated human prose."
+  },
+  "controls": {
+    "pair_count": 895,
+    "contexts": 104,
+    "parse_and_structural_errors": [],
+    "rendered_messages": 1790,
+    "argument_keys": [
+      "wire.settings.local_providers.base_url.label",
+      "wire.settings.local_providers.models.label"
+    ],
+    "plural_or_select_keys": [],
+    "markup_mismatches": [],
+    "non_NFC_keys": [],
+    "authored_bidi_control_keys": [],
+    "context_maxCells_exceeded": [],
+    "missing_argument_negative_controls": [
+      {
+        "key": "wire.settings.local_providers.base_url.label",
+        "missing_argument_rejected": true
+      },
+      {
+        "key": "wire.settings.local_providers.models.label",
+        "missing_argument_rejected": true
+      }
+    ],
+    "escaped_literal_render_controls": [
+      {
+        "key": "wire.settings.desktop_launch_command.help",
+        "source": "Empty = discover the app (local-operator-ui, then the macOS app). {session} is the session id.",
+        "target": "Để trống = tự phát hiện ứng dụng (local-operator-ui, rồi ứng dụng macOS). {session} là ID phiên."
+      },
+      {
+        "key": "wire.settings.desktop_launch_command.placeholder",
+        "source": "local-operator-ui --open-session {session}",
+        "target": "local-operator-ui --open-session {session}"
+      },
+      {
+        "key": "wire.settings.local_providers.models.help",
+        "source": "JSON: {\"model-id\":{\"context_window\":8192}}; server limits still apply.",
+        "target": "JSON: {\"model-id\":{\"context_window\":8192}}; giới hạn của máy chủ vẫn áp dụng."
+      },
+      {
+        "key": "wire.settings.providers_openrouter_max_price.help",
+        "source": "{\"prompt\": 1, \"completion\": 2} — USD / million tokens",
+        "target": "{\"prompt\": 1, \"completion\": 2} — USD / triệu token"
+      },
+      {
+        "key": "wire.settings.providers_openrouter_max_price.placeholder",
+        "source": "{\"prompt\": 1, \"completion\": 2}",
+        "target": "{\"prompt\": 1, \"completion\": 2}"
+      }
+    ],
+    "approval_literal_pseudo_controls": [
+      {
+        "key": "wire.settings.tool_approval_mode.choice.ask.label",
+        "text": "hỏi trước",
+        "en_cells": 3,
+        "vi_cells": 9,
+        "literal_pseudo": "[!! hỏi trước ~~~ !!]",
+        "pseudo_cells": 21,
+        "literal_bidi_wrapper_codepoints": [
+          "0x2067",
+          "0x2069"
+        ],
+        "literal_pseudo_roundtrip": true,
+        "literal_bidi_roundtrip": true,
+        "args": []
+      },
+      {
+        "key": "wire.settings.tool_approval_mode.choice.auto.label",
+        "text": "Tự động",
+        "en_cells": 9,
+        "vi_cells": 7,
+        "literal_pseudo": "[!! Tự động ~~~ !!]",
+        "pseudo_cells": 19,
+        "literal_bidi_wrapper_codepoints": [
+          "0x2067",
+          "0x2069"
+        ],
+        "literal_pseudo_roundtrip": true,
+        "literal_bidi_roundtrip": true,
+        "args": []
+      }
+    ],
+    "limitations": "Pure formatting and literal synthetic controls only; no actual UI rendering, clipping or native fit proof."
+  },
+  "supplementary_controls": {
+    "full_target_literal_pseudo_messages": 895,
+    "full_target_literal_bidi_wrapper_messages": 895,
+    "failures": [],
+    "vi_CLDR_categories": [
+      "other"
+    ],
+    "vi_CLDR_probes": [
+      [
+        0,
+        "other"
+      ],
+      [
+        1,
+        "other"
+      ],
+      [
+        2,
+        "other"
+      ],
+      [
+        5,
+        "other"
+      ],
+      [
+        11,
+        "other"
+      ],
+      [
+        101,
+        "other"
+      ],
+      [
+        1.5,
+        "other"
+      ]
+    ],
+    "limits": "Synthetic string processing, not rendered frames; vi is LTR. Namespace has no plural/select/skeleton nodes."
+  },
+  "inputs": {
+    "english_capture": "/Users/damian/.local-operator/sessions/6448acb16e8d/scratchpad/approval-full-en-A-approved-capture.json",
+    "english_envelope_sha256": "9ff37d2efa1d9c367ce7dcc9a01f1fa9f60f74601daf20dbb9d86c85698bf096",
+    "english_canonical_map_sha256": "f621866fb5e74c1b617e29e17d02008cb42dce6574aa3624ff9a557e1ef2a7b6",
+    "target_capture": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-full-inputs/vi-approved-envelope.json",
+    "target_envelope_sha256": "52e670c402ed50980476898f124309bff68fd2d7fbe290e6fb72f6339fc10791",
+    "target_canonical_map_sha256": "205044157074ec080724acc44010dede27b5cfa81d797b01bb451cf46648e3dc",
+    "binding_validation": "Verified public_copy, repository_verified, repository origin/root, frozen commit/checkout_head, envelope digests, formatted tool-text digest, canonical maps, exact key parity. Original source/target/context bytes were hashed and matched; product prose read only from approved captures."
+  },
+  "source_binding_limits": "Captures are approved input data, not retained semantic opinions. No partner audit receipts read. Other 893 translator provenance not inferred.",
+  "limits": [
+    "No repository edits, translations applied, ledger/generation/stage/commit/push/ref operations, app/native/browser/server/dependency/test-suite or live-settings operations.",
+    "No actual rendered frame, clipping or complete UI validation. Literal pseudo/bidi controls prove only string formatting. Vietnamese is LTR; native RTL fit is not applicable.",
+    "No plural/select/number/date skeleton occurrences in this namespace; Vietnamese CLDR other-only independently checked.",
+    "Locale guide historical enum-token exemptions conflict with this explicit operator request for human display labels; the current request takes precedence.",
+    "Unrelated masked Hindi glossary term ignored; all 895 scoped source/target values and all 104 needed context entries were readable.",
+    "The cached input route was explicitly authorized; no new public reader or raw-product-prose fallback used."
+  ],
+  "created_at": "2026-11-22T01:55:37.622542+00:00"
+}

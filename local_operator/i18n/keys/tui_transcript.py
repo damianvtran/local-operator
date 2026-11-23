@@ -61,6 +61,14 @@ def hub_steered() -> Msg:
     return Msg("tui.transcript.hub.steered", {})
 
 
+def jump_to_latest() -> Msg:
+    return Msg("tui.transcript.jump_to_latest", {})
+
+
+def jump_to_latest_short() -> Msg:
+    return Msg("tui.transcript.jump_to_latest.short", {})
+
+
 def queued_newest() -> Msg:
     return Msg("tui.transcript.queued.newest", {})
 

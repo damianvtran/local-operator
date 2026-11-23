@@ -1,0 +1,215 @@
+{
+  "locale": "zh-CN",
+  "namespace": "tui.settings_view",
+  "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+  "target_sha256": "217c416ea01e4574f29b1229bc6487d44f92a601a93c5a8f3966a3cfc97c00ef",
+  "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": null
+  },
+  "auditor": {
+    "agent": "translation-auditor (settings-audit-zh-CN)",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "clean",
+    "findings": 0,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "keys_read": 21,
+  "findings": [],
+  "provenance_note": "Translator identity/model supplied by delegating manager; translator date not supplied. Auditor read all 21 source/target/context keys independently. No fallback model used. No repository changes. This namespace audit does not waive existing Chinese programme/security holds.",
+  "evidence": {
+    "worktree": "/Users/damian/local-operator/.worktrees/i18n-settings-view",
+    "head": "56781d884f27cb85551746e9bccf7a3c81a17ab6",
+    "python": "/Users/damian/local-operator/.venv/bin/python",
+    "key_parity": true,
+    "argument_name_kind_order_parity": true,
+    "plural_categories": [
+      "other"
+    ],
+    "plural_selectors": [
+      [
+        "other"
+      ]
+    ],
+    "explicit_numeric_selectors": false,
+    "bidi_controls": false,
+    "unsanctioned_literal_latin": false,
+    "render_params": {
+      "save_key": "enter",
+      "cancel_key": "esc",
+      "browse_keys": "↑↓",
+      "complete_key": "tab",
+      "command": "/team",
+      "scope": "立即",
+      "count": 1,
+      "shown": "1"
+    },
+    "renders": {
+      "tui.settings_view.editor.contract": "enter保存 · esc取消",
+      "tui.settings_view.editor.contract_unset": "enter保存 · esc取消 · 留空即清除",
+      "tui.settings_view.editor.suggest_long": "↑↓选建议 · tab补全 · enter保存 · esc",
+      "tui.settings_view.editor.suggest_medium": "↑↓浏览 · tab补全 · enter保存",
+      "tui.settings_view.editor.suggest_short": "↑↓ · tab · enter保存",
+      "tui.settings_view.pane.agents_empty": "未配置智能体",
+      "tui.settings_view.pane.empty_hint": "用/team列出并附加",
+      "tui.settings_view.pane.more": "…… 另有1项",
+      "tui.settings_view.pane.providers_empty": "未登录任何提供商 — /team",
+      "tui.settings_view.pane.providers_header": "提供商",
+      "tui.settings_view.pane.tab_agents": "智能体",
+      "tui.settings_view.pane.tab_teams": "团队",
+      "tui.settings_view.pane.teams_empty": "未配置团队",
+      "tui.settings_view.row.add_chain": "+ 添加一条链",
+      "tui.settings_view.row.add_hop": "+ 添加一跳",
+      "tui.settings_view.scope.live": "立即",
+      "tui.settings_view.scope.never": "永不",
+      "tui.settings_view.scope.new_launch": "下次启动",
+      "tui.settings_view.scope.new_sessions": "新会话",
+      "tui.settings_view.section.takes_effect": "生效：立即",
+      "tui.settings_view.too_short": "终端高度不足以显示设置 — 请调高窗口"
+    },
+    "plural_samples": {
+      "0": "…… 另有0项",
+      "1": "…… 另有1项",
+      "2": "…… 另有2项",
+      "5": "…… 另有5项",
+      "21": "…… 另有21项"
+    },
+    "width_cells": {
+      "tui.settings_view.editor.contract": {
+        "target": 19,
+        "english": 25,
+        "maxCells": null
+      },
+      "tui.settings_view.editor.contract_unset": {
+        "target": 32,
+        "english": 42,
+        "maxCells": 23
+      },
+      "tui.settings_view.editor.suggest_long": {
+        "target": 36,
+        "english": 50,
+        "maxCells": null
+      },
+      "tui.settings_view.editor.suggest_medium": {
+        "target": 28,
+        "english": 38,
+        "maxCells": null
+      },
+      "tui.settings_view.editor.suggest_short": {
+        "target": 20,
+        "english": 22,
+        "maxCells": 23
+      },
+      "tui.settings_view.pane.agents_empty": {
+        "target": 12,
+        "english": 20,
+        "maxCells": 38
+      },
+      "tui.settings_view.pane.empty_hint": {
+        "target": 17,
+        "english": 29,
+        "maxCells": 38
+      },
+      "tui.settings_view.pane.more": {
+        "target": 10,
+        "english": 8,
+        "maxCells": 16
+      },
+      "tui.settings_view.pane.providers_empty": {
+        "target": 24,
+        "english": 22,
+        "maxCells": 38
+      },
+      "tui.settings_view.pane.providers_header": {
+        "target": 6,
+        "english": 9,
+        "maxCells": 20
+      },
+      "tui.settings_view.pane.tab_agents": {
+        "target": 6,
+        "english": 6,
+        "maxCells": 10
+      },
+      "tui.settings_view.pane.tab_teams": {
+        "target": 4,
+        "english": 5,
+        "maxCells": 10
+      },
+      "tui.settings_view.pane.teams_empty": {
+        "target": 10,
+        "english": 19,
+        "maxCells": 38
+      },
+      "tui.settings_view.row.add_chain": {
+        "target": 12,
+        "english": 13,
+        "maxCells": null
+      },
+      "tui.settings_view.row.add_hop": {
+        "target": 10,
+        "english": 11,
+        "maxCells": null
+      },
+      "tui.settings_view.scope.live": {
+        "target": 4,
+        "english": 4,
+        "maxCells": 14
+      },
+      "tui.settings_view.scope.never": {
+        "target": 4,
+        "english": 5,
+        "maxCells": 14
+      },
+      "tui.settings_view.scope.new_launch": {
+        "target": 8,
+        "english": 10,
+        "maxCells": 14
+      },
+      "tui.settings_view.scope.new_sessions": {
+        "target": 6,
+        "english": 12,
+        "maxCells": 14
+      },
+      "tui.settings_view.section.takes_effect": {
+        "target": 10,
+        "english": 18,
+        "maxCells": null
+      },
+      "tui.settings_view.too_short": {
+        "target": 35,
+        "english": 48,
+        "maxCells": null
+      }
+    },
+    "login_command_sample": {
+      "render": "未登录任何提供商 — /login <provider>",
+      "cells": 36,
+      "maxCells": 38
+    },
+    "contract_unset_exception": "32 cells exceeds raw 23-cell cap, as English does at 42; settings_view.py:4443,4466-4470 falls back to editor.contract (19 cells, 21 including indent), so no defect. Suggestion ladder 36 > 28 > 20 (22 including indent for shortest).",
+    "glossary_citations": [
+      "i18n/glossary.md:19-30 commands/identifiers remain literal",
+      "i18n/glossary.md:56,60,77 会话/智能体/团队",
+      "i18n/style-guides/zh-CN.md:68-75 technical literal policy",
+      "i18n/style-guides/zh-CN.md:85-90 other-only plurals",
+      "i18n/style-guides/zh-CN.md:99-115 cells and Chinese punctuation"
+    ],
+    "shipped_consistency_keys": [
+      "wire.settings.keymap.new_session.label (新会话)",
+      "wire.settings.hosting.label (默认提供商)",
+      "wire.settings.asks.description (立即…生效)",
+      "tui.small.settings_view.hop_count (跳)",
+      "tui.small.settings_view.hop_row_hint (此跳)",
+      "tui.small.settings_view.chain_row_hint (链)",
+      "tui.small.settings_view.overflow_more (另有…项)",
+      "tui.small.settings_view.title (设置)",
+      "tui.small.org_chart_view.team_heading (团队)"
+    ],
+    "rendered_frame": "Not captured; audit exercised message renderer and rich cell widths, not a full terminal frame."
+  }
+}

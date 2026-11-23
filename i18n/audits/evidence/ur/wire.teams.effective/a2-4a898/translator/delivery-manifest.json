@@ -1,0 +1,34 @@
+{
+  "status": "translated_not_audited",
+  "ledger_append_dry_run": {
+    "exit_code": 0,
+    "stdout": "i18n/audit-history/ur/wire.teams.effective.json",
+    "apply_performed": false
+  },
+  "artifacts": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/8dce6c4d11c0/scratchpad/ur/wire.teams.effective.json",
+      "sha256": "c43b87b8f9cc396da817e7c20da28c3b2a3b00668e6003ba4a4f0872c7ef345a"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/8dce6c4d11c0/scratchpad/ur/translator-receipt.json",
+      "sha256": "72ec0ca8d5a91b36b6d2b94cac4bd73b349657535b56f0e8282d2447a0cdb8ae"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/8dce6c4d11c0/scratchpad/ur/key-placeholder-hash-checks.json",
+      "sha256": "c475f30ed093d71e67b139d60e2817b5210ba9a36c6c2d9bc918868d37440d5b"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/8dce6c4d11c0/scratchpad/ur/validation.log",
+      "sha256": "0f3b3586567cc904e677b84a54d63189ad726222f23cab77b02ad25f96f6082b"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/8dce6c4d11c0/scratchpad/ur/ledger-dry-run.log",
+      "sha256": "cf1c0f9365b7ef5177a662b624e5c0d87755b670acd6a1c14ae1cf8652c56132"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/8dce6c4d11c0/scratchpad/ur/validate_translation.py",
+      "sha256": "19054cc87921978932ecb2fce0d26d8a7bf81fa8a435b753bf73f26ea7188ff7"
+    }
+  ]
+}

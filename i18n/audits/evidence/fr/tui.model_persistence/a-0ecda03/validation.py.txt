@@ -1,0 +1,62 @@
+import os,sys,json,hashlib,importlib.util,itertools,re
+from pathlib import Path
+from unittest.mock import patch
+ROOT=Path('/Users/damian/local-operator/.worktrees/i18n-model-persist-notice')
+sys.path.insert(0,str(ROOT))
+from local_operator.i18n import catalogues,runtime
+from rich.text import Text
+from rich.console import Console
+spec=importlib.util.spec_from_file_location('scoped_check', ROOT/'scripts/i18n/check.py'); check=importlib.util.module_from_spec(spec); sys.modules[spec.name]=check; spec.loader.exec_module(check)
+ns='tui.model_persistence'
+paths={'en':ROOT/f'local_operator/i18n/catalogues/en/{ns}.json','context':ROOT/f'local_operator/i18n/catalogues/en/{ns}.context.json','fr':ROOT/f'local_operator/i18n/catalogues/fr/{ns}.json'}
+expected={'en':'4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff','context':'b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc','fr':'2d31f57fd8a19eb9c82b71b135fc0cd76c0056d80a0ab846a744da2467e7c002'}
+print('COMMAND: primary .venv Python, PYTHONPATH worktree, isolated HOME/XDG_CONFIG_HOME/LOP_CONFIG_DIR, all CMUX_* removed')
+print('module:',catalogues.__file__);assert Path(catalogues.__file__).is_relative_to(ROOT)
+for k,p in paths.items():
+ h=hashlib.sha256(p.read_bytes()).hexdigest();print('BEFORE',k,h);assert h==expected[k]
+with patch.object(catalogues,'namespaces',return_value=(ns,)),patch.object(catalogues,'locales',return_value=('en','fr')):
+ problems=check.check_catalogues()
+print('OFFICIAL check.check_catalogues scoped en/fr + one namespace:',json.dumps(problems)); assert not problems
+for path in paths.values():
+ def no_duplicates(pairs):
+  keys=[k for k,_ in pairs];assert len(keys)==len(set(keys));return dict(pairs)
+ json.loads(path.read_text(),object_pairs_hook=no_duplicates)
+print('JSON PASS duplicate-free en/context/fr')
+source=catalogues.load_catalogue('en',ns);target=catalogues.load_catalogue('fr',ns)
+assert list(source)==list(target) and len(target)==4
+for key,text in target.items():
+ args=runtime.message_arguments(text); want=runtime.message_arguments(source[key]);assert args==want
+ for name,_kind in args:assert text.count('{'+name+'}')==1
+ assert args==(() if not key.endswith('with_model') else (('label','simple'),('routes','simple')))
+ assert runtime.plural_selectors(text)==() and all(kind!='select' for _,kind in args)
+ commands=lambda s:re.findall(r'/model (?:default|saved)|/settings',s)
+ assert commands(text)==commands(source[key])
+ assert re.findall(r'`[^`]*`|</?[^>]+>',text)==re.findall(r'`[^`]*`|</?[^>]+>',source[key])
+ print('KEY PASS',key,'args',args,'zero plural/select; commands byte-equal',commands(text),'cells',Text(text).cell_len)
+for label in ('x/y','provider-name/model-with-an-extremely-long-opaque-version-identifier-2026-11-22-release-candidate-1234567890'):
+ for mode,clausekeys in [('ordinary',('persist','saved','settings')),('missing-model',('persist','settings')),('hosting-dead-end',('settings',))]:
+  routes=' · '.join(runtime.render_message(target[f'{ns}.{k}'],{},'fr') for k in clausekeys)
+  rendered=runtime.render_message(target[f'{ns}.with_model'],{'label':label,'routes':routes},'fr')
+  assert label in rendered and routes in rendered
+  if mode=='hosting-dead-end':assert '/model default' not in routes and '/model saved' not in routes and '/settings' in routes
+  for cols in (80,100,120):
+   for inset in (0,4):
+    budget=cols-inset; lines=Text(rendered).wrap(Console(width=budget),budget)
+    assert all(line.cell_len<=budget for line in lines)
+    split_commands=[]
+    for cmd in ('/model default','/model saved','/settings'):
+     if cmd in rendered and not any(cmd in line.plain for line in lines):split_commands.append(cmd)
+    lone=bool(lines and lines[-1].plain.strip() in ('/model default','/model saved','/settings'))
+    print('WRAP',mode,'label',len(label),'cols',cols,'synthetic_inset',inset,'rows',len(lines),'line_cells',[line.cell_len for line in lines],'split_commands',split_commands,'lone_final_command',lone)
+# Pseudo expansion is a mechanical stress control, not native layout evidence.
+for key,value in target.items():
+ pieces=re.split(r'(/model (?:default|saved)|/settings|\{[^}]+\})',value)
+ pseudo=''.join(piece if i%2 else ''.join(ch+'~' if ch.isalpha() else ch for ch in piece) for i,piece in enumerate(pieces))
+ assert runtime.message_arguments(pseudo)==runtime.message_arguments(value)
+ assert re.findall(r'/model (?:default|saved)|/settings',pseudo)==re.findall(r'/model (?:default|saved)|/settings',value)
+ runtime.render_message(pseudo,{'label':'opaque/model-id','routes':'already-localized clauses'} if key.endswith('with_model') else {},'fr')
+ print('PSEUDO PASS',key,'human letters expanded; arguments and commands preserved')
+print('PSEUDO and widths are plain render controls; no native font or NoticeBlock claim')
+for k,p in paths.items():
+ h=hashlib.sha256(p.read_bytes()).hexdigest();print('AFTER',k,h);assert h==expected[k]
+print('PASS all4 keys; validation did not mutate input catalogues')

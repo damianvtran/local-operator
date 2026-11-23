@@ -1334,9 +1334,13 @@ def test_the_rate_window_is_per_destination_session(tmp_path: Path) -> None:
     assert _pending_reservations(config_dir) == 0
 
 
-def _legacy_group_key(config_dir: Path, owner: Any, metadata: Any, session_id: str) -> Any:
+def _legacy_group_key(
+    config_dir: Path, owner: Any, metadata: Any, session_id: str, *, staggered: bool = False
+) -> Any:
     """The pre-S-26 key, verbatim from origin/main (e6ab76845782), for the
-    routing-off equivalence proof below. ``session_id`` is accepted and ignored."""
+    routing-off equivalence proof below. ``session_id`` is accepted and ignored,
+    and so is ``staggered`` (the urgent-failover partition): this module runs with
+    triage pinned off, where nothing is ever staggered."""
 
     return (
         str(config_dir),
@@ -2064,13 +2068,17 @@ def test_a_dm_card_wakes_a_live_idle_session_through_the_mailbox(
         sender: Any,
         custom_type: str | None = None,
         bridge_meta: Any = None,
+        message_id: str | None = None,
     ) -> Any:
+        # Mirrors the production signature: a reserved card now carries its
+        # persisted hand-off id on the EXISTING message_id field (PR #3478 QA r1).
         calls["live"] = {
             "session_id": session_id,
             "text": text,
             "mode": mode,
             "wake": wake,
             "custom_type": custom_type,
+            "message_id": message_id,
         }
         return SimpleNamespace(detail="delivered (live)", state="delivered")
 
@@ -2087,6 +2095,9 @@ def test_a_dm_card_wakes_a_live_idle_session_through_the_mailbox(
     assert calls["live"]["custom_type"] == "team_bridge_message"
     assert _card_field(calls["live"]["text"], "message_id") == sent.id
     assert _card_field(calls["live"]["text"], "conversation_id") == CONV
+    from local_operator.mobile.peer_send import valid_peer_message_id
+
+    assert valid_peer_message_id(calls["live"]["message_id"])
 
 
 def test_a_dm_card_engages_a_cold_session_and_carries_the_message(

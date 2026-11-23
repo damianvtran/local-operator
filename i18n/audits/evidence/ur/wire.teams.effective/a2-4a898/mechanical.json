@@ -1,0 +1,149 @@
+{
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "ur": {
+      "path": "/Users/damian/.local-operator/sessions/8dce6c4d11c0/scratchpad/ur/wire.teams.effective.json",
+      "sha256": "c43b87b8f9cc396da817e7c20da28c3b2a3b00668e6003ba4a4f0872c7ef345a"
+    }
+  },
+  "key_count": 9,
+  "rows": [
+    {
+      "key": "wire.teams.effective.team_missing",
+      "placeholder_tokens": [
+        "{role}"
+      ],
+      "placeholder_names_types_order": "passed by normal validator and independent token check",
+      "technical_literals": "passed",
+      "manual_bidi_controls": 0,
+      "plural_select": "none in source or target; CLDR arms not applicable",
+      "maxCells": null,
+      "maxChars": null,
+      "code_markup": "none in source or target",
+      "character_count": 32
+    },
+    {
+      "key": "wire.teams.effective.registry_unreadable",
+      "placeholder_tokens": [],
+      "placeholder_names_types_order": "passed by normal validator and independent token check",
+      "technical_literals": "passed",
+      "manual_bidi_controls": 0,
+      "plural_select": "none in source or target; CLDR arms not applicable",
+      "maxCells": null,
+      "maxChars": null,
+      "code_markup": "none in source or target",
+      "character_count": 76
+    },
+    {
+      "key": "wire.teams.effective.config_unreadable",
+      "placeholder_tokens": [],
+      "placeholder_names_types_order": "passed by normal validator and independent token check",
+      "technical_literals": "passed",
+      "manual_bidi_controls": 0,
+      "plural_select": "none in source or target; CLDR arms not applicable",
+      "maxCells": null,
+      "maxChars": null,
+      "code_markup": "none in source or target",
+      "character_count": 76
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_value",
+      "placeholder_tokens": [
+        "{tier}"
+      ],
+      "placeholder_names_types_order": "passed by normal validator and independent token check",
+      "technical_literals": "passed",
+      "manual_bidi_controls": 0,
+      "plural_select": "none in source or target; CLDR arms not applicable",
+      "maxCells": null,
+      "maxChars": null,
+      "code_markup": "none in source or target",
+      "character_count": 131
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_mapping",
+      "placeholder_tokens": [
+        "{tier}"
+      ],
+      "placeholder_names_types_order": "passed by normal validator and independent token check",
+      "technical_literals": "passed",
+      "manual_bidi_controls": 0,
+      "plural_select": "none in source or target; CLDR arms not applicable",
+      "maxCells": null,
+      "maxChars": null,
+      "code_markup": "none in source or target",
+      "character_count": 188
+    },
+    {
+      "key": "wire.teams.effective.tier_unconfigured",
+      "placeholder_tokens": [
+        "{tier}"
+      ],
+      "placeholder_names_types_order": "passed by normal validator and independent token check",
+      "technical_literals": "passed",
+      "manual_bidi_controls": 0,
+      "plural_select": "none in source or target; CLDR arms not applicable",
+      "maxCells": null,
+      "maxChars": null,
+      "code_markup": "none in source or target",
+      "character_count": 51
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_selector",
+      "placeholder_tokens": [
+        "{tier}"
+      ],
+      "placeholder_names_types_order": "passed by normal validator and independent token check",
+      "technical_literals": "passed",
+      "manual_bidi_controls": 0,
+      "plural_select": "none in source or target; CLDR arms not applicable",
+      "maxCells": null,
+      "maxChars": null,
+      "code_markup": "none in source or target",
+      "character_count": 99
+    },
+    {
+      "key": "wire.teams.effective.model_unresolvable",
+      "placeholder_tokens": [
+        "{selector}"
+      ],
+      "placeholder_names_types_order": "passed by normal validator and independent token check",
+      "technical_literals": "passed",
+      "manual_bidi_controls": 0,
+      "plural_select": "none in source or target; CLDR arms not applicable",
+      "maxCells": null,
+      "maxChars": null,
+      "code_markup": "none in source or target",
+      "character_count": 96
+    },
+    {
+      "key": "wire.teams.effective.unavailable",
+      "placeholder_tokens": [],
+      "placeholder_names_types_order": "passed by normal validator and independent token check",
+      "technical_literals": "passed",
+      "manual_bidi_controls": 0,
+      "plural_select": "none in source or target; CLDR arms not applicable",
+      "maxCells": null,
+      "maxChars": null,
+      "code_markup": "none in source or target",
+      "character_count": 75
+    }
+  ],
+  "validator": {
+    "entrypoint": "scripts.i18n.check.main([\"--catalogues-only\"])",
+    "exit_code": 0,
+    "fixture": "/Users/damian/.local-operator/sessions/4a898e257f9c/scratchpad/ur-a2/catalogue-fixture",
+    "normal_catalogue_admission": true,
+    "scope": "Only assigned namespace; no check suppression or admission bypass"
+  },
+  "limits": [
+    "No runtime formatting, pseudo, fallback, rendered mixed-direction or visual execution performed"
+  ]
+}

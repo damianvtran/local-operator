@@ -1,0 +1,19 @@
+MODULE_PATH /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/i18n/catalogues.py /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/i18n/runtime.py
+ISOLATION /Users/damian/.local-operator/sessions/25fe1758fc50/scratchpad/fa25-home /Users/damian/.local-operator/sessions/25fe1758fc50/scratchpad/fa25-home/config CMUX= []
+BEFORE_HASHES {"context": "67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be", "en": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912", "fr": "87cf1654daed989e12d9f431395f4f731c07de5d3204aeb3f0cb0705e92719f8"}
+OFFICIAL_SCOPED_CATALOGUE_CONTEXT_ICU []
+NEGATIVE_MISSING_KEY ["fr/tui.provider_state: missing key 'tui.provider_state.logged_in'"]
+NEGATIVE_ADDED_ARGUMENT ["fr/tui.provider_state: tui.provider_state.logged_in: arguments (('unexpected', 'simple'),) != en's (): en has 0 argument(s), translation has 1"]
+RENDER en tui.provider_state.logged_in "logged in" chars 9 cells 9 example_17 "logged in" pseudo_cells 16
+RENDER en tui.provider_state.env_key "env key" chars 7 cells 7 example_17 "env key" pseudo_cells 13
+RENDER en tui.provider_state.needs_login "needs login" chars 11 cells 11 example_17 "needs login" pseudo_cells 19
+RENDER en tui.provider_state.local_ready "configured server" chars 17 cells 17 example_17 "configured server" pseudo_cells 27
+RENDER en tui.provider_state.local_unconfigured "configure server" chars 16 cells 16 example_17 "configure server" pseudo_cells 26
+RENDER fr tui.provider_state.logged_in "connecté" chars 8 cells 8 example_17 "connecté" pseudo_cells 15
+RENDER fr tui.provider_state.env_key "clé d’environnement" chars 19 cells 19 example_17 "clé d’environnem…" pseudo_cells 29
+RENDER fr tui.provider_state.needs_login "connexion requise" chars 17 cells 17 example_17 "connexion requise" pseudo_cells 29
+RENDER fr tui.provider_state.local_ready "serveur configuré" chars 17 cells 17 example_17 "serveur configuré" pseudo_cells 28
+RENDER fr tui.provider_state.local_unconfigured "configurer le serveur" chars 21 cells 21 example_17 "configurer le se…" pseudo_cells 33
+ORDERED_KEYS=5 ZERO_ARGUMENTS=10 ZERO_PLURAL_SELECT=10 NFC=10 RICH_PLAIN=10 PSEUDO=10
+AFTER_HASHES {"context": "67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be", "en": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912", "fr": "87cf1654daed989e12d9f431395f4f731c07de5d3204aeb3f0cb0705e92719f8"}
+PASS: scoped mechanics; no styled/native/UI fit certification

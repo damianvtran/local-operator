@@ -1,0 +1,46 @@
+{
+ "slot": "independent slot 2 — convergence (merged namespace)",
+ "pr": 4378,
+ "head": "7c7541d29bddf2981d048b5ae4b6fc5aab030715",
+ "scope": "60dcbe088..7c7541d29",
+ "locale": "es",
+ "namespace": "cli.sessions_move_workset",
+ "source_sha256": "0f5602723eb92b22c93931ddc3f2cbffec94da232249504726202a45aaf4db1b",
+ "context_sha256": "be34b5769c82454dd0fe0b13177833cd7f3bd209a7e022cdfe7ff4e54a9ccb78",
+ "target_sha256": "91b1e6f2cc2927888cb2e8502a8c695f5e6e8370d4abf28cc5130142837dd37d",
+ "pr4380_rows_full_audit": {
+  "needs_confirmation": "PASS",
+  "help_yes": "PASS",
+  "yes_preflight_failed": "PASS",
+  "yes_carry_unavailable": "PASS",
+  "agent_needs_operator": "PASS",
+  "plan_not_honoured": "PASS"
+ },
+ "deps_rows": "20 deps_* byte-identical to 70878bbaf (slot2-r3 certified; tree evidence slot2-r3 byte-identical to auditor scratch); read beside #4380 rows: coherent",
+ "other_rows": "85 byte-identical to 70878bbaf and to merge 5e860469d",
+ "findings": {
+  "T4-ES-1": {
+   "sev": "nit",
+   "locale": "es",
+   "key": "agent_needs_operator",
+   "current": "la tarjeta para mover … el digest que muestra esto",
+   "proposed": "la tarjeta de movimiento … el digest que muestra este comando",
+   "reason": "Smoother; es namespace uses «movimiento» for a move."
+  }
+ },
+ "concurred_first_slot": [],
+ "blocker": 0,
+ "major": 0,
+ "verdict": "PASS",
+ "chained_on": {
+  "first_slot_receipt_sha256": "a23fd4d34833e5a1ec8a9c119ea46391cd4b9506df62d98a9b7590dba5f269f2",
+  "history_sha_before": "2690901615ca062e21f11cece3e487b19a0055642099e0464c89aa52f83a2137",
+  "history_sha_after_first_slot": "4928af85ccecc83387073463e4c98cb062028afadbd307b7837fc33ca0899947"
+ },
+ "auditor": {
+  "agent": "translation-auditor (lopdev) slot 2, session 6fd346121602",
+  "model": "anthropic/claude-opus-5-5",
+  "fallback": "none"
+ },
+ "limits": "no native-speaker review; no rendered terminal frame; agent-independent only (same model family as translators and first-slot auditors)"
+}

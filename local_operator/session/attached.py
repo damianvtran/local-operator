@@ -23,6 +23,7 @@ import contextlib
 import inspect
 import logging
 import math
+import shlex
 import time
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
@@ -79,8 +80,9 @@ from local_operator.harness.types import (
     Usage,
     WakeDeliveredEvent,
 )
+from local_operator.i18n.keys import session_remote_peek as _srp
 from local_operator.i18n.keys import tui_notices as _nt
-from local_operator.i18n.messages import Msg
+from local_operator.i18n.messages import Msg, render_resolved
 from local_operator.incidents import format_cut_off_notice
 from local_operator.mobile.attach_client import (
     MOVED_REASON,
@@ -135,7 +137,11 @@ from local_operator.session.frontend_state import (
     effective_identity_for,
     freeze_new_store_state,
 )
-from local_operator.session.history_window import DisplayHistoryWindow
+from local_operator.session.history_window import (
+    DISPLAY_HISTORY_BYTES,
+    DISPLAY_HISTORY_MESSAGES,
+    DisplayHistoryWindow,
+)
 from local_operator.session.model_selection import (
     SelectionReading,
     StoredModelSelection,
@@ -593,6 +599,9 @@ _BIND_RETRY_ATTEMPTS = 3
 _BIND_RETRY_INITIAL_S = 0.1
 _BIND_RETRY_FACTOR = 1.7
 _BIND_RETRY_DELAY_CAP_S = 0.5
+
+_RuntimeLocator = Callable[[], tuple[SessionRecord | None, int | None]]
+_PublicationWaiter = Callable[[_RuntimeLocator, float], Awaitable[SessionRecord]]
 
 #: Backoff for RETRYING the canonical re-sync a degraded delta owes, when that
 #: re-sync fails against a socket that is still up (the owner busy, a transient
@@ -1701,6 +1710,7 @@ class AttachedSession:
         # later phase for the same id must always pass.
         self._live_message_phase: dict[str, int] = {}
         self._handlers: list[EventHandler] = []
+        self._event_observers: list[EventHandler] = []
         #: In-flight owner switch requests (``_switch_on_owner``), held so the
         #: tasks are not collected before their notice is delivered.
         self._switch_tasks: set[asyncio.Task[None]] = set()
@@ -1708,6 +1718,9 @@ class AttachedSession:
         # otherwise a fast owner can stream between factory return and app
         # adoption and the first visible delta vanishes.
         self._buffered_events: list[AgentEvent[Any]] = []
+        # Older buffered frames can already have reached observers while waiting
+        # for a caller. Only the new sync frames still need observer delivery.
+        self._pending_observer_ids: set[int] = set()
         self._ready_for_events = False
         self._approval_handler: ApprovalGate | None = None
         #: Where a REFUSED gate reply goes when the host has a surface for it
@@ -3740,6 +3753,7 @@ class AttachedSession:
         input_path: str | None = None,
         audio: list[dict[str, str]] | None = None,
         files: list[dict[str, Any]] | None = None,
+        delivery: str | None = None,
     ) -> tuple[str, bool]:
         """Return the owner's admission receipt, not a fictitious completed turn.
 
@@ -3765,6 +3779,13 @@ class AttachedSession:
         cannot resolve (contract amendment 2). Images keep their peer staging
         (``prepare_peer_images``); documents travel the local owner's frame
         and nothing else in v1.
+
+        ``delivery`` is the busy-send mode (``steer``/``queue``/``both``).
+        Like the carriage fields it is OMITTED when absent/``None`` or
+        ``steer``, so a legacy send stays byte-identical on the wire; unlike
+        them a ``queue``/``both`` against an owner without ``busy-delivery-v1``
+        is REFUSED here, before a frame is dialled — never forwarded without
+        its mode, which would be a silent downgrade to an urgent steer.
         """
         if files and self.runtime_locality == "another-machine":
             # The owner is a PEER: its attachment store is a different one, so a
@@ -3789,6 +3810,20 @@ class AttachedSession:
             from local_operator.session.errors import DocumentCarriageUnsupported
 
             raise DocumentCarriageUnsupported()
+        if (
+            delivery
+            and delivery != "steer"
+            and not getattr(client, "_busy_delivery_supported", False)
+        ):
+            # An owner from before the delivery modes would silently DROP the
+            # key (its dispatch only passes literal parameters), delivering an
+            # urgent steer the sender explicitly did not ask for. The capability
+            # string is the owner's own statement that it honours the mode
+            # (``busy-delivery-v1``); the dispatch's parameter probe is the
+            # second, owner-side guard. Refuse, never downgrade.
+            from local_operator.session.runtime.types import BUSY_DELIVERY_UNSUPPORTED
+
+            raise ValueError(BUSY_DELIVERY_UNSUPPORTED)
         fields: dict[str, Any] = {"text": text, "images": images, "command_id": command_id}
         if input_mode is not None:
             fields["input_mode"] = input_mode
@@ -3804,9 +3839,16 @@ class AttachedSession:
             # (``DocumentCarriageUnsupported`` in the dispatch's parameter
             # probe) rather than forwarding the text without its files.
             fields["files"] = files
+        if delivery and delivery != "steer":
+            fields["delivery"] = delivery
         return await client.request_ack_with_duplicate("steer" if steer else "prompt", **fields)
 
-    async def bind_runtime(self, *, deadline: float | None = None) -> None:
+    async def bind_runtime(
+        self,
+        *,
+        deadline: float | None = None,
+        wait_for_publication: _PublicationWaiter | None = None,
+    ) -> None:
         """Bind a viewer before an explicitly requested owner control operation.
 
         ``deadline`` (``time.monotonic()``) replaces the foreground envelope with
@@ -3814,6 +3856,8 @@ class AttachedSession:
         the remote pilot (``network/cli.py``, ``PILOT_BIND_TIMEOUT_S``), which has
         no "next keystroke rejoins it" and whose failure means the act was not
         delivered. Everyone else keeps the short foreground default.
+        ``wait_for_publication`` is a narrower opt-in for a cold send: after
+        engage, the caller may wait once for discovery inside that deadline.
         """
         if deadline is None:
             # THE DEFAULT CALL SHAPE IS main's, EXACTLY: ``_ensure_bound()``. The TUI
@@ -3825,7 +3869,10 @@ class AttachedSession:
             # 43112570841). Only a caller with its own budget changes the shape.
             await self._ensure_bound()
             return
-        await self._ensure_bound(deadline=deadline)
+        if wait_for_publication is None:
+            await self._ensure_bound(deadline=deadline)
+        else:
+            await self._ensure_bound(deadline=deadline, wait_for_publication=wait_for_publication)
 
     async def update_desktop_watch(
         self, *, visible: bool, can_notify: bool, timeout: float | None = None
@@ -4361,37 +4408,73 @@ class AttachedSession:
         never by a caller-supplied name.
         """
         self._ask_proof_at_send = False
+        async with self._ask_control_client() as client:
+            # No await before frame construction: report the proof carried by
+            # THIS connection, never a stale display client's authority.
+            self._ask_proof_at_send = self._client_proof_held(client)
+            method = getattr(client, name)
+            if tail:
+                return await method(ask_id, *tail)
+            # THIS facade is a person's local surface (the desktop app's backend, the
+            # attached pane, the CLI), so it opts its client into presenting the
+            # operator-capability proof; the runtime then stamps a trusted surface
+            # only if that proof holds (``asks/surfaces``).
+            operator = operator_ask_kwargs(method)
+            if name in ("ask_respond", "ask_revise"):
+                body = {
+                    str(key): [str(item) for item in (values or ())]
+                    for key, values in (answers or {}).items()
+                }
+                if images:
+                    return await method(
+                        ask_id, body, by=by, images=[dict(i) for i in images], **operator
+                    )
+                return await method(ask_id, body, by=by, **operator)
+            if name == "ask_dismiss" and reason:
+                return await method(ask_id, by=by, reason=reason, **operator)
+            return await method(ask_id, by=by, **operator)
+
+    @asynccontextmanager
+    async def _ask_control_client(self) -> AsyncIterator[AttachClient]:
+        """Yield a control connection without making durable asks depend on paint.
+
+        A live older owner can exceed the canonical snapshot's socket limit.
+        Durable ask IDs still resolve atomically there, and the existing attach
+        protocol supports a projection-only handshake. Keep this connection
+        separate from the facade's display client: installing a partial client
+        there would falsely claim that its epoch and history were synchronized.
+        Authentication, identity checks and operator proofs remain AttachClient's.
+        Cold sessions and remote owners retain their normal engage/bind path.
+        """
+        if self._surface == "desktop" and self._owner.placement.is_local:
+            record, _ = await asyncio.to_thread(self._owner.locate)
+            if record is not None:
+                client = self._owner.make_client(
+                    lambda _projection: None,
+                    lambda _reason: None,
+                    surface=self._surface,
+                    frontend_state=False,
+                )
+                try:
+                    try:
+                        await self._connect_client(
+                            client,
+                            record,
+                            deadline=time.monotonic() + DESKTOP_CONTROL_ATTACH_S,
+                        )
+                    except TimeoutError:
+                        raise await self._refusal_while_reconnecting(
+                            self._unavailable_reason()
+                        ) from None
+                    yield client
+                finally:
+                    client.close()
+                return
         await self._ensure_bound()
         client = self._client
         if client is None or not client.connected:
-            # ``_ensure_bound`` returns quietly while a recovery owns the dial,
-            # so this is the ask answer that lands mid-reconnect. Nothing was
-            # sent; the owner's liveness decides busy vs gone.
             raise await self._refusal_while_reconnecting(self._unavailable_reason())
-        # No await between this read and the client method building its frame,
-        # so the proof reported is the one this connection presents (R1-m2).
-        self._ask_proof_at_send = self._client_proof_held(client)
-        method = getattr(client, name)
-        if tail:
-            return await method(ask_id, *tail)
-        # THIS facade is a person's local surface (the desktop app's backend, the
-        # attached pane, the CLI), so it opts its client into presenting the
-        # operator-capability proof; the runtime then stamps a trusted surface
-        # only if that proof holds (``asks/surfaces``).
-        operator = operator_ask_kwargs(method)
-        if name in ("ask_respond", "ask_revise"):
-            body = {
-                str(key): [str(item) for item in (values or ())]
-                for key, values in (answers or {}).items()
-            }
-            if images:
-                return await method(
-                    ask_id, body, by=by, images=[dict(i) for i in images], **operator
-                )
-            return await method(ask_id, body, by=by, **operator)
-        if name == "ask_dismiss" and reason:
-            return await method(ask_id, by=by, reason=reason, **operator)
-        return await method(ask_id, by=by, **operator)
+        yield client
 
     def move_will_wait(self) -> bool:
         """Whether :meth:`set_working_directory` is about to make the user wait.
@@ -4911,7 +4994,11 @@ class AttachedSession:
             logger.debug("warm engage failed for %s", self._session_id, exc_info=True)
 
     async def _ensure_bound(
-        self, *, foreground: bool = True, deadline: float | None = None
+        self,
+        *,
+        foreground: bool = True,
+        deadline: float | None = None,
+        wait_for_publication: _PublicationWaiter | None = None,
     ) -> None:
         """Attach to a runtime, starting one if none exists. Idempotent.
 
@@ -4982,8 +5069,14 @@ class AttachedSession:
                 # suites park this seam with a ``(*, foreground)`` double, and an
                 # unconditional ``deadline=None`` made every warm raise TypeError.
                 await self._bind_under_lock(foreground=foreground)
-            else:
+            elif wait_for_publication is None:
                 await self._bind_under_lock(foreground=foreground, deadline=deadline)
+            else:
+                await self._bind_under_lock(
+                    foreground=foreground,
+                    deadline=deadline,
+                    wait_for_publication=wait_for_publication,
+                )
             # Cover every winning-owner path, including another attach/recovery
             # completing during an await. A failed model RPC is not a failed
             # socket bind and must remain a visible, retryable pending intent.
@@ -5065,7 +5158,13 @@ class AttachedSession:
                 if not self._foreground_waiting:
                     self._foreground_arrived.clear()
 
-    async def _bind_under_lock(self, *, foreground: bool, deadline: float | None = None) -> None:
+    async def _bind_under_lock(
+        self,
+        *,
+        foreground: bool,
+        deadline: float | None = None,
+        wait_for_publication: _PublicationWaiter | None = None,
+    ) -> None:
         """The engage/retry body of :meth:`_ensure_bound`, holding ``_bind_lock``.
 
         Split out so the waiter accounting around the acquire reads as one
@@ -5258,6 +5357,13 @@ class AttachedSession:
             # down turns on the difference between "no owner" and "an owner that
             # published no live record" (§3.4).
             record, owner = await asyncio.to_thread(self._owner.locate)
+            if wait_for_publication is not None and not self._disposed:
+                # Only the send caller opts in, only after a successful engage,
+                # and only once. This can read the published record; it must
+                # neither engage again nor attempt to deliver the pending act.
+                wait, wait_for_publication = wait_for_publication, None
+                if record is None:
+                    record = await wait(self._owner.locate, _effective_deadline())
             if self._disposed:
                 # Same rule as the guard at the top of the loop: never
                 # swallow a failure an earlier attempt already produced.
@@ -6293,8 +6399,9 @@ class AttachedSession:
             # substitute when the attach push frame or the ``frontend_sync``
             # reply exceeds ``server._MAX_LINE_BYTES``. Reading that as "update
             # the peer" sent the operator to a remedy that cannot exist: the
-            # peer is on the same build, and the only fix is arriving on the
-            # device that holds the conversation. ``reset`` is neither — a
+            # peer is on the same build. Exact display replay still requires
+            # the owning device, but a bounded journal peek is independent of
+            # this display bind. ``reset`` is neither — a
             # cursor that stopped resolving — so it is answered by the re-sync
             # verdict in its own arm below, never by size and never by version.
             #
@@ -6328,10 +6435,28 @@ class AttachedSession:
                 # actually has, because a viewer on another device cannot paper
                 # over either of them with a local replay.
                 if window is not None and window.status == "full_required":
-                    raise ConnectionError(
-                        "this session's newest history is too large to send here; "
-                        "open the conversation on the device that holds it"
+                    # The legacy envelope cannot distinguish page admission
+                    # from the socket fallback. Name the possible bounds, not
+                    # a made-up exact size, and give non-binding owner reads.
+                    peek = shlex.join(
+                        [
+                            "lop",
+                            "network",
+                            "sessions",
+                            "--peer",
+                            self._owner.placement.home_device,
+                            "--peek",
+                            window.conversation_id,
+                        ]
                     )
+                    message = render_resolved(
+                        _srp.display_too_large(
+                            bytes=f"{DISPLAY_HISTORY_BYTES:,}",
+                            messages=str(DISPLAY_HISTORY_MESSAGES),
+                        )
+                    )
+                    # i18n: ignore literal CLI commands appended to localized prose
+                    raise ConnectionError(f"{message}\n{peek} --head=20\n{peek} --digest")
                 if window is not None and window.status == "reset":
                     # A CURSOR THAT STOPPED RESOLVING, not an old peer. The
                     # capture raced a compaction or a prune (``history_window``
@@ -7267,7 +7392,13 @@ class AttachedSession:
         if trace is not None:
             trace.fields["metadata_record"] = "hit" if record is not None else "miss"
         if record is None:
-            record = await asyncio.to_thread(build_cold_tail_metadata, witness, path)
+            # ``stats`` names which proof a MISS paid (incremental after growth,
+            # full after a rewrite) in the open trace, so a slow open can be
+            # attributed without re-instrumenting.
+            stats: dict[str, Any] = {}
+            record = await asyncio.to_thread(build_cold_tail_metadata, witness, path, stats)
+            if trace is not None:
+                trace.fields.update(stats)
         if record is None:
             return None
         self._cold_checkpoint = record.checkpoint
@@ -7469,6 +7600,7 @@ class AttachedSession:
         ):
             insert_at += 1
         self._buffered_events[insert_at:insert_at] = seeded
+        self._pending_observer_ids.update(map(id, seeded))
         self._ready_for_events = True
         self._runtime_ready.set()
         self._drain_buffered_events()
@@ -7849,12 +7981,26 @@ class AttachedSession:
             self._live_history[message_id] = message
 
     def _drain_buffered_events(self) -> None:
-        """Deliver buffered sync frames once both ordering and a subscriber exist."""
-        if not self._ready_for_events or not self._handlers or not self._buffered_events:
+        """Release ordered sync frames without taking the caller's replay for observers."""
+        if not self._ready_for_events:
+            return
+        if self._pending_observer_ids:
+            pending, self._pending_observer_ids = self._pending_observer_ids, set()
+            observers = list(self._event_observers)
+            if observers:
+                # Late observers replay for themselves, and must not join a
+                # flush in progress. Honor unsubscriptions between frames.
+                for event in tuple(self._buffered_events):
+                    if id(event) in pending:
+                        self._notify_event_handlers(
+                            [handler for handler in observers if handler in self._event_observers],
+                            event,
+                        )
+        if not self._handlers or not self._buffered_events:
             return
         buffered, self._buffered_events = self._buffered_events, []
         for event in buffered:
-            self._emit_or_buffer(event)
+            self._emit_or_buffer(event, notify_observers=False)
 
     def _on_frontend_sync(self, data: dict[str, Any]) -> None:
         future = self._frontend_future
@@ -8183,17 +8329,23 @@ class AttachedSession:
             message = getattr(event, "message", None)
             message_id = str(getattr(message, "id", "") or "")
             if message_id and message_id in self._history_ids:
+                self._pending_observer_ids.discard(id(event))
                 continue
             kept.append(event)
         self._buffered_events = kept
 
-    def _emit_or_buffer(self, event: AgentEvent[Any]) -> None:
+    def _emit_or_buffer(self, event: AgentEvent[Any], *, notify_observers: bool = True) -> None:
         if not self._ready_for_events or not self._handlers:
             self._buffered_events.append(event)
+            if notify_observers:
+                if self._ready_for_events:
+                    self._notify_event_handlers(self._event_observers, event)
+                else:
+                    self._pending_observer_ids.add(id(event))
             return
-        self._deliver(event)
+        self._deliver(event, notify_observers=notify_observers)
 
-    def _deliver(self, event: AgentEvent[Any]) -> None:
+    def _deliver(self, event: AgentEvent[Any], *, notify_observers: bool = True) -> None:
         """Hand ``event`` to every subscribed handler now, buffering nothing.
 
         With NO subscriber the event is DROPPED, not parked — that is the
@@ -8202,7 +8354,13 @@ class AttachedSession:
         LATER runtime's turn (see ``_end_turn_locally``), and parking the event
         for a future subscriber recreates exactly that hazard one seam over.
         """
-        for handler in list(self._handlers):
+        if notify_observers:
+            self._notify_event_handlers(self._event_observers, event)
+        self._notify_event_handlers(self._handlers, event)
+
+    @staticmethod
+    def _notify_event_handlers(handlers: list[EventHandler], event: AgentEvent[Any]) -> None:
+        for handler in list(handlers):
             result = handler(event)
             if inspect.isawaitable(result):
                 asyncio.create_task(_await_handler(result))
@@ -8756,8 +8914,8 @@ class AttachedSession:
             # because every other writer of that flag is fed by the owner
             # whose socket just closed — so the spinner never stops and the
             # next message routes into the steer branch, is dropped on the
-            # floor, and is receipted as "sends when this step finishes" for a
-            # step that ended (round-4 MAJOR-3/D4-1). The honest refusal lives
+            # floor, and is receipted as "steering — may stop a running tool"
+            # for a step that ended (round-4 MAJOR-3/D4-1). The honest refusal lives
             # on the prompt path, and this is what lets a message reach it.
             self._end_turn_locally()
             self._notify_stopped()
@@ -10384,6 +10542,17 @@ class AttachedSession:
         return self._frontend_store.pending_gate
 
     @property
+    def queued_engine_live(self) -> bool:
+        """Whether the owner runs the queued-ask engine; see the store's property.
+
+        Paired with :attr:`pending_gate`: an ask-kind gate while this is true is
+        the legacy mirror of a queued ask, not a parked card.
+        """
+        if self._frontend_store is None:
+            raise RuntimeError("frontend state has not synchronized")
+        return self._frontend_store.queued_engine_live
+
+    @property
     def has_running_job(self) -> bool:
         """Whether the owner's roster still shows a running child, clone-free.
 
@@ -11547,13 +11716,18 @@ class AttachedSession:
             return
         self._history = list(messages)
 
-    def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
-        self.steer_message(Message.user(text, images))
+    def steer(
+        self,
+        text: str,
+        images: Sequence[ImageContent] | None = None,
+        delivery: str | None = None,
+    ) -> None:
+        self.steer_message(Message.user(text, images), delivery=delivery)
 
-    def steer_message(self, message: Message) -> None:
-        asyncio.create_task(self._send_steer_when_ready(message))
+    def steer_message(self, message: Message, delivery: str | None = None) -> None:
+        asyncio.create_task(self._send_steer_when_ready(message, delivery=delivery))
 
-    async def _send_steer_when_ready(self, message: Message) -> None:
+    async def _send_steer_when_ready(self, message: Message, delivery: str | None = None) -> None:
         """Retain a queued steer across silent reattach/takeover.
 
         THE ONE WRITER PATH WHOSE FAILURE HAS NO SENDER TO REPORT IT TO. Every
@@ -11590,7 +11764,7 @@ class AttachedSession:
             return
         target = self._takeover_target
         if target is not None:
-            target.steer_message(message)
+            target.steer_message(message, delivery=delivery)
             return
         client = self._client
         if client is None or not client.connected:
@@ -11604,6 +11778,7 @@ class AttachedSession:
             command_id=message.id,
             session_id=self._session_id,
             text=message.text,
+            delivery=delivery or "",
             images=[
                 _image_to_wire(block)
                 for block in message.content
@@ -12091,6 +12266,24 @@ class AttachedSession:
         def unsubscribe() -> None:
             if handler in self._handlers:
                 self._handlers.remove(handler)
+
+        return unsubscribe
+
+    def _observe_events(self, handler: EventHandler) -> Callable[[], None]:
+        """Tap current backlog and new frames without becoming the first consumer.
+
+        Unseeded sync arrivals wait for their final order. The caller still
+        owns the replay; draining it must not notify observers again.
+        """
+        self._event_observers.append(handler)
+        for event in tuple(self._buffered_events):
+            if id(event) not in self._pending_observer_ids:
+                self._notify_event_handlers([handler], event)
+
+        def unsubscribe() -> None:
+            if handler in self._event_observers:
+                # Delete an in-memory callback by index, not a filesystem entry.
+                del self._event_observers[self._event_observers.index(handler)]
 
         return unsubscribe
 

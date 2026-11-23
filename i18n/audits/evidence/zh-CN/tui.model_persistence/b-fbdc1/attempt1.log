@@ -1,0 +1,16 @@
+INPUT_HASHES_BEFORE {"en": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff", "context": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc", "zh-CN": "c9fb6447f1e19037cf40808089111d4980f5fd96d3e905d843f797230b9329b0"}
+MODULE local_operator.i18n.catalogues /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/catalogues.py
+MODULE local_operator.i18n.runtime /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/runtime.py
+MODULE scripts.i18n.check /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/scripts/i18n/check.py
+MODULE scripts.i18n.ledger /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/scripts/i18n/ledger.py
+ISOLATION /Users/damian/.local-operator/sessions/fbdc1a799cf0/scratchpad/b-home /Users/damian/.local-operator/sessions/fbdc1a799cf0/scratchpad/b-home/config CMUX absent
+SCOPED_REPO_VALIDATOR []
+KEY_PASS tui.model_persistence.persist args () cells 46 plural_select=0 NFC markup=none
+KEY_PASS tui.model_persistence.settings args () cells 33 plural_select=0 NFC markup=none
+KEY_PASS tui.model_persistence.saved args () cells 42 plural_select=0 NFC markup=none
+KEY_PASS tui.model_persistence.with_model args (('label', 'simple'), ('routes', 'simple')) cells 24 plural_select=0 NFC markup=none
+Traceback (most recent call last):
+  File "/Users/damian/local-operator/.worktrees/i18n-model-persist-notice/i18n/audits/evidence/zh-CN/tui.model_persistence/b-fbdc1/script.py.txt", line 61, in <module>
+    if state=='absent-hosting': assert '/model' not in rendered
+                                       ^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError

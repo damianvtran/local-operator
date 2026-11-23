@@ -1,0 +1,85 @@
+{
+  "locale": "hi",
+  "namespace": "tui.model_persistence",
+  "audit_date": "2026-11-22",
+  "key_count": 4,
+  "audit_pass": "B — independent second high-visibility pass",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "a776dd8a4364",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "actual_model_source": "Host model-switch telemetry in this session: provider failure: quota; switched before Hindi assessment",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "fdf96049990f",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": false,
+    "actual_model_source": "Host model-switch telemetry: provider failure: quota; fallback from anthropic/claude-opus-5-5 to openai/gpt-6.1-sol before Hindi authorship",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "source_audit_revision": "b1c5ca8be245dcc3f9cae4463d9a5553b3e0c01f",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.json",
+      "sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.context.json",
+      "sha256": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc"
+    },
+    "hi": {
+      "path": "local_operator/i18n/catalogues/hi/tui.model_persistence.json",
+      "sha256": "b64d9953f8abb7bc1e2e5f2bfab5d286d7b095d50e833211bf90df71d69eca68"
+    }
+  },
+  "independence": {
+    "parallel_A_artifacts_or_conclusions_read": false,
+    "independent_from_english_author_a97": true
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/B-a776/report.md",
+      "sha256": "77d6afc960f430a4f585a24807ea19878994c23730a0c542f252f6b9dcebd11d"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/B-a776/audit.log",
+      "sha256": "a744d9a0dcc16636846518f4b1274f66fd6b8fe3deea676f3999e8ea4f82720a"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/B-a776/script.py.txt",
+      "sha256": "1c96bd9dd820612ab0345498b5eadc64c18e049141554e2d27994a120e91c471"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "changes_requested",
+    "unresolved_blocker_major_count": 1,
+    "finding_ids": [
+      "B-HI-1"
+    ]
+  },
+  "audit_notes_not_execution_log": [
+    "report.md"
+  ],
+  "actual_execution_logs": [
+    "audit.log"
+  ],
+  "current_bytes_match_audited_hashes": true,
+  "limitations": [
+    "Plain Rich wrapping only; not styled NoticeBlock or transcript-family evidence",
+    "No native Hindi font/shaping qualification",
+    "No catalogue/history/ledger/generation/eligibility/release change"
+  ]
+}

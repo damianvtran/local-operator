@@ -30,6 +30,7 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import AsyncExitStack
 from contextvars import ContextVar
 from copy import deepcopy
 from datetime import datetime
@@ -38,6 +39,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 from pydantic import BaseModel, SecretStr
 
+from local_operator.harness.request_admission import RequestAdmission
 from local_operator.harness.types import (
     AbortSignal,
     ChatRequest,
@@ -82,6 +84,11 @@ from local_operator.session.request_observation import (
 )
 
 logger = logging.getLogger("local_operator.model.configure")
+
+#: Quota-latch token of the one-shot "sign in again" notice
+#: (``SessionStreamFn._announce_sign_in_required``); discarded when the route
+#: returns to the primary so a later expiry in the same session re-announces.
+SIGN_IN_REQUIRED_TOKEN = "auth:sign-in-required"
 
 if TYPE_CHECKING:
     # Import-time cost only for type checkers: the listing clients pull in the
@@ -4164,6 +4171,9 @@ class SessionStreamFn:
         # edited instruction file rewrote the prefix (PR #2984 QA Q1). A
         # transcript FORK ignores the rows it copied and starts at ``None``.
         self._cache_diagnostics_previous_id: str | None = None
+        # A wire client is rebuilt per attempt; a local stream identity keeps
+        # Google comparisons per conversation (not per inherited routing key).
+        self._cache_diagnostics_chain = uuid.uuid4().hex
         # The credential that served the response ``_cache_diagnostics_previous_id``
         # names. Anthropic keeps diagnostics fingerprints per account, so after
         # a mid-session switch to another credential the old id cannot be found
@@ -4198,6 +4208,7 @@ class SessionStreamFn:
         # by the subagent fork site, ``None`` for root-owned requests.
         self._observation_root: SessionStreamFn | None = None
         self._request_observers: RequestSubscriberHolder | None = None
+        self._request_admission: RequestAdmission | None = None
         self._request_job_id: str | None = None
         self._request_actor_role: str | None = None
         # The identity this session's PROVIDER CACHE is keyed under, which is
@@ -5028,6 +5039,23 @@ class SessionStreamFn:
             root._request_observers = holder
         return holder.subscribe(handler)
 
+    def install_request_admission(self, policy: RequestAdmission) -> Callable[[], None]:
+        # Use the same root reference as observation so preforked children see
+        # a late install and a subtree cannot replace the tree's spend authority.
+        root = getattr(self, "_observation_root", None) or self
+        if getattr(root, "_request_admission", None) is not None:
+            raise RuntimeError("request admission is already installed on this session tree")
+        root._request_admission = policy
+        active = True
+
+        def uninstall() -> None:
+            nonlocal active
+            if active:
+                root._request_admission = None
+                active = False
+
+        return uninstall
+
     def bind_request_actor(self, *, job_id: str | None, actor_role: str | None) -> None:
         """Attach the child Session's existing job/role identity to this stream.
 
@@ -5780,6 +5808,54 @@ class SessionStreamFn:
     async def _on_route_change(self, target: Any, reason: str) -> None:
         effort = f" ({target.effort} effort)" if target.effort else ""
         await self._notice(f"{reason} — falling back to {target.selector}{effort}")
+        # On EVERY route change, not only when ``reason`` reads ``auth``: the
+        # reason names the walk's highest-ranked error, and quota outranks auth,
+        # so a dead primary followed by a hop answering 429 settles as "quota"
+        # and would hide the one remedy. The announce checks the store's own
+        # dead-grant verdict itself and dedupes on its latch token, so a live
+        # primary stays silent and a multi-hop walk still speaks once.
+        await self._announce_sign_in_required()
+
+    async def _announce_sign_in_required(self) -> None:
+        """Tell the user ONCE, in their language, that the primary needs a sign-in.
+
+        The fallback line above only says ``provider failure: auth``. When the
+        primary's every stored login is a grant its IdP refused for good (a dead
+        refresh token, or Google Cloud session control forcing a Vertex sign-in
+        to expire), that is not a failure the user can wait out, and the turn
+        silently serving from another model is exactly what made the expired
+        Vertex sign-in look like a quota problem. So the exact next step is
+        named here, from the store's persisted verdict (no refresh is sent).
+
+        Deduped through the quota latch on its own ``auth:`` token, so a sticky
+        fallback does not repeat it every message; the route returning to the
+        primary (``_on_route_settle``) discards the token, so a real recurrence
+        later in the same session announces again. Never fails the turn: a
+        notice is advisory.
+        """
+        primary = self._primary_selector
+        if not primary:
+            return
+        provider = primary.split("/", 1)[0]
+        try:
+            from local_operator.i18n.resolve import resolve_language
+            from local_operator.providers.failover import (
+                dead_grant_reason,
+                sign_in_required_text,
+            )
+
+            dead, cause = await asyncio.to_thread(dead_grant_reason, self._auth_store, provider)
+            if not dead:
+                return
+            # The CONFIGURED language, not ``text.active_locale``: only the TUI
+            # moves the process locale live, and this also runs in `serve` and
+            # `lop exec` (see ``messages.render_resolved``).
+            # ``display=True``: this is the copy a person reads, so the two
+            # commands are kept whole in an RTL (Urdu) paragraph.
+            text = sign_in_required_text(provider, cause, locale=resolve_language(), display=True)
+            await self._announce_quota_change(primary, SIGN_IN_REQUIRED_TOKEN, text)
+        except Exception as exc:  # noqa: BLE001 - a notice must never fail the turn
+            logger.debug("sign-in notice failed (%s)", type(exc).__name__)
 
     async def _on_route_settle(self, target: Any, reason: str) -> None:
         """Forward the effective-route edge (fallback pinned / primary back)."""
@@ -5791,6 +5867,16 @@ class SessionStreamFn:
             # "back to" — the failure edge's "falling back to" and this pair
             # off the same preposition (design D1).
             await self._notice(f"back to {self._primary_selector}", "info")
+            # Re-arm the sign-in notice. Its latch token is otherwise cleared
+            # only by a healthy usage reading, and providers without a usage
+            # fetcher (google-vertex) never produce one, so the NEXT expiry in
+            # this same long-lived session (Workspace session control repeats
+            # every 1-24 h) would fall back with no "sign in again" at all.
+            # The primary serving again is the proof the sign-in was repaired.
+            primary = self._primary_selector
+            announced = self._last_quota_state.get(primary) if primary else None
+            if announced is not None:
+                announced.discard(SIGN_IN_REQUIRED_TOKEN)
         if self._route_handler is None:
             return
         result = self._route_handler(target, reason)
@@ -7367,33 +7453,65 @@ class SessionStreamFn:
         return health, shared_remaining, tier_binding, access
 
     async def __call__(
-        self, request: ChatRequest, signal: AbortSignal | None
+        self,
+        request: ChatRequest,
+        signal: AbortSignal | None,
+        *,
+        on_admitted: Callable[[], None] | None = None,
     ) -> AsyncIterator[StreamEvent]:
+        root = getattr(self, "_observation_root", None) or self
+        policy = getattr(root, "_request_admission", None)
+        admission: tuple[str, AsyncExitStack] | None = None
+        if policy is not None:
+            request_id = uuid.uuid4().hex
+            finish = policy(request_id)
+            exit_stack = AsyncExitStack()
+            if finish is not None:
+                exit_stack.callback(finish)
+            admission = request_id, exit_stack
+
         # A quota/preflight pick must stay coherent until THIS request finishes,
         # without granting an unsuccessful pick a durable cache lease. Store-
         # owned identity cleanup also works when an old generator is closed
         # after a newer boundary replaced it; no ContextVar spans a yield.
-        begin = getattr(self._auth_store, "begin_account_request", None)
-        end = getattr(self._auth_store, "end_account_request", None)
-        boundary = (
-            begin(self._session_id, request) if callable(begin) and not request.isolated else None
-        )
-        stream = self._stream_account_request(request, signal, boundary)
         try:
-            async for event in stream:
-                yield event
-        finally:
+            # Session's dispatch evidence must not commit on refusal, but it
+            # still precedes provider preparation even on the no-policy path.
+            if on_admitted is not None:
+                on_admitted()
+            begin = getattr(self._auth_store, "begin_account_request", None)
+            end = getattr(self._auth_store, "end_account_request", None)
+            boundary = (
+                begin(self._session_id, request)
+                if callable(begin) and not request.isolated
+                else None
+            )
+            # Requests without a policy keep the original stream call contract.
+            stream = (
+                self._stream_account_request(request, signal, boundary)
+                if admission is None
+                else self._stream_account_request(request, signal, boundary, admission=admission)
+            )
             try:
-                await stream.aclose()
+                async for event in stream:
+                    yield event
             finally:
-                if boundary is not None and callable(end):
-                    end(self._session_id, boundary)
+                try:
+                    await stream.aclose()
+                finally:
+                    if boundary is not None and callable(end):
+                        end(self._session_id, boundary)
+        finally:
+            if admission is not None:
+                await admission[1].aclose()
 
     async def _stream_account_request(
         self,
         request: ChatRequest,
         signal: AbortSignal | None,
         boundary: object | None = None,
+        *,
+        admission: tuple[str, AsyncExitStack] | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
         # A session's old hint describes its preceding request, not this one.
         # Only the counted boundary held by this conversation can reconcile it
@@ -7487,7 +7605,7 @@ class SessionStreamFn:
             # the conversation's owner, and an errand's request is built
             # without one — the client's byte estimate of its tiny body
             # decides, so it never goes out at the 1h write rate.
-            async for event in self._record_stream(
+            async for event in self._account_recording(
                 request,
                 stream_with_failover(
                     request,
@@ -7497,6 +7615,7 @@ class SessionStreamFn:
                     signal=signal,
                     session_id=self._session_id,
                 ),
+                admission,
             ):
                 yield event
             return
@@ -7616,6 +7735,7 @@ class SessionStreamFn:
                 update={
                     "cache_diagnostics": True,
                     "cache_diagnostics_previous_id": self._cache_diagnostics_previous_id,
+                    "cache_diagnostics_chain": self._cache_diagnostics_chain,
                 }
             )
         if request.purpose == "turn" and not request.same_route_retry:
@@ -7649,7 +7769,7 @@ class SessionStreamFn:
         # served on the same credential, and the note is an in-process read that
         # reports nothing when the account has not changed.
         self._note_serving_binding(request.model)
-        async for event in self._record_stream(
+        async for event in self._account_recording(
             request,
             stream_with_failover(
                 request,
@@ -7660,6 +7780,7 @@ class SessionStreamFn:
                 session_id=self._session_id,
                 route_state=self._route_state,
             ),
+            admission,
         ):
             usage = getattr(event, "usage", None)
             if tracks_context and usage is not None:
@@ -7712,9 +7833,32 @@ class SessionStreamFn:
         """
         return self._descendant_request_counter.count > 0
 
+    def _account_recording(
+        self,
+        request: ChatRequest,
+        stream: AsyncIterator[StreamEvent],
+        admission: tuple[str, AsyncExitStack] | None,
+    ) -> AsyncGenerator[StreamEvent, None]:
+        if admission is None:
+            return self._record_stream(request, stream)
+        request_id, exit_stack = admission
+        recorder = self._record_stream(request, stream, request_id=request_id)
+        # If the consumer closes at a yield, settle the existing observation
+        # before the cleanup callback checks for a missing final. Also close
+        # the upstream iterator on this owned path rather than relying on GC.
+        close = getattr(stream, "aclose", None)
+        if close is not None:
+            exit_stack.push_async_callback(close)
+        exit_stack.push_async_callback(recorder.aclose)
+        return recorder
+
     async def _record_stream(
-        self, request: ChatRequest, stream: AsyncIterator[StreamEvent]
-    ) -> AsyncIterator[StreamEvent]:
+        self,
+        request: ChatRequest,
+        stream: AsyncIterator[StreamEvent],
+        *,
+        request_id: str | None = None,
+    ) -> AsyncGenerator[StreamEvent, None]:
         """Forward a provider stream unchanged, then record its usage analytics.
 
         Why the recording lives HERE, wrapping the one place every provider
@@ -7745,7 +7889,7 @@ class SessionStreamFn:
         sent.
         """
         started_at = time.monotonic()
-        request_id = uuid.uuid4().hex
+        request_id = request_id or uuid.uuid4().hex
         # Resolved ONCE here, at request start (see
         # ``_request_observation_target``): the ordinary path pays two
         # attribute reads and a ``None`` check per REQUEST, never per delta.
@@ -7910,6 +8054,11 @@ class SessionStreamFn:
                         output_deltas=output_deltas,
                     )
                 if event_type == "start":
+                    cache_miss_type = getattr(event, "cache_miss_type", None) or ""
+                    cache_missed_tokens = int(getattr(event, "cache_missed_tokens", 0) or 0)
+                elif event_type == "end" and not cache_miss_type:
+                    # Gemini reports its cache read only at stream end. Keep a
+                    # start-frame diagnosis (Anthropic's contract) authoritative.
                     cache_miss_type = getattr(event, "cache_miss_type", None) or ""
                     cache_missed_tokens = int(getattr(event, "cache_missed_tokens", 0) or 0)
                 stop_reason = getattr(event, "stop_reason", None)
@@ -8166,7 +8315,9 @@ class SessionStreamFn:
         as ``estimated`` and ``usage_reported`` stays False, so no reader can
         mistake it for a provider receipt.
         """
-        self._log_cache_break(usage, cache_miss_type, cache_missed_tokens)
+        self._log_cache_break(
+            usage, cache_miss_type, cache_missed_tokens, provider=request.model.provider
+        )
         try:
             import time as _time
 
@@ -8318,7 +8469,9 @@ class SessionStreamFn:
         except Exception:  # noqa: BLE001 — recording is best-effort
             logger.debug("analytics: usage record failed", exc_info=True)
 
-    def _log_cache_break(self, usage: Usage, miss_type: str, missed_tokens: int) -> None:
+    def _log_cache_break(
+        self, usage: Usage, miss_type: str, missed_tokens: int, *, provider: str = ""
+    ) -> None:
         """One ``[prompt cache break]`` INFO line for a costly diagnosed break.
 
         Called once per call from ``_record_usage``, so the line is emitted at
@@ -8329,10 +8482,13 @@ class SessionStreamFn:
         is the API's documented "rare, low impact" case and would be noise.
         The thresholds mirror the benchmark's break classifier (>= 20k written
         and >= half the context), so log counts and ledger analysis agree.
+        Google has no write counter: its local prefix comparison supplies the
+        loss, bounded by this call's uncached input (which includes cache reads).
         """
         try:
             from local_operator.providers.clients import (
                 ANTHROPIC_CACHE_DIAGNOSIS_NO_BREAK,
+                GOOGLE_CACHE_DIAGNOSIS_NO_BREAK,
             )
 
             if (
@@ -8341,6 +8497,32 @@ class SessionStreamFn:
                 or miss_type in ("previous_message_not_found", "unavailable")
             ):
                 return
+            if provider in ("google", "google-vertex"):
+                if miss_type in GOOGLE_CACHE_DIAGNOSIS_NO_BREAK:
+                    # Includes ``unchanged_block_tail``: a healthy read short
+                    # by Google's block granularity is never a break.
+                    return
+                # Google includes cache reads in input and reports no writes.
+                # A large NEW suffix is not a lost cache prefix: require both
+                # locally diagnosed loss and actual uncached input to qualify.
+                if not (miss_type.endswith("_changed") or miss_type == "evicted_or_rerouted"):
+                    return
+                context = int(usage.input_tokens)
+                uncached = max(0, context - int(usage.cache_read_tokens))
+                lost = min(uncached, max(0, missed_tokens))
+                if lost < 20_000 or lost * 2 < context:
+                    return
+                logger.info(
+                    "[prompt cache break] session=%s type=%s missed_tokens=%d "
+                    "uncached=%d context=%d",
+                    self._session_id or "-",
+                    miss_type,
+                    int(missed_tokens),
+                    uncached,
+                    context,
+                )
+                return
+            # Retain Anthropic's write-based threshold and log format verbatim.
             written = int(usage.cache_write_tokens)
             context = int(usage.input_tokens) + int(usage.cache_read_tokens) + written
             if written < 20_000 or written * 2 < context:
@@ -8361,6 +8543,11 @@ class SessionStreamFn:
         if self._closed:
             return
         self._closed = True
+        # This stream fn's Google comparison chain can never be used again;
+        # evict it now instead of leaving it to the module-level LRU bound.
+        from local_operator.providers.clients import forget_google_cache_chain
+
+        forget_google_cache_chain(self._cache_diagnostics_chain)
         self._transport.owners -= 1
         if self._transport.owners == 0:
             await self._http.aclose()

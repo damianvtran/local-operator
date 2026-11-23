@@ -35,10 +35,12 @@ provenance-marked.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import json
 import logging
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -55,6 +57,43 @@ from local_operator.harness.message_types import validate_bridge_meta
 from local_operator.team_bridge.types import AckTarget
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class CardHandoff:
+    """The durable identity of ONE conversation-card hand-off, for one call.
+
+    WHY (PR #3478 QA r1, comments 6663928534 / 6663979598): the peer accepted a
+    card, the posted-marker write then failed, and the forced replay posted a
+    SECOND card because every ``deliver_peer_message_outcome`` call minted a
+    fresh ``peer-<hex>`` id the receiver had never seen. The receiver already
+    deduplicates on the sender-minted id; the card path simply never reused one.
+    ``conversation._deliver_card`` now persists the id on the reservation rows
+    BEFORE dispatch and hands it down here.
+
+    WHY A CONTEXT VARIABLE rather than a ``deliver_wake`` parameter: dozens of
+    test doubles (and any embedding caller) replace ``deliver_wake`` with the
+    historical keyword set; a new keyword would turn each into a ``TypeError``
+    hold. A double that ignores this simply leaves ``outcome`` unset, which the
+    caller reads as "no typed evidence" — exactly today's behaviour. The value is
+    set only for the duration of one ``_deliver_card`` call and never crosses a
+    process, a wire frame or an IPC operation: it is local plumbing for the
+    EXISTING ``message_id`` field.
+
+    ``outcome`` is filled with the typed ``DeliveryOutcome`` when the durable-
+    history branch actually dialled with ``message_id``; it stays ``None`` on the
+    cold no-history branch (``PeerMessageErrand`` there carries no id: a
+    documented at-least-once residual, never claimed closed).
+    """
+
+    message_id: str
+    outcome: Any = None
+
+
+#: Set by ``conversation._deliver_card`` around ONE ``deliver_wake`` call.
+CARD_HANDOFF: contextvars.ContextVar[CardHandoff | None] = contextvars.ContextVar(
+    "team_bridge_card_handoff", default=None
+)
 
 
 def _settings_enabled(settings: Any) -> bool:
@@ -848,6 +887,10 @@ def _confirmed_screen_result(stored: Mapping[str, Any]) -> Any:
     return ScreenResult(disposition="deliver", receipt=receipt)
 
 
+class RoutedSessionGone(Exception):
+    """``live_only`` delivery found its target no longer live. Nothing was sent."""
+
+
 async def deliver_wake(
     owner: Any,
     payload: str,
@@ -856,8 +899,17 @@ async def deliver_wake(
     config_dir: Path,
     bridge_meta: dict[str, Any] | None = None,
     sender_display: dict[str, Any] | None = None,
+    live_only: bool = False,
 ) -> str:
     """SEAM: hand the wake to the designated CoS session (lazy heavy import).
+
+    ``live_only`` is for a ROUTED target (a session that is not the designated
+    one): it is checked against the registry NOW, not as it was when the
+    decision was made, because this function otherwise passes ``record=None``
+    and a dead session with history would be cold-resumed. Resuming a task
+    session on a stranger's message is exactly what routing must never do, so a
+    target that is no longer live raises :class:`RoutedSessionGone` BEFORE
+    anything is delivered and the caller falls back to the designated session.
 
     Live target: the shipped ``deliver_peer_message`` with ``wake=True``.
     Cold target (no runtime): ``engage_runtime`` with a ``PeerMessageErrand``
@@ -873,6 +925,13 @@ async def deliver_wake(
         session_has_durable_history,
     )
 
+    live_record: Any | None = None
+    if live_only:
+        from .routing import live_capable_record
+
+        live_record = live_capable_record(None, session_id)
+        if live_record is None:
+            raise RoutedSessionGone(session_id)
     sender = {"account_id": owner.account_id, "source": TEAM_BRIDGE_MESSAGE_TYPE}
     if sender_display:
         # D1: the human card must be able to NAME the member. This dict is all
@@ -891,26 +950,44 @@ async def deliver_wake(
         from local_operator.team_bridge.display_receipt import validated_display_receipt
 
         sender.update(validated_display_receipt(sender_display, owner=owner))
-    if session_has_durable_history(session_id):
+    handoff = CARD_HANDOFF.get()
+    if live_only or session_has_durable_history(session_id):
         # Live, or cold WITH durable history: the primitive owns delivery and
         # answers with the TYPED outcome — no exception-type or message-string
         # inspection (the unengaged distinction is a state, not an error).
-        outcome = await deliver_peer_message_outcome(
-            None,
-            session_id=session_id,
-            text=payload,
-            mode="mailbox",
-            wake=True,
-            sender=sender,
-            # THE PROVENANCE KIND (H4e-render): the receiving session stamps
-            # this on the row, so the card is a bridge message rather than a
-            # generic peer one (§13.4). Re-validated at every hop.
-            custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
-            # THE BRIDGE LOCATOR (H5 F3): bounded, closed-key, omitted when
-            # absent — the receiver uses it to find ITS OWN records and never
-            # as clearance (see the receive hook).
-            bridge_meta=bridge_meta,
-        )
+        # A persisted card id rides the EXISTING ``message_id`` field only when
+        # one was bound; every other wake keeps the minted id (the primitive
+        # refuses a malformed explicit id before dialling).
+        identity = {"message_id": handoff.message_id} if handoff is not None else {}
+        try:
+            outcome = await deliver_peer_message_outcome(
+                # A routed delivery passes the record it just scanned, so the
+                # primitive can only DIAL that process: with ``None`` it resolves
+                # the id itself and may cold-resume a session that died in the
+                # meantime. A failed dial is a confirmed non-delivery, which is
+                # the designated fallback's cue, not a held card.
+                live_record,
+                session_id=session_id,
+                text=payload,
+                mode="mailbox",
+                wake=True,
+                sender=sender,
+                # THE PROVENANCE KIND (H4e-render): the receiving session stamps
+                # this on the row, so the card is a bridge message rather than a
+                # generic peer one (§13.4). Re-validated at every hop.
+                custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+                # THE BRIDGE LOCATOR (H5 F3): bounded, closed-key, omitted when
+                # absent — the receiver uses it to find ITS OWN records and never
+                # as clearance (see the receive hook).
+                bridge_meta=bridge_meta,
+                **identity,
+            )
+        except RuntimeError as exc:
+            if live_only:
+                raise RoutedSessionGone(session_id) from exc
+            raise
+        if handoff is not None:
+            handoff.outcome = outcome
         # Only a confirmed non-delivery is retryable. Returning its detail as
         # success would let the conversation caller mark its card posted and
         # discard the feed ref, permanently losing the message on replay.
@@ -921,6 +998,8 @@ async def deliver_wake(
         # delivered — the AttributeError lands in the handler's hold arm, so
         # the card stays owed instead of being settled unproven.
         if outcome.state == DELIVERY_FAILED:
+            if live_only:
+                raise RoutedSessionGone(session_id)
             raise DeliveryFailed(outcome.detail)
         return str(outcome.detail)
     # Cold with NO durable history: exactly the designated-CoS engagement

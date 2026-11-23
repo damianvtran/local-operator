@@ -97,6 +97,7 @@ from local_operator.harness.approval import (
 )
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.types import SessionProjection
+from local_operator.network import origin as mesh_origin
 from local_operator.operator import report_operator_authority
 from local_operator.operator import verify as operator_verify
 from local_operator.operator.trust import (
@@ -122,6 +123,7 @@ from local_operator.session.runtime.types import (
     ASK_ATTACHMENTS_UNSUPPORTED,
     ATTACH_ACTIVITY_CAPABILITY,
     ATTACH_MAX_CLIENTS,
+    BUSY_DELIVERY_CAPABILITY,
     DESKTOP_WATCH_CAPABILITY,
     DESKTOP_WATCH_LEASE_S,
     DOCUMENT_ATTACHMENTS_CAPABILITY,
@@ -139,6 +141,7 @@ from local_operator.session.runtime.types import (
     PEER_MESSAGE_ID_CAPABILITY,
     QUEUED_MOVE_CAPABILITY,
     RUNTIME_RECORD_KIND,
+    TEAM_BRIDGE_ROUTED_INBOX_CAPABILITY,
     VIEWED_MOVE_REFUSAL,
     ClientKind,
     ClientLocality,
@@ -2042,6 +2045,31 @@ def _takes_input_mode(handle: Any) -> bool:
     return True
 
 
+def _takes_delivery(handle: Any) -> bool:
+    """Whether ``handle``'s ``prompt`` AND ``steer`` take the ``delivery`` keyword.
+
+    Same literal-parameter rule as :func:`_takes_input_mode` and for the same
+    reason: the dispatch passes the keyword only when the literal parameter
+    name is present, so a ``**kwargs``-only method would silently DROP the
+    mode and must not be advertised. BOTH OPS ARE PROBED because the prompt
+    arm is the busy-session fallback that steers under the same command id:
+    a handle that took ``delivery`` on ``steer`` alone would advertise a
+    ``prompt`` that hands the mode to a fallback which ignores it. An
+    unreadable or missing method answers no, the conservative side.
+    """
+    for name in ("prompt", "steer"):
+        method = getattr(handle, name, None)
+        if method is None:
+            return False
+        try:
+            parameters = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            return False
+        if "delivery" not in parameters:
+            return False
+    return True
+
+
 def _takes_ask_attachments(handle: Any) -> bool:
     """Whether ``handle``'s ``ask_respond`` takes the ``attachments`` keyword.
 
@@ -2200,11 +2228,52 @@ class _ConnectionAuthority:
     #: how an unproven one is told apart (``asks/surfaces.stamp_answer_surface``).
     surface: str = ""
     kind: str = ""
+    #: G6 (mesh-origin-stamp): whether the owner's relay PROVED, on this
+    #: connection, that it holds ``K_relay`` over the peer block it declared
+    #: (``RuntimeServer._relay_attest_reply``). False for every connection that
+    #: sent no valid ``relay_attest`` as its first post-welcome frame.
+    mesh_verified: bool = False
+    #: The PROVED block's ``peer_verified``: whether the relay's link to the peer
+    #: device proved that device's identity in its handshake. Meaningful only with
+    #: ``mesh_verified``; ``verified`` on a stamp is the AND of the two.
+    peer_verified: bool = False
+    #: This runtime's own mesh ``device_id`` (``identity.load().device_id``): who
+    #: MINTED a stamp, so a stamp imported from another device never counts here
+    #: (``origin.mesh_origin_counts``). Empty when this install has no identity.
+    stamped_by: str = ""
     #: ADR 0009 origin of human input on this connection
     #: (:func:`_input_surface_for`), decided once at auth time from the
     #: connection's facts. ``""`` is no connection at all (a direct
     #: ``_dispatch``), which leaves the handle's in-process default.
     input_surface: str = ""
+
+    def mesh_origin(self) -> dict[str, Any] | None:
+        """The G5 stamp for a row or answer this connection writes, or ``None``.
+
+        ``None`` for a LOCAL connection: rule 2 writes no stamp there. Every
+        non-local connection gets one — ``verified`` only when the relay proved
+        itself AND its link proved the peer (§2 rule 3); otherwise the claimed
+        identity is kept for audit with ``verified: false``. Built from these
+        connection facts alone, never from a frame (rule 1).
+        """
+        if self.locality == "local":
+            return None
+        return mesh_origin.build_stamp(
+            self.peer,
+            self.capabilities,
+            verified=self.mesh_verified and self.peer_verified,
+            stamped_by=self.stamped_by,
+        )
+
+
+def _strip_frame_origin(frame: Mapping[str, Any]) -> dict[str, Any]:
+    """``frame`` without any frame-supplied mesh origin stamp (G5 rule 1).
+
+    A stamp is minted by THIS runtime from the connection; a copy in a frame is
+    at best noise and at worst a forgery, so it is dropped before any op reads
+    the frame — for every connection, local ones included.
+    """
+    return {key: value for key, value in frame.items() if key not in mesh_origin.FRAME_ORIGIN_KEYS}
 
 
 #: The auth-frame key the mobile daemon declares on every dial that carries the
@@ -2360,6 +2429,11 @@ def _stamp_peer_sender(raw: Any, authority: "_ConnectionAuthority") -> dict[str,
     sender = dict(raw) if isinstance(raw, Mapping) else {}
     sender.pop(MESH_SENDER_DEVICE_ID_KEY, None)
     sender.pop(MESH_SENDER_DEVICE_NAME_KEY, None)
+    # A sender dict rides peer rows (and their spool lines), which are PEER-
+    # controlled: a stamp smuggled here would sit beside the provenance the owner
+    # trusts. Both spellings go, for every locality (mesh-origin-stamp M-2).
+    for key in mesh_origin.FRAME_ORIGIN_KEYS:
+        sender.pop(key, None)
     if authority.locality == "local":
         return sender
     sender.pop("pid", None)
@@ -2557,6 +2631,20 @@ class _ClientConn:
     #: holds no capability for this runtime — which is the fail-closed state.
     operator_nonce: str = ""
     operator_salt: str = ""
+    #: G6 relay proof material (mesh-origin-stamp §3.1). The owner's relay offers
+    #: ``relay_nonce`` in its auth frame; this runtime mints ``relay_salt`` per
+    #: connection and returns it in the welcome, and the relay then proves itself
+    #: with ``relay_attest`` as its FIRST post-welcome frame. Neither is secret;
+    #: both die with the connection, so a proof is worthless on another one.
+    relay_nonce: str = ""
+    relay_salt: str = ""
+    #: True until the first post-welcome frame has been read: the ONE position a
+    #: ``relay_attest`` is accepted in (M-9). Cleared by that frame, whatever it is.
+    awaiting_first_frame: bool = True
+    #: Set by a valid ``relay_attest``: the relay proved the peer block on this
+    #: connection (``mesh_verified``), and that block's ``peer_verified``.
+    mesh_verified: bool = False
+    peer_verified: bool = False
     #: The operator-signed device certificate this connection declared in its
     #: auth frame, or "" when it declared none. NOT yet verified at the point it
     #: is stored — ``_device_cert_point`` is what resolves it under the anchor,
@@ -3055,6 +3143,7 @@ class RuntimeServer:
                 logger.debug("could not install the interactivity probe", exc_info=True)
         seed = handle.session_projection_seed
         seed.kind = kind
+        self._goal_recovery_enabled = kind != "exec"
         # The projection fold is an OPTIONAL, injected collaborator. A caller
         # that already owns a fold may hand it in and the runtime uses it
         # as-is — only tests do today; every production constructor call
@@ -3169,6 +3258,10 @@ class RuntimeServer:
                 # and the viewer must see the string before it sends the op,
                 # because an unknown op costs it the whole stream.
                 + [ATTACH_ACTIVITY_CAPABILITY]
+                # Unconditional: the routed-inbox lookup is this runtime's own
+                # code (see the constant), and the connector reads the string
+                # to decide whether it may route a Team Bridge message here.
+                + [TEAM_BRIDGE_ROUTED_INBOX_CAPABILITY]
                 + ([FRONTEND_CAPABILITY] if hasattr(handle, "subscribe_frontend") else [])
                 + (["completion-ack-v1"] if hasattr(handle, "acknowledge_attention") else [])
                 + (["display-history-window-v1"] if hasattr(handle, "history_page") else [])
@@ -3241,6 +3334,13 @@ class RuntimeServer:
                 # asks both methods — see ``_takes_input_mode``, which mirrors
                 # the dispatch's own check exactly.
                 + ([INPUT_MODE_CAPABILITY] if _takes_input_mode(handle) else [])
+                # BUSY-SEND DELIVERY MODES, gated on the handle that would HONOUR
+                # the mode rather than advertised unconditionally: the reader of
+                # this string (the mobile stream, the desktop admit path) must
+                # never send `queue`/`both` to an owner whose prompt/steer would
+                # silently drop them — that is a silent downgrade to an urgent
+                # steer. See ``_takes_delivery``.
+                + ([BUSY_DELIVERY_CAPABILITY] if _takes_delivery(handle) else [])
                 # DOCUMENTS, on the same gated-on-the-handle rule: the string
                 # is the sender's licence to send ``Prompt.files``, and an
                 # owner whose dispatch would drop the key must not advertise
@@ -4443,7 +4543,7 @@ class RuntimeServer:
             # Probed, not required — a handle without the capability (a third-
             # party or reduced host) simply has no goal judge to re-arm.
             rearm_goal_judge = getattr(self._handle, "rearm_goal_judge", None)
-            if callable(rearm_goal_judge):
+            if self._goal_recovery_enabled and callable(rearm_goal_judge):
                 try:
                     await self._handle_call_on_session_loop(rearm_goal_judge)
                 except Exception:  # noqa: BLE001 — additive, never a boot gate
@@ -4824,6 +4924,9 @@ class RuntimeServer:
                     logger.debug("could not record the serving tick's death", exc_info=True)
                 continue
             try:
+                tick_goal_recovery = getattr(self._handle, "tick_goal_recovery", None)
+                if self._goal_recovery_enabled and callable(tick_goal_recovery):
+                    tick_goal_recovery()
                 # The FLOOR for the record's ``busy`` bit, not its fix: the
                 # handle republishes at every turn boundary (the session's
                 # ``on_turn_settled`` hook), and this only bounds how stale a
@@ -5594,6 +5697,17 @@ class RuntimeServer:
         # bind it to: a connection that will never be offered a proof does not
         # need one minted.
         server_salt = operator_nonce() if client_nonce else ""
+        # G6: only a RELAYED attach connection can be offered the relay proof —
+        # the owner's relay is the only dialer that writes ``relay_nonce`` (and
+        # always with ``locality: remote``). Same shape check as the operator
+        # nonce; an ill-shaped one degrades to "no proof offered", i.e. unverified.
+        raw_relay_nonce = frame.get("relay_nonce")
+        relay_nonce = (
+            raw_relay_nonce
+            if kind == "attach" and locality == "remote" and is_wire_hex(raw_relay_nonce)
+            else ""
+        )
+        relay_salt = mesh_origin.relay_nonce() if relay_nonce else ""
         # THE PAIRED-DEVICE DECLARATION (stage D). A relay says here that a phone
         # has been paired with THIS machine, and the runtime verifies the
         # certificate under the pinned anchor before it means anything — an
@@ -5661,6 +5775,8 @@ class RuntimeServer:
             cwd_adoption=cwd_adoption,
             operator_nonce=client_nonce,
             operator_salt=server_salt,
+            relay_nonce=relay_nonce,
+            relay_salt=relay_salt,
             device_certificate=device_certificate,
         )
         self._clients[id(writer)] = conn
@@ -5842,6 +5958,10 @@ class RuntimeServer:
                 except ValueError:
                     continue
                 conn.last_seen = time.monotonic()
+                attest_reply = self._relay_attest_reply(conn, frame)
+                if attest_reply is not None:
+                    await self._send_to(conn, attest_reply)
+                    continue
                 self._dispatch_frame(conn, frame)
         except (ConnectionResetError, BrokenPipeError):
             self._drop_client(conn, reason="reader reset")
@@ -9198,6 +9318,13 @@ class RuntimeServer:
                 operator_proved=proved,
                 surface=conn.surface,
                 kind=conn.kind,
+                # ``getattr``: a reader test may hand in a reduced connection
+                # double; absent reads as the fail-closed "not proved".
+                mesh_verified=bool(getattr(conn, "mesh_verified", False)),
+                peer_verified=bool(getattr(conn, "peer_verified", False)),
+                # Loaded only for a non-local connection: a local one writes no
+                # stamp, so it never pays for the identity read.
+                stamped_by=self._mesh_device_id() if conn.locality != "local" else "",
                 input_surface=_input_surface_for(
                     declared_origin=conn.origin,
                     kind=conn.kind,
@@ -9233,6 +9360,8 @@ class RuntimeServer:
         """
         from local_operator.mobile.types import validate_control_frame
 
+        # G5 rule 1: no op ever reads a frame-supplied mesh origin stamp.
+        frame = _strip_frame_origin(frame)
         validate_control_frame(frame)
         h = self._handle
         if op == "acknowledge_attention":
@@ -9299,6 +9428,13 @@ class RuntimeServer:
                 fields["input_mode"] = frame.get("input_mode")
             if "input_path" in parameters:
                 fields["input_path"] = frame.get("input_path")
+            # The busy-send delivery mode rides the same probe: absent is the
+            # legacy steer, and a handle that predates the keyword keeps its
+            # exact old call shape (the client that sent a mode has already
+            # refused against this owner on the capability, so nothing the
+            # dispatch drops can downgrade a queued send).
+            if "delivery" in parameters:
+                fields["delivery"] = frame.get("delivery")
             # The audio door rides the same probe. A frame that omits the key
             # answers ``None`` (no recording), so every legacy send stays
             # byte-identical, and a handle that predates this keyword never
@@ -9327,6 +9463,11 @@ class RuntimeServer:
                 # the operator's own devices can still answer with their
                 # capability. Local attaches keep the default.
                 fields["owner_typed"] = False
+            # G5: the receiver-built stamp rides beside ``owner_typed``. Probed, so
+            # a handle from before the carriage keeps its exact call shape.
+            stamp = authority.mesh_origin()
+            if stamp is not None and "mesh_origin" in parameters:
+                fields["mesh_origin"] = stamp
             if "_file_admission" in parameters:
                 from local_operator.session.file_provenance import user_admission
 
@@ -9358,6 +9499,11 @@ class RuntimeServer:
                 fields["input_mode"] = frame.get("input_mode")
             if "input_path" in parameters:
                 fields["input_path"] = frame.get("input_path")
+            # The busy-send delivery mode rides the same probe: absent is the
+            # legacy steer, and a handle that predates the keyword keeps its
+            # exact old call shape.
+            if "delivery" in parameters:
+                fields["delivery"] = frame.get("delivery")
             # ...and the recording rides it like an image does: a mid-turn
             # audio send lands its blocks on the queued row rather than
             # dropping them at a handle that cannot take the keyword.
@@ -9378,6 +9524,9 @@ class RuntimeServer:
             if authority.locality != "local" and "owner_typed" in parameters:
                 # Same rule as the prompt op above.
                 fields["owner_typed"] = False
+            stamp = authority.mesh_origin()
+            if stamp is not None and "mesh_origin" in parameters:
+                fields["mesh_origin"] = stamp
             if "_file_admission" in parameters:
                 from local_operator.session.file_provenance import user_admission
 
@@ -9674,6 +9823,12 @@ class RuntimeServer:
                     ask_kwargs.update(
                         await _answer_attachment_kwargs(op, method, wire_images, answers)
                     )
+                # G5: the answer's mesh origin, minted here from the connection
+                # and stored as ``answered_by.mesh_origin``; the store folds a
+                # revision's stamp into it (design §2 rule 4).
+                answer_stamp = authority.mesh_origin()
+                if answer_stamp is not None and _accepts_kw(method, "mesh_origin"):
+                    ask_kwargs["mesh_origin"] = answer_stamp
                 outcome = method(
                     str(frame.get("ask_id", "")),
                     answers,
@@ -9762,6 +9917,9 @@ class RuntimeServer:
                         or (callable(minted_probe) and bool(minted_probe(mirrored_id[0])))
                     ),
                 )
+            mirror_stamp = authority.mesh_origin()
+            if mirror_stamp is not None and _accepts_kw(h.ask_answer, "mesh_origin"):
+                answer_kwargs["mesh_origin"] = mirror_stamp
             # ADR 0009 R10: a legacy mirrored id names a QUEUED ask (its answer
             # reaches a later run as an ``ask_response`` row); any other id is a
             # live picker in the run in flight.
@@ -11205,6 +11363,10 @@ class RuntimeServer:
                 # connection that will not outlive this list.
                 frame["operator_salt"] = conn.operator_salt
                 frame["operator_proof"] = proof
+            if conn.relay_salt:
+                # G6: the salt the relay's proof must bind. Not a credential;
+                # ``dial.dial_owner`` pops it before the welcome reaches a viewer.
+                frame["relay_salt"] = conn.relay_salt
             await self._send_to(conn, frame)
         finally:
             conn.sending_welcome = False
@@ -11256,6 +11418,98 @@ class RuntimeServer:
         if getattr(self._handle, "session_projection_seed", None) is None:
             return None
         return {"op": "welcome", "data": self._identity_projection()}
+
+    def _relay_key_material(self) -> tuple[bytes, str] | None:
+        """``(K_relay, device_id)``, derived ONCE per runtime and cached (M-10).
+
+        The device seed is read, derived from and discarded inside
+        ``origin.relay_key_for``: this runtime only ever holds the purpose-bound
+        key. Only a SUCCESS is cached — an install paired after this runtime
+        started is picked up on the next relayed connection — and a rotation after
+        caching leaves the old key here, so the relay's new proof fails and the
+        stamp reads unverified (fail-closed, never stale-true). The root is this
+        runtime's own ``config_dir()``, the root its relay shares.
+        """
+        cached = getattr(self, "_relay_key_cache", None)
+        if cached is not None:
+            return cast("tuple[bytes, str]", cached)
+        from local_operator.paths import config_dir
+
+        try:
+            material = mesh_origin.relay_key_for(config_dir())
+        except Exception:  # noqa: BLE001 — no key means no proof: unverified
+            logger.debug("mesh origin: this install's device key is unreadable", exc_info=True)
+            return None
+        if material is not None:
+            self._relay_key_cache = material
+        return material
+
+    def _mesh_device_id(self) -> str:
+        """This install's mesh ``device_id`` for ``stamped_by``, or "" with none."""
+        material = self._relay_key_material()
+        return material[1] if material is not None else ""
+
+    def _relay_attest_reply(self, conn: _ClientConn, frame: Any) -> dict[str, Any] | None:
+        """Handle a ``relay_attest`` on the reader loop; ``None`` for any other frame.
+
+        G6 (mesh-origin-stamp §3.1). Runs on the connection's READER, before the
+        frame is scheduled, because it mutates per-connection state and the
+        dispatcher deliberately holds no ``conn`` (the ``event_mute`` rule).
+
+        POSITION IS PINNED (M-9): accepted ONLY as the first frame after the
+        welcome, on a connection that was offered a salt. Anywhere else it is
+        REFUSED with no state change — so a viewer's frame pumped through the
+        owner's relay after its attest, or a second attempt, can neither verify
+        nor un-verify a connection. One attempt per connection, pass or fail.
+
+        ``verified`` on the stamp is ``proof_ok AND block.peer_verified``: the
+        block is recomputed from the auth frame's ``peer`` and ``capabilities``
+        exactly as the relay built it (``origin.canonical_block``), so a proof over
+        any other identity, link or ``peer_verified`` fails. Logged as facts only,
+        never the proof.
+        """
+        first = conn.awaiting_first_frame
+        conn.awaiting_first_frame = False
+        if not isinstance(frame, dict) or frame.get("op") != mesh_origin.RELAY_ATTEST_OP:
+            return None
+        req = frame.get("req")
+        if not first or not conn.relay_salt:
+            logger.info(
+                "relay attest refused: not the first post-welcome frame of a relayed "
+                "connection (kind=%s locality=%s)",
+                conn.kind,
+                conn.locality,
+            )
+            return {
+                "op": "error",
+                "req": req,
+                "message": "relay_attest is accepted only as the first frame of a relayed dial",
+            }
+        material = self._relay_key_material()
+        block = mesh_origin.canonical_block(conn.peer, conn.capabilities)
+        ok = material is not None and mesh_origin.relay_proof_ok(
+            frame.get("proof"),
+            key=material[0],
+            relay_nonce=conn.relay_nonce,
+            relay_salt=conn.relay_salt,
+            block=block,
+        )
+        if ok:
+            conn.mesh_verified = True
+            conn.peer_verified = block["peer_verified"] is True
+        logger.info(
+            "relay attest: proof_ok=%s peer_verified=%s device=%r network=%r",
+            ok,
+            block["peer_verified"],
+            block["device_id"],
+            block["network_id"],
+        )
+        return {
+            "op": "ack",
+            "req": req,
+            "detail": "relay attested" if ok else "relay not attested",
+            "verified": bool(ok),
+        }
 
     def _welcome_operator_proof(self, conn: _ClientConn) -> str | None:
         """This connection's handshake proof, or ``None`` when there is none to give.

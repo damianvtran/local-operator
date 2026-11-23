@@ -1770,6 +1770,7 @@ async def deliver_peer_message_outcome(
     cwd: str = "",
     custom_type: str | None = None,
     bridge_meta: dict[str, Any] | None = None,
+    message_id: str | None = None,
 ) -> DeliveryOutcome:
     """Deliver one message and return the HONEST state of that delivery.
 
@@ -1783,8 +1784,21 @@ async def deliver_peer_message_outcome(
     :func:`unengaged_refusal`, because no message was ever minted and there is no
     state to report; :func:`deliver_peer_message` stays the ``-> str`` face for
     callers that only want the receipt line.
+
+    ``message_id`` (optional, LOCAL plumbing only — the wire field already
+    exists): a caller that persisted the identity of ONE logical message before
+    dispatch passes it so a replay after a crash re-sends the SAME id, which the
+    receiver's existing duplicate gate answers instead of appending a second row
+    (Team Bridge card hand-off, PR #3478 QA r1). Omitted means mint, exactly as
+    every other caller has always done. An explicit id that is not the receiver's
+    accepted shape is REFUSED before anything is dialled: silently minting a
+    replacement would re-open the duplicate the caller is trying to close, and a
+    malformed id would be ignored by the receiver (which mints its own) anyway.
     """
-    message_id = mint_peer_message_id()
+    if message_id is None:
+        message_id = mint_peer_message_id()
+    elif not valid_peer_message_id(message_id):
+        raise ValueError("invalid peer message id")
     if record is not None:
         # The unengaged gate, at this layer as well as in resolution: a caller
         # can bypass resolution (a hand-built record, a future entry point).

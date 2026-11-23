@@ -48,6 +48,7 @@ from local_operator.secrets.errors import (
     SecretExists,
     SecretNotFound,
     SecretStoreError,
+    SessionBrokerLost,
 )
 
 
@@ -70,5 +71,6 @@ __all__ = [
     "SecretExists",
     "SecretNotFound",
     "SecretStoreError",
+    "SessionBrokerLost",
     "secrets",
 ]

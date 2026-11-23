@@ -1,0 +1,19 @@
+module: /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/__init__.py
+frozen SHA256: local_operator/i18n/catalogues/en/tui.model_persistence.json 4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff
+frozen SHA256: local_operator/i18n/catalogues/en/tui.model_persistence.context.json b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc
+protected token: '/model default' exact, once
+tui.model_persistence.persist args= () plural/select arms=0
+render: /model default将当前模型保存为新会话的默认模型
+protected token: '/settings' exact, once
+tui.model_persistence.settings args= () plural/select arms=0
+render: /settings也可修改新会话的默认模型
+protected token: '/model saved' exact, once
+tui.model_persistence.saved args= () plural/select arms=0
+render: /model saved将本会话切换至已保存的默认模型
+tui.model_persistence.with_model args= (('label', 'simple'), ('routes', 'simple')) plural/select arms=0
+envelope opaque parameters preserved: 模型：provider/model — /model default将当前模型保存为新会话的默认模型 · /model saved将本会话切换至已保存的默认模型 · /settings也可修改新会话的默认模型
+envelope opaque parameters preserved: 模型：provider/long-opaque-model-identity-20261122-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx — /model default将当前模型保存为新会话的默认模型 · /model saved将本会话切换至已保存的默认模型 · /settings也可修改新会话的默认模型
+settings-only setup clause: /settings也可修改新会话的默认模型
+target SHA256: c9fb6447f1e19037cf40808089111d4980f5fd96d3e905d843f797230b9329b0
+PASS: 4 keys; source order; frozen hashes; context schema; ICU argument parity; zero plural/select arms; exact protected commands; opaque string parameters; no manual bidi controls
+NOT RUN: global/base-aware checker (owner centralized); live NoticeBlock wrapping 80/100/120, integration and native rendering (owner scope); independent A/B audits pending

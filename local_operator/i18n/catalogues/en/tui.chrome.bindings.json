@@ -3,7 +3,7 @@
   "tui.chrome.bindings.legend_app_ctrl_b": "show or hide the sessions list",
   "tui.chrome.bindings.legend_app_ctrl_c": "interrupt the turn; twice exits",
   "tui.chrome.bindings.legend_app_ctrl_g": "cycle the subagent panel",
-  "tui.chrome.bindings.legend_app_ctrl_home_end": "jump to the transcript top or end",
+  "tui.chrome.bindings.legend_app_ctrl_home_end": "jump top/end; scroll option+k/j or ctrl+]/\\",
   "tui.chrome.bindings.legend_app_ctrl_l": "clear the transcript (history stays)",
   "tui.chrome.bindings.legend_app_ctrl_n_ctrl_s": "start a new session / resume one",
   "tui.chrome.bindings.legend_app_ctrl_t": "expand or collapse the todo panel",

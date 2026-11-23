@@ -15,7 +15,7 @@
     "tone": "plain, reassuring"
   },
   "tui.bridge_card.body.held": {
-    "note": "The message was held by the operator's content screening and not shown to the agent. Never mention a reason or category; only that it is held.",
+    "note": "Moderation is holding the message for review (it can still be released or refused), so its text is not shown to the agent or here. Never mention a reason or category; only that it is held for review. Not used for a temporary screening delay (see body.held_transient).",
     "role": "card body state",
     "tone": "neutral, factual"
   },
@@ -50,7 +50,7 @@
     "tone": "neutral, factual"
   },
   "tui.bridge_card.body.offline": {
-    "note": "Radient could not be reached while loading this message body. The card is already open, so the retry is to close it and open it again (not 'expand again'). 'Radient' is a product name, not translated.",
+    "note": "Radient could not be reached while loading this message body. The open card retries by itself on a timer, so this says it is retrying; no user action is needed. 'Radient' is a product name, not translated.",
     "role": "card body state",
     "tone": "plain"
   },
@@ -90,8 +90,28 @@
     "tone": "plain instruction, terse"
   },
   "tui.bridge_card.header.offline": {
-    "note": "One-line collapsed card header (after the sender's name) when Radient could not be reached while loading this message. The card is closed here, so the retry is to open (expand) it — the open card's body line, tui.bridge_card.body.offline, says 'close and reopen' instead. 'Radient' is a product name, not translated. Keep it short.",
+    "note": "One-line collapsed card header (after the sender's name) when Radient could not be reached while loading this message. The card is closed here, so the retry is to open (expand) it — an open card retries by itself, and its body line, tui.bridge_card.body.offline, says it is retrying. 'Radient' is a product name, not translated. Keep it short.",
     "role": "collapsed card summary",
+    "tone": "plain, terse"
+  },
+  "tui.bridge_card.context.dm": {
+    "note": "Shown in an expanded inbound Team Bridge card, on the line under the untrusted-content caution, naming where the message was sent: a one-to-one direct message. Joined with ' · ' to an optional thread marker and the time (e.g. 'Direct message · 14:56'). Short label, sentence case.",
+    "role": "card context: conversation kind",
+    "tone": "plain, terse"
+  },
+  "tui.bridge_card.context.channel": {
+    "note": "Same line as tui.bridge_card.context.dm, for a channel whose name is unknown (a known name is shown as '#name' instead). Short label.",
+    "role": "card context: conversation kind",
+    "tone": "plain, terse"
+  },
+  "tui.bridge_card.context.group": {
+    "note": "Same line as tui.bridge_card.context.dm, for a group conversation (several people, not a named channel) whose name is unknown. Short label.",
+    "role": "card context: conversation kind",
+    "tone": "plain, terse"
+  },
+  "tui.bridge_card.context.thread_reply": {
+    "note": "Same line as tui.bridge_card.context.dm: the message is a reply inside a thread, not a top-level post (e.g. '#general · Thread reply · 14:56'). Short label, sentence case.",
+    "role": "card context: thread marker",
     "tone": "plain, terse"
   }
 }

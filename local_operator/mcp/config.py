@@ -349,6 +349,46 @@ def _string_list(value: JsonValue) -> list[str]:
     return [item for item in value if isinstance(item, str)]
 
 
+def server_suppressed(
+    name: str, cfg: MCPServerConfig, *, disabled: set[str], enabled: set[str]
+) -> bool:
+    """Does the enable/disable resolution turn this declaration off?
+
+    THE ONE PREDICATE: ``disabledServers`` beats ``enabledServers``, which beats
+    the entry's own ``enabled: false``. It is public because the mesh's MCP
+    definition sync (``network/mcpdefs.py``) must decide "does the owner run
+    this server" by the same rule the connect path uses — a second spelling is
+    how the mirror came to install, on every peer, a server its owner had turned
+    off.
+    """
+    return name in disabled or (cfg.enabled is False and name not in enabled)
+
+
+def suppressed_server_names(doc: Mapping[str, Any] | None) -> set[str]:
+    """Every name ONE local-operator document turns off, by :func:`server_suppressed`.
+
+    The names in its ``disabledServers`` list (declared here or not — the list is
+    a name-level tombstone) plus each of its own ``mcpServers`` entries the
+    predicate suppresses (``enabled: false`` not rescued by ``enabledServers``).
+    Scoped to the one document on purpose: the mesh mirror reads an install's
+    user-scope ``mcp.json`` for an explicit root and has no project ``cwd``, so
+    folding in another file's lists would make the answer depend on where the
+    relay happened to start.
+    """
+    if not isinstance(doc, Mapping):
+        return set()
+    disabled = set(_string_list(doc.get("disabledServers")))
+    enabled = set(_string_list(doc.get("enabledServers")))
+    names = set(disabled)
+    for name, raw in _local_operator_servers(dict(doc)).items():
+        cfg = _coerce_server_config(raw)
+        if cfg is not None and server_suppressed(
+            str(name), cfg, disabled=disabled, enabled=enabled
+        ):
+            names.add(str(name))
+    return names
+
+
 def _local_operator_servers(doc: dict[str, Any]) -> dict[str, Any]:
     """Server entries from a local-operator-shaped file (``mcpServers`` key)."""
     servers = doc.get("mcpServers")
@@ -602,8 +642,7 @@ def load_all_mcp_configs(
     sources: dict[str, str] = {}
     for name, entries in per_name.items():
         for cfg, source in entries:
-            suppressed = name in disabled or (cfg.enabled is False and name not in enabled)
-            if suppressed:
+            if server_suppressed(name, cfg, disabled=disabled, enabled=enabled):
                 if source in owned_sources:
                     break
                 continue

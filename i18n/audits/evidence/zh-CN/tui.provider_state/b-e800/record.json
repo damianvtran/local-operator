@@ -1,0 +1,96 @@
+{
+  "locale": "zh-CN",
+  "namespace": "tui.provider_state",
+  "audit_id": "b-e800",
+  "audit_date": "2026-11-22",
+  "key_count": 5,
+  "source_audit_revision": "a54ec02de48a94b68d6c3dc92e1307c97ea776ad",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "e800bd515a19",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "298f6fe9722a",
+    "independent_from_english_source_author_session": "93b7b02899af",
+    "independent_from_auditor_A_session": "8aa95e755693",
+    "actual_model_source": "Host [model switch] message: temporary fallback due to provider failure: quota",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "298f6fe9722a",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host [model switch] message in this session; provider quota failure",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "translator_provenance_source": "i18n/audits/evidence/zh-CN/tui.provider_state/zh22author/record.json",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.json",
+      "sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.context.json",
+      "sha256": "67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/tui.provider_state.json",
+      "sha256": "ba73193e56b6b01a584418c0b8a392ee01af2c810789229f576895fbc978a5f1"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.provider_state/b-e800/report.md",
+      "sha256": "08befe0681299ecbb0dc74173e9421611d86942488692488597014032b2979f2"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.provider_state/b-e800/audit.log",
+      "sha256": "f59ffa7c8411c2960f763c60bb5853c19b1e6c19054af217d18279c813b2f0eb"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.provider_state/b-e800/script.py.txt",
+      "sha256": "91aa5a7d3f56997f13a46ddb4f5eb74b1e074ee828e0b4740c621708d2e42114"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.provider_state/b-e800/ledger-receipt.json",
+      "sha256": "3c9046eba11f2425e3a027bbfa894964aeff931f8fcb3c5666f22aa2db64fe17"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "current_bytes_match_audited_hashes": true,
+  "artifact_semantics": {
+    "report.md": "audit_notes_not_execution_log",
+    "audit.log": "actual execution stdout/stderr; exit 0; discovery warning retained",
+    "script.py.txt": "exact executed validator program",
+    "ledger-receipt.json": "append-ready current-contract ledger receipt; not applied",
+    "artifact-manifest.json": "artifact hash manifest; not ledger receipt"
+  },
+  "validation": {
+    "official_scoped_catalogue_problems": [],
+    "negative_controls": [
+      "missing_key_rejected",
+      "added_argument_rejected"
+    ],
+    "official_render_cases": 10,
+    "zero_argument_messages": 10,
+    "plural_select_count": 0,
+    "rich_width_samples": 20,
+    "synthetic_pseudo_cases": 10,
+    "full_checker_run": false,
+    "native_ui_fit_proven": false,
+    "network_isolation_proven": false,
+    "original_provider_before_offline_claim": "UNVERIFIED"
+  },
+  "retention": "New repo-only uncommitted B evidence; manager must commit. No ledger/history apply."
+}

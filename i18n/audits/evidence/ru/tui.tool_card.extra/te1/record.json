@@ -1,0 +1,56 @@
+{
+  "locale": "ru",
+  "namespace": "tui.tool_card.extra",
+  "source_sha256": "a89883a2ea4462b720f39ec853b5569904920da2a7ca72f98855d28f19f8bd2c",
+  "context_sha256": "ef227e6333498cd9cfb4a82a1e4e8038e716264040cf0da0440b7721f5911b45",
+  "target_sha256": "298843fcb688b0997c7861e117293c59cab81c60573e54e273e1ec59a7fcd385",
+  "translator": {
+    "agent": "translator (lopdev task subagent)",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-21",
+    "provenance": "as supplied in the audit brief; translator instance not observed by the auditor"
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev independent auditor subagent, task extra-audit-ru), not the translator; did not edit values",
+    "session": "ed293cbf568a",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-21",
+    "result": "clean-with-findings",
+    "findings": 2,
+    "unresolved_blocker_major": 0,
+    "severity_counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 1,
+      "nit": 1
+    },
+    "finding_ids": [
+      "RU-X1",
+      "RU-X2"
+    ],
+    "fallback_used": true,
+    "fallback_note": "pinned openai/gpt-6.1-sol hit quota HTTP 429 mid-audit; harness descended to anthropic/claude-opus-5-5, which is the same model family as the translator (independent agent instance, independent context)",
+    "independent_from_translator": true,
+    "actual_model_source": "harness model-switch notices in the auditor session"
+  },
+  "status": "passed",
+  "note": "Independent full audit (round 1) of the new tui.tool_card.extra namespace (16 keys) at worktree i18n-toolcard-followup @ 37892ab97f46 (ru file uncommitted). message_arguments parity+order 16/16; CLDR one/few/many/other on all 3 plurals, no =N; render_message spot-checks n=0,1,2,5,11,21,22,25,1.5; cell_len within maxCells on all 9 budgeted keys; no unsanctioned Latin; U+2026 and U+00B7 preserved; check.py --catalogues-only: 0 problems. RU-X1 minor (wake marker 'будить' vs glossary/status 'пробуждение', width-forced), RU-X2 nit (untitled could be 'Без названия'). Native-speaker review and rendered-frame certification not claimed.",
+  "findings": [
+    {
+      "id": "RU-X1",
+      "severity": "minor",
+      "key": "tui.tool_card.extra.send.mode.wake",
+      "current": "будить",
+      "proposed": "будить (keep) and record a ru locale call: wake marker uses the verb 'будить' because 'пробуждение' (11 cells) exceeds the 8-cell budget",
+      "reason": "Glossary/style guide map wake→пробуждение and status.send.wake_unconfirmed reads 'пробуждение без ответа'; 'будить' shares the root and already appears in wire.settings.wakes.description ('ассистента будят'), so it is consistent in meaning but is an unrecorded drift and a part-of-speech mix with 'сейчас'/'тихо'."
+    },
+    {
+      "id": "RU-X2",
+      "severity": "nit",
+      "key": "tui.tool_card.extra.search.untitled",
+      "current": "Результат без названия",
+      "proposed": "Без названия",
+      "reason": "Standard Russian 'Untitled' label; 12 vs 22 cells (en 15) in a list slot that stands in for a page title."
+    }
+  ]
+}

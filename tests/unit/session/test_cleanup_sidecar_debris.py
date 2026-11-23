@@ -173,3 +173,27 @@ def test_the_sidecar_clearing_is_bounded_to_three_named_files(
     )
     assert neighbour_cache.exists()
     assert neighbour_lock.exists()
+
+
+def test_a_removal_clears_the_prewarm_settlement_record(tmp_path: Path) -> None:
+    """PR #4398 review m1: ``cache/prewarm_settled/<id>.json`` goes with its session.
+
+    The boot prewarm writes it OUTSIDE the session directory (it pins an inode and
+    is meaningless anywhere else), so no removal took it; a neighbour's survives.
+    """
+    from local_operator.session import index_prewarm
+
+    sessions = _store(tmp_path, "abc", "def")
+    records = {}
+    for session_id in ("abc", "def"):
+        record = index_prewarm.settled_record_path(tmp_path, session_id)
+        assert record is not None
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text("{}", encoding="utf-8")
+        records[session_id] = record
+
+    assert remove_session_dir(
+        sessions / "abc", config_dir=tmp_path, policy="p", reason="r", actor="test"
+    )
+    assert not records["abc"].exists(), "the settlement record outlived its session"
+    assert records["def"].exists(), "a live session's settlement record was removed"

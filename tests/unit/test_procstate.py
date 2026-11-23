@@ -166,3 +166,40 @@ def test_a_declining_sysctl_probe_falls_back_to_ps(monkeypatch: pytest.MonkeyPat
     sample = procstate.process_sample(os.getpid())
     assert sample is not None and sample.zombie is False
     assert asked and asked[0][0] == "/bin/ps"  # type: ignore[index]
+
+
+def test_start_epochs_reads_the_ps_lstart_token_as_utc(monkeypatch):
+    """The lstart token is C-locale UTC; its epoch must not drift with TZ/locale.
+
+    A cache sweeper compares this against a file's mtime to spot a reused pid
+    (index_read_model._sweep_dead_writer_temps), so a TZ-shifted reading would
+    call a live writer a stranger.
+    """
+    monkeypatch.setattr(procstate, "birth_scheme", lambda: procstate.BIRTH_SCHEME_PS_LSTART)
+    monkeypatch.setattr(
+        procstate,
+        "process_samples",
+        lambda pids: {
+            7: procstate.ProcessSample(zombie=False, birth=procstate._lstart_token(1_795_202_040)),
+            8: procstate.ProcessSample(zombie=False, birth="garbage"),
+        },
+    )
+    assert procstate.start_epochs([7, 8]) == {7: 1_795_202_040.0, 8: None}
+
+
+@pytest.mark.skipif(procstate.is_windows(), reason="Windows has no birth probe")
+def test_start_epochs_of_a_fresh_process_is_now():
+    import subprocess
+    import sys
+    import time
+
+    before = time.time()
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        started = procstate.start_epochs([child.pid])[child.pid]
+        assert started is not None
+        # One-second lstart resolution floors the start; allow that and nothing more.
+        assert before - 1.5 <= started <= time.time() + 0.5
+    finally:
+        child.kill()
+        child.wait()

@@ -1289,6 +1289,12 @@ def _import_transcript_outcome(
 #: drifted would let one end accept an id the other refuses.
 _SESSION_ID_RE = re.compile(r"^[a-f0-9]{12}$")
 
+# The desktop catalogue exposes persisted directory names, not just IDs minted
+# by the current runtime. Bulk receipts accept the observed full hex form too,
+# without treating arbitrary catalogue keys as writable session identities.
+BULK_RECEIPT_SESSION_ID_PATTERN = r"^(?:[a-f0-9]{12}|[a-f0-9]{32})$"
+BULK_RECEIPT_SESSION_ID_RE = re.compile(BULK_RECEIPT_SESSION_ID_PATTERN)
+
 
 def acknowledge_session_receipt(root: Path, session_id: str, token: str) -> dict[str, Any]:
     """Acknowledge ONE session's read receipt, on the root that holds the session.

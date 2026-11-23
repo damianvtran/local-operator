@@ -421,15 +421,18 @@ async def test_a_wedged_rows_tooltip_carries_the_remedy_and_an_error_rows_does_n
     The ``error`` row is the reopen case, so the pairing matters as much as the
     presence: the clause must not travel to a row whose remedy is different.
     """
-    from local_operator.session.catalog import WEDGED_STATUS
-    from local_operator.tui.widgets.session_sidebar import WEDGED_REMEDY
+    from local_operator.session.catalog import wedged_status
+
+    # The English bytes of the keyed remedy clause (tui.session_sidebar.tooltip.
+    # status_wedged around the literal `lop stop` command token).
+    WEDGED_REMEDY = "lop stop if it stays silent"
 
     now = time.time()
     wedged = CatalogEntry(SessionRow("quiet0000001", now, "Quiet owner", live_state="wedged"))
     failed = CatalogEntry(
         SessionRow("failed000001", now, "Failed turn"), unseen=True, completion_kind="error"
     )
-    assert wedged.status == WEDGED_STATUS
+    assert wedged.status == wedged_status()
     assert failed.status == "Unseen error"
 
     app = OperatorApp(lambda: _factory(FakeSession()))
@@ -455,7 +458,7 @@ async def test_a_wedged_rows_tooltip_carries_the_remedy_and_an_error_rows_does_n
         await pilot.pause()
         lines = str(sidebar.tooltip or "").splitlines()
         assert len(lines) == 3, lines
-        assert WEDGED_STATUS in lines[1], lines
+        assert wedged_status() in lines[1], lines
         assert lines[1].endswith(WEDGED_REMEDY), lines
 
         await pilot.hover("#session-sidebar", offset=(8, _row_y(failed.id)))
@@ -1237,9 +1240,8 @@ async def test_navigation_crosses_a_section_header_without_stalling():
         await pilot.pause()
         await pilot.press("ctrl+b")
         await pilot.pause()
-        assert app._sidebar_timer is not None
-        app._sidebar_timer.pause()
         sidebar = app._session_sidebar
+        _quiesce_sidebar_refresh(app)
         sidebar.set_entries(_mixed_entries())
         await _focus_settled(pilot, sidebar)
         # The frame really does carry both headers.
@@ -1257,6 +1259,151 @@ async def test_navigation_crosses_a_section_header_without_stalling():
         # boundary costs no extra press and never parks on a header.
         assert walked == ["act2", "old1", "old2"], walked
         assert all(step in {entry.id for entry in sidebar.entries} for step in walked)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timer_only", [False, True], ids=["real-helper", "timer-only-control"])
+async def test_navigation_retires_the_real_opening_catalog(monkeypatch, timer_only):
+    """Drive the ORIGINAL navigation test with its opening read landing late.
+
+    The timer-only control must fail that function's existing walked assertion,
+    not an independent reimplementation of navigation. The real helper case is
+    deliberately red until that function actually calls the helper. Hold only
+    the real disk read's return; the app, collect, worker and key delivery remain
+    real. Worker completion, rather than a sleep, orders the destructive read
+    before the first Down and proves that generation rejection is the repair.
+    """
+    import inspect
+
+    from textual.pilot import Pilot
+
+    from local_operator.tui import session_catalog
+
+    original = test_navigation_crosses_a_section_header_without_stalling
+    original_load = session_catalog.load_catalog
+    original_run_worker = OperatorApp.run_worker
+    original_press = Pilot.press
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    thread_finished = asyncio.Event()
+    release = threading.Event()
+    load_started = threading.Event()
+    workers = []
+    apps = []
+    generations = []
+    down_ids = []
+    load_calls = []
+    settled = False
+
+    def held_load(*args, **kwargs):
+        # Delegate against the autouse fixture's real empty catalog; returning
+        # a canned [] would bypass the collect path this regression guards.
+        load_started.set()
+        try:
+            rows = original_load(*args, **kwargs)
+            load_calls.append(rows)
+            loop.call_soon_threadsafe(entered.set)
+            release.wait()
+            assert rows == [], rows
+            return rows
+        except Exception:
+            # A broken fixture/read must fail through worker.wait(), not leave
+            # the UI waiting forever for an event only a successful read sets.
+            loop.call_soon_threadsafe(entered.set)
+            raise
+        finally:
+            loop.call_soon_threadsafe(thread_finished.set)
+
+    def capture_worker(self, *args, **kwargs):
+        worker = original_run_worker(self, *args, **kwargs)
+        if kwargs.get("group") == "sidebar-catalog":
+            apps.append(self)
+            workers.append(worker)
+            generations.append(self._sidebar_refresh_generation)
+        return worker
+
+    def pause_timer_only(app):
+        assert app._sidebar_timer is not None
+        app._sidebar_timer.pause()
+
+    async def ordered_press(self, *keys, **kwargs):
+        nonlocal settled
+        if keys == ("down",) and not settled:
+            await entered.wait()
+            assert len(workers) == 1
+            app = apps[0]
+            assert app._sidebar_refresh_again is False
+            before = app._sidebar_refresh_generation
+            assert app._session_sidebar.cursor_id == "act1"
+            assert {entry.id for entry in app._session_sidebar.entries} == {
+                "act1",
+                "act2",
+                "old1",
+                "old2",
+            }
+            release.set()
+            await workers[0].wait()
+            assert app._sidebar_refresh_generation == before
+            assert app._sidebar_refresh_pending is False
+            assert app._sidebar_refresh_again is False
+            assert len(workers) == len(load_calls) == 1
+            # Record whether the ORIGINAL function invalidated its opening read.
+            # Do not assert repair here: baseline must reach its own assertion.
+            settled = True
+        result = await original_press(self, *keys, **kwargs)
+        if keys == ("ctrl+b",):
+            await entered.wait()
+            assert len(workers) == 1
+        elif keys == ("down",):
+            down_ids.append(apps[0]._session_sidebar.cursor_id)
+        return result
+
+    monkeypatch.setattr(session_catalog, "load_catalog", held_load)
+    monkeypatch.setattr(OperatorApp, "run_worker", capture_worker)
+    monkeypatch.setattr(Pilot, "press", ordered_press)
+    if timer_only:
+        monkeypatch.setitem(globals(), "_quiesce_sidebar_refresh", pause_timer_only)
+
+    # Pytest assertion rewriting changes exception text. Tie the negative
+    # control to the original code object AND exact existing assertion line,
+    # plus the actual cursor IDs, rather than accepting any AssertionError.
+    source, first_line = inspect.getsourcelines(original)
+    walked_line = first_line + next(
+        index
+        for index, line in enumerate(source)
+        if line.strip().startswith('assert walked == ["act2", "old1", "old2"]')
+    )
+    try:
+        if timer_only:
+            with pytest.raises(AssertionError) as failure:
+                await original()
+            frames = []
+            traceback = failure.value.__traceback__
+            while traceback is not None:
+                frames.append((traceback.tb_frame.f_code, traceback.tb_lineno))
+                traceback = traceback.tb_next
+            assert frames[-1] == (original.__code__, walked_line)
+            assert down_ids == ["", "", ""]
+            assert str(failure.value).startswith("['', '', '']")
+            assert apps[0]._sidebar_refresh_generation == generations[0]
+        else:
+            await original()
+            assert down_ids == ["act2", "old1", "old2"]
+            assert apps[0]._sidebar_refresh_generation == generations[0] + 1
+        assert settled
+        assert len(workers) == len(load_calls) == 1
+        assert apps[0]._sidebar_refresh_again is False
+    finally:
+        # Unblock collect even when setup/assertions fail; wait for the captured
+        # workers so neither the executor thread nor a catalog task leaks out.
+        release.set()
+        if load_started.is_set():
+            await thread_finished.wait()
+        for worker in workers:
+            # App teardown can cancel a worker on an earlier setup failure;
+            # cancellation is already reaped, not a second failure to mask it.
+            if not worker.is_cancelled:
+                await worker.wait()
 
 
 @pytest.mark.asyncio
@@ -1676,7 +1823,7 @@ def test_no_reachable_row_state_pairs_a_glyph_with_the_wrong_words():
     this table describes. Enumerating it here would assert a pairing no surface
     renders; the companion test drives the real render path instead.
     """
-    from local_operator.session.catalog import WEDGED_STATUS
+    from local_operator.session.catalog import wedged_status
     from local_operator.tui.terminal_title import SPINNER_FRAMES
     from local_operator.tui.widgets.session_picker import (
         ATTACHED_MARKER,
@@ -1692,7 +1839,7 @@ def test_no_reachable_row_state_pairs_a_glyph_with_the_wrong_words():
     #: glyph a row drew is a contradiction the user would have to resolve.
     ALLOWED = {
         NEEDS_YOU_MARKER: {"Approval needed", "Answer needed"},
-        WEDGED_MARKER: {WEDGED_STATUS},
+        WEDGED_MARKER: {wedged_status()},
         ATTACHED_MARKER: {"Open"},
         # The sentences ``catalog.delegating_label`` builds for the counts
         # enumerated below. ``2 subagents running`` is a PREFIX of the two-count
@@ -2049,7 +2196,7 @@ async def test_no_reachable_unseen_row_pairs_a_glyph_with_the_wrong_words():
     """
     from textual.geometry import Region
 
-    from local_operator.session.catalog import WEDGED_STATUS
+    from local_operator.session.catalog import wedged_status
     from local_operator.tui.terminal_title import SPINNER_FRAMES
     from local_operator.tui.widgets.session_picker import WEDGED_MARKER
 
@@ -2061,7 +2208,7 @@ async def test_no_reachable_unseen_row_pairs_a_glyph_with_the_wrong_words():
         "✓": {"Unseen completion"},
         "✗": {"Unseen error"},
         "⊘": {"Unseen interruption", "Unseen interruption — retired for an update"},
-        WEDGED_MARKER: {WEDGED_STATUS},
+        WEDGED_MARKER: {wedged_status()},
         "!": {"Approval needed", "Answer needed"},
     }
     now = time.time()
@@ -3063,7 +3210,7 @@ def test_a_quiet_owner_reads_as_not_answering_with_its_measured_age() -> None:
     unchanged; the age is printed beside the state so the reader is given the
     measurement the sentence is made of rather than a bare adjective.
     """
-    from local_operator.session.catalog import WEDGED_STATUS
+    from local_operator.session.catalog import wedged_status
     from local_operator.tui.widgets.session_picker import WEDGED_MARKER, row_state_mark
 
     row = SessionRow(
@@ -3074,13 +3221,13 @@ def test_a_quiet_owner_reads_as_not_answering_with_its_measured_age() -> None:
         heartbeat_age_s=243.0,
     )
     status = CatalogEntry(row).status
-    assert status == f"{WEDGED_STATUS} (last heartbeat 4m ago)"
+    assert status == f"{wedged_status()} (last heartbeat 4m ago)"
     assert "responding" not in status
 
     # No measurement (a cold render, a hand-built row): the state survives and
     # the number is absent rather than invented.
     bare = SessionRow("q" * 12, time.time(), "quiet owner", live_state="wedged")
-    assert CatalogEntry(bare).status == WEDGED_STATUS
+    assert CatalogEntry(bare).status == wedged_status()
 
     # And the words still pair with the glyph the row draws: the whole point of
     # the wording change is that this state stays distinguishable from ordinary
@@ -5696,8 +5843,13 @@ def test_sidebar_footer_bindings_do_not_shadow_app_bindings() -> None:
         )
         # A REMAPPABLE app key must never be shadowed: that is the exact D10 bug
         # (`ctrl+n` silently took the user's new-session hotkey), so it is
-        # asserted directly rather than left to the allowlist.
-        taken = keymap_defaults & set(shadows)
+        # asserted directly rather than left to the allowlist. The ONE documented
+        # exception is `ctrl+f`: it became `keymap.fork_aside`'s default when the
+        # app-level rows were exposed, and the sidebar's fleet door already
+        # carries it under a reviewed reason whose guard (`check_action` declines
+        # `fork_aside` while the aside is open) is what makes the shadow safe —
+        # so the allowlist still has to name it, and nothing else gets in.
+        taken = (keymap_defaults & set(shadows)) - set(allowed_shadows)
         assert not taken, f"{widget.__name__} shadows remappable keymap keys: {taken}"
 
     check(SessionSidebar)
@@ -5900,3 +6052,97 @@ async def test_background_work_on_an_attached_unread_parent_paints_the_work_mark
         plain = sidebar.render().plain
         assert DELEGATING_MARKER not in plain
         assert COMPLETION_MARKERS["complete"][0] in plain
+
+
+@pytest.mark.asyncio
+async def test_the_paged_footer_head_names_the_live_focus_key() -> None:
+    """Q1: the paged ladder's `head_plain` rung is composed from `lead`.
+
+    `lead` was the one branch that skipped substitution (the focused/unfocused
+    candidates were substituted after composition, but `head_plain` is
+    `f"{position} · {lead}"` built later), so after remapping `focus_sidebar`
+    the paged footer still advertised `f9 focus`. Substituting `lead` at its
+    definition covers every rung, including this one.
+    """
+    entries = [_plain(str(index)) for index in range(120)]
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, entries, total=4)
+        footer = sidebar.render().plain.splitlines()[-1]
+        assert "f9 focus" in footer, footer
+        assert "1–" in footer or "120" in footer, footer
+
+        app._apply_keymap({"keymap.focus_sidebar": "f11"}, announce=False)
+        await pilot.pause()
+        painted = sidebar.render().plain.splitlines()[-1]
+        assert "f11 focus" in painted, painted
+        assert "f9 focus" not in painted, painted
+
+
+def _swap_keymap() -> dict[str, str]:
+    return {"keymap.toggle_sidebar": "f9", "keymap.focus_sidebar": "ctrl+b"}
+
+
+@pytest.mark.asyncio
+async def test_the_footer_survives_swaps_chains_and_pins_in_one_pass() -> None:
+    """M1: the lead was live-substituted and then substituted AGAIN inside the
+    composed rungs, so a swap came back unchanged and a chain was rewritten
+    twice. These are the reviewer's three repros on one mounted footer, plus the
+    paged ladder and its chip variant — every rung the sidebar can pick.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)])
+        footer = sidebar.render().plain.splitlines()[-1]
+        assert "f9 focus" in footer and "ctrl+b hide" in footer, footer
+
+        # Swap: each key must follow its OWN action to the other's old spelling.
+        app._apply_keymap(_swap_keymap(), announce=False)
+        await pilot.pause()
+        swapped = sidebar.render().plain.splitlines()[-1]
+        assert "ctrl+b focus" in swapped and "f9 hide" in swapped, swapped
+
+        # Chain: a live value that is another shipped chord is not rewritten.
+        app._apply_keymap(
+            {"keymap.focus_sidebar": "ctrl+t", "keymap.toggle_todos": "f12"},
+            announce=False,
+        )
+        await pilot.pause()
+        chained = sidebar.render().plain.splitlines()[-1]
+        assert "ctrl+t focus" in chained, chained
+        assert "f12" not in chained, "the inserted chord was rewritten a second time"
+
+        # Pin: `pin` is built from `lead`, so it must not double-apply either.
+        app._apply_keymap(
+            {"keymap.toggle_pin": "ctrl+x", "keymap.focus_sidebar": "f10"},
+            announce=False,
+        )
+        await pilot.pause()
+        pinned = sidebar.render().plain.splitlines()[-1]
+        assert "f10 focus" in pinned, pinned
+        assert "ctrl+x" not in pinned, "this rung has no pin, so it must not appear"
+
+
+@pytest.mark.asyncio
+async def test_the_paged_footer_head_substitutes_the_lead_exactly_once() -> None:
+    """The paged ladder (120 rows) with the subagent chip on every rung.
+
+    `head_plain` and `head_hide` are composed AFTER the lead, so they were the
+    rungs the round-1 fix covered; this pins that the single pass over the final
+    candidates still reaches them once the chip and the position are in play.
+    """
+    entries = [_plain(str(index)) for index in range(120)]
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(110, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, entries, total=4)
+        footer = sidebar.render().plain.splitlines()[-1]
+        assert "f9 focus" in footer, footer
+
+        app._apply_keymap(_swap_keymap(), announce=False)
+        await pilot.pause()
+        swapped = sidebar.render().plain.splitlines()[-1]
+        assert "ctrl+b focus" in swapped, swapped
+        assert "f9 focus" not in swapped, swapped

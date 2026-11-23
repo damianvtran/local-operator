@@ -1,0 +1,23 @@
+{
+  "tui.settings_view.editor.contract": "{save_key} lưu · {cancel_key} hủy",
+  "tui.settings_view.editor.contract_unset": "{save_key} lưu · {cancel_key} hủy · để trống để gỡ",
+  "tui.settings_view.editor.suggest_long": "{browse_keys} gợi ý · {complete_key} điền · {save_key} lưu · {cancel_key}",
+  "tui.settings_view.editor.suggest_medium": "{browse_keys} duyệt · {complete_key} điền · {save_key} lưu",
+  "tui.settings_view.editor.suggest_short": "{browse_keys} · {complete_key} · {save_key} lưu",
+  "tui.settings_view.pane.agents_empty": "chưa cấu hình tác nhân nào",
+  "tui.settings_view.pane.empty_hint": "{command} để liệt kê và gắn",
+  "tui.settings_view.pane.more": "{count, plural, other {… còn {shown}}}",
+  "tui.settings_view.pane.providers_empty": "chưa đăng nhập — {command}",
+  "tui.settings_view.pane.providers_header": "nhà cung cấp",
+  "tui.settings_view.pane.tab_agents": "tác nhân",
+  "tui.settings_view.pane.tab_teams": "nhóm",
+  "tui.settings_view.pane.teams_empty": "chưa cấu hình nhóm nào",
+  "tui.settings_view.row.add_chain": "+ thêm chuỗi",
+  "tui.settings_view.row.add_hop": "+ thêm chặng",
+  "tui.settings_view.scope.live": "ngay lập tức",
+  "tui.settings_view.scope.never": "không bao giờ",
+  "tui.settings_view.scope.new_launch": "khởi chạy lại",
+  "tui.settings_view.scope.new_sessions": "phiên mới",
+  "tui.settings_view.section.takes_effect": "có hiệu lực: {scope}",
+  "tui.settings_view.too_short": "cửa sổ quá thấp để hiện cài đặt — hãy kéo cao thêm"
+}

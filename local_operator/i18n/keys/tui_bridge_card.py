@@ -69,6 +69,22 @@ def body_unavailable() -> Msg:
     return Msg("tui.bridge_card.body.unavailable", {})
 
 
+def context_channel() -> Msg:
+    return Msg("tui.bridge_card.context.channel", {})
+
+
+def context_dm() -> Msg:
+    return Msg("tui.bridge_card.context.dm", {})
+
+
+def context_group() -> Msg:
+    return Msg("tui.bridge_card.context.group", {})
+
+
+def context_thread_reply() -> Msg:
+    return Msg("tui.bridge_card.context.thread_reply", {})
+
+
 def frame_untrusted() -> Msg:
     return Msg("tui.bridge_card.frame.untrusted", {})
 

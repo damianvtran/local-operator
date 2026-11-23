@@ -282,7 +282,26 @@ def test_spec_field_surface_is_pinned() -> None:
         # through ``saver.command.set_saver_choice`` rather than the namespace,
         # for the same reason the output contract is.
         "radient_saver",
+        # The first-prompt MCP readiness bound (additive; applied post-open
+        # through ``Session.set_first_turn_mcp_wait``, never the namespace).
+        "mcp_ready_timeout_s",
     }
+
+
+def test_mcp_ready_timeout_defaults_to_the_measured_first_turn_bound() -> None:
+    """spec.py may not import the gate module (stdlib-only contract), so the
+    literal default is pinned to the gate's measured constant here."""
+    from local_operator.session.declared_mcp_ready import DECLARED_MCP_READY_TIMEOUT_S
+
+    assert SessionSpec().mcp_ready_timeout_s == DECLARED_MCP_READY_TIMEOUT_S
+    assert SessionSpec(mcp_ready_timeout_s=None).mcp_ready_timeout_s is None
+    assert SessionSpec(mcp_ready_timeout_s=0).mcp_ready_timeout_s == 0
+
+
+@pytest.mark.parametrize("value", [True, -1.0, float("nan"), float("inf"), "30"])
+def test_mcp_ready_timeout_refuses_what_wait_for_tools_refuses(value: Any) -> None:
+    with pytest.raises(SessionSpecError, match="mcp_ready_timeout_s: timeout_s must be"):
+        SessionSpec(mcp_ready_timeout_s=value)
 
 
 # --- approval policy ------------------------------------------------------------

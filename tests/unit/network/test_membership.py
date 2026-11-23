@@ -67,7 +67,10 @@ def test_read_peer_cannot_mint_an_unknown_admin() -> None:
     ).to_json()
     # Exact net_member_list answer rows: even a forged added_by is not evidence
     # that the authenticated link's reader may speak for an unknown identity.
-    assert relay.adopt_members(record, [forged], sender_device_id=PEER) == (False, [])
+    assert relay.adopt_members(record, [forged], sender_device_id=PEER, supplier_verified=True) == (
+        False,
+        [],
+    )
     assert record.member(forged["device_id"]) is None
 
 
@@ -78,7 +81,10 @@ def test_member_cannot_promote_its_own_row(role: str) -> None:
     forged = peer.to_json()
     forged.update(role="admin", capabilities=sorted(types.capabilities_for_role("admin")))
     forged["endpoints"] = ["127.0.0.1:43210"]
-    assert relay.adopt_members(record, [forged], sender_device_id=PEER) == (False, [])
+    assert relay.adopt_members(record, [forged], sender_device_id=PEER, supplier_verified=True) == (
+        False,
+        [],
+    )
     assert peer.role == role
     assert peer.endpoints == []
 
@@ -89,7 +95,9 @@ def test_self_capability_increase_cannot_bootstrap_a_later_third_party_row() -> 
     forged_self = peer.to_json()
     forged_self["capabilities"] = sorted(types.capabilities_for_role("admin"))
     forged_other = dict(forged_self, device_id="d_" + "c" * 32)
-    assert relay.adopt_members(record, [forged_self, forged_other], sender_device_id=PEER) == (
+    assert relay.adopt_members(
+        record, [forged_self, forged_other], sender_device_id=PEER, supplier_verified=True
+    ) == (
         False,
         [],
     )
@@ -111,7 +119,9 @@ def test_local_capability_revoke_does_not_block_owned_metadata_updates() -> None
     # The peer still declares its originally admitted capabilities. Accept its
     # owned metadata, not its stale capability claim or a subsequent new identity.
     forged = dict(own, device_id="d_" + "c" * 32)
-    assert relay.adopt_members(record, [own, forged], sender_device_id=PEER) == (True, [])
+    assert relay.adopt_members(
+        record, [own, forged], sender_device_id=PEER, supplier_verified=True
+    ) == (True, [])
     assert peer.name == "renamed-peer"
     assert peer.endpoints == own["endpoints"]
     assert peer.role == "drive"
@@ -170,7 +180,10 @@ def test_a_drive_supplier_relays_only_a_known_members_endpoint(
         added_via="relay",
     )
     caplog.set_level("WARNING", logger="local_operator.network.relay")
-    assert relay.adopt_members(record, [forged], sender_device_id=PEER) == (True, [])
+    assert relay.adopt_members(record, [forged], sender_device_id=PEER, supplier_verified=True) == (
+        True,
+        [],
+    )
     after = third.to_json()
     assert after["endpoints"] == ["10.0.0.2:4200"]
     # Everything except the address is exactly what this device held before.
@@ -192,7 +205,9 @@ def test_the_receivers_own_row_from_a_drive_supplier_is_ignored_silently(
     before = own.to_json()
     relayed = dict(before, endpoints=["10.9.9.9:1"], role="read", name="not-me")
     caplog.set_level("WARNING", logger="local_operator.network.relay")
-    assert relay.adopt_members(record, [relayed], sender_device_id=PEER) == (False, [])
+    assert relay.adopt_members(
+        record, [relayed], sender_device_id=PEER, supplier_verified=True
+    ) == (False, [])
     assert own.to_json() == before
     assert _refusals(caplog) == []
 
@@ -214,7 +229,10 @@ def test_an_unknown_third_row_from_a_drive_supplier_is_refused_once(
     assert own is not None
     # A whole table, as a pull carries it: only the unknown row is a refusal.
     rows = [own.to_json(), peer.to_json(), unknown]
-    assert relay.adopt_members(record, rows, sender_device_id=PEER) == (False, [])
+    assert relay.adopt_members(record, rows, sender_device_id=PEER, supplier_verified=True) == (
+        False,
+        [],
+    )
     assert record.member(THIRD) is None
     assert _refusals(caplog) == [
         "Refused member row: third-device assertion requires admin standing"
@@ -226,7 +244,10 @@ def test_joined_member_can_assert_its_own_admitted_row() -> None:
     peer = _admit_peer(record, role="read")
     own = peer.to_json()
     own["endpoints"] = ["127.0.0.1:43210"]
-    assert relay.adopt_members(record, [own], sender_device_id=PEER) == (True, [])
+    assert relay.adopt_members(record, [own], sender_device_id=PEER, supplier_verified=True) == (
+        True,
+        [],
+    )
     assert peer.endpoints == own["endpoints"]
 
 
@@ -241,11 +262,15 @@ def test_admin_can_introduce_a_genuine_third_device_grant() -> None:
     ).to_json()
     # An unsolicited notification is not an answered membership pull, even from
     # an admin. The subsequent pull may introduce this exact authorised row.
-    assert relay.adopt_members(record, [newcomer], sender_device_id=PEER, allow_new=False) == (
+    assert relay.adopt_members(
+        record, [newcomer], sender_device_id=PEER, allow_new=False, supplier_verified=True
+    ) == (
         False,
         [],
     )
-    assert relay.adopt_members(record, [newcomer], sender_device_id=PEER) == (
+    assert relay.adopt_members(
+        record, [newcomer], sender_device_id=PEER, supplier_verified=True
+    ) == (
         True,
         [newcomer["device_id"]],
     )
@@ -257,7 +282,7 @@ def test_admin_can_introduce_a_genuine_third_device_grant() -> None:
 def test_member_rows_without_authenticated_supplier_are_not_admissions() -> None:
     record, _state = _record()
     row = types.MemberRecord(device_id=PEER, role="admin").to_json()
-    assert relay.adopt_members(record, [row]) == (False, [])
+    assert relay.adopt_members(record, [row], supplier_verified=True) == (False, [])
     assert record.member(PEER) is None
 
 
@@ -707,7 +732,9 @@ def test_a_rotation_statement_that_arrives_after_the_pull_is_a_no_op(root: Path)
         rotated_at=time.time(),
         added_via="invite",
     )
-    assert relay.adopt_members(record, [published.to_json()], sender_device_id=SELF) == (
+    assert relay.adopt_members(
+        record, [published.to_json()], sender_device_id=SELF, supplier_verified=True
+    ) == (
         True,
         [new.device_id],
     )
@@ -828,7 +855,9 @@ def test_another_network_is_refused_even_when_this_one_already_applied_it(root: 
         rotated_at=time.time(),
         added_via="invite",
     )
-    assert relay.adopt_members(record, [published.to_json()], sender_device_id=SELF) == (
+    assert relay.adopt_members(
+        record, [published.to_json()], sender_device_id=SELF, supplier_verified=True
+    ) == (
         True,
         [new.device_id],
     )
@@ -1175,13 +1204,17 @@ def test_a_name_is_believed_only_from_the_device_it_names() -> None:
     assert peer_row is not None
     own = peer_row.to_json()
     own["name"] = "build-box"
-    changed, added = relay.adopt_members(record, [own], sender_device_id=PEER)
+    changed, added = relay.adopt_members(
+        record, [own], sender_device_id=PEER, supplier_verified=True
+    )
     assert (changed, added) == (True, [])
     assert peer_row.name == "build-box"
     # A DIFFERENT device relays the same row with an invented name.
     third_party = peer_row.to_json()
     third_party["name"] = "impostor"
-    changed, added = relay.adopt_members(record, [third_party], sender_device_id=SELF)
+    changed, added = relay.adopt_members(
+        record, [third_party], sender_device_id=SELF, supplier_verified=True
+    )
     assert (changed, added) == (False, [])
     assert peer_row.name == "build-box"
 
@@ -1214,7 +1247,9 @@ def test_a_peer_cannot_store_an_invalid_label_as_its_name() -> None:
     assert peer_row is not None
     hostile = peer_row.to_json()
     hostile["name"] = "d_" + "a" * 32  # this record's OWN id, as a "name"
-    changed, added = relay.adopt_members(record, [hostile], sender_device_id=PEER)
+    changed, added = relay.adopt_members(
+        record, [hostile], sender_device_id=PEER, supplier_verified=True
+    )
     assert (changed, added) == (False, [])
     assert peer_row.name == "laptop"
 
@@ -1227,7 +1262,9 @@ def test_a_peer_cannot_store_an_invalid_label_as_its_name() -> None:
         role="read",
         capabilities=sorted(types.capabilities_for_role("read")),
     ).to_json()
-    changed, added = relay.adopt_members(record, [newcomer], sender_device_id=SELF)
+    changed, added = relay.adopt_members(
+        record, [newcomer], sender_device_id=SELF, supplier_verified=True
+    )
     assert added == [newcomer_id]
     newcomer_row = record.member(newcomer_id)
     assert newcomer_row is not None

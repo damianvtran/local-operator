@@ -1,0 +1,101 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.teams.effective",
+  "assigned_scope_label": "wire.teams.effective9keys",
+  "audit_date": "2026-11-19T18:58:15.801134+00:00",
+  "audit_id": "a2b66",
+  "key_count": 9,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "2b66cec83cdb",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-19T18:58:15.801134+00:00",
+    "independent_from_translator_session": "530f154495de",
+    "actual_model_source": "Host session model declaration: openai/gpt-6.1-sol",
+    "fallback_used": false,
+    "result": "passed",
+    "findings": 0
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "530f154495de",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-19T18:41:24.794825+00:00",
+    "actual_model_source": "Translator receipt, hash independently verified",
+    "fallback_used": false
+  },
+  "source_audit_revision": "e70bc818b8553dca1fad007705257817be49ee37",
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "zh-CN": {
+      "path": "/Users/damian/.local-operator/sessions/530f154495de/scratchpad/zh-CN.wire.teams.effective.json",
+      "sha256": "6d8d1fc410def690b03ad02ba6c759a5d7b3e82391d9c12dc441fbff7d73f454"
+    },
+    "translator_receipt": {
+      "path": "/Users/damian/.local-operator/sessions/530f154495de/scratchpad/zh-CN.wire.teams.effective.translator-receipt.json",
+      "sha256": "cd670459e27140ac60a009c72ef40ddb90485c5e9a1deb82a7af241974432f4a"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.teams.effective/a2b66/report.md",
+      "current_scratch_path": "/Users/damian/.local-operator/sessions/2b66cec83cdb/scratchpad/report.md",
+      "sha256": "2327b2c529a8acb67ec4c485e988fd86621202d3d8554f82aee13bd7f57103f3"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.teams.effective/a2b66/audit.log",
+      "current_scratch_path": "/Users/damian/.local-operator/sessions/2b66cec83cdb/scratchpad/audit.log",
+      "sha256": "c05c954aa7e8a06a0b1496d023290e841b4dde3414d0a85bffaea47065fbe983"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.teams.effective/a2b66/receipt.json",
+      "current_scratch_path": "/Users/damian/.local-operator/sessions/2b66cec83cdb/scratchpad/receipt.json",
+      "sha256": "fc746e9e7a58f104a549f8db28953f2f4d09f4a00f116276c9acf45c2d3dad97"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.teams.effective/a2b66/validate_zh_effective.py",
+      "current_scratch_path": "/Users/damian/.local-operator/sessions/2b66cec83cdb/scratchpad/validate_zh_effective.py",
+      "sha256": "9141bd591243bd4c51c952e1ae72626e39ead5045dfc7c01823b2bde59f59479"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "scope": "independent linguistic and scoped mechanical audit only"
+  },
+  "audit_notes_not_execution_log": "report.md",
+  "actual_execution_log": "audit.log",
+  "second_independent_audit": {
+    "required": true,
+    "performed_by_this_session": false,
+    "reason": "User-visible error/unavailability diagnostics and model configuration remedies; HOWTO high-visibility/safety rule"
+  },
+  "validation": {
+    "frozen_repo_check_catalogues_isolated_fixture": "passed",
+    "strict_json_keys_placeholders_tokens": "passed",
+    "runtime_string_formatting_nine_keys": "passed; not rendered evidence",
+    "full_check_and_generation": "not executed",
+    "ledger_append": "not executed",
+    "pseudo_localization": "not executed",
+    "gui_fallback_rtl_rendered_evidence": "not executed; integration owner must supply applicable captures"
+  },
+  "retention": {
+    "status": "scratch handoff only; not tracked or merged",
+    "intended_record_path": "i18n/audits/evidence/zh-CN/wire.teams.effective/a2b66/record.json",
+    "manager_action": "Preserve bundle at canonical tracked path before append; run append history-sha/dry-run/apply per HOWTO"
+  },
+  "original_lost_evidence": {
+    "status": "none; new audit of frozen supplied originals"
+  },
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false
+}

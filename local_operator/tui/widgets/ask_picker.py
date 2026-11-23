@@ -442,6 +442,9 @@ class _QuestionState:
     #: previous one, and coming back to a question would show it differently
     #: from how it was left.
     revealed: bool = False
+    # Separate from the answer cursor: reading a long frozen consent question
+    # must never select a different answer. Only explicit reveal enables paging.
+    question_offset: int = 0
 
 
 @dataclass
@@ -1035,7 +1038,12 @@ class AskPickerScreen(Container):
         self._repaint()
 
     def action_page(self, delta: int) -> None:
-        """PageUp/PageDown move the cursor a page and let the window follow.
+        """Page revealed question text, otherwise move the answer cursor a page.
+
+        A question longer than the fixed card uses PgUp/PgDn as a lossless
+        reader while Ctrl+E is on; arrows still choose answers. That mode is
+        named on the footer with its exact line range and cannot grant consent.
+        Ordinary asks retain their cursor paging when no question is hidden.
 
         CLAMPED, not wrapped: paging past the end lands on the end, unlike
         :meth:`action_move` which wraps a discrete keypress. The step is
@@ -1047,6 +1055,13 @@ class AskPickerScreen(Container):
         means "about a screenful" while the window stays line-granular.
         """
         layout = self._layout()
+        review = self._question_review_window(layout)
+        if review is not None:
+            start, page, total = review
+            self.state.question_offset = max(0, min(total - page, start + delta * page))
+            self._rejected = False
+            self._repaint()
+            return
         step = max(1, self._rows_per_body(layout.line_start_by_row, layout.body_line_budget) - 1)
         target = self.state.selected + delta * step
         self._move_to(max(0, min(self.row_count - 1, target)))
@@ -1727,10 +1742,11 @@ class AskPickerScreen(Container):
         so a nominal reserve of 4 delivered 2 at 100x30/26/24/22/20 and 80x24:
         the very starvation the constant exists to prevent.
 
-        ``reveal`` LIFTS the bound — it does not promise the whole question.
-        Past the point where the body cannot hold the text, ``_allocate`` step 5
-        clips it and marks the cut, which is the card's existing discipline and
-        the honest answer on a terminal with nothing left to give.
+        ``reveal`` LIFTS the bound. If the fixed body still cannot hold the
+        question, ``_allocate`` exposes a page without dropping any characters;
+        PgUp/PgDn reaches the rest. The footer reports the exact review range.
+        This is essential for frozen consent details: an ellipsis without a
+        way to read its hidden text is not an adequate authorization surface.
         """
         # A newline is a ROW BREAK here, never a character (PR #3693 design D1).
         # ``wrap_cells`` splits on " " only, so "a\nb" was one word: a host- or
@@ -2364,8 +2380,14 @@ class AskPickerScreen(Container):
         if position:
             remaining -= 1
         # The first line is already paid for above; the rest competes at step 5.
-        kept = list(question[: remaining + 1])
-        if len(kept) < len(question) and kept:
+        page = min(len(question), remaining + 1)
+        # Reveal is a lossless review viewport, not a larger truncation cap.
+        # Keep allocation unchanged (including answer/exit reservations), and
+        # page only the question. The footer names PgUp/PgDn and its exact range;
+        # the answer cursor and all ordinary, unrevealed asks stay unchanged.
+        start = max(0, min(self.state.question_offset, len(question) - page)) if reveal else 0
+        kept = list(question[start : start + page])
+        if not reveal and len(kept) < len(question) and kept:
             # Say that the question continues. A silently halved question is
             # the one clip on this card the reader cannot detect: every other
             # abbreviation leaves a count, a caret or an empty gutter behind.
@@ -3752,6 +3774,21 @@ class AskPickerScreen(Container):
             return _wrap_tail(self._row_description(index), wrapped, position)
         return text
 
+    def _question_review_window(self, layout: _CardLayout) -> tuple[int, int, int] | None:
+        """The lossless question range while reveal exceeds the fixed card.
+
+        This is deliberately derived from the final allocation, not a second
+        height heuristic. A resize clamps the offset against the new wrap and
+        page size without changing any answer or persisting unfinished input.
+        """
+        if not self.state.revealed or not layout.question:
+            return None
+        total = len(self._question_lines(layout.width, reveal=True))
+        page = len(layout.question)
+        if total <= page:
+            return None
+        return max(0, min(self.state.question_offset, total - page)), page, total
+
     def _footer_hints(self, width: int) -> list[tuple[str, str]]:
         """The key hints that fit, shedding WORDS before it sheds KEYS.
 
@@ -3776,6 +3813,20 @@ class AskPickerScreen(Container):
         outranks even that: it is the ONLY key that can answer the question, and
         it used to be dropped while `esc skip` survived.
         """
+        review = self._question_review_window(self._layout()) if self.has_focus else None
+        if review is not None:
+            start, page, total = review
+            # Key identifiers and a numeric range, not new translatable copy.
+            # Defend navigation and exit ahead of answer shortcuts: the missing
+            # text is what makes an authorization meaningful at compact sizes.
+            hints = [("PgUp/PgDn", f"{start + 1}–{start + page}/{total}")]
+            reveal_hint = self._reveal_hint()
+            if reveal_hint is not None:
+                hints.append(reveal_hint)
+            if not self._read_only:
+                hints.extend([("↑↓", ""), ("enter", "")])
+            hints.append(self._shown_exit_hint)
+            return self._shed_to_fit(hints, ["↑↓", "enter", "^e", "PgUp/PgDn", "esc"], width)
         # While the CARD does not hold the caret, most of this keymap is not
         # reachable: the composer has focus and takes the arrows, Enter and the
         # printable keys as text. Only what the app routes still works — the

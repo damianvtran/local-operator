@@ -1,0 +1,8 @@
+{
+  "wire.agent_badges.packaged": {
+    "role": "agent provenance badge",
+    "tone": "short, plain, lowercase",
+    "maxCells": 27,
+    "note": "Available built-in starter not yet present in the registry. Not installation status, trust, security, or permission. Shares ONE 27-cell facts budget with kind and proactive; not 27 cells per label. Preserve the proactive safety marker whole, spilling it or scope to another facts line when needed."
+  }
+}

@@ -1,0 +1,208 @@
+{
+  "locale": "zh-CN",
+  "namespace": "tui.info",
+  "head": "8f1e45a3a98ca9f8b7312b6707c36e21b758966d",
+  "source_sha256": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+  "context_sha256": "aee21715fca769227b3bda5b500a5e81e51763cf86817f741baff8b1a5ef0ae7",
+  "target_before_sha256": "937193f1bfb9552b0d59a86cea9e3185c9db65dabb32d0512640a377f58f2a2d",
+  "target_after_sha256": "a3c7fef5c7f39382aad8ee62e2e2d90915344119892a45719531e14115ba8e02",
+  "key_count": 277,
+  "changed_keys": [
+    "tui.info.approval.auto_full",
+    "tui.info.export.build_age",
+    "tui.info.export.uptime",
+    "tui.info.state.stale"
+  ],
+  "unchanged_keys": 273,
+  "order_format_untouched_values": "byte-exact",
+  "checks": [
+    {
+      "key": "tui.info.approval.auto_full",
+      "rendered": "工具调用无需确认即可执行",
+      "pseudo_missing_or_noarg": "⟦··工具调用无需确认即可执行··⟧"
+    },
+    {
+      "message_id": "tui.info.export.build_age",
+      "missing_rendered": "  距构建时间        未知",
+      "known_renders": [
+        {
+          "seconds": 0,
+          "duration": "0秒",
+          "rendered": "  距构建时间        0秒"
+        },
+        {
+          "seconds": 1,
+          "duration": "1秒",
+          "rendered": "  距构建时间        1秒"
+        },
+        {
+          "seconds": 2,
+          "duration": "2秒",
+          "rendered": "  距构建时间        2秒"
+        },
+        {
+          "seconds": 5,
+          "duration": "5秒",
+          "rendered": "  距构建时间        5秒"
+        },
+        {
+          "seconds": 11,
+          "duration": "11秒",
+          "rendered": "  距构建时间        11秒"
+        },
+        {
+          "seconds": 21,
+          "duration": "21秒",
+          "rendered": "  距构建时间        21秒"
+        },
+        {
+          "seconds": 1000,
+          "duration": "16分钟",
+          "rendered": "  距构建时间        16分钟"
+        },
+        {
+          "seconds": 60,
+          "duration": "1分钟",
+          "rendered": "  距构建时间        1分钟"
+        },
+        {
+          "seconds": 3600,
+          "duration": "1小时0分",
+          "rendered": "  距构建时间        1小时0分"
+        },
+        {
+          "seconds": 3660,
+          "duration": "1小时1分",
+          "rendered": "  距构建时间        1小时1分"
+        },
+        {
+          "seconds": 86400,
+          "duration": "1天0小时",
+          "rendered": "  距构建时间        1天0小时"
+        },
+        {
+          "seconds": 86400000,
+          "duration": "1000天0小时",
+          "rendered": "  距构建时间        1000天0小时"
+        }
+      ],
+      "missing_argument_error": "message argument 'build_age_s' was not supplied (have: none)",
+      "select_codes": [
+        "unmeasured",
+        "other"
+      ],
+      "structural_signature": "matches English exactly",
+      "pseudo_missing_or_noarg": "⟦··  距构建时间        未知··⟧",
+      "pseudo_known": "⟦··  距构建时间        21秒··⟧"
+    },
+    {
+      "message_id": "tui.info.export.uptime",
+      "missing_rendered": "  已运行时间        未知",
+      "known_renders": [
+        {
+          "seconds": 0,
+          "duration": "0秒",
+          "rendered": "  已运行时间        0秒"
+        },
+        {
+          "seconds": 1,
+          "duration": "1秒",
+          "rendered": "  已运行时间        1秒"
+        },
+        {
+          "seconds": 2,
+          "duration": "2秒",
+          "rendered": "  已运行时间        2秒"
+        },
+        {
+          "seconds": 5,
+          "duration": "5秒",
+          "rendered": "  已运行时间        5秒"
+        },
+        {
+          "seconds": 11,
+          "duration": "11秒",
+          "rendered": "  已运行时间        11秒"
+        },
+        {
+          "seconds": 21,
+          "duration": "21秒",
+          "rendered": "  已运行时间        21秒"
+        },
+        {
+          "seconds": 1000,
+          "duration": "16分钟",
+          "rendered": "  已运行时间        16分钟"
+        },
+        {
+          "seconds": 60,
+          "duration": "1分钟",
+          "rendered": "  已运行时间        1分钟"
+        },
+        {
+          "seconds": 3600,
+          "duration": "1小时0分",
+          "rendered": "  已运行时间        1小时0分"
+        },
+        {
+          "seconds": 3660,
+          "duration": "1小时1分",
+          "rendered": "  已运行时间        1小时1分"
+        },
+        {
+          "seconds": 86400,
+          "duration": "1天0小时",
+          "rendered": "  已运行时间        1天0小时"
+        },
+        {
+          "seconds": 86400000,
+          "duration": "1000天0小时",
+          "rendered": "  已运行时间        1000天0小时"
+        }
+      ],
+      "missing_argument_error": "message argument 'uptime_s' was not supplied (have: none)",
+      "select_codes": [
+        "unmeasured",
+        "other"
+      ],
+      "structural_signature": "matches English exactly",
+      "pseudo_missing_or_noarg": "⟦··  已运行时间        未知··⟧",
+      "pseudo_known": "⟦··  已运行时间        21秒··⟧"
+    },
+    {
+      "key": "tui.info.state.stale",
+      "rendered": "进程已不存在",
+      "pseudo_missing_or_noarg": "⟦··进程已不存在··⟧"
+    }
+  ],
+  "actual_interpreter": "/Users/damian/local-operator/.venv/bin/python",
+  "worktree_import": "/Users/damian/local-operator/.worktrees/i18n-info-readout/local_operator/i18n/runtime.py",
+  "model": "openai/gpt-6.1-sol",
+  "fallback_from": "anthropic/claude-opus-5-5; provider quota notice",
+  "session": "1af53bef9d51",
+  "finding_dispositions": {
+    "ZH-1": "Applied 进程已不存在, matching fresh source context PID no longer exists.",
+    "ZH-2": "Applied actual report approval.auto_full: 提示 -> 确认. Runtime label shorthand was incorrect; label already 运行时 and unchanged.",
+    "ZH-3": "Deferred fit-only risk: no demonstrated clipping; retain consistent spaced middle-dot separator and full runtime/trajectory semantics. No fit claim."
+  },
+  "glossary_choices": {
+    "runtime": "运行时 unchanged",
+    "trajectory": "轨迹 unchanged",
+    "approval_prompt": "确认, matching ask_full/ask_short",
+    "stale": "进程已不存在",
+    "unmeasured_duration": "未知 in whole-field native labels 距构建时间 and 已运行时间; generic missing measurement, not latest-version wording"
+  },
+  "new_terms": [],
+  "overflow_risks": [
+    "ZH-3 summary_terse narrow-frame fit risk retained; not rendered or proven overflow."
+  ],
+  "not_run": [
+    "pytest",
+    "App/TUI/browser/native/build",
+    "whole checker/generator/ledger",
+    "CI",
+    "independent translation audit",
+    "rendered fit/RTL shaping"
+  ],
+  "scope": "Authorship plus changed-key mechanical controls only; no native clearance/self-audit claim."
+}

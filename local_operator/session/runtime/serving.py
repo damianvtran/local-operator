@@ -531,6 +531,55 @@ _ANNOUNCE_FAILED = "failed"
 #: so a test or worker that moves ``LOCAL_OPERATOR_CONFIG_DIR`` gets its own.
 _display_watch_attached: set[str] = set()
 
+#: Config directories this process already subscribed to ``language`` changes
+#: (:func:`attach_language_config_watch`). Same one-per-directory rule as
+#: :data:`_display_watch_attached`: the active locale is process-global.
+_language_watch_attached: set[str] = set()
+
+
+def _notice_text_for_viewer(payload: dict[str, Any]) -> dict[str, Any]:
+    """A catalogued notice's ``text`` re-rendered in this process's language.
+
+    WHY HERE. ``session._notice`` / ``loop._notice`` pin ``text`` to English
+    because the same event object is persisted to the transcript and replayed,
+    and a journal must not depend on the language the runtime happened to have
+    when it wrote the row. The viewers on this relay (the desktop's
+    ``transcript-reducer`` ``case "notice"``, the attached TUI's
+    ``_handle_notice``) paint ``text`` verbatim and carry no ``tui.notices``
+    catalogue, so the pinned English reached a French operator's screen (the
+    2026-11 desktop fr census, row 10). RFC §2.6 allows ``text`` to be "en, or
+    the resolved locale when known": this is the DISPLAY boundary, the last
+    place before bytes, and it is downstream of the transcript write — the
+    journal keeps English and ``code``/``params`` stay for re-rendering.
+
+    The active locale is the runtime's own (``process.main`` activates it at
+    boot; :func:`attach_language_config_watch` follows later switches).
+    Notices without a ``code`` are free prose nobody catalogued and pass
+    through untouched, as does anything that fails to render: copy is never
+    a reason to drop an event.
+    """
+    if payload.get("type") != "notice":
+        return payload
+    code = payload.get("code")
+    if not isinstance(code, str) or not code:
+        return payload
+    try:
+        from local_operator.i18n.messages import render_record
+        from local_operator.i18n.text import active_locale
+
+        params = payload.get("params")
+        rendered = render_record(
+            code, params if isinstance(params, dict) else {}, locale=active_locale()
+        )
+    except Exception:  # noqa: BLE001 — copy is never a reason to drop an event
+        logger.debug("notice re-render failed; keeping the English text", exc_info=True)
+        return payload
+    # An unknown code renders as the code itself (``render_record``'s contract);
+    # the English sentence the producer already wrote is the better fallback.
+    if rendered.text and rendered.text != code:
+        payload["text"] = rendered.text
+    return payload
+
 
 def session_may_announce(session: Any) -> bool:
     """Whether ``session`` is one the operator's OWN listings would show.
@@ -634,6 +683,23 @@ def _question_prose(question: Any) -> str:
 REMOTE_ORIGIN_SENDER_KEY = "remote_origin"
 
 
+def _origin_kwargs(fn: Any, mesh_origin: Mapping[str, Any] | None) -> dict[str, Any]:
+    """``{"mesh_origin": ...}`` for a session seam that takes it, else ``{}``.
+
+    Probed like every optional keyword this handle threads into its session
+    (``harness_injected``, ``owner_typed``): a reduced or third-party session
+    from before the mesh-origin carriage keeps its exact old call shape, and
+    there is nothing to pass when no stamp was minted (local, legacy).
+    """
+    if mesh_origin is None:
+        return {}
+    try:
+        accepts = "mesh_origin" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return {}
+    return {"mesh_origin": dict(mesh_origin)} if accepts else {}
+
+
 def _file_admission_for(
     locality: str | None, capabilities: Iterable[str] | None, operation: str
 ) -> Any:
@@ -692,6 +758,7 @@ class _PromptCommand:
     #: delivery, a compaction) before handing this command to ``Session.prompt``.
     #: See ``ServingSessionHandle.prompt``'s ``wait_for_turn``.
     wait_for_turn: bool = True
+    goal_context: tuple[str, int] | None = None
     #: The terminal event's own error text, when this command's turn failed.
     #: Recorded by the drain's outcome observer because ``completed`` carries only
     #: the VERDICT: a ``wait_complete`` caller that got a bare "did not complete"
@@ -717,6 +784,10 @@ class _PromptCommand:
     documents: list["DocumentContent"] | None = None
     #: False for a prompt from a remote connection (see ``prompt``).
     owner_typed: bool = True
+    #: The receiving runtime's mesh origin stamp for a remote prompt
+    #: (``network/origin.py``), threaded to ``Session.prompt`` so the durable row
+    #: carries it. ``None`` for a local prompt and for every legacy producer.
+    mesh_origin: dict[str, Any] | None = None
     # Frozen before queue/spool; never serialized into inbox/receipt JSON.
     _file_capture: Any = None
     #: ADR 0009: the connection's surface, decided by the control server, or
@@ -1151,6 +1222,8 @@ class ServingSessionHandle(SessionHandle):
         #: Whether the goal judge may still admit continuation turns. Only a
         #: headless run closes it (:meth:`close_goal_continuations`).
         self._goal_continuations_open = True
+        self._goal_stopping = False
+        self._goal_recovery_queued = False
         self._active_prompt_command_id: str | None = None
         self._desktop_mcp: Any = None
         self._desktop_cwd = cwd
@@ -1389,7 +1462,8 @@ class ServingSessionHandle(SessionHandle):
         self._pending_futures: dict[str, asyncio.Future[Any]] = {}
         #: Set by :meth:`refuse_gates_for_exit` once a SIGNAL has committed this
         #: runtime to leaving: every gate opened afterwards answers at once with
-        #: the deny/escape answer instead of parking. See that method for why.
+        #: the deny/escape answer instead of parking. See that method for why;
+        #: :meth:`reopen_gates_after_yield` is its single reversal.
         self._gates_closed_for_exit = False
         # request_id -> (monotonic instant, settled value) for gates that LANDED
         # recently. The desktop answer path retries ONCE under the same id when an
@@ -3375,6 +3449,7 @@ class ServingSessionHandle(SessionHandle):
         source: str = SOURCE_PEER,
         command_id: str = "",
         harness_injected: bool = False,
+        mesh_origin: Mapping[str, Any] | None = None,
         message_id: str = "",
         custom_type: str = "",
         bridge_meta: dict[str, Any] | None = None,
@@ -3465,6 +3540,13 @@ class ServingSessionHandle(SessionHandle):
                     source=source,
                     command_id=command_id,
                     harness_injected=harness_injected,
+                    # OWNER rows only (M-2): a peer row is the sender's to shape,
+                    # so it never carries a stamp, whatever a caller passed.
+                    mesh_origin=(
+                        dict(mesh_origin)
+                        if mesh_origin is not None and source == SOURCE_USER
+                        else None
+                    ),
                     # The peer sender's identity, carried across the handover so
                     # the successor's delivery is idempotent against a row that
                     # was spooled twice (see ``inbox.InboxLine.message_id``).
@@ -3693,6 +3775,8 @@ class ServingSessionHandle(SessionHandle):
         now requires positive evidence for ``interrupted``) would have to guess.
         """
         self._note_deliberate_stop()
+        self._goal_stopping = True
+        self._goal_continuations_open = False
         self._deny_pending_gates()
         trigger = self.on_stop_requested
         if trigger is not None:
@@ -3757,12 +3841,27 @@ class ServingSessionHandle(SessionHandle):
         Gates opened AFTER this answer immediately too, without parking: the
         model's next step after a denial is often another gated call, and a
         fresh card would hold the drain open exactly as the first one did.
-        One-way for the life of the process — it is only called on an exit
-        that has already been committed to. Returns how many parked gates were
+        One-way except for :meth:`reopen_gates_after_yield` — it is only called
+        on an exit that has already been committed to. Returns how many parked gates were
         settled, for the log.
         """
         self._gates_closed_for_exit = True
         return self._deny_pending_gates()
+
+    def reopen_gates_after_yield(self) -> None:
+        """Let gates park again: an unattended signal drain admitted the owner's prompt.
+
+        ``process._yield_signal_drain_to_owner`` lifts the admission latch so an
+        operator's prompt runs here instead of waiting behind a subagent for a
+        successor. That operator is present and can answer a card, so the reason
+        :meth:`refuse_gates_for_exit` gives (nobody can answer before the exit)
+        no longer holds; left closed, every approval in their turn was silently
+        denied and every ask read as "escaped" (agent review round 1 on #4355,
+        R1). A card parked afterwards reads as a step in flight, which the
+        signal bound spares rather than reaps — acceptable with the operator at
+        the composer. Settled gates stay settled; this only affects new ones.
+        """
+        self._gates_closed_for_exit = False
 
     def _deny_pending_gates(self) -> int:
         """Refuse every parked approval/ask so teardown cannot hang on them.
@@ -4109,7 +4208,7 @@ class ServingSessionHandle(SessionHandle):
                 # fixture measures a 531,082-byte payload, and
                 # ``fit_frame_for_wire`` returns it byte-identical.
                 payload = bound_agent_end_for_wire(
-                    event.model_dump(mode="json"),
+                    _notice_text_for_viewer(event.model_dump(mode="json")),
                     session_id=getattr(self._session, "session_id", None),
                 )
                 on_event(payload)
@@ -4357,15 +4456,24 @@ class ServingSessionHandle(SessionHandle):
         input_path: str | None = None,
         audio: list[dict[str, str]] | list["AudioContent"] | None = None,
         files: list[dict[str, Any]] | None = None,
+        delivery: str | None = None,
         *,
         wait_complete: bool = False,
         harness_injected: bool = False,
         wait_for_turn: bool = True,
         owner_typed: bool = True,
+        mesh_origin: Mapping[str, Any] | None = None,
+        _goal_context: tuple[str, int] | None = None,
         _file_admission: Any = None,
         input_surface: str | None = None,
     ) -> str:
         """Admit one ordinary prompt; the receipt is its durable append.
+
+        ``mesh_origin`` is the stamp the control server minted for a REMOTE
+        connection (``network/origin.py``; never from a frame). It rides beside
+        ``owner_typed`` to ``Session.prompt`` and, when this runtime is leaving,
+        onto the spooled line's own ``InboxLine.mesh_origin`` field — never into
+        its ``sender``, which peer rows share (mesh-origin-stamp M-2).
 
         ``input_surface`` is the ADR 0009 origin the control server derived from
         the authenticated connection (``mobile``/``remote``/``desktop``/``tui``/
@@ -4396,6 +4504,15 @@ class ServingSessionHandle(SessionHandle):
         a detached failure. A session whose ``prompt`` predates the
         ``documents`` keyword is refused (``DocumentCarriageUnsupported``),
         never forwarded without its files.
+
+        ``delivery`` is the busy-send mode (``steer``/``queue``/``both``),
+        accepted so this handle advertises ``busy-delivery-v1`` (see
+        ``_takes_delivery``) and ignored on the ``prompt`` op; the ``steer``
+        op is where the mode applies. An IDLE prompt opens its own turn, so
+        the mode is ignored there. The wire client already refused
+        ``queue``/``both`` against an owner whose record lacked
+        ``busy-delivery-v1``, so reaching here with a mode is the claim that
+        the handle honours it.
 
         ``wait_for_turn`` makes an accepted prompt WAIT for a turn this queue
         did not open instead of failing after admission (see
@@ -4550,6 +4667,11 @@ class ServingSessionHandle(SessionHandle):
         # expired), the runtime re-admits this same spool itself
         # (``process._refresh_for``), so the queue is never a promise to a
         # successor that does not come.
+        if _goal_context is not None and not self._goal_prompt_current(_goal_context):
+            # Unlike an operator prompt, a continuation must never be spooled
+            # to a successor: the verdict belongs to this owner's context.
+            self._refuse_admitted(command_id)
+            raise RuntimeError("goal continuation no longer current")
         if self._updating:
             if blocks or document_blocks_decoded:
                 # An inbox row is text, so carrying an image- or document-
@@ -4570,6 +4692,7 @@ class ServingSessionHandle(SessionHandle):
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
+                    mesh_origin=mesh_origin,
                 )
             except BaseException:
                 # No durable spool owns the message on failure/cancellation: release
@@ -4624,6 +4747,7 @@ class ServingSessionHandle(SessionHandle):
                         source=SOURCE_USER,
                         command_id=command_id,
                         harness_injected=harness_injected,
+                        mesh_origin=mesh_origin,
                     )
                 except BaseException:
                     # A failed/cancelled spool has no successor-owned message to
@@ -4685,11 +4809,13 @@ class ServingSessionHandle(SessionHandle):
             completed,
             harness_injected,
             wait_for_turn,
+            goal_context=_goal_context,
             input_mode=input_mode,
             input_path=input_path,
             audio=audio_blocks_decoded,
             documents=document_blocks_decoded,
             owner_typed=owner_typed,
+            mesh_origin=dict(mesh_origin) if mesh_origin is not None else None,
             _file_capture=file_capture,
             input_surface=input_surface,
         )
@@ -4788,6 +4914,24 @@ class ServingSessionHandle(SessionHandle):
                 self._goal_loop.state = dict(store.state.loop)
         return self._goal_loop
 
+    def _goal_context_available(self) -> bool:
+        return not (
+            self._disposing
+            or self._draining
+            or self._updating
+            or self._retiring_cause
+            or self._goal_stopping
+        )
+
+    def _goal_prompt_current(self, context: tuple[str, int]) -> bool:
+        return (
+            not (self._disposing or self._draining or self._updating or self._retiring_cause)
+            and self._goal_continuations_open
+            and not self._loop_owns_the_verdict()
+            and self._session.goal_status == "active"
+            and (self._session.goal_token, self._session.goal_turn_serial) == context
+        )
+
     def _goal_judge_driver(self):
         """The standing goal's judge — the sibling of :meth:`_loop_driver`.
 
@@ -4859,6 +5003,8 @@ class ServingSessionHandle(SessionHandle):
                         command_id=command_id,
                         wait_complete=True,
                         harness_injected=True,
+                        owner_typed=False,
+                        _goal_context=(self._session.goal_token, self._session.goal_turn_serial),
                     )
                 except BaseException:
                     # The judge never retries: it publishes `waiting` and re-arms
@@ -4910,6 +5056,8 @@ class ServingSessionHandle(SessionHandle):
                 judge_state=lambda: self._session.goal_judge_state,
                 loop_running=self._loop_owns_the_verdict,
                 continuations=lambda: self._goal_continuations_open,
+                context_available=self._goal_context_available,
+                recovery_idle=lambda: not self.is_conversationally_active(),
             )
         return self._goal_judge
 
@@ -5009,38 +5157,39 @@ class ServingSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — the event path never fails on this feature
             logger.debug("supplement trigger failed", exc_info=True)
 
-    def rearm_goal_judge(self) -> None:
-        """Trigger 3, once per boot: re-engage a goal whose judge was in flight.
-
-        Called through ``server._handle_call_on_session_loop`` immediately after
-        the fold subscription is installed, so this runs once per OWNED session,
-        on that session's loop, after the restored record is readable. The rule
-        of who re-arms lives in the driver (RULINGS R3): a ``waiting``/``stalled``
-        goal is NOT re-armed by a restart, because nothing was in flight and
-        *checkpoint state is not an instruction to spend more tokens*.
-
-        Synchronous by design: the plan that holds it cannot await, so it
-        schedules the probe as a background task on this loop.
-        """
-        # A session outside the record's contract has no judge to re-arm, and
-        # scheduling a task that would fail on that read is how the
-        # `test_exec_mode` cells got an unretrieved exception instead of a
-        # verdict — checked BEFORE the task exists, so nothing outlives this
-        # call (QA round 1, Q3).
-        driver = self._goal_judge_driver()
-        if driver is None:
+    def tick_goal_recovery(self) -> None:
+        """Nudge the workload loop without making the serving heartbeat await it."""
+        if self._goal_recovery_queued or self._loop.is_closed():
             return
-        # ASK THE PROBE'S OWN QUESTION FIRST, because scheduling is not free:
-        # ``_background_tasks`` is the set ``is_busy`` reads as "work a clean exit
-        # would destroy", and a probe that would immediately find nothing in
-        # flight still puts a task in it. That made an idle runtime report busy
-        # for as long as the no-op took — the commonest boot of all is a session
-        # that never used ``/goal`` — and ``is_busy`` is what ``is_pristine`` and
-        # the reaper read, so an empty conversation could not be recognised as
-        # pristine and retired. Refusing HERE keeps the task set meaning what it
-        # says; a goal that IS in flight is unaffected, because this is the same
-        # ``needs_rearm`` predicate the probe itself applies.
-        if not driver.needs_rearm():
+        self._goal_recovery_queued = True
+
+        def probe() -> None:
+            try:
+                self.rearm_goal_judge()
+            except Exception:  # noqa: BLE001 — recovery probes must not break serving
+                logger.debug("goal recovery probe failed", exc_info=True)
+            finally:
+                self._goal_recovery_queued = False
+
+        try:
+            self._loop.call_soon_threadsafe(probe)
+        except RuntimeError:  # loop closed between the probe and the enqueue
+            self._goal_recovery_queued = False
+
+    def rearm_goal_judge(self) -> None:
+        """Probe on boot and heartbeat, on the session's owning loop."""
+        from local_operator.session.goal_judge import owns_the_session
+
+        if (
+            not self._goal_continuations_open
+            or not self._goal_context_available()
+            or not owns_the_session(self._session)
+            or self.is_busy()
+        ):
+            return
+        driver = self._goal_judge_driver()
+        due = getattr(self._session, "goal_recovery_due", None)
+        if driver is None or not driver.needs_rearm() or not callable(due) or not due():
             return
         task = asyncio.ensure_future(driver.rearm_on_resume())
         self._background_tasks.add(task)
@@ -5140,6 +5289,9 @@ class ServingSessionHandle(SessionHandle):
         A long-lived runtime never calls this and keeps the full chain.
         """
         self._goal_continuations_open = False
+        disable = getattr(self._session, "disable_goal_recovery", None)
+        if callable(disable):
+            disable()
 
     @_on_session_loop
     async def settle_goal_judge_headless(self) -> None:
@@ -5609,6 +5761,10 @@ class ServingSessionHandle(SessionHandle):
                     # ``wait_for_turn=False`` existed. A streaming turn still takes
                     # the immediate refusal and the steer path.
                     await self._await_turn_lock_free()
+                if command.goal_context is not None and not self._goal_prompt_current(
+                    command.goal_context
+                ):
+                    raise RuntimeError("goal continuation no longer current")
                 parameters = inspect.signature(self._session.prompt).parameters
                 if "message_id" in parameters:
                     fields: dict[str, Any] = {
@@ -5628,6 +5784,8 @@ class ServingSessionHandle(SessionHandle):
                         fields["_file_capture"] = command._file_capture
                     if "owner_typed" in parameters and not command.owner_typed:
                         fields["owner_typed"] = False
+                    if "mesh_origin" in parameters and command.mesh_origin is not None:
+                        fields["mesh_origin"] = command.mesh_origin
                     if "input_surface" in parameters and command.input_surface is not None:
                         fields["input_surface"] = command.input_surface
                     if "input_mode" in parameters:
@@ -5735,10 +5893,14 @@ class ServingSessionHandle(SessionHandle):
         files: list[dict[str, Any]] | None = None,
         harness_injected: bool = False,
         owner_typed: bool = True,
+        delivery: str | None = None,
+        mesh_origin: Mapping[str, Any] | None = None,
         _file_admission: Any = None,
         input_surface: str | None = None,
     ) -> str:
         # ``owner_typed``: see ``prompt`` — False for a remote connection's steer.
+        # ``mesh_origin``: see ``prompt`` — the receiver-minted stamp, carried to
+        # the queued row and to the spooled line alike.
         # ``input_surface``: see ``prompt`` — the ADR 0009 origin of this steer.
         self._check_loop_thread()
         command_id = command_id or str(uuid.uuid4())
@@ -5803,6 +5965,8 @@ class ServingSessionHandle(SessionHandle):
                     carries_attachments=carries_attachments,
                     harness_injected=harness_injected,
                     owner_typed=owner_typed,
+                    delivery=delivery,
+                    mesh_origin=mesh_origin,
                     _file_admission=_file_admission,
                     input_surface=input_surface,
                 )
@@ -5883,6 +6047,8 @@ class ServingSessionHandle(SessionHandle):
         carries_attachments: bool,
         harness_injected: bool,
         owner_typed: bool = True,
+        delivery: str | None = None,
+        mesh_origin: Mapping[str, Any] | None = None,
         _file_admission: Any = None,
         input_surface: str | None = None,
     ) -> tuple[str, bool]:
@@ -5930,6 +6096,7 @@ class ServingSessionHandle(SessionHandle):
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
+                    mesh_origin=mesh_origin,
                     raise_reader=False,
                 )
             finally:
@@ -5974,6 +6141,7 @@ class ServingSessionHandle(SessionHandle):
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
+                    mesh_origin=mesh_origin,
                     raise_reader=False,
                 )
             except Exception:
@@ -6018,6 +6186,13 @@ class ServingSessionHandle(SessionHandle):
             fields["harness_injected"] = harness_injected
         if "owner_typed" in parameters and not owner_typed:
             fields["owner_typed"] = False
+        # The busy-send delivery mode: probed like the fields above, so a
+        # session that predates the keyword never receives it. Added only
+        # when the wire carried one, so a legacy steer stays byte-identical.
+        if "delivery" in parameters and delivery is not None:
+            fields["delivery"] = delivery
+        if "mesh_origin" in parameters and mesh_origin is not None:
+            fields["mesh_origin"] = dict(mesh_origin)
         if "_file_capture" in parameters:
             fields["_file_capture"] = file_capture
         if "input_surface" in parameters and input_surface is not None:
@@ -7423,6 +7598,7 @@ class ServingSessionHandle(SessionHandle):
         value: str,
         question_index: int | None = None,
         by: str = UNVERIFIED_SURFACE,
+        mesh_origin: Mapping[str, Any] | None = None,
     ) -> str:
         # ``question_index`` is accepted for protocol parity with the TUI handle
         # (U8 guard). An owned session assigns a DISTINCT request_id per question
@@ -7440,7 +7616,7 @@ class ServingSessionHandle(SessionHandle):
         # (``asks/surfaces.stamp_answer_surface``): ``mirror`` only when the
         # frame proved the operator capability. The fail-closed default is for
         # a caller that never went through that seam.
-        mirrored = await self._mirror_ask_answer(request_id, value, by=by)
+        mirrored = await self._mirror_ask_answer(request_id, value, by=by, mesh_origin=mesh_origin)
         if mirrored is not None:
             return mirrored
         # Resolve with the QUESTION id the harness asked under — never our
@@ -7454,7 +7630,12 @@ class ServingSessionHandle(SessionHandle):
         return "answered"
 
     async def _mirror_ask_answer(
-        self, request_id: str, value: str | None, *, by: str = UNVERIFIED_SURFACE
+        self,
+        request_id: str,
+        value: str | None,
+        *,
+        by: str = UNVERIFIED_SURFACE,
+        mesh_origin: Mapping[str, Any] | None = None,
     ) -> str | None:
         """Answer a queued ask through the legacy mirrored card id, or ``None``.
 
@@ -7493,7 +7674,10 @@ class ServingSessionHandle(SessionHandle):
         # settle the ask in one atomic write. ``ask_respond`` stays atomic and
         # still refuses a partial map — a whole-ask client has no reason to send
         # one, and accepting it there would be a second, weaker contract.
-        outcome = self._session.answer_ask_question(ask_id, key, [value], by=by)
+        # The receiver-minted mesh origin (``network/origin.py``) rides only when
+        # there is one, so a session from before the carriage keeps its call shape.
+        origin_kwargs = _origin_kwargs(self._session.answer_ask_question, mesh_origin)
+        outcome = self._session.answer_ask_question(ask_id, key, [value], by=by, **origin_kwargs)
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the answer was refused"))
         if not outcome.get("settled"):
@@ -7540,6 +7724,7 @@ class ServingSessionHandle(SessionHandle):
         answers: dict[str, list[str]],
         by: str = "",
         attachments: Mapping[str, Sequence["ImageContent"]] | None = None,
+        mesh_origin: Mapping[str, Any] | None = None,
     ) -> str:
         """Answer a QUEUED ask (design §2.4). Additive op: an old registrant
         answers ``unknown op``, and a runtime without the queue refuses in words.
@@ -7559,6 +7744,8 @@ class ServingSessionHandle(SessionHandle):
         # a handle that takes it keeps the pictures, one that does not is
         # refused-not-stripped by every sender.
         kwargs: dict[str, Any] = {"attachments": attachments} if attachments else {}
+        # Stored as ``answered_by.mesh_origin`` (mesh-origin-stamp §4).
+        kwargs.update(_origin_kwargs(self._session.respond_ask, mesh_origin))
         outcome = self._session.respond_ask(ask_id, answers, by=by or "remote", **kwargs)
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the answer was refused"))
@@ -7599,7 +7786,13 @@ class ServingSessionHandle(SessionHandle):
         return "decided"
 
     @_on_session_loop
-    async def ask_revise(self, ask_id: str, answers: dict[str, list[str]], by: str = "") -> str:
+    async def ask_revise(
+        self,
+        ask_id: str,
+        answers: dict[str, list[str]],
+        by: str = "",
+        mesh_origin: Mapping[str, Any] | None = None,
+    ) -> str:
         """REVISE a queued ask's recorded answer before it is delivered (design §10).
 
         The same op family, the same atomic whole-ask body and the same awaited
@@ -7620,7 +7813,10 @@ class ServingSessionHandle(SessionHandle):
         the loop, which is exactly the accepted-and-then-dropped interleaving
         §10 forbids.
         """
-        outcome = self._session.revise_ask(ask_id, answers, by=by or "remote")
+        # A revision's stamp is folded with the first answer's by the store, so an
+        # unstamped or unverified revision voids ``verified`` (§2 rule 4, M-8).
+        origin_kwargs = _origin_kwargs(self._session.revise_ask, mesh_origin)
+        outcome = self._session.revise_ask(ask_id, answers, by=by or "remote", **origin_kwargs)
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the revision was refused"))
         # Awaited for the same reason ``ask_respond`` awaits it: it starts the
@@ -13055,6 +13251,7 @@ async def spawn_owned_session(
     birth_fast: bool = False,
     resume: str | None = None,
     model_selection_override: bool = True,
+    goal_wake_due: int | None = None,
 ) -> ServingSessionHandle:
     """Build a session for the phone with the CLI's composition root.
 
@@ -13154,6 +13351,7 @@ async def spawn_owned_session(
         birth_effort=birth_effort,
         birth_fast=birth_fast,
         model_selection_override=model_selection_override,
+        goal_wake_due=goal_wake_due,
     )
 
     # PAY THE COMPOSITION ROOT'S IMPORTS HERE, AND IN A THREAD.
@@ -13282,6 +13480,7 @@ async def spawn_owned_session(
     )
     attach_gate_config_watch(handle, config_directory)
     attach_display_config_watch(config_directory)
+    attach_language_config_watch(config_directory)
     return handle
 
 
@@ -13336,3 +13535,51 @@ def attach_display_config_watch(config_directory: Path) -> None:
         logger.warning(
             "config watcher could not be attached to the runtime display folds", exc_info=True
         )
+
+
+def attach_language_config_watch(config_directory: Path) -> None:
+    """Keep this process's active locale on the configured ``language``.
+
+    A runtime outlives a language switch (the desktop's Settings, the TUI's
+    ``/language``, ``lop config``, all in OTHER processes), and the copy it
+    renders for viewers — notices via :func:`_notice_text_for_viewer`, and
+    every ``tr``/``envelope()`` call that reads the active locale — must move
+    with it rather than stay on the boot language until a restart. The move
+    itself is ``i18n.boot.follow_language``, the same one the server's
+    settings route and desktop feed make, so the registry copy refreshers run
+    here too. Subscribed at the same spawn seams as the display watcher and
+    degraded the same way: a runtime that cannot follow keeps its boot locale.
+    """
+    key = str(config_directory)
+    if key in _language_watch_attached:
+        return
+    unsubscribe = None
+    try:
+        from local_operator.config_watch import process_watcher
+        from local_operator.i18n.boot import follow_language
+
+        def _on_change(change: Any) -> None:
+            if "language" not in change.changed_keys:
+                return
+            raw = change.values.get("language")
+            # ``auto``/absent exercises the chain (``LOP_LANG`` -> OS) without a
+            # second config read, exactly as the desktop feed passes it.
+            follow_language(raw if isinstance(raw, str) else "auto")
+
+        watcher = process_watcher(config_directory)
+        # Subscribe BEFORE start: start's synchronous poll may deliver a write
+        # since construction. Then reconcile the latest snapshot, since a write
+        # since boot may already be the watcher's baseline (no delta to deliver).
+        # All three steps run on this loop without yielding, so later ticks use
+        # the listener and cannot be overwritten by an older captured snapshot.
+        unsubscribe = watcher.subscribe(_on_change)
+        watcher.start(asyncio.get_running_loop())
+        raw = watcher.values.get("language")
+        follow_language(raw if isinstance(raw, str) else "auto")
+        _language_watch_attached.add(key)
+    except Exception:  # noqa: BLE001 — the runtime keeps its boot locale
+        # A failed attachment must not leave a listener behind for the retry.
+        # The watcher is shared with other consumers; do not stop it here.
+        if unsubscribe is not None:
+            unsubscribe()
+        logger.warning("config watcher could not be attached to the runtime locale", exc_info=True)

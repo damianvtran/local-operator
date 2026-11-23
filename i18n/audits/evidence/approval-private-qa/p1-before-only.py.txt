@@ -1,0 +1,58 @@
+"""P1-only fixture repair follow-up. All product modules come from unchanged candidate."""
+import scripts.probe_isolation as isolation
+import asyncio,json,os,hashlib
+from pathlib import Path
+from local_operator import settings_io
+from local_operator.config import ConfigManager
+from local_operator.i18n import catalogues
+from local_operator.i18n.text import set_active_locale,active_locale
+from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.settings_view import SettingsView
+from local_operator.team_bridge import availability
+from scripts.visual_capture import save_capture
+from tests.unit.tui.test_app_pilot import FakeSession,_factory
+R=Path('/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad'); FIX=R/'p1-selfcontained-catalogues'
+assert isolation.SANDBOX.is_relative_to(R)
+print('ISOLATION',os.environ['HOME'],os.environ['LOCAL_OPERATOR_CONFIG_DIR'],str(Path.cwd()),flush=True)
+catalogues.catalogue_root=lambda:FIX
+accepted=0
+for locale in catalogues.locales():
+ for namespace in catalogues.namespaces(locale):
+  catalogues.load_catalogue(locale,namespace);accepted+=1
+print('ALL_FIXTURE_NAMESPACES_ACCEPTED',accepted,flush=True)
+manager=ConfigManager(Path(os.environ['LOCAL_OPERATOR_CONFIG_DIR']))
+for key,value in {'tool_approval_mode':'auto','shell_environment.mode':'inherit','providers.openrouter.enforce_distillable_text':'true'}.items():settings_io.write_setting(manager,settings_io.BY_KEY[key],value)
+manager.set_config_value('language','fr'); availability.record(manager.config_dir,visible=True,state='ready',checked_at=0)
+config=manager.config_dir/'config.yml';original=config.read_bytes();out=[]
+retained=json.loads((R/'after-capture-result.json').read_text())
+async def main():
+ app=OperatorApp(lambda:_factory(FakeSession()))
+ async with app.run_test(size=(120,36)) as pilot:
+  await pilot.pause();app._open_settings_view();await pilot.pause();view=app.query_one(SettingsView)
+  cases=[(l,'shell_environment.mode',(120,36),'agents' if i%2==0 else 'teams',f'{l}-shell_environment.mode.expanded') for i,l in enumerate(('fr','zh-CN','hi','ur','es','ru','vi'))]
+  cases += [('hi','providers.openrouter.enforce_distillable_text',(120,36),'teams','hi-providers.openrouter.enforce_distillable_text.expanded'),('fr','team_bridge.session',(100,30),'agents','fr-compact-team_bridge.session-100x30.settled')]
+  for locale,key,size,pane,after_name in cases:
+   set_active_locale(locale);assert active_locale()==locale
+   await pilot.resize_terminal(*size);await pilot.pause()
+   view._expanded=None;view._repaint()
+   for i,row in enumerate(view._rows):
+    if row.kind=='setting' and row.setting.key==key:view._selected=i;break
+   else:raise AssertionError('missing row '+key)
+   while view._pane!=pane:view.action_pane(1)
+   view._repaint();view._scroll_to_selection();await pilot.pause()
+   if key!='team_bridge.session':view.action_activate();await pilot.pause()
+   choices=[{'value':row.choice.value,'label':str(row.choice.label),'description':str(row.choice.description),'paint':view._row_text(row,i,view._list_width()).plain} for i,row in enumerate(view._rows) if row.kind=='choice']
+   assert choices or key=='team_bridge.session'
+   if key=='shell_environment.mode':assert [c['label'] for c in choices]==['inherit','allowlist']
+   path=R/('p1-before-'+after_name)
+   save_capture(app,str(path)+'.first.svg');first=app.export_screenshot();await pilot.pause();save_capture(app,str(path)+'.settled.svg');stable=first==app.export_screenshot()
+   assert config.read_bytes()==original
+   source=next(x for x in retained if x['locale']==locale and x['key']==key and bool(x.get('compact'))==(key=='team_bridge.session') and (key!='team_bridge.session' or x['size']==list(size)))
+   record={'locale':locale,'key':key,'size':size,'pane':pane,'first_equal_settled':stable,'config_unchanged':True,'choices':choices,'label':str(settings_io.BY_KEY[key].label),'detail':view._detail_text.plain,'list_width':view._list_width(),'detail_width':view._detail_width(),'region':str(view.region),'virtual':str(view.virtual_size),'before_prefix':str(path),'retained_after_svg':str(R/('after-'+after_name+'.svg')),'retained_after_sha256':hashlib.sha256((R/('after-'+after_name+'.svg')).read_bytes()).hexdigest(),'retained_after_source':source}
+   assert record['list_width']==source.get('list_width',source.get('width'))
+   # Namespace acceptance above proves the prior containment failure is gone, not hidden.
+   assert 'tui.small.settings_view' not in app.export_screenshot()
+   out.append(record);print('P1_CASE',locale,key,size,'stable',stable,'no_write',True,flush=True)
+   await pilot.press('escape');await pilot.pause()
+ (R/'p1-before-result.json').write_text(json.dumps({'accepted_namespaces':accepted,'cases':out},ensure_ascii=False,indent=2))
+asyncio.run(main())

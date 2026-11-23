@@ -1,0 +1,38 @@
+{
+  "python": "3.12.13 (main, Mar  3 2026, 15:35:03) [Clang 21.1.4 ]",
+  "interpreter": "/Users/damian/local-operator/.venv/bin/python",
+  "source": {
+    "pyproject.toml": "009fec741a68dad42d8771457bc8781134797cd289d173b3e4cd8f95eae4b1e3",
+    "local_operator/tui/app.py": "b127aac8a49ae18f2b691ca72bf0ad2c335bad8d9b49b328af957ee522353112",
+    "local_operator/tui/widgets/editor.py": "ba03a049e2ccfa004d4c63d1eb50d993a826e88149eab3e6acb87d10c99b5411",
+    "local_operator/i18n/keys/tui_editor_readonly.py": "68f283e9bf6deeb52db3a2ae7624ccab992bf99f78433230e99839f79458604a",
+    "local_operator/tui/local_operator.tcss": "a388e695061e014ecd8e2aa1334bf4f4020fd4edcbf9eeeecfdfd8e51f5d4783",
+    "scripts/visual_capture.py": "47b7811aea17c73cd55fae41289c31dfc798641c0caa26e4114ab162311512ca",
+    "local_operator/i18n/catalogues/en/tui.editor_readonly.json": "a2a8bfb8a250b38e3a950bb2b02d885ec76cc726d77521086801099b6e99b5f2",
+    "local_operator/i18n/catalogues/fr/tui.editor_readonly.json": "98e716bcdc26c724f9e556e3ed366349cf0a596a8dc81bb350fc95a9f39d0ad5",
+    "local_operator/i18n/catalogues/zh-CN/tui.editor_readonly.json": "de698b3c4f9a184351bd627147bfe086da057890e287e01a78d87539471fa65f",
+    "local_operator/i18n/catalogues/es/tui.editor_readonly.json": "d92fbdd397bbf7dd424c51c79b302c3b1b35b155a97a30cd5fd0973dbe1d950b",
+    "local_operator/i18n/catalogues/ru/tui.editor_readonly.json": "07740014857374da1b9bec31999f65955e6a6069faf97fa753e109e28f88d1e0",
+    "local_operator/i18n/catalogues/vi/tui.editor_readonly.json": "86c9aa76cd934591e291b4140ef3cc1b391662fe8f94d8db6646b7bc89366198",
+    "local_operator/i18n/catalogues/hi/tui.editor_readonly.json": "6a682bddc90feaa5627dd033b11a30c6fa4e6bb53c623e0c09fa500d30bbae7f",
+    "local_operator/i18n/catalogues/ur/tui.editor_readonly.json": "c423782b7450e73a070fa4f774a8c2324f89629909698d2a27175ced2e717817"
+  },
+  "dependencies": {
+    "textual": {
+      "version": "8.2.8",
+      "metadata_sha256": "fa4831c4001c94a8d8177cccd05099d8fa021575c81a3bd53eae3b995eb22f1e"
+    },
+    "rich": {
+      "version": "15.0.0",
+      "metadata_sha256": "fad34fc603fac4481bf81f8dd629492fc302c0ec31909c86644751512afb2e3b"
+    },
+    "regex": {
+      "version": "2026.9.29",
+      "metadata_sha256": "33859377dbf8dd38ee3de73fd97faebf4a63d50576e3cc1a9dfe44df08b0936a"
+    },
+    "Pillow": {
+      "version": "12.3.0",
+      "metadata_sha256": "8fc07146cab33ef7582361dab6eac596d340b03ec648f18217da7894f73838c8"
+    }
+  }
+}

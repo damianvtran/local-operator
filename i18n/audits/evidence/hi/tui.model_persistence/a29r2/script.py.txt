@@ -1,0 +1,90 @@
+"""Independent A round 2 scoped audit rig; Rich metrics are not native UI/font proof."""
+from pathlib import Path
+import os, sys, json, hashlib, re, unicodedata, importlib.util
+from unittest.mock import patch
+from collections import Counter
+from rich.console import Console
+from rich.text import Text
+from local_operator.i18n import catalogues, runtime
+ROOT=Path.cwd(); NS='tui.model_persistence'
+assert not any(k.startswith('CMUX_') for k in os.environ)
+assert Path.home()!=Path('/Users/damian')
+assert os.environ['LOCAL_OPERATOR_CONFIG_DIR'].startswith(str(Path.home()))
+print('ISOLATION PASS', 'HOME/config isolated; no CMUX; XPC_FLAGS absent=', 'XPC_FLAGS' not in os.environ)
+print('INTERPRETER',sys.executable)
+for m in (catalogues,runtime):
+    assert Path(m.__file__).resolve().is_relative_to(ROOT)
+    print('MODULE',m.__name__,m.__file__)
+spec=importlib.util.spec_from_file_location('audit_check',ROOT/'scripts/i18n/check.py'); check=importlib.util.module_from_spec(spec);sys.modules[spec.name]=check;spec.loader.exec_module(check)
+paths={x:ROOT/f'local_operator/i18n/catalogues/{x}/{NS}.json' for x in ('en','hi')};paths['context']=ROOT/f'local_operator/i18n/catalogues/en/{NS}.context.json'
+hashes={k:hashlib.sha256(p.read_bytes()).hexdigest() for k,p in paths.items()}
+expected={'en':'4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff','context':'b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc','hi':'fe5174ef5f6cd8ea96d751c6722707d58a6a9108d17922d9b411b9a6b6799967'}
+assert hashes==expected; print('BEFORE HASHES',json.dumps(hashes,sort_keys=True))
+prior=json.loads((ROOT/'i18n/audits/evidence/hi/tui.model_persistence/author-fdf9-fix1/record.json').read_text())['prior_evidence_and_history_hashes']
+for p,digest in prior.items():assert hashlib.sha256((ROOT/p).read_bytes()).hexdigest()==digest
+print('PRIOR EVIDENCE/HISTORY HASHES preserved',len(prior))
+en=catalogues.load_catalogue('en',NS);hi=catalogues.load_catalogue('hi',NS);ctx=catalogues.context('en',NS)
+assert list(en)==list(hi)==list(ctx)==[NS+'.'+x for x in ('persist','settings','saved','with_model')]
+# Limit iteration only: execute the official checker unchanged on this pair/group.
+with patch.object(catalogues,'locales',return_value=('en','hi')), patch.object(catalogues,'namespaces',return_value=(NS,)):
+    result=check.check_catalogues();print('OFFICIAL SCOPED CHECK',result);assert result==[]
+    original=catalogues.load_catalogue
+    for mode in ('missing-key','missing-argument','renamed-argument'):
+        broken=dict(hi)
+        if mode=='missing-key':del broken[NS+'.persist']
+        elif mode=='missing-argument':broken[NS+'.with_model']=broken[NS+'.with_model'].replace('{routes}','')
+        else:broken[NS+'.with_model']=broken[NS+'.with_model'].replace('{label}','{wrong}')
+        def load(loc,ns):return broken if loc=='hi' else original(loc,ns)
+        with patch.object(catalogues,'load_catalogue',side_effect=load):
+            errors=check.check_catalogues();assert errors;print('NEGATIVE OFFICIAL',mode,errors)
+for k in en:
+    assert runtime.message_arguments(en[k])==runtime.message_arguments(hi[k])
+    assert Counter(re.findall(r'\{(\w+)\}',en[k]))==Counter(re.findall(r'\{(\w+)\}',hi[k]))
+    for s in (en[k],hi[k]):
+        assert not runtime.plural_selectors(s)
+        assert not re.search(r',\s*(plural|select|selectordinal)\b',s)
+    assert unicodedata.normalize('NFC',hi[k])==hi[k]
+    assert not re.search('[\u200c\u200d\u202a-\u202e\u2066-\u2069]',hi[k])
+    for token in ('/model default','/model saved','/settings'):
+        assert en[k].count(token)==hi[k].count(token)
+    assert re.findall(r'`[^`]*`|</?\w+[^>]*>',en[k])==re.findall(r'`[^`]*`|</?\w+[^>]*>',hi[k])
+    assert 'maxCells' not in ctx[k] and 'maxChars' not in ctx[k]
+    print('KEY PASS',k,'arguments=',runtime.message_arguments(hi[k]),'plural/select=0','NFC/protected/markup PASS','cells=',Text(hi[k]).cell_len,'chars=',len(hi[k]))
+for missing in ('label','routes'):
+    args={'label':'provider/model','routes':'/settings'};del args[missing]
+    try:runtime.render_message(hi[NS+'.with_model'],args,'hi')
+    except runtime.MessageFormatError as e:print('NEGATIVE RENDER',missing,type(e).__name__,str(e))
+    else:raise AssertionError('missing arg accepted')
+unknown_id=NS+'.absent'
+assert runtime.render_message(unknown_id,{},'hi')==unknown_id
+print('DIRECT UNKNOWN ID PASS: literal input passes through unchanged; not a lookup/error test')
+# Pseudo only human text, retaining ICU and command tokens.
+tokens=re.compile(r'(/model default|/model saved|/settings|\{label\}|\{routes\})')
+def pseudo(s):return ''.join(p if tokens.fullmatch(p) else '['+p+' ~~~]' for p in tokens.split(s) if p)
+for k in en:
+    ps=pseudo(en[k]);assert runtime.message_arguments(ps)==runtime.message_arguments(en[k])
+    for token in ('/model default','/model saved','/settings'):assert ps.count(token)==en[k].count(token)
+    print('PSEUDO',k,ps)
+labels=('x/y','provider/model-{opaque}[x]--flag-20261122-'+'longopaque'*8)
+families={'ordinary':('persist','saved','settings'),'missing-model':('persist','settings'),'hosting-deadend':('settings',)}
+wraps=0
+for loc,cat in (('en',en),('hi',hi),('pseudo-en',{k:pseudo(v) for k,v in en.items()})):
+    for family,keys in families.items():
+        routes=' · '.join(runtime.render_message(cat[NS+'.'+k],{},'en' if loc=='pseudo-en' else loc) for k in keys)
+        if family=='hosting-deadend':assert '/model' not in routes and routes.count('/settings')==1
+        for label in labels:
+            text=runtime.render_message(cat[NS+'.with_model'],{'label':label,'routes':routes},'en' if loc=='pseudo-en' else loc)
+            assert text.count(label)==text.count(routes)==1
+            for width in (80,100,120):
+                lines=Text(text).wrap(Console(width=width,color_system=None),width)
+                assert all(line.cell_len<=width for line in lines)
+                print('RICH_WRAP_ONLY',loc,family,'label_chars',len(label),'width',width,'cells',[line.cell_len for line in lines],'rows',json.dumps([line.plain for line in lines],ensure_ascii=False))
+                wraps+=1
+args={'label':'p/{do_not_interpolate}[x]--flag','routes':'पहले से स्थानीयकृत {opaque} /settings'}
+assert runtime.render_message(hi[NS+'.with_model'],args,'hi')==f"मॉडल: {args['label']} — {args['routes']}"
+print('OPAQUE PASS no recursive processing; width cases=',wraps)
+after={k:hashlib.sha256(p.read_bytes()).hexdigest() for k,p in paths.items()};assert after==hashes
+print('AFTER HASHES',json.dumps(after,sort_keys=True));print('PASS scoped mechanical/render diagnostics; NOT styled NoticeBlock/native shaping/font/global UI proof')
+
+for p,digest in prior.items():assert hashlib.sha256((ROOT/p).read_bytes()).hexdigest()==digest
+print('PRIOR EVIDENCE/HISTORY AFTER PASS',len(prior))

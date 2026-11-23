@@ -165,7 +165,14 @@ def inject_evaluator_tool_path(directories: tuple[str, ...] | None) -> None:
 
     if directories is None:
         return
-    os.environ["PATH"] = os.pathsep.join((*os.defpath.split(os.pathsep), *directories))
+    os.environ["PATH"] = effective_evaluator_path(directories)
+
+
+def effective_evaluator_path(directories: tuple[str, ...] | None) -> str:
+    """Mirror the scorer's direct, shell-free executable lookup at reset."""
+    if directories is None:
+        return os.environ.get("PATH", os.defpath)
+    return os.pathsep.join((os.defpath, *directories))
 
 
 def install_secret_environment(values: dict[str, str]) -> None:

@@ -1,0 +1,105 @@
+{
+  "status": "translated",
+  "locale": "es",
+  "namespace": "wire.teams.effective",
+  "task_group": "wire.teams.effective9keys",
+  "date": "2026-11-19",
+  "frozen_core_commit": "e70bc818b8553dca1fad007705257817be49ee37",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "8fba0458db34",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Runtime session model declaration in developer context",
+    "fallback_used": false,
+    "fallback_note": "No fallback observed in this session. No translation service/API/SDK used."
+  },
+  "inputs": [
+    {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/i18n/style-guides/es.md",
+      "sha256": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6"
+    },
+    {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  ],
+  "artifact": {
+    "path": "/Users/damian/.local-operator/sessions/8fba0458db34/scratchpad/es.wire.teams.effective.json",
+    "sha256": "aad6efce35fa6fccc25573506b0ec3d3ee042f6e23f6e52d5440d2289a519e25",
+    "key_count": 9
+  },
+  "glossary_choices": {
+    "team": "equipo",
+    "agent": "agente",
+    "model": "modelo in prose; model preserved as configuration key",
+    "provider": "proveedor in prose; provider/model preserved as syntax",
+    "registry": "registro; consistent with es/tui.authoring.json registry_missing",
+    "reasoning effort": "esfuerzo de razonamiento; consistent with es/wire.settings.json model.description",
+    "model mapping": "objeto de configuración de modelo; context defines mapping as configuration object"
+  },
+  "ambiguities_and_reasoning": [
+    {
+      "keys": [
+        "wire.teams.effective.tier_invalid_value",
+        "wire.teams.effective.tier_invalid_mapping"
+      ],
+      "decision": "Use objeto de configuración rather than asignación to name the configuration object, not assignment or paid allowance. Preserve required model and optional effort."
+    },
+    {
+      "keys": [
+        "wire.teams.effective.model_unresolvable"
+      ],
+      "decision": "resolver el modelo expresses technical resolution failure without inventing a cause or exposing exception prose."
+    }
+  ],
+  "glossary_proposals": [
+    {
+      "en": "model mapping",
+      "es": "objeto de configuración de modelo"
+    },
+    {
+      "en": "model selector",
+      "es": "selector de modelo"
+    },
+    {
+      "en": "reasoning effort",
+      "es": "esfuerzo de razonamiento (already established in sibling catalogue; propose formal glossary entry)"
+    }
+  ],
+  "icu_cldr_bidi": {
+    "placeholders": "Exact per-key sequences preserved: {role}, {tier}, {selector}.",
+    "icu": "No plural/select ICU expressions in these nine source messages.",
+    "cldr": "Spanish one/many/other applies to plurals; no plurals here.",
+    "bidi": "Spanish LTR; no manual bidi controls inserted.",
+    "technical_tokens": "subagents.models., provider/model, model, effort and opaque placeholder values remain literal."
+  },
+  "mechanical_verification": {
+    "json": "PASS: written UTF-8 JSON parsed back successfully",
+    "key_count_and_order": "PASS: exactly 9 keys in English source order",
+    "source_hashes": "PASS: English/context hashes equal delegated frozen hashes",
+    "placeholders": "PASS: exact per-key placeholder sequences",
+    "technical_literals": "PASS: path/selector occurrence counts preserved; model and effort keys present in the required instruction",
+    "bidi_controls": "PASS: none present",
+    "length": "No maxCells/maxChars in assigned sidecar; natural wrapping specified. No length exceptions.",
+    "verification_correction": "Initial mechanical effort word-count assertion failed because English effort occurs as both prose and configuration key. Refined verification checks the literal effort key in context; prose effort correctly translates to esfuerzo. Target bytes unchanged."
+  },
+  "validator": {
+    "executed": false,
+    "reason": "Task requests scratch-only hash/key/placeholder verification and forbids tests/builds. Repository catalogue validator not run; no validator success claimed."
+  },
+  "audit": {
+    "performed": false,
+    "rendered": false,
+    "independent_auditor_required": true,
+    "note": "Translator provenance only, not an audit or rendered validation claim."
+  },
+  "scope": "Only two scratch artifacts written; no repository/generated/ledger edits, tests, builds, installs, commits or PR operations."
+}

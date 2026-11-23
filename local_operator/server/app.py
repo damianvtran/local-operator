@@ -8,6 +8,7 @@ through HTTP requests instead of CLI.
 import asyncio
 import logging
 import secrets
+import threading
 from collections.abc import AsyncIterator, Iterable, Iterator
 from contextlib import asynccontextmanager
 from functools import lru_cache
@@ -79,6 +80,7 @@ from local_operator.server.routes import (
     desktop_projects,
     desktop_quota,
     desktop_radient,
+    desktop_remote_compute,
     desktop_runtimes,
     desktop_session_files,
     desktop_sessions,
@@ -86,6 +88,7 @@ from local_operator.server.routes import (
     desktop_team_bridge,
     desktop_tunnel,
     desktop_tunnel_setup,
+    desktop_voice,
     desktop_wakes,
     health,
     i18n,
@@ -248,6 +251,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # the instance only when THIS boot started it: one already running (a lazy
     # ``service.list_assets`` start, a caller's own indexer) is not ours to end.
     library_indexer = None
+    # Set where the org-hub gate starts; declared here so the ``finally`` below
+    # can read it even when startup raised before that point.
+    org_hub_thread: threading.Thread | None = None
     try:
         from local_operator.library.indexer import ensure_started, is_running
 
@@ -664,10 +670,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # THE ORG AGENT HUB GATE at daemon start: refresh the cached Radient Team
     # eligibility and enrol new org items, on a daemon thread so readiness
     # never waits on a memberships read. Never raises; ineligible = no-op.
+    # The thread handle is kept so the teardown can join it: it atomically
+    # rewrites ``hub/org_catalogue.json`` under the config root, and a daemon
+    # still mid-write when the lifespan returns races whoever removes or reuses
+    # that root next (CI: a test's ``rmtree`` hit its ``.tmp`` file vanishing).
     try:
         from local_operator.hub_org import enrol as hub_org_enrol
 
-        hub_org_enrol.on_boundary(app.state.config_manager.config_dir, "daemon-start")
+        org_hub_thread = hub_org_enrol.on_boundary(
+            app.state.config_manager.config_dir, "daemon-start"
+        )
     except Exception:  # noqa: BLE001 - the org hub is optional; the daemon is not
         logger.debug("org hub gate refresh could not start", exc_info=True)
 
@@ -813,6 +825,22 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # ``finally`` so a raise earlier in the teardown cannot leak the threads. ``stop``
         # joins with its own 5 s bound and the loops honour the stop flag
         # between units of work, so this does not hold shutdown on a long scan.
+        # The org-hub gate refresh writes under the config root too (see where
+        # it starts); wait for it before the indexer and before the lifespan
+        # returns. Bounded, because its memberships read is a network call:
+        # shutdown is not held hostage, but a thread that outlives the bound is
+        # logged rather than silently assumed done. Off the loop, like the join
+        # below.
+        if org_hub_thread is not None and org_hub_thread.is_alive():
+            try:
+                await asyncio.to_thread(org_hub_thread.join, 5.0)
+                if org_hub_thread.is_alive():
+                    logger.warning(
+                        "org hub boundary thread still running at shutdown; "
+                        "it may write under the config root"
+                    )
+            except Exception:  # noqa: BLE001 — teardown of a background refresh never raises
+                logger.debug("org hub boundary join failed at shutdown", exc_info=True)
         if library_indexer is not None:
             try:
                 from local_operator.library.indexer import stop_started
@@ -1272,6 +1300,28 @@ async def standalone_browser_write_gate(request: Request, call_next):
 async def desktop_validation_error(request: Request, error: RequestValidationError):
     # Pydantic includes the rejected INPUT in its default 422 response. SecretStr
     # protects model dumps, not failures before a model was constructed.
+    if request.url.path == "/v1/desktop/attention/seen" and request.method == "POST":
+        # A client needs to know which item blocked the whole receipt batch.
+        # Only include known schema locations: an extra key in `loc`, `input`,
+        # and JSON-decoder context can contain caller data.
+        issues = []
+        for issue in error.errors():
+            location: list[str | int] = []
+            for part in issue["loc"]:
+                if not isinstance(part, int) and part not in (
+                    "body",
+                    "items",
+                    "session_id",
+                    "completion_token",
+                ):
+                    break
+                location.append(part)
+            if issue["type"] == "json_invalid":
+                continue
+            issues.append({"loc": location, "msg": issue["msg"]})
+            break  # One diagnostic suffices; don't amplify a 500-item failure.
+        if issues:
+            return JSONResponse(status_code=422, content={"detail": issues})
     if request.url.path.startswith(
         ("/v1/auth/", "/v1/settings", "/v1/mcp", "/v1/desktop/", "/v1/notification-sounds")
     ) or (desktop_posture().enabled and _legacy_desktop_gated(request.url.path, request.method)):
@@ -1439,11 +1489,24 @@ app.include_router(desktop_notifications.router)
 # desktop family rather than beside `desktop_profiles` because the preference
 # is renderer state, not a session or catalogue surface.
 app.include_router(desktop_preferences.router)
+# The RADIENT REMOTE COMPUTE surface (``features.remote_compute``): the device
+# dropdown's Radient group, the runs panel and the three writes. Registered last in
+# the desktop family for the reason every block above gives — FastAPI matches in
+# declaration order — and its templates collide with nothing declared earlier:
+# ``/v1/desktop/remote-compute`` is a literal path, its ``/runs`` child and
+# ``/runs/{id}[/cancel]`` children sit under that literal, and no block above
+# declares that prefix. The prefix is what keeps it off the sessions router's
+# ``/v1/desktop/{...}`` family, of which there is none.
+app.include_router(desktop_remote_compute.router)
 # Notification sounds (`features.notification_sounds`): the built-in and custom
 # sound list, rendered audio, and add/rename/remove of the user's own sounds.
 # Its own `/v1/notification-sounds` prefix shares nothing with the desktop
 # family above, and it carries `require_desktop` on the router itself.
 app.include_router(notification_sounds.router)
+# Per-session VOICE MODE (`features.voice`): `/v1/desktop/voice` and its
+# `/utterance` and `/text` children. Literal paths that no template above
+# declares, so declaration order cannot make one swallow them.
+app.include_router(desktop_voice.router)
 
 # Install the loop-local work fence before lifespan publishes its reload
 # capability. It drains real request bodies, not just endpoint construction;

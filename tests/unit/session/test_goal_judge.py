@@ -205,19 +205,15 @@ async def test_a_readable_continuation_publishes_continuing_with_its_reason():
 
 @pytest.mark.asyncio
 async def test_three_consecutive_unreadable_verdicts_stall_the_goal():
-    """Fail-safe CONTINUE, and the strike is what stops it.
-
-    ``_parse_loop_verdict`` documents its own ``None`` return as "a fail-safe
-    CONTINUE plus a judge-failure strike, never as a release", so each unreadable
-    verdict still sends the agent back to work — and the breaker stops it at
-    ``GOAL_JUDGE_FAILURES`` rather than letting a broken judge spend without end.
-    """
+    """Unreadable answers never release a goal or authorize another work turn."""
     h = Harness(answers=[UNREADABLE] * 10)
     h.on_prompt = lambda _h: _continue_then_achieved(_h)
     await _judge_all(h)
+    for _ in range(GOAL_JUDGE_FAILURES - 1):
+        await h.build().rearm_on_resume()
     assert h.state.state == "stalled"
     assert h.state.reason == STALLED_BREAKER_REASON
-    assert len(h.prompts) == GOAL_JUDGE_FAILURES - 1
+    assert h.prompts == []
     assert len(h.judge_calls) == GOAL_JUDGE_FAILURES
     # A stall is a stop, not a release: nothing was marked done.
     assert h.settled == []
@@ -229,6 +225,8 @@ async def test_a_readable_verdict_clears_the_strike_count():
     h = Harness(answers=[UNREADABLE, CONTINUE, UNREADABLE, UNREADABLE, ACHIEVED])
     h.on_prompt = lambda _h: _continue_then_achieved(_h)
     await _judge_all(h)
+    for _ in range(3):
+        await h.build().rearm_on_resume()
     assert h.state.state == "done"
     assert h.settled == ["All the work is done"]
     # Two strikes never reach the breaker, and the readable CONTINUE reset them.
@@ -307,6 +305,8 @@ async def test_the_breaker_announces_once_across_its_whole_episode():
     h = Harness(answers=[UNREADABLE] * 10)
     h.on_prompt = lambda _h: _continue_then_achieved(_h)
     await _judge_all(h)
+    for _ in range(GOAL_JUDGE_FAILURES - 1):
+        await h.build().rearm_on_resume()
     announced = [notice for notice in map(goal_stalled_notice, h.changed) if notice]
     assert announced == [STALLED_BREAKER_NOTICE]
     # The strikes really did publish their own diffs — so the count above is not
@@ -340,6 +340,8 @@ async def test_a_repeated_stall_still_carries_its_reason_on_the_transition():
     h = Harness(answers=[UNREADABLE] * 10)
     h.on_prompt = lambda _h: _continue_then_achieved(_h)
     await _judge_all(h)
+    for _ in range(GOAL_JUDGE_FAILURES - 1):
+        await h.build().rearm_on_resume()
     assert [fields for fields in h.changed if fields.get("state") == "stalled"]
 
     # A second episode, begun the way the real one is: a turn end re-arms the
@@ -636,13 +638,13 @@ async def test_start_turn_end_claims_in_flight_before_the_task_exists():
 
 
 @pytest.mark.asyncio
-async def test_rearm_on_resume_judges_only_an_actually_in_flight_state():
-    for state in ("continuing", "judging"):
+async def test_rearm_on_resume_judges_only_a_nonterminal_state():
+    for state in ("continuing", "judging", "waiting", "stalled"):
         h = Harness(answers=[ACHIEVED], judge_state=GoalJudgeState(state=state, run=4))
         h.release_judge.set()
         await h.build().rearm_on_resume()
         assert len(h.judge_calls) == 1, state
-    for state in ("waiting", "stalled", "done", "idle"):
+    for state in ("done", "idle"):
         h = Harness(answers=[ACHIEVED], judge_state=GoalJudgeState(state=state))
         h.release_judge.set()
         await h.build().rearm_on_resume()

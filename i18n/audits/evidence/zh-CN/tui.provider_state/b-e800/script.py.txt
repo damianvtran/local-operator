@@ -1,0 +1,61 @@
+"""Independent B scoped validator; no application startup or ledger mutation."""
+import os, sys, json, hashlib, unicodedata, re
+from pathlib import Path
+from unittest.mock import patch
+from rich.text import Text
+from rich.console import Console
+from scripts.i18n import check
+from local_operator.i18n import catalogues, runtime
+R=Path.cwd(); NS='tui.provider_state'
+paths=[f'local_operator/i18n/catalogues/en/{NS}.json',f'local_operator/i18n/catalogues/en/{NS}.context.json',f'local_operator/i18n/catalogues/zh-CN/{NS}.json']
+expected=['113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912','67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be','ba73193e56b6b01a584418c0b8a392ee01af2c810789229f576895fbc978a5f1']
+def hashes(): return [hashlib.sha256((R/p).read_bytes()).hexdigest() for p in paths]
+print('interpreter',sys.executable,'module',runtime.__file__,'checker',check.__file__)
+assert Path(runtime.__file__).is_relative_to(R)
+assert not any(k.startswith('CMUX_') for k in os.environ)
+print('HOME',os.environ['HOME'],'CONFIG',os.environ['LOCAL_OPERATOR_CONFIG_DIR'])
+assert hashes()==expected
+print('before hashes',dict(zip(paths,hashes())))
+# The OFFICIAL validator is unchanged. Only its enumeration is restricted to the requested inputs.
+with patch.object(catalogues,'locales',return_value=('en','zh-CN')), patch.object(catalogues,'namespaces',return_value=(NS,)):
+    problems=check.check_catalogues(); print('official scoped catalogue/context/ICU',problems); assert not problems
+    real_load=catalogues.load_catalogue
+    def bad_missing(locale,namespace):
+        data=dict(real_load(locale,namespace))
+        if locale=='zh-CN': del data[NS+'.logged_in']
+        return data
+    with patch.object(catalogues,'load_catalogue',side_effect=bad_missing):
+        p=check.check_catalogues(); print('missing-key negative',p); assert any('missing key' in s for s in p)
+    def bad_arg(locale,namespace):
+        data=dict(real_load(locale,namespace))
+        if locale=='zh-CN': data[NS+'.logged_in']+=' {unexpected}'
+        return data
+    with patch.object(catalogues,'load_catalogue',side_effect=bad_arg):
+        p=check.check_catalogues(); print('added-argument negative',p); assert any('arguments' in s for s in p)
+en=catalogues.load_catalogue('en',NS); zh=catalogues.load_catalogue('zh-CN',NS); context=catalogues.context('en',NS)
+assert list(en)==list(zh)==list(context) and len(en)==5
+print('ordered parity 5/5; context 5/5; CLDR zh-CN categories',check.json.loads((Path(runtime.__file__).with_name('data')/'plural_rules.json').read_text())['locales']['zh-CN']['categories'])
+protected=re.compile(r'`[^`]*`|</?[^>]+>|--[A-Za-z][\w-]*|\{[^}]*\}')
+for key in en:
+    for locale,source in [('en',en[key]),('zh-CN',zh[key])]:
+        assert runtime.message_arguments(source)==() and runtime.plural_selectors(source)==()
+        assert runtime.parse_message(source)
+        assert source==unicodedata.normalize('NFC',source)
+        assert not any(unicodedata.category(c) in ('Mn','Me','Cf') for c in source)
+        assert runtime.render_message(source,{},locale)==source
+        assert protected.findall(source)==[]
+        print('official render',locale,key,repr(runtime.render_message(source,{},locale)),'zero_args/plural/select; NFC; protected_tokens=0')
+        for width in [17,31]:
+            console=Console(width=width,record=True,color_system=None)
+            with console.capture() as capture: console.print(Text(source),end='')
+            print('PlainRich diagnostic',locale,key,'cells',Text(source).cell_len,'sample_width',width,'render',repr(capture.get()))
+        pseudo='［'+source+' 〜〜〜〜〜〜］'
+        assert runtime.render_message(pseudo,{},locale)==pseudo
+        print('synthetic pseudo (not official pseudo workflow)',locale,key,'cells',Text(pseudo).cell_len)
+    assert protected.findall(en[key])==protected.findall(zh[key])
+    for hint in ['maxCells','maxChars']:
+        if hint in context[key]: assert (Text(zh[key]).cell_len if hint=='maxCells' else len(zh[key]))<=context[key][hint]
+assert hashes()==expected
+print('after hashes',dict(zip(paths,hashes())))
+print('PASS: 10 official zero-arg renders, 20 PlainRich width controls, 10 synthetic pseudo renders; both negative controls rejected; inputs immutable')
+print('LIMITS: no real Settings geometry/CJK font/global UI; widths are diagnostics not max caps; no app startup; producer remains English pending adapter; original provider-before-offline claim UNVERIFIED; no network isolation/certificate claim')

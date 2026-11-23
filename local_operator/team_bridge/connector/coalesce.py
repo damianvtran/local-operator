@@ -103,6 +103,9 @@ class _Pending:
     metadata: Any  # ConversationCardMetadata
     ref_key: str
     mention: bool
+    #: An urgent-failover standby (``conversation.classify_wake``): its row is still
+    #: ``deferred`` and the flush must ask ``promote`` before it can wake anyone.
+    staggered: bool = False
 
 
 @dataclass
@@ -161,7 +164,14 @@ def merge_metadata(items: list[Any]) -> Any:
     kinds = {item.sender_kind for item in items}
     labels = {item.sender_label for item in items}
     sender_kind = newest.sender_kind if len(kinds) == 1 else "mixed"
-    sender_label = newest.sender_label if len(labels) == 1 else "several members"
+    displays = {item.session_agent_display for item in items}
+    same_presentation = len(kinds) == len(labels) == len(displays) == 1
+    # Names are presentation equality only, never endpoint/session routing keys.
+    # Unknown session provenance cannot name an entire agent burst.
+    if sender_kind == "agent" and newest.session_agent_display is None:
+        same_presentation = False
+    sender_label = newest.sender_label if same_presentation else "several members"
+    session_display = newest.session_agent_display if same_presentation else None
     attachments = sum(int(item.attachments or 0) for item in items)
     note = next((item.attachments_note for item in reversed(items) if item.attachments_note), None)
     # Files coalesce the same way: the count is a sum, and one withheld line rides the
@@ -173,6 +183,7 @@ def merge_metadata(items: list[Any]) -> Any:
         mention=any(item.mention for item in items),
         sender_kind=sender_kind,
         sender_label=sender_label,
+        session_agent_display=session_display,
         attachments=attachments,
         attachments_note=note,
         files=files,
@@ -181,6 +192,9 @@ def merge_metadata(items: list[Any]) -> Any:
         # B4b: one released message in the burst puts the provenance line on the
         # whole card, because the agent reads every message of the group.
         owner_released=any(getattr(item, "owner_released", False) for item in items),
+        # The gap BEFORE the burst: the oldest message's own count. Later
+        # messages in the group follow it directly, so they add nothing.
+        since_last_delivery=int(getattr(items[0], "since_last_delivery", 0) or 0),
     )
 
 
@@ -211,8 +225,28 @@ class WakeCoalescer:
         session_id: str,
         config_dir: Path,
         now: float | None = None,
+        min_interval_s: float | None = None,
+        dwell_s: float | None = None,
+        staggered_delay_s: float | None = None,
     ) -> None:
         """Buffer one admitted message's card. Idempotent per message id.
+
+        ``dwell_s`` (channel-wake triage, operator 2026-11-21: batch messages that
+        arrive close together) turns the rate into a short DELAY for a non-urgent
+        wake: a new group is due ``dwell_s`` from now (still never before the rate
+        window), so neighbours arriving meanwhile share its one card. ``0`` marks an
+        IMMEDIATE wake (DM, mention, direct, owner): it pulls a dwelling group's due
+        time back to the rate floor, so a mention is never held behind ambient
+        chatter. ``None`` is the pre-dwell behaviour.
+
+        ``staggered_delay_s`` buffers an urgent-failover standby in its OWN group
+        (so an unrelated wake in the thread cannot flush it early), due after its
+        slot's delay; the flush's ``promote`` hook decides whether it wakes at all.
+
+        ``min_interval_s`` raises the gap after this destination's last wake
+        above the ordinary window: the per-destination gate for ROUTED groups
+        (``connector/routing.py``), whose target is not the session that always
+        received everything. ``None`` keeps the ordinary window.
 
         The crash-recovery hold is written HERE, before the caller deletes the
         feed ref: everything after this point may not run (a stop, a kill, a
@@ -223,18 +257,34 @@ class WakeCoalescer:
         """
 
         now = time.time() if now is None else now
-        key = _group_key(config_dir, owner, metadata, session_id)
+        staggered = staggered_delay_s is not None
+        key = _group_key(config_dir, owner, metadata, session_id, staggered=staggered)
         group = self._groups.get(key)
+        last = self._last_wake.get(key)
+        # Rate, not delay: a quiet conversation is due NOW (flushed at the end of
+        # this iteration); a recently woken one waits out the window.
+        gap = self.window_s if min_interval_s is None else max(self.window_s, min_interval_s)
+        floor = now if last is None else max(now, last + gap)
         if group is None:
-            last = self._last_wake.get(key)
-            # Rate, not delay: a quiet conversation is due NOW (flushed at the
-            # end of this iteration); a recently woken one waits out the window.
-            due = now if last is None else max(now, last + self.window_s)
+            due = floor
+            if staggered:
+                due = max(floor, now + max(0.0, float(staggered_delay_s or 0.0)))
+            elif dwell_s:
+                due = max(floor, now + max(0.0, float(dwell_s)))
             group = _Group(owner=owner, config_dir=config_dir, session_id=session_id, due_at=due)
             self._groups[key] = group
+        elif dwell_s is not None and dwell_s <= 0 and not staggered:
+            group.due_at = min(group.due_at, floor)
         if any(item.metadata.message_id == metadata.message_id for item in group.items):
             return
-        group.items.append(_Pending(metadata=metadata, ref_key=ref_key, mention=metadata.mention))
+        group.items.append(
+            _Pending(
+                metadata=metadata,
+                ref_key=ref_key,
+                mention=metadata.mention,
+                staggered=staggered,
+            )
+        )
         group.items.sort(key=lambda item: item.metadata.conversation_seq)
         if len(group.items) >= MAX_COALESCED_MESSAGES:
             group.due_at = min(group.due_at, now)
@@ -262,6 +312,7 @@ class WakeCoalescer:
         now: float | None = None,
         owner_filter: Any = None,
         config_dir: Path | None = None,
+        promote: Callable[..., Awaitable[bool]] | None = None,
     ) -> list[dict[str, Any]]:
         """Deliver every due group: ONE ``deliver`` call per group.
 
@@ -289,6 +340,21 @@ class WakeCoalescer:
             # cancelled by a stop leaves it buffered while a replay or a body
             # turn settles the reservation. An item whose card is already
             # posted, or whose reservation is settled, must not wake anyone.
+            #
+            # An urgent-failover standby is still ``deferred`` here (settled), so
+            # it is offered to ``promote`` FIRST: unanswered → its row becomes
+            # ``pending`` and the owed check below keeps it; answered (or no hook)
+            # → it stays deferred and the owed check drops it with no card.
+            for item in group.items:
+                if not item.staggered:
+                    continue
+                item.staggered = False
+                if promote is None:
+                    continue
+                try:
+                    await promote(group.owner, item.metadata, config_dir=group.config_dir)
+                except Exception:  # noqa: BLE001 — closed code; the row stays deferred
+                    logger.warning("bridge: staggered wake check failed code=promote_failed")
             group.items = _still_owed(group)
             if not group.items:
                 # NOT a silent drop. Every item was already POSTED or SETTLED
@@ -317,43 +383,65 @@ class WakeCoalescer:
                     }
                 )
                 continue
-            metadata = merge_metadata([item.metadata for item in group.items])
-            try:
-                detail = await deliver(
-                    group.owner,
-                    metadata,
-                    session_id=group.session_id,
-                    config_dir=group.config_dir,
+            # ONE CARD PER PERSISTED HAND-OFF IDENTITY (PR #3478 QA r1). A replay
+            # can re-group differently from the original flush (A+B went out,
+            # B's marker failed, the retry buffers B with a new C). Re-merging
+            # B+C under B's bound id would let the receiver swallow C as a
+            # duplicate (a lost wake); a fresh id for B+C would post B twice.
+            # So the group is split by the binding stored on each reservation:
+            # members bound to one id re-send under it, unbound members get
+            # their own new card. One partition in the ordinary case, so a
+            # normal burst is still exactly one card.
+            delivered_items: list[_Pending] = []
+            failed_items: list[_Pending] = []
+            for part in _handoff_partitions(group):
+                metadata = merge_metadata([item.metadata for item in part])
+                try:
+                    detail = await deliver(
+                        group.owner,
+                        metadata,
+                        session_id=group.session_id,
+                        config_dir=group.config_dir,
+                    )
+                except Exception:  # noqa: BLE001 — closed code, never content
+                    logger.warning("bridge: coalesced wake failed code=delivery_failed")
+                    failed_items.extend(part)
+                    outcomes.append({"action": "hold", "messages": len(part)})
+                    continue
+                except BaseException:
+                    # A stop or an interrupt is NOT a failed delivery to retry in
+                    # place: this process is going away and the buffer with it.
+                    # The group's holds (written at enqueue) are refreshed past
+                    # the grace period and the exception propagates, so the next
+                    # start's ordinary hold retry re-drives every message in the
+                    # group. Swallowing it here would strand the group in memory
+                    # that is about to be discarded. Partitions already handed
+                    # off are settled first so their markers are not lost too.
+                    if delivered_items:
+                        _settle(replace(group, items=delivered_items), now=now)
+                        group.items = [i for i in group.items if i not in delivered_items]
+                    _persist_holds(group, retry_at=time.time() + _HOLD_GRACE_S)
+                    raise
+                delivered_items.extend(part)
+                outcomes.append(
+                    {
+                        "action": "delivered",
+                        "conversation_id": metadata.conversation_id,
+                        "message_ids": [item.metadata.message_id for item in part],
+                        "detail": detail,
+                    }
                 )
-            except Exception:  # noqa: BLE001 — closed code, never content
-                logger.warning("bridge: coalesced wake failed code=delivery_failed")
+            if delivered_items:
+                _settle(replace(group, items=delivered_items), now=now)
+                self._last_wake[key] = now
+                if len(self._last_wake) > _LAST_WAKE_CAP:
+                    self._last_wake.clear()
+            if failed_items:
+                group.items = failed_items
                 group.due_at = now + max(self.window_s, 1.0)
                 _persist_holds(group, retry_at=group.due_at + _HOLD_GRACE_S)
-                outcomes.append({"action": "hold", "messages": len(group.items)})
                 continue
-            except BaseException:
-                # A stop or an interrupt is NOT a failed delivery to retry in
-                # place: this process is going away and the buffer with it. The
-                # group's holds (written at enqueue) are refreshed past the
-                # grace period and the exception propagates, so the next start's
-                # ordinary hold retry re-drives every message in the group.
-                # Swallowing it here would strand the group in memory that is
-                # about to be discarded.
-                _persist_holds(group, retry_at=time.time() + _HOLD_GRACE_S)
-                raise
             del self._groups[key]
-            self._last_wake[key] = now
-            if len(self._last_wake) > _LAST_WAKE_CAP:
-                self._last_wake.clear()
-            _settle(group, now=now)
-            outcomes.append(
-                {
-                    "action": "delivered",
-                    "conversation_id": metadata.conversation_id,
-                    "message_ids": [item.metadata.message_id for item in group.items],
-                    "detail": detail,
-                }
-            )
         return outcomes
 
     def persist_pending_holds(self, *, config_dir: Path | None = None) -> None:
@@ -381,13 +469,21 @@ class _Scope:
             _ACTIVE.reset(self._token)
 
 
-def _group_key(config_dir: Path, owner: Any, metadata: Any, session_id: str) -> GroupKey:
+def _group_key(
+    config_dir: Path, owner: Any, metadata: Any, session_id: str, *, staggered: bool = False
+) -> GroupKey:
     # session_id last: ``flush_due`` reads ``key[2]`` as the conversation id.
+    # A staggered standby keys apart from the thread's ordinary group (a suffix
+    # no thread id can carry) so it keeps its own due time and rate memory — and
+    # PER MESSAGE (review r1 m2): ``due`` is set only when a group is created, so
+    # a second urgent message in the same thread with another slot would inherit
+    # the first one's due time and be checked early (a duplicate) or late.
+    thread = metadata.thread_root_id or ""
     return (
         str(config_dir),
         str(getattr(owner, "endpoint_id", "") or ""),
         metadata.conversation_id,
-        metadata.thread_root_id or "",
+        f"{thread}\x1fstaggered\x1f{metadata.message_id}" if staggered else thread,
         session_id,
     )
 
@@ -442,6 +538,42 @@ def _still_owed(group: _Group) -> list[_Pending]:
             continue
         kept.append(item)
     return kept
+
+
+def _handoff_partitions(group: _Group) -> list[list[_Pending]]:
+    """Split a group by each reservation's persisted card hand-off identity.
+
+    Keys: the bound ``peer-`` id (members of ONE earlier card), ``''`` (never
+    handed off: they share one new card), and the store's sentinels for a
+    legacy or unreserved row, each kept apart so ``_deliver_card`` can hold or
+    pass them without contaminating another partition. Order follows the
+    group's own ``conversation_seq`` order. A store that cannot answer keeps
+    the whole group as ONE partition, i.e. exactly the pre-change behaviour,
+    and the bind inside the hand-off then refuses or proceeds on its own read.
+    """
+
+    from local_operator.team_bridge.store import Store, StoreRefused
+
+    by_conversation: dict[str, list[str]] = {}
+    for item in group.items:
+        by_conversation.setdefault(item.metadata.conversation_id, []).append(
+            item.metadata.message_id
+        )
+    bindings: dict[tuple[str, str], str | None] = {}
+    try:
+        store = Store(group.config_dir)
+        for conversation_id, ids in by_conversation.items():
+            for mid, value in store.card_handoff_bindings(
+                group.owner, conversation_id, ids
+            ).items():
+                bindings[(conversation_id, mid)] = value
+    except StoreRefused:
+        return [list(group.items)]
+    parts: dict[str | None, list[_Pending]] = {}
+    for item in group.items:
+        key = bindings.get((item.metadata.conversation_id, item.metadata.message_id))
+        parts.setdefault(key, []).append(item)
+    return list(parts.values())
 
 
 def _persist_hold(owner: Any, ref_key: str, config_dir: Path, *, retry_at: float) -> None:

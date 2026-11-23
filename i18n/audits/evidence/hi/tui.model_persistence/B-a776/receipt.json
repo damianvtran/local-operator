@@ -1,0 +1,55 @@
+{
+  "locale": "hi",
+  "namespace": "tui.model_persistence",
+  "source_sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "fdf96049990f",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": false,
+    "actual_model_source": "Host model-switch telemetry: provider failure: quota; fallback from anthropic/claude-opus-5-5 to openai/gpt-6.1-sol before Hindi authorship",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "a776dd8a4364",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "actual_model_source": "Host model-switch telemetry in this session: provider failure: quota; switched before Hindi assessment",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "date": "2026-11-22",
+    "result": "changes_requested",
+    "findings": 1
+  },
+  "status": "changes_requested",
+  "note": "Independent B: changes requested B-HI-1 (saved scope). Record: i18n/audits/evidence/hi/tui.model_persistence/B-a776/record.json",
+  "record_reference": "i18n/audits/evidence/hi/tui.model_persistence/B-a776/record.json",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/B-a776/record.json",
+      "sha256": "4ede38b78183d6a0dd5e01c4299a53223b719adc11593601a3c14cfb699c98e0"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/B-a776/report.md",
+      "sha256": "77d6afc960f430a4f585a24807ea19878994c23730a0c542f252f6b9dcebd11d"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/B-a776/audit.log",
+      "sha256": "a744d9a0dcc16636846518f4b1274f66fd6b8fe3deea676f3999e8ea4f82720a"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/B-a776/script.py.txt",
+      "sha256": "1c96bd9dd820612ab0345498b5eadc64c18e049141554e2d27994a120e91c471"
+    }
+  ]
+}

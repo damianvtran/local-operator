@@ -1,0 +1,90 @@
+{
+  "locale": "vi",
+  "namespace": "tui.model_persistence",
+  "audit_date": "2026-11-22",
+  "key_count": 4,
+  "auditor": {
+    "agent": "i18n-auditor B",
+    "session": "674d6e6c175e",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "translator_session": "edc50a6f3d77",
+    "actual_model_source": "Host model-switch message during this audit: anthropic/claude-opus-5-5 to openai/gpt-6.1-sol; provider failure: quota. Assessment and execution after fallback.",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "translator_provenance_source": "i18n/audits/evidence/vi/tui.model_persistence/viau1/record.json",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "edc50a6f3d77",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": false,
+    "actual_model_source": "Host model-switch message: anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; provider failure: quota. Translation and validation authored after switch.",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "source_audit_revision": "b1c5ca8be245dcc3f9cae4463d9a5553b3e0c01f",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.json",
+      "sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.context.json",
+      "sha256": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc"
+    },
+    "vi": {
+      "path": "local_operator/i18n/catalogues/vi/tui.model_persistence.json",
+      "sha256": "d6b5f00ab0a25ea2596879299e5cda07b5b5bb66bf8ea8bc9081f503719cf505"
+    },
+    "style": {
+      "path": "i18n/style-guides/vi.md",
+      "sha256": "99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/vi/tui.model_persistence/vib674/report.md",
+      "sha256": "47beecc7cdbf2a87d1843b81e80552a7df698f4dd0fc2ccd0fa18dfe6c34a10d",
+      "kind": "audit_notes_not_execution_log"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/tui.model_persistence/vib674/audit.log",
+      "sha256": "47ca15b86797726ce1e3448d83246a93d4d8a273f8ff5617cffd7038592bfb1c",
+      "kind": "actual_execution_log"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/tui.model_persistence/vib674/script.py.txt",
+      "sha256": "614b0d1d0f1171b4eea2fb1a7674b5ac2dfd3b32101b08a7965e715d79727f63",
+      "kind": "reproduction_source"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "current_bytes_match_audited_hashes": true,
+  "execution": {
+    "exit_code": 0,
+    "plain_rich_cases": 36,
+    "styled_native_geometry": false,
+    "consumer_execution": false
+  },
+  "ledger_applied": false,
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false
+}

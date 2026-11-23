@@ -1,0 +1,85 @@
+{
+  "locale": "es",
+  "namespace": "tui.session_sidebar",
+  "source_sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a",
+  "target_sha256": "16295c4fd94c38d8c6cc94991b4d1a01d9a99633c3d1a5db8716ca61b5b45c11",
+  "context_sha256": "698e8f0e151fee53d52a533bc51d7edcc600ce6964d74cdb024888238161f6e0",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20"
+  },
+  "auditor": {
+    "agent": "translation-auditor (sidebar-reaudit-es), session c6f26f5d7512",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "round": 2,
+  "scope": {
+    "changed_keys": [
+      "tui.session_sidebar.footer.hub_note"
+    ],
+    "composition_keys": [
+      "tui.session_sidebar.footer.asks_note",
+      "tui.session_sidebar.footer.opening",
+      "tui.session_sidebar.footer.refresh_failed",
+      "tui.hub_links.detail.title"
+    ],
+    "changed_keys_read": 1,
+    "context_keys_read": 4,
+    "total_keys_read": 5
+  },
+  "findings": [],
+  "checks": {
+    "message_arguments": [
+      [
+        "count",
+        "simple"
+      ]
+    ],
+    "placeholder_parity": true,
+    "renders": [
+      {
+        "count": 0,
+        "rendered": "vínc.: 0",
+        "cells": 8,
+        "maxCells": 10,
+        "passed": true
+      },
+      {
+        "count": 1,
+        "rendered": "vínc.: 1",
+        "cells": 8,
+        "maxCells": 10,
+        "passed": true
+      },
+      {
+        "count": 9,
+        "rendered": "vínc.: 9",
+        "cells": 8,
+        "maxCells": 10,
+        "passed": true
+      },
+      {
+        "count": 10,
+        "rendered": "vínc.: 10",
+        "cells": 9,
+        "maxCells": 10,
+        "passed": true
+      },
+      {
+        "count": 99,
+        "rendered": "vínc.: 99",
+        "cells": 9,
+        "maxCells": 10,
+        "passed": true
+      }
+    ]
+  },
+  "note": "Delta-only independent re-audit. vínc. abbreviates vínculo, the configured-link glossary noun and shipped door title Vínculos del hub. Lowercase terse label and abbreviation punctuation match preg.: {count}; no address-form or plural agreement issue in count-neutral label. Counts 10 and 99 fit 9/10 cells. Neighbour status strings read for composition only, not reopened for audit. No rendered full-TUI proof claimed. Actual model openai/gpt-6.1-sol; no fallback used."
+}

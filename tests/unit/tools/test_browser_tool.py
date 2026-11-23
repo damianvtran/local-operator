@@ -2704,3 +2704,73 @@ def test_a_malformed_query_count_does_not_break_the_answer(monkeypatch) -> None:
         )
         assert not result.is_error, (broken, result.text)
         assert "2 matches for 'input'" in result.text
+
+
+# --- a failed close says WHY, and owed tabs are retried -----------------------
+
+
+def test_a_failed_host_close_names_the_hosts_own_code_and_reason(monkeypatch) -> None:
+    """2026-11-17: every stranding incident read "could not close the tab" with
+    the host's ``owner_refused`` (a password-manager prompt) thrown away, so
+    nobody could tell a paused tab from a wedged host."""
+
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
+        problem = builtin._error(
+            tool_call_id,
+            "browser",
+            "Local Operator desktop app's browser host error (owner_refused): a password "
+            "manager prompt in that tab is waiting for the user",
+        )
+        problem.details = {"error_code": "owner_refused"}
+        return None, problem
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    state = BrowserSurface()
+    state.surface_id = "ui:8:7a3e"
+    message = asyncio.run(builtin.close_browser_surface(state))
+    assert "owner_refused" in message
+    assert "password manager prompt" in message
+    assert "ownership retained for retry" in message
+    assert state.surface_id == "ui:8:7a3e"
+
+
+def test_a_code_the_rendering_omits_is_still_named(monkeypatch) -> None:
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
+        problem = builtin._error(tool_call_id, "browser", "the host said no")
+        problem.details = {"error_code": "owner_refused"}
+        return None, problem
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    state = BrowserSurface()
+    state.surface_id = "ui:8:7a3e"
+    assert "owner_refused: the host said no" in asyncio.run(builtin.close_browser_surface(state))
+
+
+class _OwedResource:
+    def __init__(self, owed: list[dict[str, str]], failures: list[str]) -> None:
+        self.record: dict[str, Any] = {"stranded_surfaces": owed}
+        self.failures = failures
+        self.calls = 0
+
+    async def close_stranded(self) -> list[str]:
+        self.calls += 1
+        return self.failures
+
+
+def test_close_reports_owed_tabs_it_settled_or_could_not() -> None:
+    nothing = _OwedResource([], [])
+    result = builtin._text("t1", "browser", "No browser surface open.", useless=True)
+    out = builtin._with_stranded_note(result, asyncio.run(builtin._close_stranded_quietly(nothing)))
+    assert nothing.calls == 0 and out.useless, "no owed tabs: untouched"
+
+    owed = _OwedResource([{"surface": "ui:8:x", "allocation_id": "a"}], [])
+    result = builtin._text("t1", "browser", "No browser surface open.", useless=True)
+    out = builtin._with_stranded_note(result, asyncio.run(builtin._close_stranded_quietly(owed)))
+    assert owed.calls == 1
+    assert "Also closed earlier tab" in out.text and not out.useless
+
+    stuck = _OwedResource([{"surface": "ui:8:x", "allocation_id": "a"}], ["owner_refused: busy"])
+    result = builtin._text("t1", "browser", "Closed browser surface ui:9:y.")
+    out = builtin._with_stranded_note(result, asyncio.run(builtin._close_stranded_quietly(stuck)))
+    assert "owner_refused: busy" in out.text
+    assert "retried at session end" in out.text

@@ -1,0 +1,101 @@
+{
+  "schema": 1,
+  "note": "Byte-identical originals; original provenance and verdict unchanged. Retention mapping is not an audit.",
+  "files": [
+    {
+      "retained_path": "i18n/audits/evidence/hi/wire.teams.effective/hi2/post-verdict-comparison.json",
+      "original_path": "/Users/damian/.local-operator/sessions/2851856c6680/scratchpad/hi-second-audit/post-verdict-comparison.json",
+      "sha256": "bb18ae1ebd444829115e671b77b0d79bdb015a1ce9e3f1e599a31585d89e895e"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/hi/wire.teams.effective/hi2/record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/2851856c6680/scratchpad/hi-second-audit/record.json",
+      "sha256": "57bbfe8566c17a3abf1c2f51bebc585c72d9174f7b4fd7e6d6a275b29c2f193a"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/hi/wire.teams.effective/hi2/report.json",
+      "original_path": "/Users/damian/.local-operator/sessions/2851856c6680/scratchpad/hi-second-audit/report.json",
+      "sha256": "9c71f5787a8afd516d8d50b3653414e2caf66a31814af164425f435259b33136"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/hi/wire.teams.effective/hi2/check.py",
+      "original_path": "/Users/damian/.local-operator/sessions/2851856c6680/scratchpad/hi-second-audit/check.py",
+      "sha256": "d24bcb1fd252414561d29215936f099da308c7285d48246042c238b5f349d220"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/hi/wire.teams.effective/hi2/mechanical-success.log",
+      "original_path": "/Users/damian/.local-operator/sessions/2851856c6680/scratchpad/hi-second-audit/mechanical-success.log",
+      "sha256": "ae36d79ac3f96bd07c9fb27a2e84df472859361292fb8eb7da12ff160426325b"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/hi/wire.teams.effective/hi2/mechanical.json",
+      "original_path": "/Users/damian/.local-operator/sessions/2851856c6680/scratchpad/hi-second-audit/mechanical.json",
+      "sha256": "ae36d79ac3f96bd07c9fb27a2e84df472859361292fb8eb7da12ff160426325b"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/hi/wire.teams.effective/hi2/mechanical.log",
+      "original_path": "/Users/damian/.local-operator/sessions/2851856c6680/scratchpad/hi-second-audit/mechanical.log",
+      "sha256": "8e745e561b1f6a741ec453daf448dd1d10ecd9999ac0266e166b54e177f43890"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/hi/wire.teams.effective/hi2/admission.log",
+      "original_path": "/Users/damian/.local-operator/sessions/2851856c6680/scratchpad/hi-second-audit/admission.log",
+      "sha256": "ce3d34f6548fa87ef16fff2bc43bc0971fb760bd60407782593e35fb06a302f2"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/hi/wire.teams.effective/hi2/receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/2851856c6680/scratchpad/hi-second-audit/receipt.json",
+      "sha256": "ea8acbb67fe399fc0448f9027f27709fea20ea4e5451f2d600b1cbffac360e0f"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/hi/wire.teams.effective/hi2/translator-receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/47e37aebb87c/scratchpad/effective-reasons-hi/translator-receipt.json",
+      "sha256": "86a98b21628efd36399bf394ac54377cc97379bd5574b9d83a897adfb1a2f5c3"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/hi/wire.teams.effective/hi2/wire.teams.effective.json",
+      "original_path": "/Users/damian/.local-operator/sessions/47e37aebb87c/scratchpad/effective-reasons-hi/catalogues/hi/wire.teams.effective.json",
+      "sha256": "e2a1d7d25325c08db1f414105c75609e7c3a4f65d8a877169064974a9d5f1d92"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/hi/wire.teams.effective/hi2/translator/ledger-dry-run.json",
+      "original_path": "/Users/damian/.local-operator/sessions/47e37aebb87c/scratchpad/effective-reasons-hi/ledger-dry-run.json",
+      "sha256": "5039647a3253e0791acb86ff858c1470e9e513f0110e61c5adb2e03ded3005bb"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/hi/wire.teams.effective/hi2/translator/validation.log",
+      "original_path": "/Users/damian/.local-operator/sessions/47e37aebb87c/scratchpad/effective-reasons-hi/validation.log",
+      "sha256": "3ac08ebb5f9124a1846ab552e7d5ea6f7823473e6d864d99783919980349899b"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/hi/wire.teams.effective/hi2/translator/translator-receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/47e37aebb87c/scratchpad/effective-reasons-hi/translator-receipt.json",
+      "sha256": "86a98b21628efd36399bf394ac54377cc97379bd5574b9d83a897adfb1a2f5c3"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/hi/wire.teams.effective/hi2/translator/validate.py",
+      "original_path": "/Users/damian/.local-operator/sessions/47e37aebb87c/scratchpad/effective-reasons-hi/validate.py",
+      "sha256": "35321ca4895795aebcc555687a62af4e273a31eee4a4a1797359d1c1ca0f300c"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/hi/wire.teams.effective/hi2/translator/mechanical-checks.json",
+      "original_path": "/Users/damian/.local-operator/sessions/47e37aebb87c/scratchpad/effective-reasons-hi/mechanical-checks.json",
+      "sha256": "cb1c4bba416616074dc719c2224c0ead13c0dcb7c5d8b40f4e21251d0974a779"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/hi/wire.teams.effective/hi2/translator/catalogues/hi/wire.teams.effective.json",
+      "original_path": "/Users/damian/.local-operator/sessions/47e37aebb87c/scratchpad/effective-reasons-hi/catalogues/hi/wire.teams.effective.json",
+      "sha256": "e2a1d7d25325c08db1f414105c75609e7c3a4f65d8a877169064974a9d5f1d92"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/hi/wire.teams.effective/hi2/translator/catalogues/en/wire.teams.effective.context.json",
+      "original_path": "/Users/damian/.local-operator/sessions/47e37aebb87c/scratchpad/effective-reasons-hi/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/hi/wire.teams.effective/hi2/translator/catalogues/en/wire.teams.effective.json",
+      "original_path": "/Users/damian/.local-operator/sessions/47e37aebb87c/scratchpad/effective-reasons-hi/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    }
+  ]
+}

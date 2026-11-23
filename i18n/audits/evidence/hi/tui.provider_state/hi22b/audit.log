@@ -1,0 +1,15 @@
+interpreter: /Users/damian/local-operator/.venv/bin/python
+module: /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/i18n/catalogues.py
+isolated HOME/config; CMUX absent: /Users/damian/.local-operator/sessions/7d0c5bb3f103/scratchpad/hi22b-home
+input sha256 en 113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912
+input sha256 context 67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be
+input sha256 hi 6842f379ee5668e28c087ef764491411da67b5580ade695a03164975364da7b1
+official check.check_catalogues scoped en/hi namespace: []
+missing-key negative: ["hi/tui.provider_state: missing key 'tui.provider_state.logged_in'"]
+added-argument negative: ["hi/tui.provider_state: tui.provider_state.logged_in: arguments (('invented', 'simple'),) != en's (): en has 0 argument(s), translation has 1"]
+{"key": "tui.provider_state.logged_in", "text": "लॉग इन है", "args": 0, "plural": 0, "select": 0, "NFC": true, "protected_tokens": 0, "rich_plain_equal": true, "cell_len_diagnostic_only": 7, "declared_cap": null}
+{"key": "tui.provider_state.env_key", "text": "परिवेश चर से कुंजी", "args": 0, "plural": 0, "select": 0, "NFC": true, "protected_tokens": 0, "rich_plain_equal": true, "cell_len_diagnostic_only": 12, "declared_cap": null}
+{"key": "tui.provider_state.needs_login", "text": "लॉग इन ज़रूरी", "args": 0, "plural": 0, "select": 0, "NFC": true, "protected_tokens": 0, "rich_plain_equal": true, "cell_len_diagnostic_only": 9, "declared_cap": null}
+{"key": "tui.provider_state.local_ready", "text": "सर्वर कॉन्फ़िगर है", "args": 0, "plural": 0, "select": 0, "NFC": true, "protected_tokens": 0, "rich_plain_equal": true, "cell_len_diagnostic_only": 12, "declared_cap": null}
+{"key": "tui.provider_state.local_unconfigured", "text": "सर्वर कॉन्फ़िगर करें", "args": 0, "plural": 0, "select": 0, "NFC": true, "protected_tokens": 0, "rich_plain_equal": true, "cell_len_diagnostic_only": 13, "declared_cap": null}
+PASS: official scoped catalogue/context/ICU checks, 2 rejecting controls, all 5 zero-argument renders, NFC/protected tokens, English and synthetic pseudo/plain Rich controls. Not native-font or live UI proof.

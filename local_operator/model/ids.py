@@ -26,6 +26,18 @@ _DATE_SUFFIX_RE = re.compile(r"-\d{8}$")
 #: alone — only a dash that is standing in for a decimal point is rewritten.
 _DOTTED_VERSION_RE = re.compile(r"(?<=\d)-(?=\d)")
 
+# Recognize published GPT-6.2 Responses families and later minors in those
+# families, including snapshots. A lookalike, fine-tune, or future major is
+# not evidence the endpoint implements the same instruction placement.
+_OPENAI_DEVELOPER_INSTRUCTIONS_RE = re.compile(
+    r"gpt-6\.(?:[2-9]|[1-9][0-9]+)-(?:astra|sol)(?:-\d{4}-\d{2}-\d{2})?$"
+)
+
+
+def openai_developer_instructions_model(model_id: str) -> bool:
+    """Model half of the Responses developer-instruction capability check."""
+    return _OPENAI_DEVELOPER_INSTRUCTIONS_RE.fullmatch(model_id.lower()) is not None
+
 
 def normalised_id(model_id: str) -> str:
     """A model id in the one spelling both sides of a match can agree on.

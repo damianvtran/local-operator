@@ -1162,6 +1162,15 @@ _FRONTEND_LOCAL_SLASHES = {
     # on the runtime's host where nobody is sitting.
     "fork",
     "theme",
+    # The transcript layout is a standing preference written to THIS machine's
+    # config.yml (`display.transcript_display`) and painted by THIS terminal, so
+    # it is `/theme`'s rule exactly: routed to a runtime it would persist a
+    # default governing a host the user is not sitting at, and the fold it
+    # changes is drawn here. (Slice 1 registered the command and the setting but
+    # left the scope at the default, which advertised it as authoritative and
+    # made the runtime's dispatcher the one thing expected to answer it —
+    # `test_the_runtime_dispatches_every_slash_command_it_advertises` caught it.)
+    "transcript",
     # The settings page reads and writes THIS machine's config.yml, exactly
     # like `/theme` and `/search` above it. Routed to the runtime it would open
     # against the runtime's config and persist a default governing a machine the
@@ -7287,6 +7296,22 @@ class FrontendStateStore:
         return self._state.pending_gate
 
     @property
+    def queued_engine_live(self) -> bool:
+        """Whether this runtime runs the queued-ask engine, WITHOUT cloning the state.
+
+        The capability read the wire documents: a well-formed ``asks`` list, or
+        the presence of ``asks_open`` (``desktop-session-contract.ts``'s
+        "presence of ``asks``/``asks_open`` IS the capability flag"). While it is
+        true, an ask-kind :attr:`pending_gate` is only the legacy mirror of a
+        QUEUED ask (``asks/render.mirror_card``) -- the agent is continuing, so
+        the ask parks nothing -- and a reader asking "is something blocking
+        this turn?" must not count it. Under ``LOP_ASK_NONBLOCKING=0`` neither
+        field is published and the same gate IS a parked card.
+        """
+        state = self._state
+        return state.asks is not None or state.asks_open is not None
+
+    @property
     def has_subscribers(self) -> bool:
         """Whether a FRONTEND is attached.
 
@@ -8638,7 +8663,17 @@ class FrontendStateStore:
             # fold keeps the legacy shape an old surface renders today.
             spend_channels=_spend_channels_payload(session, ledger, child_costs, spend),
             streaming=bool(getattr(session, "is_streaming", False)),
-            generation=int(getattr(session, "_generation", current.generation) or 0),
+            # The generation the turn EVENTS carry, not the raw per-run counter:
+            # a post-compaction continuation re-enters ``_run_turn`` and bumps
+            # ``_generation`` while staying the same turn, and a snapshot that
+            # said N+1 while that turn's ``agent_end`` said N made every viewer
+            # guard comparing the two drop the turn's own end (review R7-M1). A
+            # host without the attribute keeps the raw counter it always had.
+            generation=int(
+                getattr(session, "_turn_generation", None)
+                or getattr(session, "_generation", current.generation)
+                or 0
+            ),
             last_turn_outcome=_last_turn_outcome_from(session, current.last_turn_outcome),
             last_turn_cut_off=_last_turn_cut_off_from(session, current.last_turn_cut_off),
             activity_started_at=(
@@ -9046,6 +9081,18 @@ class FrontendStateStore:
         # (review round 1, M1).
         changes.update(self._channels_change(session))
         return self.mutate(**changes)
+
+    def refresh_observed_monitors(self, scheduler: Any) -> FrontendUpdate | None:
+        """Advance quiet check status only when a frontend is consuming it.
+
+        A later viewer takes a fresh session snapshot on attach; internal
+        transport observers alone do not justify projecting or serializing
+        every quiet check. For attached viewers, use the regular sequence
+        and field revision rather than silently editing the snapshot.
+        """
+        if not self.has_subscribers:
+            return None
+        return self.mutate(monitors=_monitor_state(scheduler))
 
     def refresh_jobs(self, session: Any) -> FrontendUpdate | None:
         """Publish the job roster without rescanning unrelated session state.

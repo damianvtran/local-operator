@@ -1,0 +1,41 @@
+{
+  "record_reference": "i18n/audits/evidence/hi/tui.provider_state/a57ba/record.json",
+  "auditor": {
+    "agent": "i18n-auditor (Hindi A)",
+    "session": "57ba373043b9",
+    "model": "openai/gpt-6.1-sol",
+    "configured_model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": true,
+    "independentFromAuthor": true,
+    "translator_session": "520071768802",
+    "actual_model_source": "Host model-switch message in this session: openai/gpt-6.1-sol, provider failure: quota. Per-response served-provider metadata not available/independently verified; configured Claude is not asserted as served.",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota",
+      "per_response_identity_verified": false
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/a57ba/audit.log",
+      "sha256": "60a591a591712864ab77de77dc597cb0a865e501faf7d99338c09506155c487f"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/a57ba/directledger-receipt.json",
+      "sha256": "ccb675f4f998c62daa652c1d6eb79d5a02dfea7db2d8aeef759813996eb4c6db"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/a57ba/record.json",
+      "sha256": "c0c13f5c6a0548cf0523d86b8177de8482f61e7a7f584a043845d07366f43891"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/a57ba/report.md",
+      "sha256": "34dbbba42060c1c64207b35fcbfaf0b3dd188a8ad5df0e5281950ef9ce7e5e91"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/a57ba/script.py.txt",
+      "sha256": "2da275d549499cfdebf072051dc820e4b2773922d72340d7a8515fddec30a6cb"
+    }
+  ]
+}

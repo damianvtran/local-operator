@@ -1,0 +1,35 @@
+{
+  "audit": "chrome-r2-ru",
+  "namespace": "tui.settings_view.chrome",
+  "locale": "ru",
+  "round": 2,
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-settings-leftovers",
+  "head": "183ed01e92cc",
+  "sha256": {
+    "en": "2e04f79550d0b09cd262c32850a31c20d5dec2b88b09facd2369d967bd5ee930",
+    "ru": "ba2e9c05c6e8a741042dc6800397cb5abc10da60c6436e07bf806c4231922441",
+    "en_context": "4d981004bb67852a6b4f8420ecb6eabba2f6c2c3d2328780830bcb4313dc8b40"
+  },
+  "keys_read": 49,
+  "check_py_catalogues_only": "0 problem(s)",
+  "over_cap_realistic": [],
+  "verdict": "clean-with-findings",
+  "findings": [
+    {
+      "id": "T-ru-r2-1",
+      "sev": "minor",
+      "key": "error.unexpected_structure"
+    },
+    {
+      "id": "T-ru-r2-2",
+      "sev": "nit",
+      "key": "gate_kept.medium"
+    },
+    {
+      "id": "T-ru-r2-3",
+      "sev": "nit",
+      "key": "error.retired"
+    }
+  ],
+  "auditor_model": "anthropic/claude-opus-5-5 (fallback; primary openai/gpt-6.1-sol 429) — same model as translator"
+}

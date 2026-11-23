@@ -1154,7 +1154,7 @@ async def test_busy_dm_pickup_preserves_running_tool(tmp_path, monkeypatch, case
             # RED log and exact source retained in scratch. The ORIGINAL turn
             # remains immutable; no manual prompt manufactures the next turn.
             assert BODY not in "\n".join(rig.stream.texts(2))
-            if case in ("single", "multi"):
+            if case == "single":
                 assert len(rig.stream.requests) == 3 + len(rig.messages)
                 for index, (message_id, body) in enumerate(rig.messages.items(), start=3):
                     request = "\n".join(rig.stream.texts(index))
@@ -1164,10 +1164,21 @@ async def test_busy_dm_pickup_preserves_running_tool(tmp_path, monkeypatch, case
                     )
                     row = rig.store.body_reservation(rig.owner, CONVERSATION_ID, message_id)
                     assert row["state"] == "completed"
+            if case == "multi":
+                # ``team_bridge.multi_frame_turns`` (default on): the two bodies
+                # that arrived while the session was busy ride ONE follow-up
+                # turn as two frames, each body exactly once, both completed.
+                assert len(rig.stream.requests) == 4
+                request = "\n".join(rig.stream.texts(3))
+                for message_id, body in rig.messages.items():
+                    assert request.count(body) == 1
+                    row = rig.store.body_reservation(rig.owner, CONVERSATION_ID, message_id)
+                    assert row["state"] == "completed"
+            if case in ("single", "multi"):
                 # ONE wake card per batch (wake contract coalescing): two DMs
                 # admitted in the same connector pass share one card naming
-                # both ids, while each body is still hydrated in its own turn
-                # (the per-message assertions above).
+                # both ids; each body is still hydrated and verified as its own
+                # frame (the per-message assertions above).
                 cards = bridge_frames(rig.root)
                 assert len(cards) == 1
                 if len(rig.messages) > 1:

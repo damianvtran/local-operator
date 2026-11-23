@@ -1,0 +1,79 @@
+"""Independent Spanish B: scoped official validators and plain Rich controls only."""
+import hashlib,json,os,re,sys,unicodedata
+from pathlib import Path
+import local_operator
+from local_operator.i18n import catalogues,runtime
+from scripts.i18n import check
+from rich.console import Console
+from rich.text import Text
+ROOT=Path('/Users/damian/local-operator/.worktrees/i18n-model-persist-notice')
+NS='tui.model_persistence'
+print('COMMAND: env -i HOME=<session scratch>/esB-home LOCAL_OPERATOR_CONFIG_DIR=<session scratch>/esB-home/config PYTHONPATH=<worktree> primary .venv/bin/python <bundle>/script.py.txt')
+print('python',sys.executable,'module',local_operator.__file__,'checker',check.__file__)
+assert Path(local_operator.__file__).resolve()==ROOT/'local_operator/__init__.py'
+assert Path(check.__file__).resolve()==ROOT/'scripts/i18n/check.py'
+assert not any(k.startswith(('CMUX_','LOP_')) for k in os.environ)
+print('isolated HOME',os.environ['HOME'],'config',os.environ['LOCAL_OPERATOR_CONFIG_DIR'],'CMUX/LOP=0')
+paths={'en':('en',NS+'.json','4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff'),'context':('en',NS+'.context.json','b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc'),'es':('es',NS+'.json','253fc1d487b648e6c778ac0f102ca5a49865dd8e223374ad31981f92ff97cce4')}
+def hashes(stage):
+ for name,(loc,file,expected) in paths.items():
+  actual=hashlib.sha256((ROOT/'local_operator/i18n/catalogues'/loc/file).read_bytes()).hexdigest()
+  assert actual==expected,(stage,name,actual)
+  print(stage,name,actual)
+hashes('BEFORE')
+en=catalogues.load_catalogue('en',NS); es=catalogues.load_catalogue('es',NS); ctx=catalogues.context('en',NS)
+assert list(en)==list(es)==list(ctx) and len(es)==4
+problems=[]; check._check_context_sidecar(problems,'en',NS,en)
+plural=json.loads((ROOT/'local_operator/i18n/data/plural_rules.json').read_text())
+commands={'persist':'/model default','settings':'/settings','saved':'/model saved'}
+for loc,cat in [('en',en),('es',es)]:
+ for key,text in cat.items():
+  args=runtime.message_arguments(text)
+  assert check.arguments_match(runtime.message_arguments(en[key]),args,translated_source=text,locale=loc,plural=plural)
+  check._check_plural_categories(problems,loc,NS,key,text,plural,loc)
+  assert not runtime.plural_selectors(text) and all(k not in ('plural','select','selectordinal') for _,k in args)
+  assert unicodedata.normalize('NFC',text)==text
+  assert not re.search('[\u202a-\u202e\u2066-\u2069]',text)
+  name=key.rsplit('.',1)[1]
+  if name in commands:
+   assert text.count(commands[name])==1
+   assert re.findall(r'/model (?:default|saved)|/settings',text)==[commands[name]]
+  else: assert args==( ('label','simple'),('routes','simple')) and text.count('{label}')==text.count('{routes}')==1
+  assert not re.search(r'`|</?\w+|\[[^]]+\]',text)
+  print('KEY',loc,key,'args',args,'text',text)
+assert not problems,problems
+# Negative controls against actual official APIs and the exact key-set predicate.
+bad=dict(es); bad.pop(next(iter(bad))); assert list(en)!=list(bad)
+print('NEGATIVE missing key rejected by key-parity assertion')
+assert not check.arguments_match(runtime.message_arguments(en[NS+'.with_model']),())
+try: runtime.render_message(es[NS+'.with_model'],{'label':'x/y'},'es')
+except runtime.MessageFormatError as exc: print('NEGATIVE missing argument rejected',type(exc).__name__,str(exc))
+else: raise AssertionError('missing argument accepted')
+print('PASS scoped catalogue/context/ICU; ordered keys=4; plural/select=0; NFC; markup absent')
+labels=['x/y','provider/opaque-model-2026-11-22-'+('abc123-'*18)+'end']
+count=0
+for loc,cat in [('en',en),('es',es)]:
+ for pseudo in (False,True):
+  def expand(text):
+   if not pseudo:return text
+   # Expand human text only: protected command and ICU tokens unchanged.
+   return ''.join(s if re.fullmatch(r'/model (?:default|saved)|/settings|\{\w+\}',s) else ''.join(c*2 if c.lower() in 'aeiouáéíóú' else c for c in s) for s in re.split(r'(/model (?:default|saved)|/settings|\{\w+\})',text))
+  routes={n:runtime.render_message(expand(cat[NS+'.'+n]),{},loc) for n in commands}
+  for state,names in [('ordinary',['persist','saved','settings']),('missing-model',['persist','settings']),('absent-hosting',['settings']),('unknown-hosting',['settings'])]:
+   joined=' · '.join(routes[n] for n in names)
+   assert ('/model' not in joined) if state.endswith('hosting') else True
+   for label in labels:
+    text=runtime.render_message(expand(cat[NS+'.with_model']),{'label':label,'routes':joined},loc)
+    assert text.count(label)==text.count(joined)==1
+    for n,cmd in commands.items(): assert text.count(cmd)==(1 if n in names else 0)
+    for width in (80,100,120):
+     lines=Text(text).wrap(Console(width=width,color_system=None),width)
+     assert all(x.cell_len<=width for x in lines)
+     lone=lines[-1].plain.strip() in commands.values()
+     print('WRAP',loc,'pseudo',pseudo,state,'label',len(label),'width',width,'cells',[x.cell_len for x in lines],'lone-final-command',lone)
+     print('\n'.join(x.plain for x in lines))
+     count+=1
+  print('DEAD-END',loc,'pseudo',pseudo,routes['settings'])
+print('PASS plain Rich matrix',count,'cases; English same-code controls; pseudo only human text')
+print('LIMITATION: no styled NoticeBlock, native geometry, transcript-family, UI integration, eligibility or release claim; no invented width cap')
+hashes('AFTER')

@@ -92,10 +92,24 @@ class RankedTarget:
     #: lives in, which read as though ``$HOME`` itself were owned (QA Q5).
     shown: str = ""
     cleanup_hold: bool = False
+    #: Which preservation condition a ``cleanup_hold`` failed (``HOLD_*`` below);
+    #: empty = the general hold. Display only: ``cleanup_hold_text`` picks its
+    #: guidance from it so an ignored-files hold is never worded like the
+    #: unpushed-work one. Rank and branch never read it.
+    hold_conditions: tuple[str, ...] = ()
 
     @property
     def path(self) -> str:
         return self.target.path or "<unresolved>"
+
+
+#: Exact plain ``git worktree remove`` found ignored entries it cannot prove
+#: regenerable (Git would delete them).
+HOLD_IGNORED_UNVERIFIED = "ignored-unverified"
+#: The strict status read behind that check failed, so nothing was proven.
+HOLD_IGNORED_UNREADABLE = "ignored-unreadable"
+#: Tracked or untracked changes sit beside the ignored payload.
+HOLD_CHANGES = "changes"
 
 
 @dataclass
@@ -1370,7 +1384,7 @@ def _rank(
         # unknown ranks HIGH with that state named (the one fact the agent can
         # act on); not-linked takes the ordinary ranking below.
         from local_operator.guardrails.provenance import (
-            plain_cleanup_ignored_preserved,
+            plain_cleanup_ignored_inventory,
             state_phrase,
             worktree_activity,
             worktree_state,
@@ -1395,14 +1409,15 @@ def _rank(
         # foreign.
         #
         # The legacy family state below treats ignored entries like Git does.
-        # Exact plain commands separately require the same ignored-payload
-        # witness as exact forced cleanup, regardless of the creator.
+        # Plain removal must preserve payload at the resolved linked checkout
+        # regardless of its spelling or creator. Unlike exact-path consent,
+        # these checks can only add a hold, not authorize a removal.
         own = _owned_by_session(target, path, prot, session_id, kin=not target.forced)
         relation = own[2] if own is not None else ""
         # A hidden pid with no evidence is ignored for the PLAIN removal only
         # (git itself still refuses untracked content); ``--force`` keeps the
         # strict rule (review M1, PR #4161).
-        plain_payload: dict[str, bool] | None = {} if exact_cleanup and not target.forced else None
+        plain_payload: dict[str, bool] | None = None if target.forced else {}
         state = worktree_state(
             path,
             own=own is not None and (relation == "" or not target.forced),
@@ -1462,18 +1477,38 @@ def _rank(
                     cleanup_hold=True,
                 )
             if plain_payload is not None:
-                preserved = plain_cleanup_ignored_preserved(path)
-                if preserved is not True:
-                    reason = (
-                        "could not verify ignored files"
-                        if preserved is None
-                        else (
-                            "preservation check failed; "
-                            "preserve unverified ignored files separately"
-                        )
-                    )
+                inventory = plain_cleanup_ignored_inventory(path)
+                if inventory is None:
                     return RankedTarget(
-                        target, Risk.HIGH, f"linked worktree state: {reason}", cleanup_hold=True
+                        target,
+                        Risk.HIGH,
+                        "linked worktree state: could not verify ignored files",
+                        cleanup_hold=True,
+                        hold_conditions=(HOLD_IGNORED_UNREADABLE,),
+                    )
+                if inventory.unverified_ignored:
+                    # Same hold as before; only the words changed (operator
+                    # follow-up 2026-11-21): the reason counts what Git would
+                    # delete, never lists it, and says whether real changes
+                    # sit beside it so the refusal can tell the two apart.
+                    n = inventory.unverified_ignored
+                    reason = (
+                        f"{n} ignored {'entry' if n == 1 else 'entries'} the guard "
+                        "cannot prove regenerable"
+                    )
+                    conditions: tuple[str, ...] = (HOLD_IGNORED_UNVERIFIED,)
+                    if inventory.changes:
+                        c = inventory.changes
+                        reason += (
+                            f"; {c} tracked or untracked " f"{'change' if c == 1 else 'changes'}"
+                        )
+                        conditions += (HOLD_CHANGES,)
+                    return RankedTarget(
+                        target,
+                        Risk.HIGH,
+                        f"linked worktree state: {reason}",
+                        cleanup_hold=True,
+                        hold_conditions=conditions,
                     )
             idle = activity.pr_state == "none" and not activity.owners_running
             # OWN + CLEAN does not need the forge (operator escalation

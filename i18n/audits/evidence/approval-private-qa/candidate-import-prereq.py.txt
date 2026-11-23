@@ -1,0 +1,21 @@
+"""Import-only gate; never launch the application or tests."""
+import os, sys, json, importlib, importlib.metadata, hashlib
+from pathlib import Path
+ROOT = Path('/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad')
+WT = Path('/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy')
+assert Path.home().is_relative_to(ROOT)
+assert Path(os.environ['LOCAL_OPERATOR_CONFIG_DIR']).is_relative_to(ROOT)
+assert Path.cwd().is_relative_to(ROOT)
+assert not any(k.startswith(('CMUX_', 'LOP_')) for k in os.environ)
+print(json.dumps({'python':sys.executable,'HOME':os.environ['HOME'],'config':os.environ['LOCAL_OPERATOR_CONFIG_DIR'],'cwd':str(Path.cwd()),'versions':{k:importlib.metadata.version(k) for k in ('textual','fastapi','httpx','pydantic','rich')}},indent=2),flush=True)
+for name in ('local_operator','local_operator.settings_io','local_operator.tui.app','tests.unit.tui.test_app_pilot','local_operator.server.routes.settings'):
+    print('IMPORT_ATTEMPT',name,flush=True)
+    module=importlib.import_module(name)
+    source=Path(module.__file__).resolve()
+    assert source.is_relative_to(WT),(name,str(source))
+    print('IMPORT_OK',name,str(source),flush=True)
+    if name=='local_operator.tui.app': print('CSS_PATH',str(module.OperatorApp.CSS_PATH),flush=True)
+    if name=='tests.unit.tui.test_app_pilot': assert module.FakeSession and module._factory
+print('SHIPPED', (WT/'local_operator/i18n/data/shipped.json').read_text(),flush=True)
+print('EN_SOURCE_SHA256',hashlib.sha256((WT/'local_operator/i18n/catalogues/en/wire.settings.json').read_bytes()).hexdigest(),flush=True)
+print('IMPORT_PREREQUISITE_PASS',flush=True)

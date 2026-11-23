@@ -1,0 +1,192 @@
+{
+  "locale": "ru",
+  "namespace": "tui.settings_view",
+  "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+  "target_sha256": "2e5fb6a0abf5a01d33ed38404069a86deb32f2a4d30a72a5e544bd24f136aa04",
+  "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20",
+    "provenance": "Task brief; not independently observed"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "session": "46650807ab7e",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "fallback": "none",
+    "result": "clean",
+    "findings": 0,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "round": 2,
+  "changed_keys": [
+    "tui.settings_view.editor.contract_unset"
+  ],
+  "keys_read": 5,
+  "semantic_scope": "One changed key and four adjacent editor-hint keys, side-by-side en/ru; not full namespace certification.",
+  "findings": [],
+  "checks": [
+    {
+      "key": "tui.settings_view.editor.contract",
+      "arguments": [
+        [
+          "save_key",
+          "simple"
+        ],
+        [
+          "cancel_key",
+          "simple"
+        ]
+      ],
+      "argument_parity": true,
+      "maxCells": null,
+      "en": {
+        "source": "{save_key} saves · {cancel_key} cancels",
+        "rendered": "enter saves · esc cancels",
+        "cells": 25,
+        "with_indent_cells": 27
+      },
+      "ru": {
+        "source": "{save_key} сохранить · {cancel_key} отмена",
+        "rendered": "enter сохранить · esc отмена",
+        "cells": 28,
+        "with_indent_cells": 30
+      }
+    },
+    {
+      "key": "tui.settings_view.editor.contract_unset",
+      "arguments": [
+        [
+          "save_key",
+          "simple"
+        ],
+        [
+          "cancel_key",
+          "simple"
+        ]
+      ],
+      "argument_parity": true,
+      "maxCells": 23,
+      "en": {
+        "source": "{save_key} saves · {cancel_key} cancels · clear to unset",
+        "rendered": "enter saves · esc cancels · clear to unset",
+        "cells": 42,
+        "with_indent_cells": 44
+      },
+      "ru": {
+        "source": "{save_key} сохр. · {cancel_key} отмена · пусто — сброс",
+        "rendered": "enter сохр. · esc отмена · пусто — сброс",
+        "cells": 40,
+        "with_indent_cells": 42
+      }
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_long",
+      "arguments": [
+        [
+          "browse_keys",
+          "simple"
+        ],
+        [
+          "complete_key",
+          "simple"
+        ],
+        [
+          "save_key",
+          "simple"
+        ],
+        [
+          "cancel_key",
+          "simple"
+        ]
+      ],
+      "argument_parity": true,
+      "maxCells": null,
+      "en": {
+        "source": "{browse_keys} suggestions · {complete_key} completes · {save_key} saves · {cancel_key}",
+        "rendered": "↑↓ suggestions · tab completes · enter saves · esc",
+        "cells": 50,
+        "with_indent_cells": 52
+      },
+      "ru": {
+        "source": "{browse_keys} подсказки · {complete_key} дополнить · {save_key} сохранить · {cancel_key}",
+        "rendered": "↑↓ подсказки · tab дополнить · enter сохранить · esc",
+        "cells": 52,
+        "with_indent_cells": 54
+      }
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_medium",
+      "arguments": [
+        [
+          "browse_keys",
+          "simple"
+        ],
+        [
+          "complete_key",
+          "simple"
+        ],
+        [
+          "save_key",
+          "simple"
+        ]
+      ],
+      "argument_parity": true,
+      "maxCells": null,
+      "en": {
+        "source": "{browse_keys} browse · {complete_key} complete · {save_key} saves",
+        "rendered": "↑↓ browse · tab complete · enter saves",
+        "cells": 38,
+        "with_indent_cells": 40
+      },
+      "ru": {
+        "source": "{browse_keys} выбор · {complete_key} дополнить · {save_key} сохранить",
+        "rendered": "↑↓ выбор · tab дополнить · enter сохранить",
+        "cells": 42,
+        "with_indent_cells": 44
+      }
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_short",
+      "arguments": [
+        [
+          "browse_keys",
+          "simple"
+        ],
+        [
+          "complete_key",
+          "simple"
+        ],
+        [
+          "save_key",
+          "simple"
+        ]
+      ],
+      "argument_parity": true,
+      "maxCells": 23,
+      "en": {
+        "source": "{browse_keys} · {complete_key} · {save_key} saves",
+        "rendered": "↑↓ · tab · enter saves",
+        "cells": 22,
+        "with_indent_cells": 24
+      },
+      "ru": {
+        "source": "{browse_keys} · {complete_key} · {save_key} сохр.",
+        "rendered": "↑↓ · tab · enter сохр.",
+        "cells": 22,
+        "with_indent_cells": 24
+      }
+    }
+  ],
+  "notes": [
+    "Russian сохр. is a clear bounded-space abbreviation of сохранить, consistent with unchanged suggest_short; отмена matches neighbouring editor.contract. пусто — сброс accurately conveys empty-to-unset, confirmed at settings_view.py:3144-3153 calling settings_io.reset_setting. No plural, markup or RTL constructs in changed message.",
+    "Changed hint renders to 40 cells (English 42), above sidecar maxCells=23. Consumer settings_view.py:4482-4486 tests the FULL hint including two spaces (42 cells) against room and uses the existing short contract when insufficient. This is an explicit source/context fallback, not new Russian overflow: no newly hidden behaviour relative to English. Width limitation is recorded, not a new blocker/major.",
+    "Only technical key names enter/esc/tab remain Latin by design. No English prose in reviewed Russian messages.",
+    "Actual render_message output and cell_len measured using repository .venv python with PYTHONPATH bound to worktree. No rendered-frame or native-speaker certification claimed."
+  ],
+  "commit_audited": "464c2500c7ab94c2c2335cfb2c277eb801d7b858"
+}

@@ -23,6 +23,7 @@ import contextlib
 import copy
 import email.utils
 import functools
+import hashlib
 import json
 import logging
 import math
@@ -32,9 +33,10 @@ import time
 import unicodedata
 import urllib.parse
 import uuid
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections import OrderedDict
+from collections.abc import AsyncIterator, Collection, Mapping, Sequence
 from datetime import timezone
-from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol, runtime_checkable
 
 import httpx
 
@@ -68,6 +70,7 @@ from local_operator.harness.types import (
 )
 from local_operator.incidents import CONTEXT_LENGTH_MARKERS
 from local_operator.model import tariff
+from local_operator.model.ids import openai_developer_instructions_model
 from local_operator.model.speed import (
     DIALECT_ANTHROPIC_SPEED,
     DIALECT_SERVICE_TIER,
@@ -2952,10 +2955,10 @@ def _targets_cover(targets: list[dict[str, Any]], block: dict[str, Any]) -> bool
     return any(existing is block for existing in targets)
 
 
-def _settled_cache_target(
+def _settled_cache_target_with_index(
     messages: list[dict[str, Any]], image_part_types: tuple[str, ...]
-) -> dict[str, Any] | None:
-    """The content block whose cached prefix ends BEFORE the newest frame.
+) -> tuple[int, dict[str, Any]] | None:
+    """Return ``(message_index, content_block)`` whose prefix ends BEFORE the newest frame.
 
     Frame-heavy sessions cross the wire budget and start re-rendering old
     screenshots -- the fit walk keeps the newest frame at full size and
@@ -2989,6 +2992,12 @@ def _settled_cache_target(
     The frame scan descends into a part's nested ``content``; see
     :func:`_part_holds_frame` for the Anthropic ``tool_result`` shape that
     makes a top-level-only scan find nothing on a screenshot session.
+
+    Returning the message index alongside the block lets callers tell whether
+    an image is already deep in history behind newer text turns: when
+    ``prev_user`` sits strictly AFTER the settled boundary, callers keep BOTH
+    markers so a tail miss does not collapse hundreds of thousands of tokens
+    back to an old screenshot.
     """
     image_indices = [
         i
@@ -2998,18 +3007,27 @@ def _settled_cache_target(
     ]
     if not image_indices:
         return None
-    candidates: list[dict[str, Any]] = []
+    candidates: list[int] = []
     if image_indices[-1] > 0:
-        candidates.append(messages[image_indices[-1] - 1])
+        candidates.append(image_indices[-1] - 1)
     if len(image_indices) >= 2:
-        candidates.append(messages[image_indices[-2]])
-    for message in candidates:
+        candidates.append(image_indices[-2])
+    for idx in candidates:
+        message = messages[idx]
         content = message.get("content")
         if isinstance(content, str) and content:
             message["content"] = content = [{"type": "text", "text": content}]
         if isinstance(content, list) and content and isinstance(content[-1], dict):
-            return content[-1]
+            return idx, content[-1]
     return None
+
+
+def _settled_cache_target(
+    messages: list[dict[str, Any]], image_part_types: tuple[str, ...]
+) -> dict[str, Any] | None:
+    """The content block whose cached prefix ends BEFORE the newest frame."""
+    found = _settled_cache_target_with_index(messages, image_part_types)
+    return found[1] if found is not None else None
 
 
 class OpenAICompatClient:
@@ -3024,6 +3042,10 @@ class OpenAICompatClient:
     this client is configured for it and the ``ModelSpec`` advertises support;
     compatibility providers and explicit opt-outs keep chat/completions.
     """
+
+    # Anthropic-backed pools reached through OpenAI-compatible gateways
+    # (Radient, OpenRouter) enforce Anthropic's 4-breakpoint limit per request.
+    MAX_CACHE_BREAKPOINTS = 4
 
     def __init__(
         self,
@@ -3281,6 +3303,7 @@ class OpenAICompatClient:
         # prefix, captured as rendered (one entry per message on this wire).
         epoch_ids = _frozen_prefix_ids(request)
         epoch_entry: dict[str, Any] | None = None
+        ephemeral_indices: set[int] = set()
         for message in _without_unrenderable_tool_calls(wire_messages):
             entry = self._replay_chat_message(
                 message, request.model, endpoint, scope, chat_document_budget
@@ -3298,6 +3321,8 @@ class OpenAICompatClient:
             if request.model.requires_reasoning_echo and _echo_reasoning_content(entry):
                 echo_turns += 1
             messages.append(entry)
+            if getattr(message, "_ephemeral", False):
+                ephemeral_indices.add(len(messages) - 1)
             if message.id in epoch_ids:
                 epoch_entry = entry
         # Aggregator identity alone is not the model family: Google keeps its
@@ -3324,11 +3349,19 @@ class OpenAICompatClient:
         )
         if direct_deepseek:
             messages = _deepseek_tool_images(messages)
-        elif request.model.supports_prompt_cache and not (
-            request.model.provider == "openai"
-            and endpoint == "https://api.openai.com/v1/chat/completions"
+        elif (
+            request.cache_markers == "auto"
+            and request.model.supports_prompt_cache
+            and not (
+                request.model.provider == "openai"
+                and endpoint == "https://api.openai.com/v1/chat/completions"
+            )
         ):
-            self._message_cache_markers(messages, frozen_entry=epoch_entry)
+            self._message_cache_markers(
+                messages,
+                frozen_entry=epoch_entry,
+                ephemeral_indices=ephemeral_indices,
+            )
         body: dict[str, Any] = {
             "model": request.model.model_id,
             "stream": True,
@@ -3497,29 +3530,38 @@ class OpenAICompatClient:
     def _system_messages(self, request: ChatRequest) -> list[dict[str, Any]]:
         """System blocks → messages; stable blocks carry ``cache_control``.
 
-        Mirrors the Anthropic client's all-but-last-two breakpoint policy so
-        OpenRouter BYOK / OpenAI-compatible pools that honor ephemeral markers
-        get the same warm prefix. Providers that ignore the field are
-        unaffected; gated on ``supports_prompt_cache``.
+        Mirrors ``AnthropicClient``'s ``cache_markers`` policy so gateways
+        (Radient, OpenRouter BYOK) routing to Anthropic do not pay 1.25x
+        cache-write on one-shot auxiliary prompts:
+        - ``"none"``: no ``cache_control`` markers anywhere.
+        - ``"system"``: mark only the final system block (caches the static
+          head without touching unique user messages, matching
+          ``AnthropicClient._build_body`` even for 1-block judge prompts).
+        - ``"auto"``: all-but-last-two stable blocks, capped at
+          ``MAX_CACHE_BREAKPOINTS``.
         """
         blocks = request.system_blocks
         out: list[dict[str, Any]] = []
-        stable_cutoff = max(len(blocks) - 2, 0)
+        # DeepSeek caches complete persisted prefixes automatically. Explicit
+        # ephemeral markers are undocumented there and moving them each turn
+        # rewrites old prefixes, defeating the very cache they try to help.
+        # Direct OpenAI caches implicitly; Anthropic's marker dialect is
+        # supported by some gateways but is not a Chat API field.
+        can_mark = (
+            request.cache_markers != "none"
+            and request.model.supports_prompt_cache
+            and request.model.provider != "deepseek"
+            and not (
+                request.model.provider == "openai" and self._base_url == "https://api.openai.com/v1"
+            )
+        )
+        stable_cutoff = min(self.MAX_CACHE_BREAKPOINTS, max(len(blocks) - 2, 0))
         for i, block in enumerate(blocks):
-            # DeepSeek caches complete persisted prefixes automatically. Explicit
-            # ephemeral markers are undocumented there and moving them each turn
-            # rewrites old prefixes, defeating the very cache they try to help.
-            if (
-                request.model.supports_prompt_cache
-                and request.model.provider != "deepseek"
-                # Direct OpenAI caches implicitly; Anthropic's marker dialect is
-                # supported by some gateways but is not a Chat API field.
-                and not (
-                    request.model.provider == "openai"
-                    and self._base_url == "https://api.openai.com/v1"
-                )
-                and i < stable_cutoff
-            ):
+            should_mark = can_mark and (
+                (request.cache_markers == "system" and i == len(blocks) - 1)
+                or (request.cache_markers == "auto" and i < stable_cutoff)
+            )
+            if should_mark:
                 out.append(
                     {
                         "role": "system",
@@ -3537,56 +3579,107 @@ class OpenAICompatClient:
         messages: list[dict[str, Any]],
         *,
         frozen_entry: dict[str, Any] | None = None,
+        ephemeral_indices: Collection[int] | None = None,
     ) -> None:
-        """Mark the final message and the settled boundary for caching.
+        """Mark the final persistent message and the settled/rolling boundary for caching.
 
         Same economics as the Anthropic client: system-only markers stop the
         warm prefix before the conversation. OpenAI-compatible pools that
-        honor ``cache_control`` on content parts (OpenRouter BYOK) then keep
-        the previous request's prefix warm; providers that ignore the field
-        are unaffected. Only applied when the model reports prompt caching.
+        honor ``cache_control`` on content parts (Radient, OpenRouter BYOK)
+        then keep the previous request's prefix warm; providers that ignore the
+        field are unaffected. Only applied when the model reports prompt
+        caching and ``request.cache_markers == "auto"``.
+
+        Tail placement skips trailing transient frames (``ephemeral_indices``,
+        such as ``PendingTurn``'s ephemeral body frame) whenever a persistent
+        conversation message exists before them, so the tail cache entry
+        survives after the turn settles and the frame disappears.
 
         The second marker sits at the settled boundary -- the last message
         before the newest frame -- rather than on an earlier user turn: an
         older turn's block is stable but sits hundreds of content blocks deep
         once frames start re-rendering, where the provider's backward lookback
-        can no longer find it (see ``_settled_cache_target`` for the measured
-        cost). With no usable frame in the history the previous user turn is
-        marked instead, the historical layout for text-only sessions.
+        can no longer find it (see ``_settled_cache_target_with_index``). When
+        an image sits deep in history and ``prev_user`` is strictly AFTER the
+        settled message, BOTH ``settled`` and ``prev_user`` are marked (within
+        ``MAX_CACHE_BREAKPOINTS = 4`` by trimming trailing system markers) so a
+        tail miss does not collapse 200k tokens back to an old screenshot.
 
         ``frozen_entry`` is the rendered message ending a Radient Saver prefix
         (contract §4). When present its last block takes the second marker in
         place of the heuristic, exactly as on the Anthropic wire.
         """
+        ephemeral = ephemeral_indices if ephemeral_indices is not None else frozenset()
         targets: list[dict[str, Any]] = []
-        if messages:
-            last = messages[-1]
-            content = last.get("content")
+        # Walk backward past trailing ephemeral frames so the tail cache entry
+        # lands on the last persistent conversation message.
+        tail_msg: dict[str, Any] | None = None
+        for idx in range(len(messages) - 1, -1, -1):
+            if idx not in ephemeral and messages[idx].get("role") != "system":
+                tail_msg = messages[idx]
+                break
+        if tail_msg is None and messages:
+            tail_msg = messages[-1]
+        if tail_msg is not None:
+            content = tail_msg.get("content")
             if isinstance(content, str):
-                last["content"] = [{"type": "text", "text": content}]
-                content = last["content"]
+                tail_msg["content"] = [{"type": "text", "text": content}]
+                content = tail_msg["content"]
             if isinstance(content, list) and content:
                 targets.append(content[-1])
-        settled = _settled_cache_target(messages, ("image_url",))
+
+        settled_pair = _settled_cache_target_with_index(messages, ("image_url",))
         frozen_block = _last_block([frozen_entry]) if frozen_entry is not None else None
+        # Filter ephemeral frames out of prev_user candidates so a transient
+        # frame neither receives a rolling marker nor displaces the prior user
+        # turn that keeps the pre-turn cache warm.
+        user_indices = [
+            i for i, m in enumerate(messages) if m.get("role") == "user" and i not in ephemeral
+        ]
+        prev_user_idx = user_indices[-2] if len(user_indices) >= 2 else None
+
+        def _append_prev_user() -> None:
+            if prev_user_idx is None:
+                return
+            prev = messages[prev_user_idx]
+            content = prev.get("content")
+            if isinstance(content, str):
+                prev["content"] = [{"type": "text", "text": content}]
+                content = prev["content"]
+            if isinstance(content, list) and content:
+                prev_block = content[-1]
+                if not _targets_cover(targets, prev_block):
+                    targets.append(prev_block)
+
         if frozen_block is not None:
             if not _targets_cover(targets, frozen_block):
                 targets.append(frozen_block)
-        elif settled is not None:
-            if not _targets_cover(targets, settled):
-                targets.append(settled)
+        elif settled_pair is not None:
+            settled_idx, settled_block = settled_pair
+            if not _targets_cover(targets, settled_block):
+                targets.append(settled_block)
+            if prev_user_idx is not None and prev_user_idx > settled_idx:
+                _append_prev_user()
         else:
-            user_indices = [i for i, m in enumerate(messages) if m.get("role") == "user"]
-            if len(user_indices) >= 2:
-                prev = messages[user_indices[-2]]
-                content = prev.get("content")
-                if isinstance(content, str):
-                    prev["content"] = [{"type": "text", "text": content}]
-                    content = prev["content"]
-                if isinstance(content, list) and content:
-                    prev_block = content[-1]
-                    if not _targets_cover(targets, prev_block):
-                        targets.append(prev_block)
+            _append_prev_user()
+
+        if not targets:
+            return
+        # Enforce MAX_CACHE_BREAKPOINTS across system + message markers so
+        # Anthropic-backed OpenAI-compat pools never reject >4 cache_control
+        # blocks; drop trailing (lowest-value) system markers first.
+        system_marker_blocks = [
+            part
+            for msg in messages
+            if msg.get("role") == "system" and isinstance(msg.get("content"), list)
+            for part in msg["content"]
+            if isinstance(part, dict)
+            and "cache_control" in part
+            and not _targets_cover(targets, part)
+        ]
+        budget = max(0, self.MAX_CACHE_BREAKPOINTS - len(targets))
+        for block in system_marker_blocks[budget:]:
+            block.pop("cache_control", None)
         for block in targets:
             if isinstance(block, dict):
                 block["cache_control"] = {"type": "ephemeral"}
@@ -3624,17 +3717,38 @@ class OpenAICompatClient:
         return (
             not self._codex_responses_mode(oauth_access)
             and self._openai_api == "responses"
-            and request.model.supports_responses_api
+            and (
+                request.model.supports_responses_api
+                # Discovery can omit the capability for newer GPT-6 models.
+                # Keep this exception on the built-in public route; automatic
+                # caching there does not require changing cache-key eligibility.
+                or self._uses_developer_instructions(request.model, f"{self._base_url}/responses")
+            )
+        )
+
+    def _uses_developer_instructions(self, model: ModelSpec, endpoint: str) -> bool:
+        if not openai_developer_instructions_model(model.model_id):
+            return False
+        if endpoint == "https://api.openai.com/v1/responses":
+            return model.provider == "openai"
+        # Codex's standard HTTP client also moved its base instructions into
+        # input (openai/codex#51156). Restrict that contract to the built-in
+        # subscription route, not a compatible client with a custom base.
+        return (
+            endpoint == CODEX_RESPONSES_URL
+            and self._base_url == "https://api.openai.com/v1"
+            and model.provider in {"openai", "openai-device"}
         )
 
     def _build_responses_body(
         self, request: ChatRequest, *, endpoint: str | None = None, scope: str | None = None
     ) -> dict[str, Any]:
-        """Public Responses body using native input items and flat tools."""
+        """Responses body using native input items and flat tools."""
         affinity_request = request
+        actual_endpoint = endpoint or f"{self._base_url}/responses"
         request = bind_native_context(
             request,
-            endpoint or f"{self._base_url}/responses",
+            actual_endpoint,
             "openai-responses",
             scope,
             _estimate_slope(request.model),
@@ -3646,18 +3760,27 @@ class OpenAICompatClient:
             "input": _messages_to_openai_responses(
                 wire_messages,
                 request.model,
-                endpoint or f"{self._base_url}/responses",
+                actual_endpoint,
                 scope,
                 request=request,
             ),
         }
         if request.system_blocks:
-            # Preserve the established legacy layout. Current Codex also has
-            # Lite developer input items, but that changes reasoning context
-            # and showed no benefit in our probes (docs/OPENAI_CACHING.md).
-            # Public breakpoint/TTL support is a different contract: current
-            # OAuth probes reject explicit markers even with the Lite header.
-            body["instructions"] = "\n\n".join(request.system_blocks)
+            instructions = "\n\n".join(request.system_blocks)
+            # GPT-6.2+ places top-level instructions after the last eligible
+            # cache breakpoint. Keep the exact reusable text first in input
+            # without changing history, retention or breakpoint placement.
+            if self._uses_developer_instructions(request.model, actual_endpoint):
+                body["input"].insert(
+                    0,
+                    {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [{"type": "input_text", "text": instructions}],
+                    },
+                )
+            else:
+                body["instructions"] = instructions
         if request.tools:
             body["tools"] = _tools_to_openai_responses(request.tools)
             body["tool_choice"] = {"auto": "auto", "none": "none", "required": "required"}.get(
@@ -3686,13 +3809,11 @@ class OpenAICompatClient:
             # The public API's default respects the organization's data policy;
             # forcing 24h can override ZDR's in-memory default or be unsupported
             # on older/unknown models. Leave custom gateways' contract untouched.
-            actual_endpoint = endpoint or f"{self._base_url}/responses"
             if not (
                 request.model.provider == "openai"
                 and actual_endpoint == "https://api.openai.com/v1/responses"
             ):
                 body["prompt_cache_retention"] = "24h"
-        actual_endpoint = endpoint or f"{self._base_url}/responses"
         if actual_endpoint == "https://api.openai.com/v1/responses" and body.get(
             "prompt_cache_key"
         ):
@@ -5422,6 +5543,7 @@ class AnthropicClient:
         *,
         ttl: str | None = None,
         frozen_block: dict[str, Any] | None = None,
+        ephemeral_indices: Collection[int] | None = None,
     ) -> None:
         """Place cache_control on the conversation, not just the system head.
 
@@ -5429,13 +5551,18 @@ class AnthropicClient:
         markers stop the cached prefix before the first message, so the
         growing conversation (every tool result, every assistant turn) is
         re-processed at full price on every request. Mark the last content
-        block of the final message and the settled boundary -- the message
-        immediately before the newest frame -- so the second breakpoint's
-        block survives the frame re-renders that long screenshot sessions
-        perform (see ``_settled_cache_target`` for the measured cost of the
-        older placement). With no usable frame in the history the previous
-        user turn is marked instead, the historical layout for text-only
-        sessions.
+        block of the final persistent message (skipping trailing ephemeral
+        frames such as ``PendingTurn``'s body frame so the cache entry
+        survives once the frame disappears) and the settled boundary -- the
+        message immediately before the newest frame -- so the second
+        breakpoint's block survives the frame re-renders that long screenshot
+        sessions perform (see ``_settled_cache_target_with_index`` for the
+        measured cost of the older placement). When an image sits deep in
+        history and ``prev_user`` is strictly AFTER the settled message, BOTH
+        ``settled`` and ``prev_user`` are marked so a tail miss does not
+        collapse 200k tokens back to an old screenshot. With no usable frame
+        in the history the previous persistent user turn is marked instead,
+        the historical layout for text-only sessions.
 
         Budget: MAX_CACHE_BREAKPOINTS total. System markers are counted
         first; when the sum would exceed the cap the LOWEST-value system
@@ -5455,30 +5582,50 @@ class AnthropicClient:
         """
         system = body.get("system") or []
         system_markers = [i for i, entry in enumerate(system) if "cache_control" in entry]
+        ephemeral = ephemeral_indices if ephemeral_indices is not None else frozenset()
         message_targets: list[dict[str, Any]] = []
-        if messages:
-            last = messages[-1]
-            if isinstance(last.get("content"), list) and last["content"]:
-                message_targets.append(last["content"][-1])
-        settled = _settled_cache_target(messages, ("image",))
+        # Prefer the last persistent (non-ephemeral) message so the tail
+        # breakpoint survives after an ephemeral PendingTurn frame disappears.
+        tail_msg: dict[str, Any] | None = None
+        for idx in range(len(messages) - 1, -1, -1):
+            if idx not in ephemeral:
+                tail_msg = messages[idx]
+                break
+        if tail_msg is None and messages:
+            tail_msg = messages[-1]
+        if tail_msg is not None:
+            if isinstance(tail_msg.get("content"), list) and tail_msg["content"]:
+                message_targets.append(tail_msg["content"][-1])
+        settled_pair = _settled_cache_target_with_index(messages, ("image",))
+        user_indices = [
+            i for i, m in enumerate(messages) if m.get("role") == "user" and i not in ephemeral
+        ]
+        prev_user_idx = user_indices[-2] if len(user_indices) >= 2 else None
+
+        def _append_prev_user() -> None:
+            if prev_user_idx is None:
+                return
+            prev_user = messages[prev_user_idx]
+            if isinstance(prev_user.get("content"), list) and prev_user["content"]:
+                block = prev_user["content"][-1]
+                if not _targets_cover(message_targets, block):
+                    message_targets.append(block)
+
         if frozen_block is not None:
             if not _targets_cover(message_targets, frozen_block):
                 message_targets.append(frozen_block)
-        elif settled is not None:
-            if not _targets_cover(message_targets, settled):
-                message_targets.append(settled)
+        elif settled_pair is not None:
+            settled_idx, settled_block = settled_pair
+            if not _targets_cover(message_targets, settled_block):
+                message_targets.append(settled_block)
+            if prev_user_idx is not None and prev_user_idx > settled_idx:
+                _append_prev_user()
         else:
-            # Second-to-last USER turn keeps the previous request's prefix warm.
-            user_indices = [i for i, m in enumerate(messages) if m.get("role") == "user"]
-            if len(user_indices) >= 2:
-                prev_user = messages[user_indices[-2]]
-                if isinstance(prev_user.get("content"), list) and prev_user["content"]:
-                    block = prev_user["content"][-1]
-                    if not _targets_cover(message_targets, block):
-                        message_targets.append(block)
+            # Second-to-last persistent USER turn keeps the previous request's prefix warm.
+            _append_prev_user()
         if not message_targets:
             return
-        budget = self.MAX_CACHE_BREAKPOINTS - len(message_targets)
+        budget = max(0, self.MAX_CACHE_BREAKPOINTS - len(message_targets))
         # Drop the lowest-value system breakpoints (the last stable blocks)
         # until system + message markers fit the cap.
         for index in system_markers[budget:]:
@@ -5521,6 +5668,7 @@ class AnthropicClient:
         # it is rendered rather than located by index afterwards.
         epoch_ids = _frozen_prefix_ids(request)
         epoch_block: dict[str, Any] | None = None
+        ephemeral_indices: set[int] = set()
         for message in _without_unrenderable_tool_calls(wire_messages):
             # Anthropic 400s on an assistant message whose content array is
             # empty, which is exactly what an errored/aborted model turn
@@ -5587,6 +5735,8 @@ class AnthropicClient:
                     # where skipping is the right answer.
                     blocks = [{"type": "text", "text": EMPTY_USER_TEXT}]
                 messages.append({"role": message.role, "content": blocks})
+                if getattr(message, "_ephemeral", False):
+                    ephemeral_indices.add(len(messages) - 1)
             if message.id in epoch_ids:
                 epoch_block = _last_block(messages)
 
@@ -5650,7 +5800,13 @@ class AnthropicClient:
             # second breakpoint's block survives frame re-renders, within
             # MAX_CACHE_BREAKPOINTS by dropping the lowest-value system
             # breakpoint.
-            self._message_cache_breakpoints(messages, body, ttl=ttl, frozen_block=epoch_block)
+            self._message_cache_breakpoints(
+                messages,
+                body,
+                ttl=ttl,
+                frozen_block=epoch_block,
+                ephemeral_indices=ephemeral_indices,
+            )
         if request.tools:
             # Safe default: unmapped values fall back to auto (PR-22).
             #
@@ -6100,6 +6256,220 @@ GOOGLE_API_URL = "https://generativelanguage.googleapis.com"
 VERTEX_API_URL = "https://aiplatform.googleapis.com"
 
 
+# ``@`` closes the major too: Vertex model ids carry a version suffix
+# (``gemini-4@001``, ``gemini-4-neon@default``), and without it a bare major
+# followed by ``@`` failed the gate and silently lost the Gemini 3+ wire rules.
+_GEMINI_MAJOR_RE = re.compile(r"gemini-(\d+)(?:[.\-@]|$)")
+
+
+def _is_gemini_3_or_later(model_id: str) -> bool:
+    """Whether ``model_id`` is a Gemini generation 3 or later model.
+
+    Two wire behaviours started with Gemini 3 and, per Google's Gemini 4 Neon
+    guide, carry forward to Gemini 4: strict ``thoughtSignature`` validation on
+    replayed function calls (so imported/model-switched history needs the
+    ``skip_thought_signature_validator`` marker) and multimodal
+    ``functionResponse.parts``. A literal Gemini-3-only check silently
+    dropped both for ``gemini-4-neon``; parsing the MAJOR number keeps the gate
+    right for every later generation without another edit.
+
+    Only the last path segment is read, so a vendor or resource prefix
+    (``google/``, ``models/``, ``publishers/google/models/``) does not matter.
+    The match is anchored at that segment's start and needs ``-``/``.``/``@``/end
+    after the digits, so ``gemini-exp-1206``, ``gemma-3-27b`` and ``xgemini-4`` are
+    not Gemini 3+, and ``gemini-10-ultra`` is (no lexical compare).
+    """
+    bare = model_id.rsplit("/", 1)[-1].strip().lower()
+    match = _GEMINI_MAJOR_RE.match(bare)
+    return match is not None and int(match.group(1)) >= 3
+
+
+# ---------------------------------------------------------------------------
+# Google/Vertex prompt-cache miss telemetry (silent: analytics + logs only)
+# ---------------------------------------------------------------------------
+#
+# WHY: Anthropic's ``diagnostics`` object names the prefix section that broke a
+# cache (``_anthropic_cache_diagnosis``); Gemini's ``generateContent`` returns
+# no such thing, only ``usageMetadata`` (``promptTokenCount``,
+# ``cachedContentTokenCount``) at the end of the stream. Without a local
+# comparison every Google row left ``calls.cache_miss_type`` blank, so a ledger
+# reader could not tell an idle/routing eviction (nothing we can fix) from a
+# prefix mutation (something we can). This classifier answers that locally.
+#
+# CONSTRAINTS: purely in-memory and local. Nothing here adds a network call or
+# touches the body sent to Google; the digests are taken from the body AFTER it
+# is built. The result reaches ``StreamEndEvent.cache_miss_type`` and from there
+# only ``analytics.db`` and the log file -- it is never rendered anywhere.
+#
+# SCOPING mirrors Anthropic's chain: only requests ``SessionStreamFn`` opted in
+# (``ChatRequest.cache_diagnostics``, conversation turns) are classified, and
+# the chain is that stream fn's own ``cache_diagnostics_chain`` token, so a fork
+# (which shares its parent's ``prompt_cache_key``) or an aside never compares
+# against another conversation. The wire client is rebuilt per attempt, so the
+# state cannot live on ``GoogleClient``; it lives here, keyed by chain plus
+# route, model and credential scope (any change of those is a new cache, hence
+# ``baseline``), and bounded so it never grows with process lifetime.
+
+#: Most chains kept. One entry per (conversation, route, model, credential); a
+#: process hosts a handful of live conversations, so 128 keeps every live one
+#: while bounding a long-running daemon. Evicting a live chain only costs one
+#: ``baseline`` row, never a turn.
+_GOOGLE_PREFIX_SNAPSHOTS_MAX = 128
+
+#: The implicit-caching minimum below which a zero cache read is expected, not
+#: an eviction. 4096 is the LARGEST documented Gemini minimum (Pro tiers;
+#: Flash tiers document less), chosen so a sub-minimum prompt is never blamed on
+#: eviction; a smaller-minimum model merely under-reports a few evictions.
+_GOOGLE_IMPLICIT_CACHE_MIN_TOKENS = 4096
+
+#: Largest identical-prefix shortfall that is still a HEALTHY read, inclusive.
+#:
+#: Evidence (PR #4340 QA Q-O1, and the operator's read-only analytics.db,
+#: ``provider='google-vertex'`` rows through 2026-11-20): when the whole
+#: previous prompt is a byte-identical prefix, Vertex reads back either
+#: ``prev_prompt + 1`` (a full hit) or a little LESS than ``prev_prompt``, and
+#: that shortfall was never above 2049 -- 713, 1503, 1779, and exactly 2049 on
+#: 4 of the operator's 25 adjacent pairs and on every non-baseline row of
+#: QA's live ``lop exec`` runs. The recurring exact 2049 is the fingerprint of
+#: implicit caching committing whole blocks and leaving the final partial
+#: block of the previous prompt unread; no larger shortfall appeared without
+#: an idle gap or prefix change. Such a turn is not a break, so it gets the
+#: non-break label ``unchanged_block_tail`` with its honest
+#: ``cache_missed_tokens`` (a distinct label, rather than plain ``unchanged``,
+#: so a ledger query can still measure what the block tail costs and notice if
+#: Google's granularity ever moves). Inclusive, because 2049 itself is the
+#: observed healthy maximum; anything larger is ``partial_eviction``.
+_GOOGLE_CACHE_BLOCK_TAIL_TOKENS = 2049
+
+#: Google ``cache_miss_type`` values that are NOT a prefix break. Shared by
+#: ``SessionStreamFn._log_cache_break`` and any ledger analysis so the new
+#: healthy-tail label can never be counted (or logged) as a break.
+GOOGLE_CACHE_DIAGNOSIS_NO_BREAK = frozenset({"baseline", "unchanged", "unchanged_block_tail"})
+
+
+class _GooglePrefixSnapshot(NamedTuple):
+    # Raw 32-byte SHA-256 digests: only ever compared for equality, so the
+    # 64-char hex form would just double the memory of every kept chain.
+    system_hash: bytes
+    tools_hash: bytes
+    tool_config_hash: bytes
+    contents_hashes: tuple[bytes, ...]
+    prompt_tokens: int = 0
+
+
+_GOOGLE_PREFIX_SNAPSHOTS: OrderedDict[tuple[str, ...], _GooglePrefixSnapshot] = OrderedDict()
+
+
+def _google_digest(value: Any) -> bytes:
+    # Canonical JSON (sorted keys, no whitespace) so a dict-ordering difference
+    # that Google would never see is not reported as a break.
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).digest()
+
+
+def _google_prefix_snapshot(body: Mapping[str, Any]) -> _GooglePrefixSnapshot:
+    contents = body.get("contents") or []
+    return _GooglePrefixSnapshot(
+        system_hash=_google_digest(body.get("systemInstruction")),
+        tools_hash=_google_digest(body.get("tools")),
+        tool_config_hash=_google_digest(body.get("toolConfig")),
+        contents_hashes=tuple(_google_digest(item) for item in contents),
+    )
+
+
+def _google_cache_diagnosis(
+    previous: _GooglePrefixSnapshot | None,
+    current: _GooglePrefixSnapshot,
+    cached_tokens: int,
+) -> tuple[str, int]:
+    """``(cache_miss_type, cache_missed_tokens)`` for one Google request.
+
+    Section order and names follow Anthropic's ``cache_miss_reason.type`` so
+    one ledger query spans providers; ``tool_config_changed``,
+    ``evicted_or_rerouted``, ``partial_eviction`` and ``unchanged_block_tail``
+    are Google-only. ``cache_missed_tokens`` is the previously-cacheable prompt
+    that was not read back: ``previous.prompt_tokens - cached_tokens`` (never
+    negative), or 0 when nothing was lost (``baseline``, ``unchanged``).
+    """
+    if previous is None:
+        return "baseline", 0
+    shortfall = max(0, previous.prompt_tokens - max(0, cached_tokens))
+    if current.system_hash != previous.system_hash:
+        return "system_changed", shortfall
+    if current.tools_hash != previous.tools_hash:
+        return "tools_changed", shortfall
+    if current.tool_config_hash != previous.tool_config_hash:
+        return "tool_config_changed", shortfall
+    prev_contents = previous.contents_hashes
+    if len(current.contents_hashes) < len(prev_contents) or any(
+        a != b for a, b in zip(current.contents_hashes, prev_contents)
+    ):
+        return "messages_changed", shortfall
+    # The whole previous prompt is a byte-identical prefix of this one.
+    if cached_tokens <= 0:
+        if previous.prompt_tokens >= _GOOGLE_IMPLICIT_CACHE_MIN_TOKENS:
+            return "evicted_or_rerouted", previous.prompt_tokens
+        return "unchanged", 0
+    if shortfall > _GOOGLE_CACHE_BLOCK_TAIL_TOKENS:
+        return "partial_eviction", shortfall
+    if shortfall > 0:
+        return "unchanged_block_tail", shortfall
+    return "unchanged", 0
+
+
+def _google_chain_key(
+    request: ChatRequest, base_url: str, vertex: bool, scope: str
+) -> tuple[str, ...] | None:
+    chain = request.cache_diagnostics_chain
+    if not request.cache_diagnostics or request.purpose != "turn" or not chain:
+        return None
+    return (chain, base_url, "vertex" if vertex else "ai-studio", request.model.model_id, scope)
+
+
+def _google_record_prefix(
+    key: tuple[str, ...],
+    snapshot: _GooglePrefixSnapshot,
+    *,
+    prompt_tokens: int,
+    cached_tokens: int,
+) -> tuple[str, int]:
+    """Classify against the chain's last snapshot, then store this one.
+
+    Called only once ``usageMetadata`` reported ``prompt_tokens > 0``: a 4xx/5xx
+    raises before it and an aborted or usage-less stream never reaches it, so a
+    failed attempt never becomes the baseline the next call is compared with.
+    """
+    miss = _google_cache_diagnosis(_GOOGLE_PREFIX_SNAPSHOTS.get(key), snapshot, cached_tokens)
+    # A routing/model/account switch starts a fresh chain, including when the
+    # user later switches BACK: an old route's snapshot is no longer adjacent.
+    for old_key in tuple(_GOOGLE_PREFIX_SNAPSHOTS):
+        if old_key[0] == key[0] and old_key != key:
+            del _GOOGLE_PREFIX_SNAPSHOTS[old_key]
+    _GOOGLE_PREFIX_SNAPSHOTS[key] = snapshot._replace(prompt_tokens=prompt_tokens)
+    _GOOGLE_PREFIX_SNAPSHOTS.move_to_end(key)
+    while len(_GOOGLE_PREFIX_SNAPSHOTS) > _GOOGLE_PREFIX_SNAPSHOTS_MAX:
+        _GOOGLE_PREFIX_SNAPSHOTS.popitem(last=False)
+    return miss
+
+
+def forget_google_cache_chain(chain: str) -> None:
+    """Drop every snapshot of one comparison chain (its stream fn closed).
+
+    The LRU bound alone would keep a closed conversation's snapshots until 128
+    newer chains pushed them out; a closed ``SessionStreamFn`` can never send
+    on that chain again, so its entries are dead weight. Best-effort: teardown
+    must never fail on telemetry.
+    """
+    try:
+        for key in tuple(_GOOGLE_PREFIX_SNAPSHOTS):
+            if key[0] == chain:
+                _GOOGLE_PREFIX_SNAPSHOTS.pop(key, None)
+    except Exception:  # noqa: BLE001 — telemetry teardown, never fatal
+        logger.debug("google cache chain eviction failed", exc_info=True)
+
+
 class GoogleClient:
     """Minimal Gemini client: ``streamGenerateContent?alt=sse``.
 
@@ -6197,11 +6567,13 @@ class GoogleClient:
                     for call in message.tool_calls
                 ]
                 rendered_call_ids.update((call.id, call.id) for call in message.tool_calls)
-                if request.model.model_id.startswith("gemini-3"):
+                if _is_gemini_3_or_later(request.model.model_id):
                     # Imported/model-switched history has no valid signature.
                     # Google's documented migration marker avoids a 400 while
                     # making no claim to preserve another model's reasoning.
                     # Real same-route signatures take the native path above.
+                    # Gemini 4 enforces the same strict validation as 3 (the
+                    # Neon guide), so the gate is "3 or later", not "3".
                     call_parts[0]["thoughtSignature"] = "skip_thought_signature_validator"
                 parts.extend(call_parts)
             if message.role == "tool":
@@ -6209,8 +6581,10 @@ class GoogleClient:
                     "name": message.tool_name or "",
                     "response": {"content": self._tool_response_content(message)},
                 }
-                # Gemini 3 supports images inside functionResponse. Older
-                # models accept image parts alongside it in the user content.
+                # Gemini 3 and later (Gemini 4's Neon guide documents the same
+                # multimodal ``functionResponse.parts``) take images inside
+                # functionResponse. Older models accept image parts alongside
+                # it in the user content.
                 # Both paths preserve actual image bytes; prose saying an
                 # image existed leaves screenshot-driven loops blind.
                 images = [
@@ -6219,7 +6593,7 @@ class GoogleClient:
                     if isinstance(block, ImageContent)
                 ]
                 result_parts: list[dict[str, Any]] = [{"functionResponse": response_part}]
-                if images and request.model.model_id.startswith("gemini-3"):
+                if images and _is_gemini_3_or_later(request.model.model_id):
                     response_part["parts"] = images
                 else:
                     result_parts.extend(images)
@@ -6563,9 +6937,18 @@ class GoogleClient:
         #: carrier wins and ``None`` means it was never named.
         served_model: str | None = None
 
-        async with self._open_content_stream(
-            request, url, self._build_body(request, scope=scope), headers
-        ) as response:
+        body = self._build_body(request, scope=scope)
+        cache_key = _google_chain_key(request, self._base_url, self._is_vertex(request), scope)
+        prefix: _GooglePrefixSnapshot | None = None
+        if cache_key is not None:
+            # Silent telemetry must never fail a turn: a hashing bug only
+            # loses this call's diagnosis (no snapshot, so nothing recorded).
+            try:
+                prefix = _google_prefix_snapshot(body)
+            except Exception:  # noqa: BLE001 — telemetry is best-effort
+                logger.debug("google cache snapshot failed", exc_info=True)
+        prompt_tokens = 0
+        async with self._open_content_stream(request, url, body, headers) as response:
             started = False
             async for data in _iter_sse_lines(response):
                 try:
@@ -6682,11 +7065,38 @@ class GoogleClient:
             )
         elif stop_reason == "error":
             error = f"model call failed ({defect_marker or 'unknown finishReason'})"
+        cache_miss_type: str | None = None
+        cache_missed_tokens = 0
+        if (
+            cache_key is not None
+            and prefix is not None
+            and usage is not None
+            and prompt_tokens > 0
+            and error is None
+            and (visible_text or replay_calls)
+        ):
+            # Commit only after a successful, non-empty stream. GeneratorExit,
+            # transport failures and provider-error finishes leave the last
+            # usable baseline intact, even when a partial usage chunk arrived.
+            try:
+                cache_miss_type, cache_missed_tokens = _google_record_prefix(
+                    cache_key,
+                    prefix,
+                    prompt_tokens=prompt_tokens,
+                    cached_tokens=usage.cache_read_tokens,
+                )
+            except Exception:  # noqa: BLE001 — telemetry is best-effort
+                # Same contract as the snapshot step: the completed stream
+                # still ends normally, just without a diagnosis.
+                cache_miss_type, cache_missed_tokens = None, 0
+                logger.debug("google cache diagnosis failed", exc_info=True)
         yield StreamEndEvent(
             stop_reason=stop_reason,
             usage=usage,
             error=error,
             served_model=served_model,
+            cache_miss_type=cache_miss_type,
+            cache_missed_tokens=cache_missed_tokens,
             provider_payload=(
                 native_payload(
                     request.model,

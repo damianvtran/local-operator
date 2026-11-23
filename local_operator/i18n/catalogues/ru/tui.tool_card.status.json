@@ -1,0 +1,20 @@
+{
+  "tui.tool_card.status.cut_off": "оборвано",
+  "tui.tool_card.status.error": "ошибка",
+  "tui.tool_card.status.interrupted": "прервано",
+  "tui.tool_card.status.not_run": "не запускался",
+  "tui.tool_card.status.partial": "Частично",
+  "tui.tool_card.status.queued": "очередь",
+  "tui.tool_card.status.running": "идёт",
+  "tui.tool_card.status.send.delivery_unconfirmed": "доставка под вопросом",
+  "tui.tool_card.status.send.no_new_wake": "не пробуждали",
+  "tui.tool_card.status.send.not_delivered": "не доставлено",
+  "tui.tool_card.status.send.receipt_reused": "квитанция та же",
+  "tui.tool_card.status.send.wake_unconfirmed": "пробуждение без ответа",
+  "tui.tool_card.status.session_reset": "сессия сброшена",
+  "tui.tool_card.status.switch.partial": "переключено (ошибка)",
+  "tui.tool_card.status.switch.pending": "ожидает",
+  "tui.tool_card.status.switch.switched": "переключено",
+  "tui.tool_card.status.switch.unchanged": "без изменений",
+  "tui.tool_card.status.waiting": "ожидает"
+}

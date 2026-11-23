@@ -1588,6 +1588,166 @@ async def test_openai_api_key_gpt5_uses_public_responses_end_to_end() -> None:
     assert events[-1].stop_reason == "toolUse"
 
 
+@pytest.mark.parametrize(
+    ("provider", "model_id", "base_url", "api_mode", "placement"),
+    [
+        ("openai", "gpt-6.2-astra", "https://api.openai.com/v1", "responses", "input"),
+        ("openai", "gpt-6.10-sol", "https://api.openai.com/v1", "responses", "input"),
+        ("openai", "gpt-6.2-sol", "https://gateway.invalid/v1", "responses", "instructions"),
+        ("openrouter", "gpt-6.2-sol", "https://api.openai.com/v1", "responses", "instructions"),
+        ("openai", "gpt-6.2-unknown", "https://api.openai.com/v1", "responses", "instructions"),
+        ("openai", "gpt-6.2-sol", "https://api.openai.com/v1", "chat_completions", "chat"),
+        ("openai-device", "gpt-6.2-sol", "https://api.openai.com/v1", "codex", "input"),
+        ("openai", "gpt-6.2-sol", "https://gateway.invalid/v1", "codex", "instructions"),
+    ],
+)
+async def test_responses_developer_instructions_are_scoped_to_official_models_and_endpoint(
+    provider: str, model_id: str, base_url: str, api_mode: str, placement: str
+) -> None:
+    from local_operator.model.configure import build_model_spec
+    from local_operator.providers.clients import CODEX_RESPONSES_URL
+
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content)
+        stream = (
+            _sse([{"choices": [{"delta": {}, "finish_reason": "stop"}]}])
+            if placement == "chat"
+            else _public_responses_sse()
+        )
+        return httpx.Response(200, content=stream, headers={"content-type": "text/event-stream"})
+
+    # Official models resolve through the same discovery fallback as a session.
+    # Force Responses only for the negative controls so we exercise the body gate.
+    spec = build_model_spec(provider, model_id)
+    if placement == "instructions" and not spec.supports_responses_api:
+        spec = spec.model_copy(update={"supports_responses_api": True})
+    request = ChatRequest(
+        model=spec, system_blocks=["Reusable guidance."], messages=[Message.user("hi")]
+    )
+    access = (
+        OAuthAccess(access_token="fixture", credential_id=1, org_id="org", kind="oauth")
+        if api_mode == "codex"
+        else None
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = OpenAICompatClient(
+            base_url, http_client=http, openai_api="responses" if access else api_mode
+        )
+        await _collect(client.stream(request, "fixture", access))
+
+    body = captured["body"]
+    if placement == "chat":
+        assert captured["url"] == f"{base_url}/chat/completions"
+        assert body["messages"][0] == {"role": "system", "content": "Reusable guidance."}
+        assert "instructions" not in body and "input" not in body
+    else:
+        assert captured["url"] == (CODEX_RESPONSES_URL if access else f"{base_url}/responses")
+        if placement == "input":
+            assert "instructions" not in body
+            assert body["input"][0] == {
+                "type": "message",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": "Reusable guidance."}],
+            }
+            assert body["input"][1]["role"] == "user"
+        else:
+            assert body["instructions"] == "Reusable guidance."
+            assert body["input"][0]["role"] == "user"
+
+
+@pytest.mark.parametrize(
+    ("model_id", "base_url", "api_mode", "route", "developer_prefix", "cache_key"),
+    [
+        ("gpt-6.2-sol", None, "responses", "responses", True, False),
+        ("gpt-6.2-sol", None, "chat_completions", "chat/completions", False, False),
+        (
+            "gpt-6.2-sol",
+            "https://gateway.invalid/v1",
+            "responses",
+            "chat/completions",
+            False,
+            False,
+        ),
+        ("gpt-6.1-sol", None, "responses", "responses", False, True),
+        ("gpt-5.6-sol", None, "responses", "responses", False, True),
+    ],
+    ids=["default-responses", "explicit-chat", "custom-base", "older-discovered", "catalogue"],
+)
+async def test_openai_model_preserves_endpoint_and_cache_key_contract(
+    model_id: str,
+    base_url: str | None,
+    api_mode: str,
+    route: str,
+    developer_prefix: bool,
+    cache_key: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator.model import configure, discovery, prices
+
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content)
+        stream = (
+            _public_responses_sse()
+            if request.url.path.endswith("/responses")
+            else _sse([{"choices": [{"delta": {}, "finish_reason": "stop"}]}])
+        )
+        return httpx.Response(200, content=stream, headers={"content-type": "text/event-stream"})
+
+    # Public /v1/models can expose an ID before the pricing catalogue has a row.
+    # Exercise that path without allowing live catalogue data to mask the regression.
+    monkeypatch.setattr(configure, "_catalogue_credential", lambda *a, **kw: ("", False, None))
+    monkeypatch.setattr(
+        discovery,
+        "available_models",
+        lambda *a, **kw: ([discovery.DiscoveredModel(model_id)], "live"),
+    )
+    monkeypatch.setattr(prices, "price_catalogue_row", lambda *a, **kw: None)
+    configure.invalidate_model_info_cache()
+    try:
+        spec = configure.build_model_spec("openai", model_id)
+    finally:
+        configure.invalidate_model_info_cache()
+    if base_url is not None:
+        spec = spec.model_copy(update={"base_url": base_url})
+    request = ChatRequest(
+        model=spec,
+        system_blocks=["Reusable guidance."],
+        messages=[Message.user("hi")],
+        prompt_cache_key="lineage-123",
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = client_for_spec(spec, http_client=http, openai_api=api_mode)
+        await _collect(client.stream(request, "fixture"))
+
+    assert captured["url"] == f"{base_url or 'https://api.openai.com/v1'}/{route}"
+    body = captured["body"]
+    assert "prompt_cache_retention" not in body
+    if cache_key:
+        assert body["prompt_cache_key"] == "lineage-123"
+    else:
+        assert "prompt_cache_key" not in body
+    if developer_prefix:
+        assert "instructions" not in body
+        assert body["input"][0] == {
+            "type": "message",
+            "role": "developer",
+            "content": [{"type": "input_text", "text": "Reusable guidance."}],
+        }
+        assert body["input"][1]["role"] == "user"
+    elif route == "responses":
+        assert body["instructions"] == "Reusable guidance."
+        assert body["input"][0]["role"] == "user"
+    else:
+        assert body["messages"][0] == {"role": "system", "content": "Reusable guidance."}
+        assert "instructions" not in body and "input" not in body
+
+
 def _enum_members(node: Any) -> list[Any]:
     """Collect enum members from exactly the provider-bound JSON payload.
 
@@ -3289,6 +3449,132 @@ def test_cache_markers_fall_back_to_the_previous_user_turn_without_frames() -> N
         )
     )
     assert "cache_control" in anthropic_body["messages"][0]["content"][-1]
+
+
+def test_tail_cache_breakpoint_skips_trailing_ephemeral_frame_on_both_clients() -> None:
+    """A trailing ephemeral frame (e.g. PendingTurn's transient body frame)
+    vanishes after the turn settles. Both AnthropicClient and
+    OpenAICompatClient must place the tail cache_control breakpoint on the last
+    persistent message before it (and keep prev_user on persistent turns),
+    falling back to the ephemeral frame only if no persistent message exists."""
+    frame = Message.user("ephemeral admitted body")
+    frame._ephemeral = True
+    assert "_ephemeral" not in frame.model_dump()
+
+    history = [
+        Message.user("earlier persistent turn"),
+        Message.assistant("earlier reply"),
+        Message.user("persistent wake card"),
+        frame,
+    ]
+    spec_oai = _spec(provider="radient", model_id="anthropic/claude-sonnet-5.5")
+    spec_oai.supports_prompt_cache = True
+    oai_body = OpenAICompatClient("https://api.radienthq.com/v1")._build_body(
+        ChatRequest(model=spec_oai, system_blocks=["instructions", "inventory"], messages=history)
+    )
+    assert "_ephemeral" not in json.dumps(oai_body)
+    oai_conv = [m for m in oai_body["messages"] if m["role"] != "system"]
+    # Index 0 = earlier persistent user, index 2 = persistent wake card, index 3 = ephemeral frame
+    assert _marked_message_indices(oai_conv) == [0, 2]
+    assert "cache_control" not in json.dumps(oai_conv[3])
+
+    anth_body = AnthropicClient()._build_body(
+        ChatRequest(
+            model=_spec(provider="anthropic"),
+            system_blocks=["instructions", "inventory", "skills", "env"],
+            messages=history,
+        )
+    )
+    assert "_ephemeral" not in json.dumps(anth_body)
+    assert _marked_message_indices(anth_body["messages"]) == [0, 2]
+    assert "cache_control" not in json.dumps(anth_body["messages"][3])
+
+    # Degenerate frame-only request falls back to marking the ephemeral message.
+    only_oai = OpenAICompatClient("https://api.radienthq.com/v1")._build_body(
+        ChatRequest(model=spec_oai, system_blocks=["instructions", "inventory"], messages=[frame])
+    )
+    only_oai_conv = [m for m in only_oai["messages"] if m["role"] != "system"]
+    assert _marked_message_indices(only_oai_conv) == [0]
+
+    only_anth = AnthropicClient()._build_body(
+        ChatRequest(
+            model=_spec(provider="anthropic"),
+            system_blocks=["instructions", "inventory"],
+            messages=[frame],
+        )
+    )
+    assert _marked_message_indices(only_anth["messages"]) == [0]
+
+
+def test_deep_image_keeps_both_settled_and_prev_user_within_breakpoint_cap() -> None:
+    """When an image sits deep in history behind newer text turns, ``prev_user``
+    is strictly AFTER ``settled``'s message. Both AnthropicClient and
+    OpenAICompatClient must keep BOTH ``settled`` and ``prev_user`` (plus tail)
+    so a tail miss does not collapse 200k tokens back to the old image, while
+    trimming trailing system markers to stay <= MAX_CACHE_BREAKPOINTS (4)."""
+    deep_history = [
+        Message.user("task"),
+        Message.user("old screenshot", [_tiny_frame("b2xk")]),
+        Message.assistant("analyzed"),
+        Message.user("follow-up 1"),
+        Message.assistant("reply 1"),
+        Message.user("follow-up 2"),
+        Message.assistant("reply 2"),
+        Message.user("follow-up 3"),
+    ]
+    # Anthropic wire: settled=0 (before image at 1),
+    # prev_user=5 (follow-up 2), tail=7 (follow-up 3).
+    anth_body = AnthropicClient()._build_body(
+        ChatRequest(
+            model=_spec(provider="anthropic"),
+            system_blocks=["instructions", "inventory", "skills", "env"],
+            messages=deep_history,
+        )
+    )
+    assert _marked_message_indices(anth_body["messages"]) == [0, 5, 7]
+    anth_sys_marked = [e for e in anth_body["system"] if "cache_control" in e]
+    assert len(anth_sys_marked) == 1  # trimmed from 2 -> 1 to fit 1 + 3 <= 4
+    assert len(anth_sys_marked) + 3 <= AnthropicClient.MAX_CACHE_BREAKPOINTS
+
+    # OpenAICompatClient wire: 4 system messages (indices 0..3) + conversation (4..11).
+    # settled=4 (task, before image at 5), prev_user=9 (follow-up 2), tail=11 (follow-up 3).
+    spec_oai = _spec(provider="radient", model_id="anthropic/claude-sonnet-5.5")
+    spec_oai.supports_prompt_cache = True
+    oai_body = OpenAICompatClient("https://api.radienthq.com/v1")._build_body(
+        ChatRequest(
+            model=spec_oai,
+            system_blocks=["instructions", "inventory", "skills", "env"],
+            messages=deep_history,
+        )
+    )
+    oai_sys = [m for m in oai_body["messages"] if m["role"] == "system"]
+    oai_conv = [m for m in oai_body["messages"] if m["role"] != "system"]
+    assert _marked_message_indices(oai_conv) == [0, 5, 7]
+    oai_sys_marked = [m for m in oai_sys if "cache_control" in json.dumps(m.get("content"))]
+    assert len(oai_sys_marked) == 1  # trimmed from 2 -> 1 to fit 1 + 3 <= 4
+    total_oai = len(_marked_message_indices(oai_body["messages"]))
+    assert total_oai <= OpenAICompatClient.MAX_CACHE_BREAKPOINTS
+
+    # Nested tool_result screenshot deep in history on Anthropic wire too.
+    nested_deep = [
+        *_anthropic_frame_history("ZnJhbWU="),
+        Message.assistant("done with screenshots"),
+        Message.user("later text turn 1"),
+        Message.assistant("later reply 1"),
+        Message.user("later text turn 2"),
+    ]
+    nested_body = AnthropicClient()._build_body(
+        ChatRequest(
+            model=_spec(provider="anthropic"),
+            system_blocks=["instructions", "inventory", "skills", "env"],
+            messages=nested_deep,
+        )
+    )
+    # settled=3 (assistant tool_use before newest nested image at 4),
+    # prev_user=6 (later text turn 1), tail=8 (later text turn 2).
+    assert _marked_message_indices(nested_body["messages"]) == [3, 6, 8]
+    nested_sys_marked = [e for e in nested_body["system"] if "cache_control" in e]
+    assert len(nested_sys_marked) + 3 <= AnthropicClient.MAX_CACHE_BREAKPOINTS
 
 
 def test_openai_compat_chat_body_carries_prompt_cache_key():

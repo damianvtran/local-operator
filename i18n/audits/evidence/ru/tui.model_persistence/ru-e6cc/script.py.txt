@@ -1,0 +1,85 @@
+"""Author-only mechanical validation; not an independent linguistic audit.
+
+Use the official checker with enumeration narrowed to this namespace and en/ru;
+no checker rules, catalogue bytes, eligibility or history are modified.
+Plain Rich wrapping is diagnostic only, not a styled NoticeBlock/native UI proof.
+"""
+import hashlib
+import json
+from pathlib import Path
+import sys
+import unicodedata
+from unittest.mock import patch
+
+ROOT = Path(sys.argv[1]).resolve()
+import local_operator.i18n.catalogues as cat
+from local_operator.i18n import runtime
+from scripts.i18n import check
+from rich.console import Console
+from rich.text import Text
+
+NS = 'tui.model_persistence'
+assert Path(cat.__file__).resolve() == ROOT / 'local_operator/i18n/catalogues.py'
+assert Path(runtime.__file__).resolve() == ROOT / 'local_operator/i18n/runtime.py'
+assert Path(check.__file__).resolve() == ROOT / 'scripts/i18n/check.py'
+print('module_provenance:', cat.__file__, runtime.__file__, check.__file__)
+paths = {
+    'en': ROOT / f'local_operator/i18n/catalogues/en/{NS}.json',
+    'context': ROOT / f'local_operator/i18n/catalogues/en/{NS}.context.json',
+    'ru': ROOT / f'local_operator/i18n/catalogues/ru/{NS}.json',
+}
+def hashes():
+    return {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in paths.items()}
+before = hashes()
+assert before['en'] == '4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff'
+assert before['context'] == 'b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc'
+print('before_sha256:', json.dumps(before, sort_keys=True))
+en = cat.load_catalogue('en', NS)
+ru = cat.load_catalogue('ru', NS)
+ctx = cat.context('en', NS)
+assert list(en) == list(ru) == list(ctx) == [f'{NS}.{k}' for k in ('persist', 'settings', 'saved', 'with_model')]
+assert all(cat.context_entry_problem(entry) is None for entry in ctx.values())
+with patch.object(cat, 'namespaces', return_value=(NS,)), patch.object(cat, 'locales', return_value=('en', 'ru')):
+    problems = check.check_catalogues()
+print('official_check_catalogues_scoped:', problems)
+assert not problems
+for key in en:
+    assert runtime.message_arguments(en[key]) == runtime.message_arguments(ru[key])
+    assert not runtime.plural_selectors(en[key]) and not runtime.plural_selectors(ru[key])
+    for message in (en[key], ru[key]):
+        ast = runtime.parse_message(message)
+        assert not any(getattr(node, 'kind', None) in ('plural', 'select') for node in ast)
+    assert not any(unicodedata.bidirectional(char) in ('LRE','RLE','LRO','RLO','PDF','LRI','RLI','FSI','PDI') for char in ru[key])
+for suffix, command in [('persist', '/model default'), ('settings', '/settings'), ('saved', '/model saved')]:
+    value = ru[f'{NS}.{suffix}']
+    assert value.count(command) == 1
+    assert runtime.message_arguments(value) == ()
+    assert runtime.render_message(value, {}, 'ru') == value
+assert ru[f'{NS}.with_model'].count('{label}') == 1
+assert ru[f'{NS}.with_model'].count('{routes}') == 1
+assert runtime.message_arguments(ru[f'{NS}.with_model']) == (('label', 'simple'), ('routes', 'simple'))
+print('keys=4; order=source; plural_arms=0; select_arms=0; simple_args=label/routes once each; literal_commands=exact; manual_bidi=0')
+labels = ('provider/model', 'provider/opaque-model-2026-11-22-long-identity-v1')
+route_sets = {
+    'ordinary': ('persist', 'saved', 'settings'),
+    'missing_model_setup': ('persist', 'settings'),
+    'absent_or_unknown_hosting': ('settings',),
+}
+for state, suffixes in route_sets.items():
+    routes = ' · '.join(runtime.render_message(ru[f'{NS}.{suffix}'], {}, 'ru') for suffix in suffixes)
+    if state == 'absent_or_unknown_hosting':
+        assert '/model' not in routes and routes.count('/settings') == 1
+    for label in labels:
+        output = runtime.render_message(ru[f'{NS}.with_model'], {'label': label, 'routes': routes}, 'ru')
+        assert output == f'модель: {label} — {routes}'
+        assert output.count(label) == 1 and output.count(routes) == 1
+        print(f'render[{state}, {label}]: {output}')
+        for width in (80, 100, 120):
+            console = Console(width=width, force_terminal=False, color_system=None)
+            lines = Text(output).wrap(console, width, overflow='fold')
+            assert all(line.cell_len <= width for line in lines)
+            print(f'plain_rich_only width={width} rows={len(lines)} cells={[line.cell_len for line in lines]} last={lines[-1].plain!r}')
+after = hashes()
+assert before == after
+print('after_sha256:', json.dumps(after, sort_keys=True))
+print('SCOPED MECHANICAL VALIDATION OK; status remains translated; no independent audit, global check, styled/native UI or eligibility claim')

@@ -1,0 +1,102 @@
+{
+  "locale": "vi",
+  "namespace": "tui.model_persistence",
+  "audit_date": "2026-11-22",
+  "key_count": 4,
+  "record_kind": "translation_author_receipt_not_independent_audit",
+  "status": "translated",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "edc50a6f3d77",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": false,
+    "actual_model_source": "Host model-switch message: anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; provider failure: quota. Translation and validation authored after switch.",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "auditor": {
+    "agent": "i18n-translator",
+    "session": "edc50a6f3d77",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": false,
+    "actual_model_source": "Host model-switch message: anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; provider failure: quota. Translation and validation authored after switch.",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "role": "author only; independent auditor not performed"
+  },
+  "source_revision": "87d87ec8b02ef3c279fda673302ce775f4a0329e",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.json",
+      "sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.context.json",
+      "sha256": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc"
+    },
+    "vi": {
+      "path": "local_operator/i18n/catalogues/vi/tui.model_persistence.json",
+      "sha256": "d6b5f00ab0a25ea2596879299e5cda07b5b5bb66bf8ea8bc9081f503719cf505"
+    },
+    "style": {
+      "path": "i18n/style-guides/vi.md",
+      "sha256": "99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/vi/tui.model_persistence/viau1/notes.md",
+      "sha256": "a1dbdeb3911c94d7cad51fa154df1d1d3deb8a559da2db55e620cc5506df0de3",
+      "kind": "audit_notes_not_execution_log"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/tui.model_persistence/viau1/validator.py.txt",
+      "sha256": "841c9d9af06a491fa817a17f576a94c5c9b9ba5fdbb2819882463d9bd27a9065",
+      "kind": "reproduction_source"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/tui.model_persistence/viau1/audit.log",
+      "sha256": "a339f06990c486a82c2563e3d955d1a0e3f58f4c1b8127b7b99fb6e08674d36a",
+      "kind": "actual_execution_log"
+    }
+  ],
+  "execution": {
+    "exit_code": 0,
+    "official_scoped_catalogue_problems": [],
+    "key_order_count": 4,
+    "plural_select_count": 0,
+    "missing_argument_negative_controls": 2,
+    "plain_rich_widths": [
+      80,
+      100,
+      120
+    ],
+    "styled_noticeblock_native_proof": false
+  },
+  "current_report_verdict": {
+    "status": "translated",
+    "unresolved_blocker_major_count": null,
+    "finding_ids": [],
+    "note": "Not audited: no author semantic approval; independent A/B audit pending."
+  },
+  "glossary_proposals": {
+    "boot default": "mô hình mặc định khi mở phiên",
+    "saved boot default": "mô hình mặc định đã lưu (with explicit current-session switch)"
+  },
+  "ledger_changed": false,
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false
+}

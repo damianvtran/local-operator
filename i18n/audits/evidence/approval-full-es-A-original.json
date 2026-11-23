@@ -1,0 +1,2200 @@
+{
+  "locale": "es",
+  "side": "A",
+  "namespace": "wire.settings",
+  "round": 1,
+  "status": "failed",
+  "head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+  "scope": "fa4fb006..a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+  "source_sha256": "298fc1100cb10bfa34909aa245307a735dad318f456e5bbfb5337fbcdb1e8962",
+  "context_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+  "target_sha256": "e1026565e8003ddb8985c82e0b23de028a7ac4e01b5fbd5e4b6a3294660c64a5",
+  "translator": {
+    "agent": "approval-labels-author-es (only new automático label)",
+    "model": "openai/gpt-6.1-sol per allowed translator receipt; independent response provenance not observed here",
+    "source": "i18n/audits/evidence/approval-choice-translator-es.json",
+    "original_other_keys": "Unknown original authors/models; preguntar retained, not newly authored by that translator"
+  },
+  "auditor": {
+    "agent": "translation-auditor / approval-full-es-A-cached",
+    "model": "openai/gpt-6.1-sol",
+    "actual_host_fallback": "Host announced provider quota failure and switch from anthropic/claude-opus-5-5 to openai/gpt-6.1-sol before semantic reading; no Anthropic semantic authorship claimed.",
+    "findings": [
+      {
+        "id": "ES-A-M1.1",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+        "current": "false",
+        "proposed": "desactivado",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M1.2",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+        "current": "default",
+        "proposed": "predeterminado",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M1.3",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+        "current": "allow",
+        "proposed": "permitir",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M1.4",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+        "current": "deny",
+        "proposed": "denegar",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M1.5",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+        "current": "default",
+        "proposed": "predeterminado",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M1.6",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+        "current": "true",
+        "proposed": "activado",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M1.7",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+        "current": "default",
+        "proposed": "predeterminado",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M1.8",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+        "current": "true",
+        "proposed": "activado",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M1.9",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+        "current": "default",
+        "proposed": "predeterminado",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M1.10",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+        "current": "default",
+        "proposed": "predeterminado",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M1.11",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+        "current": "true",
+        "proposed": "activado",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M1.12",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+        "current": "default",
+        "proposed": "predeterminado",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M1.13",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+        "current": "allowlist",
+        "proposed": "lista de permitidos",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M1.14",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+        "current": "inherit",
+        "proposed": "heredar",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M1.15",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+        "current": "client",
+        "proposed": "cliente",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M1.16",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+        "current": "off",
+        "proposed": "desactivada",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M1.17",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+        "current": "provider",
+        "proposed": "proveedor",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M1.18",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.speech_voice_gender.choice.female.label",
+        "current": "female",
+        "proposed": "femenina",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M1.19",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.speech_voice_gender.choice.male.label",
+        "current": "male",
+        "proposed": "masculina",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M1.20",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.web_search_strategy.choice.ordered.label",
+        "current": "ordered",
+        "proposed": "por orden",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M1.21",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+        "current": "round_robin",
+        "proposed": "rotación",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M1.22",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.session_scratchpad.title",
+        "current": "Scratchpad",
+        "proposed": "Borrador",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M1.23",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.session_scratchpad_max_bytes.label",
+        "current": "Límite de scratchpad (bytes)",
+        "proposed": "Límite del borrador (bytes)",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M1.24",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.session_scratchpad_max_bytes.help",
+        "current": "Bytes que puede guardar el scratchpad de una sesión: de 16 MiB a 8 GiB. Predeterminado: 256 MiB.",
+        "proposed": "Bytes que puede guardar el borrador de una sesión: de 16 MiB a 8 GiB. Predeterminado: 256 MiB.",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M1.25",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.display_composer_chevron.label",
+        "current": "Chevron del prompt",
+        "proposed": "Indicador del prompt",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M1.26",
+        "group": "ES-A-M1",
+        "severity": "major",
+        "origin": "inherited namespace issue; not the two approval-label source changes",
+        "key": "wire.settings.team_bridge_session.label",
+        "current": "Sesión de CoS",
+        "proposed": "Sesión de jefa de gabinete",
+        "reason": "Human-facing display copy retains English rather than Spanish; Choice.value and API/config identifiers remain unchanged. This violates the operator entire-UI/no-English-human-label acceptance criterion.",
+        "evidence": "settings_io.py independently localizes Choice labels; settings_view.py:4387-4410 paints row.choice.label. Scratchpad is a translatable product noun per context entry 64, not a protected brand; CoS is the English chief-of-staff acronym."
+      },
+      {
+        "id": "ES-A-M2",
+        "severity": "major",
+        "origin": "inherited namespace meaning issue",
+        "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+        "current": "La constante actual.",
+        "proposed": "La expresividad habitual.",
+        "reason": "La constante actual is a literal/mathematical calque, not an explanation of the middle voice delivery; verified context entry 83 explicitly means existing standard delivery, not a mathematical constant.",
+        "evidence": "English Today’s constant / sidecar note 83; settings_io.py:6326-6327 uses this as display choice explanation."
+      }
+    ],
+    "unresolved_blocker_count": 0,
+    "unresolved_major_count": 27,
+    "minor_count": 3
+  },
+  "fresh_keys_read": 895,
+  "retained_semantic_keys": 0,
+  "contexts_read": 104,
+  "fresh_read_evidence": "All EN/ES pairs read sequentially 1-130,131-210,211-300,301-380,381-455,456-525,526-605,606-685,686-765,766-835,836-895; every omitted spill middle expanded. Contexts 1-52,53-80,81-92,93-104 including every spill omission. These cached official tool captures are inputs, not semantic retention.",
+  "inputs": {
+    "english": {
+      "path": "/Users/damian/.local-operator/sessions/6448acb16e8d/scratchpad/approval-full-en-A-approved-capture.json",
+      "envelope_sha256": "9ff37d2efa1d9c367ce7dcc9a01f1fa9f60f74601daf20dbb9d86c85698bf096",
+      "canonical_map_sha256": "f621866fb5e74c1b617e29e17d02008cb42dce6574aa3624ff9a557e1ef2a7b6"
+    },
+    "spanish": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-full-inputs/es-approved-envelope.json",
+      "envelope_sha256": "ba48ba9c815b8a17b106c6b7d31248ca3d9dc41e1a8a7fd024e396f0011e5c3d",
+      "canonical_map_sha256": "f23f987795b13044ef9107441dbe55ab37db9221c6198dfaa19a381056ddcbd8"
+    },
+    "binding": "895 keys in both; equal key sets; public_copy=true, repository_verified=true, GitHub repository/root/H match; formatted-tool-text SHA verified separately from original-file SHA. Original EN/ES file bytes read for hash only; context parsed only after exact approved SHA."
+  },
+  "approval_label_verdict": {
+    "status": "passed",
+    "keys": [
+      "wire.settings.tool_approval_mode.choice.ask.label",
+      "wire.settings.tool_approval_mode.choice.auto.label"
+    ],
+    "reason": "preguntar is idiomatic infinitive; automático names modo. Neither asserts all tools always prompt or grants permission/bypasses guards; descriptions preserve write/exec scope. Existing lower-case fragment register is consistent with other locale choices.",
+    "new_two_label_issues": []
+  },
+  "subgroups": [
+    {
+      "subgroup": "agents",
+      "keys_read": 6,
+      "keys": [
+        "wire.settings.agents.description",
+        "wire.settings.agents.title",
+        "wire.settings.agents_auto_update_seeds.choice.false.description",
+        "wire.settings.agents_auto_update_seeds.choice.true.description",
+        "wire.settings.agents_auto_update_seeds.help",
+        "wire.settings.agents_auto_update_seeds.label"
+      ],
+      "verdict": "passed with minor findings",
+      "major_findings": [],
+      "minor_findings": [
+        "ES-A-m1"
+      ]
+    },
+    {
+      "subgroup": "aida",
+      "keys_read": 22,
+      "keys": [
+        "wire.settings.aida.description",
+        "wire.settings.aida.title",
+        "wire.settings.aida_cadence_at.help",
+        "wire.settings.aida_cadence_at.label",
+        "wire.settings.aida_cadence_at.placeholder",
+        "wire.settings.aida_cadence_max_extra_per_day.help",
+        "wire.settings.aida_cadence_max_extra_per_day.label",
+        "wire.settings.aida_cadence_min_gap_minutes.help",
+        "wire.settings.aida_cadence_min_gap_minutes.label",
+        "wire.settings.aida_cadence_paused.choice.false.description",
+        "wire.settings.aida_cadence_paused.choice.true.description",
+        "wire.settings.aida_cadence_paused.help",
+        "wire.settings.aida_cadence_paused.label",
+        "wire.settings.aida_enabled.choice.false.description",
+        "wire.settings.aida_enabled.choice.true.description",
+        "wire.settings.aida_enabled.help",
+        "wire.settings.aida_enabled.label",
+        "wire.settings.aida_name.help",
+        "wire.settings.aida_name.label",
+        "wire.settings.aida_name.placeholder",
+        "wire.settings.aida_onboarding_nudge_days.help",
+        "wire.settings.aida_onboarding_nudge_days.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "appearance",
+      "keys_read": 2,
+      "keys": [
+        "wire.settings.appearance.description",
+        "wire.settings.appearance.title"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "approvals",
+      "keys_read": 2,
+      "keys": [
+        "wire.settings.approvals.description",
+        "wire.settings.approvals.title"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "asks",
+      "keys_read": 12,
+      "keys": [
+        "wire.settings.asks.description",
+        "wire.settings.asks.title",
+        "wire.settings.asks_lapsed_visible_for.choice.1h.description",
+        "wire.settings.asks_lapsed_visible_for.choice.1h.label",
+        "wire.settings.asks_lapsed_visible_for.choice.24h.description",
+        "wire.settings.asks_lapsed_visible_for.choice.24h.label",
+        "wire.settings.asks_lapsed_visible_for.choice.7d.description",
+        "wire.settings.asks_lapsed_visible_for.choice.7d.label",
+        "wire.settings.asks_lapsed_visible_for.choice.at_expiry.description",
+        "wire.settings.asks_lapsed_visible_for.choice.at_expiry.label",
+        "wire.settings.asks_lapsed_visible_for.help",
+        "wire.settings.asks_lapsed_visible_for.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "auto",
+      "keys_read": 4,
+      "keys": [
+        "wire.settings.auto_save_conversation.choice.false.description",
+        "wire.settings.auto_save_conversation.choice.true.description",
+        "wire.settings.auto_save_conversation.help",
+        "wire.settings.auto_save_conversation.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "bash",
+      "keys_read": 31,
+      "keys": [
+        "wire.settings.bash_heavy_jobs_enabled.choice.false.description",
+        "wire.settings.bash_heavy_jobs_enabled.choice.true.description",
+        "wire.settings.bash_heavy_jobs_enabled.help",
+        "wire.settings.bash_heavy_jobs_enabled.label",
+        "wire.settings.bash_memory_enabled.choice.false.description",
+        "wire.settings.bash_memory_enabled.choice.true.description",
+        "wire.settings.bash_memory_enabled.help",
+        "wire.settings.bash_memory_enabled.label",
+        "wire.settings.bash_memory_limit_mb.help",
+        "wire.settings.bash_memory_limit_mb.label",
+        "wire.settings.bash_memory_mode.choice.auto.description",
+        "wire.settings.bash_memory_mode.choice.auto.label",
+        "wire.settings.bash_memory_mode.choice.manual.description",
+        "wire.settings.bash_memory_mode.choice.manual.label",
+        "wire.settings.bash_memory_mode.help",
+        "wire.settings.bash_memory_mode.label",
+        "wire.settings.bash_memory_soft_fraction.help",
+        "wire.settings.bash_memory_soft_fraction.label",
+        "wire.settings.bash_query_budget_enabled.choice.false.description",
+        "wire.settings.bash_query_budget_enabled.choice.true.description",
+        "wire.settings.bash_query_budget_enabled.help",
+        "wire.settings.bash_query_budget_enabled.label",
+        "wire.settings.bash_query_budget_seconds.help",
+        "wire.settings.bash_query_budget_seconds.label",
+        "wire.settings.bash_query_budget_stop.choice.false.description",
+        "wire.settings.bash_query_budget_stop.choice.true.description",
+        "wire.settings.bash_query_budget_stop.help",
+        "wire.settings.bash_query_budget_stop.label",
+        "wire.settings.bash_shell.help",
+        "wire.settings.bash_shell.help.windows",
+        "wire.settings.bash_shell.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "bool",
+      "keys_read": 2,
+      "keys": [
+        "wire.settings.bool.off",
+        "wire.settings.bool.on"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "classification",
+      "keys_read": 30,
+      "keys": [
+        "wire.settings.classification.description",
+        "wire.settings.classification.title",
+        "wire.settings.classification_auto.choice.false.description",
+        "wire.settings.classification_auto.choice.true.description",
+        "wire.settings.classification_auto.help",
+        "wire.settings.classification_auto.label",
+        "wire.settings.classification_maxcandidates.help",
+        "wire.settings.classification_maxcandidates.label",
+        "wire.settings.classification_maxrecommendations.help",
+        "wire.settings.classification_maxrecommendations.label",
+        "wire.settings.classification_maxstatechars.help",
+        "wire.settings.classification_maxstatechars.label",
+        "wire.settings.classification_model.help",
+        "wire.settings.classification_model.label",
+        "wire.settings.classification_notice.help",
+        "wire.settings.classification_notice.label",
+        "wire.settings.classification_timeoutms.help",
+        "wire.settings.classification_timeoutms.label",
+        "wire.settings.classification_vendor.choice.auto.description",
+        "wire.settings.classification_vendor.choice.auto.label",
+        "wire.settings.classification_vendor.choice.openrouter.description",
+        "wire.settings.classification_vendor.choice.openrouter.label",
+        "wire.settings.classification_vendor.choice.radient.description",
+        "wire.settings.classification_vendor.choice.radient.label",
+        "wire.settings.classification_vendor.choice.typesafe.description",
+        "wire.settings.classification_vendor.choice.typesafe.label",
+        "wire.settings.classification_vendor.help",
+        "wire.settings.classification_vendor.label",
+        "wire.settings.classification_waitms.help",
+        "wire.settings.classification_waitms.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "compaction",
+      "keys_read": 48,
+      "keys": [
+        "wire.settings.compaction.description",
+        "wire.settings.compaction.title",
+        "wire.settings.compaction_auto_continue.choice.false.description",
+        "wire.settings.compaction_auto_continue.choice.true.description",
+        "wire.settings.compaction_auto_continue.help",
+        "wire.settings.compaction_auto_continue.label",
+        "wire.settings.compaction_enabled.choice.false.description",
+        "wire.settings.compaction_enabled.choice.true.description",
+        "wire.settings.compaction_enabled.help",
+        "wire.settings.compaction_enabled.label",
+        "wire.settings.compaction_idle_enabled.choice.false.description",
+        "wire.settings.compaction_idle_enabled.choice.true.description",
+        "wire.settings.compaction_idle_enabled.help",
+        "wire.settings.compaction_idle_enabled.label",
+        "wire.settings.compaction_idle_min_growth_tokens.help",
+        "wire.settings.compaction_idle_min_growth_tokens.label",
+        "wire.settings.compaction_idle_threshold_tokens.help",
+        "wire.settings.compaction_idle_threshold_tokens.label",
+        "wire.settings.compaction_keep_recent_tokens.help",
+        "wire.settings.compaction_keep_recent_tokens.label",
+        "wire.settings.compaction_mid_turn_enabled.choice.false.description",
+        "wire.settings.compaction_mid_turn_enabled.choice.true.description",
+        "wire.settings.compaction_mid_turn_enabled.help",
+        "wire.settings.compaction_mid_turn_enabled.label",
+        "wire.settings.compaction_resume_replay.choice.card.description",
+        "wire.settings.compaction_resume_replay.choice.card.label",
+        "wire.settings.compaction_resume_replay.choice.full.description",
+        "wire.settings.compaction_resume_replay.choice.full.label",
+        "wire.settings.compaction_resume_replay.help",
+        "wire.settings.compaction_resume_replay.label",
+        "wire.settings.compaction_strategy.choice.auto.description",
+        "wire.settings.compaction_strategy.choice.auto.label",
+        "wire.settings.compaction_strategy.choice.context_full.description",
+        "wire.settings.compaction_strategy.choice.context_full.label",
+        "wire.settings.compaction_strategy.choice.off.description",
+        "wire.settings.compaction_strategy.choice.off.label",
+        "wire.settings.compaction_strategy.choice.snapcompact.description",
+        "wire.settings.compaction_strategy.choice.snapcompact.label",
+        "wire.settings.compaction_strategy.help",
+        "wire.settings.compaction_strategy.label",
+        "wire.settings.compaction_threshold_percent.help",
+        "wire.settings.compaction_threshold_percent.label",
+        "wire.settings.compaction_threshold_tokens.help",
+        "wire.settings.compaction_threshold_tokens.label",
+        "wire.settings.compaction_wire_bytes_budget.help",
+        "wire.settings.compaction_wire_bytes_budget.label",
+        "wire.settings.compaction_wire_bytes_trigger.help",
+        "wire.settings.compaction_wire_bytes_trigger.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "conversation",
+      "keys_read": 2,
+      "keys": [
+        "wire.settings.conversation_length.help",
+        "wire.settings.conversation_length.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "desktop",
+      "keys_read": 7,
+      "keys": [
+        "wire.settings.desktop.description",
+        "wire.settings.desktop.title",
+        "wire.settings.desktop_launch_command.help",
+        "wire.settings.desktop_launch_command.label",
+        "wire.settings.desktop_launch_command.placeholder",
+        "wire.settings.desktop_remote_files_cache_bytes.help",
+        "wire.settings.desktop_remote_files_cache_bytes.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "detail",
+      "keys_read": 2,
+      "keys": [
+        "wire.settings.detail_length.help",
+        "wire.settings.detail_length.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "display",
+      "keys_read": 107,
+      "keys": [
+        "wire.settings.display_comfortable_rows.choice.false.description",
+        "wire.settings.display_comfortable_rows.choice.true.description",
+        "wire.settings.display_comfortable_rows.help",
+        "wire.settings.display_comfortable_rows.label",
+        "wire.settings.display_composer_band.choice.false.description",
+        "wire.settings.display_composer_band.choice.true.description",
+        "wire.settings.display_composer_band.help",
+        "wire.settings.display_composer_band.label",
+        "wire.settings.display_composer_chevron.choice.false.description",
+        "wire.settings.display_composer_chevron.choice.true.description",
+        "wire.settings.display_composer_chevron.help",
+        "wire.settings.display_composer_chevron.label",
+        "wire.settings.display_composer_command.help",
+        "wire.settings.display_composer_command.label",
+        "wire.settings.display_composer_command.placeholder",
+        "wire.settings.display_composer_command_interval.help",
+        "wire.settings.display_composer_command_interval.label",
+        "wire.settings.display_composer_context.choice.false.description",
+        "wire.settings.display_composer_context.choice.true.description",
+        "wire.settings.display_composer_context.help",
+        "wire.settings.display_composer_context.label",
+        "wire.settings.display_composer_cost.choice.false.description",
+        "wire.settings.display_composer_cost.choice.true.description",
+        "wire.settings.display_composer_cost.help",
+        "wire.settings.display_composer_cost.label",
+        "wire.settings.display_composer_cwd.choice.false.description",
+        "wire.settings.display_composer_cwd.choice.true.description",
+        "wire.settings.display_composer_cwd.help",
+        "wire.settings.display_composer_cwd.label",
+        "wire.settings.display_composer_duration.choice.false.description",
+        "wire.settings.display_composer_duration.choice.true.description",
+        "wire.settings.display_composer_duration.help",
+        "wire.settings.display_composer_duration.label",
+        "wire.settings.display_composer_model.choice.false.description",
+        "wire.settings.display_composer_model.choice.true.description",
+        "wire.settings.display_composer_model.help",
+        "wire.settings.display_composer_model.label",
+        "wire.settings.display_composer_rate.choice.false.description",
+        "wire.settings.display_composer_rate.choice.true.description",
+        "wire.settings.display_composer_rate.help",
+        "wire.settings.display_composer_rate.label",
+        "wire.settings.display_dock.choice.full.description",
+        "wire.settings.display_dock.choice.full.label",
+        "wire.settings.display_dock.choice.hidden.description",
+        "wire.settings.display_dock.choice.hidden.label",
+        "wire.settings.display_dock.choice.summary.description",
+        "wire.settings.display_dock.choice.summary.label",
+        "wire.settings.display_dock.help",
+        "wire.settings.display_dock.label",
+        "wire.settings.display_heading_markers.choice.false.description",
+        "wire.settings.display_heading_markers.choice.true.description",
+        "wire.settings.display_heading_markers.help",
+        "wire.settings.display_heading_markers.label",
+        "wire.settings.display_hide_cross_session.choice.false.description",
+        "wire.settings.display_hide_cross_session.choice.true.description",
+        "wire.settings.display_hide_cross_session.help",
+        "wire.settings.display_hide_cross_session.label",
+        "wire.settings.display_images.choice.false.description",
+        "wire.settings.display_images.choice.true.description",
+        "wire.settings.display_images.help",
+        "wire.settings.display_images.label",
+        "wire.settings.display_narration.choice.false.description",
+        "wire.settings.display_narration.choice.true.description",
+        "wire.settings.display_narration.help",
+        "wire.settings.display_narration.label",
+        "wire.settings.display_nerd_icons.choice.false.description",
+        "wire.settings.display_nerd_icons.choice.false.label",
+        "wire.settings.display_nerd_icons.choice.none.description",
+        "wire.settings.display_nerd_icons.choice.none.label",
+        "wire.settings.display_nerd_icons.choice.true.description",
+        "wire.settings.display_nerd_icons.choice.true.label",
+        "wire.settings.display_nerd_icons.help",
+        "wire.settings.display_nerd_icons.label",
+        "wire.settings.display_notification_session_name.choice.false.description",
+        "wire.settings.display_notification_session_name.choice.true.description",
+        "wire.settings.display_notification_session_name.help",
+        "wire.settings.display_notification_session_name.label",
+        "wire.settings.display_notifications.choice.false.description",
+        "wire.settings.display_notifications.choice.true.description",
+        "wire.settings.display_notifications.help",
+        "wire.settings.display_notifications.label",
+        "wire.settings.display_rail.choice.false.description",
+        "wire.settings.display_rail.choice.true.description",
+        "wire.settings.display_rail.help",
+        "wire.settings.display_rail.label",
+        "wire.settings.display_reasoning.choice.false.description",
+        "wire.settings.display_reasoning.choice.true.description",
+        "wire.settings.display_reasoning.help",
+        "wire.settings.display_reasoning.label",
+        "wire.settings.display_shimmer.choice.false.description",
+        "wire.settings.display_shimmer.choice.true.description",
+        "wire.settings.display_shimmer.help",
+        "wire.settings.display_shimmer.label",
+        "wire.settings.display_terminal_title.choice.false.description",
+        "wire.settings.display_terminal_title.choice.true.description",
+        "wire.settings.display_terminal_title.help",
+        "wire.settings.display_terminal_title.label",
+        "wire.settings.display_time_format.choice.12h.description",
+        "wire.settings.display_time_format.choice.12h.label",
+        "wire.settings.display_time_format.choice.24h.description",
+        "wire.settings.display_time_format.choice.24h.label",
+        "wire.settings.display_time_format.help",
+        "wire.settings.display_time_format.label",
+        "wire.settings.display_turn_answer_rail.choice.false.description",
+        "wire.settings.display_turn_answer_rail.choice.true.description",
+        "wire.settings.display_turn_answer_rail.help",
+        "wire.settings.display_turn_answer_rail.label"
+      ],
+      "verdict": "failed",
+      "major_findings": [
+        "ES-A-M1.25"
+      ],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "failover",
+      "keys_read": 2,
+      "keys": [
+        "wire.settings.failover.description",
+        "wire.settings.failover.title"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "fork",
+      "keys_read": 14,
+      "keys": [
+        "wire.settings.fork.description",
+        "wire.settings.fork.title",
+        "wire.settings.fork_cmux_placement.choice.surface.description",
+        "wire.settings.fork_cmux_placement.choice.surface.label",
+        "wire.settings.fork_cmux_placement.choice.workspace.description",
+        "wire.settings.fork_cmux_placement.choice.workspace.label",
+        "wire.settings.fork_cmux_placement.help",
+        "wire.settings.fork_cmux_placement.label",
+        "wire.settings.fork_mode.choice.switch.description",
+        "wire.settings.fork_mode.choice.switch.label",
+        "wire.settings.fork_mode.choice.window.description",
+        "wire.settings.fork_mode.choice.window.label",
+        "wire.settings.fork_mode.help",
+        "wire.settings.fork_mode.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "guardrails",
+      "keys_read": 10,
+      "keys": [
+        "wire.settings.guardrails.description",
+        "wire.settings.guardrails.title",
+        "wire.settings.guardrails_critical_override.help",
+        "wire.settings.guardrails_critical_override.label",
+        "wire.settings.guardrails_enabled.help",
+        "wire.settings.guardrails_enabled.label",
+        "wire.settings.guardrails_judge_timeout_s.help",
+        "wire.settings.guardrails_judge_timeout_s.label",
+        "wire.settings.guardrails_rules_dir.help",
+        "wire.settings.guardrails_rules_dir.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "heavy",
+      "keys_read": 2,
+      "keys": [
+        "wire.settings.heavy_jobs.description",
+        "wire.settings.heavy_jobs.title"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "hooks",
+      "keys_read": 8,
+      "keys": [
+        "wire.settings.hooks.description",
+        "wire.settings.hooks.title",
+        "wire.settings.hooks_forward_claude.help",
+        "wire.settings.hooks_forward_claude.label",
+        "wire.settings.hooks_forward_codex.help",
+        "wire.settings.hooks_forward_codex.label",
+        "wire.settings.hooks_native.help",
+        "wire.settings.hooks_native.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "hosting",
+      "keys_read": 2,
+      "keys": [
+        "wire.settings.hosting.help",
+        "wire.settings.hosting.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "hub",
+      "keys_read": 12,
+      "keys": [
+        "wire.settings.hub.description",
+        "wire.settings.hub.title",
+        "wire.settings.hub_auto_update_agents.choice.false.description",
+        "wire.settings.hub_auto_update_agents.choice.true.description",
+        "wire.settings.hub_auto_update_agents.help",
+        "wire.settings.hub_auto_update_agents.label",
+        "wire.settings.hub_auto_update_teams.choice.false.description",
+        "wire.settings.hub_auto_update_teams.choice.true.description",
+        "wire.settings.hub_auto_update_teams.help",
+        "wire.settings.hub_auto_update_teams.label",
+        "wire.settings.hub_check_interval_min.help",
+        "wire.settings.hub_check_interval_min.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "keymap",
+      "keys_read": 2,
+      "keys": [
+        "wire.settings.keymap.description",
+        "wire.settings.keymap.title"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "language",
+      "keys_read": 2,
+      "keys": [
+        "wire.settings.language.help",
+        "wire.settings.language.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "librarian",
+      "keys_read": 20,
+      "keys": [
+        "wire.settings.librarian.description",
+        "wire.settings.librarian.title",
+        "wire.settings.librarian_cadence_at.help",
+        "wire.settings.librarian_cadence_at.label",
+        "wire.settings.librarian_cadence_at.placeholder",
+        "wire.settings.librarian_cadence_max_extra_per_day.help",
+        "wire.settings.librarian_cadence_max_extra_per_day.label",
+        "wire.settings.librarian_cadence_min_gap_minutes.help",
+        "wire.settings.librarian_cadence_min_gap_minutes.label",
+        "wire.settings.librarian_cadence_paused.choice.false.description",
+        "wire.settings.librarian_cadence_paused.choice.true.description",
+        "wire.settings.librarian_cadence_paused.help",
+        "wire.settings.librarian_cadence_paused.label",
+        "wire.settings.librarian_enabled.choice.false.description",
+        "wire.settings.librarian_enabled.choice.true.description",
+        "wire.settings.librarian_enabled.help",
+        "wire.settings.librarian_enabled.label",
+        "wire.settings.librarian_name.help",
+        "wire.settings.librarian_name.label",
+        "wire.settings.librarian_name.placeholder"
+      ],
+      "verdict": "passed with minor findings",
+      "major_findings": [],
+      "minor_findings": [
+        "ES-A-m2",
+        "ES-A-m3"
+      ]
+    },
+    {
+      "subgroup": "local",
+      "keys_read": 6,
+      "keys": [
+        "wire.settings.local_providers.base_url.help",
+        "wire.settings.local_providers.base_url.label",
+        "wire.settings.local_providers.description",
+        "wire.settings.local_providers.models.help",
+        "wire.settings.local_providers.models.label",
+        "wire.settings.local_providers.title"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "max",
+      "keys_read": 2,
+      "keys": [
+        "wire.settings.max_learnings_history.help",
+        "wire.settings.max_learnings_history.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "memory",
+      "keys_read": 2,
+      "keys": [
+        "wire.settings.memory_guard.description",
+        "wire.settings.memory_guard.title"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "mesh",
+      "keys_read": 8,
+      "keys": [
+        "wire.settings.mesh_updates.description",
+        "wire.settings.mesh_updates.title",
+        "wire.settings.mesh_moves.title",
+        "wire.settings.mesh_moves.description",
+        "wire.settings.mesh_move_working_set_max_bytes.label",
+        "wire.settings.mesh_move_working_set_max_bytes.help",
+        "wire.settings.mesh_move_working_set_roots.label",
+        "wire.settings.mesh_move_working_set_roots.help"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "model",
+      "keys_read": 15,
+      "keys": [
+        "wire.settings.model.description",
+        "wire.settings.model.title",
+        "wire.settings.model_effort.choice.high.description",
+        "wire.settings.model_effort.choice.low.description",
+        "wire.settings.model_effort.choice.max.description",
+        "wire.settings.model_effort.choice.medium.description",
+        "wire.settings.model_effort.choice.minimal.description",
+        "wire.settings.model_effort.choice.none.description",
+        "wire.settings.model_effort.choice.unset.description",
+        "wire.settings.model_effort.choice.unset.label",
+        "wire.settings.model_effort.choice.xhigh.description",
+        "wire.settings.model_effort.help",
+        "wire.settings.model_effort.label",
+        "wire.settings.model_name.help",
+        "wire.settings.model_name.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "monitor",
+      "keys_read": 24,
+      "keys": [
+        "wire.settings.monitor.description",
+        "wire.settings.monitor.title",
+        "wire.settings.monitor_classifymaxchars.help",
+        "wire.settings.monitor_classifymaxchars.label",
+        "wire.settings.monitor_defaultintervals.help",
+        "wire.settings.monitor_defaultintervals.label",
+        "wire.settings.monitor_deltamaxchars.help",
+        "wire.settings.monitor_deltamaxchars.label",
+        "wire.settings.monitor_maxconsecutivefailures.help",
+        "wire.settings.monitor_maxconsecutivefailures.label",
+        "wire.settings.monitor_maxdeliveriesperhour.help",
+        "wire.settings.monitor_maxdeliveriesperhour.label",
+        "wire.settings.monitor_maxdeltalines.help",
+        "wire.settings.monitor_maxdeltalines.label",
+        "wire.settings.monitor_maxmonitors.help",
+        "wire.settings.monitor_maxmonitors.label",
+        "wire.settings.monitor_normalizetimestamps.choice.false.description",
+        "wire.settings.monitor_normalizetimestamps.choice.true.description",
+        "wire.settings.monitor_normalizetimestamps.help",
+        "wire.settings.monitor_normalizetimestamps.label",
+        "wire.settings.monitor_runtimeoutms.help",
+        "wire.settings.monitor_runtimeoutms.label",
+        "wire.settings.monitor_snapshotmaxchars.help",
+        "wire.settings.monitor_snapshotmaxchars.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "network",
+      "keys_read": 34,
+      "keys": [
+        "wire.settings.network.description",
+        "wire.settings.network.title",
+        "wire.settings.network_advertise_hosts.help",
+        "wire.settings.network_advertise_hosts.label",
+        "wire.settings.network_advertise_hosts.placeholder",
+        "wire.settings.network_audit_generations.help",
+        "wire.settings.network_audit_generations.label",
+        "wire.settings.network_audit_max_age_days.help",
+        "wire.settings.network_audit_max_age_days.label",
+        "wire.settings.network_audit_max_bytes.help",
+        "wire.settings.network_audit_max_bytes.label",
+        "wire.settings.network_credentials_github_repositories.help",
+        "wire.settings.network_credentials_github_repositories.label",
+        "wire.settings.network_credentials_github_repositories.placeholder",
+        "wire.settings.network_credentials_grant_ttl_s.help",
+        "wire.settings.network_credentials_grant_ttl_s.label",
+        "wire.settings.network_credentials_offline_hold_s.help",
+        "wire.settings.network_credentials_offline_hold_s.label",
+        "wire.settings.network_listen_address.help",
+        "wire.settings.network_listen_address.label",
+        "wire.settings.network_max_handshakes.help",
+        "wire.settings.network_max_handshakes.label",
+        "wire.settings.network_port.help",
+        "wire.settings.network_port.label",
+        "wire.settings.network_rollout_on_update.choice.auto.description",
+        "wire.settings.network_rollout_on_update.choice.auto.label",
+        "wire.settings.network_rollout_on_update.choice.off.description",
+        "wire.settings.network_rollout_on_update.choice.off.label",
+        "wire.settings.network_rollout_on_update.help",
+        "wire.settings.network_rollout_on_update.label",
+        "wire.settings.network_sync_debounce_s.help",
+        "wire.settings.network_sync_debounce_s.label",
+        "wire.settings.network_sync_tick_s.help",
+        "wire.settings.network_sync_tick_s.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "openrouter",
+      "keys_read": 2,
+      "keys": [
+        "wire.settings.openrouter.description",
+        "wire.settings.openrouter.title"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "proactive",
+      "keys_read": 12,
+      "keys": [
+        "wire.settings.proactive.description",
+        "wire.settings.proactive.title",
+        "wire.settings.proactive_patience_backoff.help",
+        "wire.settings.proactive_patience_backoff.label",
+        "wire.settings.proactive_patience_default_ms.help",
+        "wire.settings.proactive_patience_default_ms.label",
+        "wire.settings.proactive_patience_episode_ttl_ms.help",
+        "wire.settings.proactive_patience_episode_ttl_ms.label",
+        "wire.settings.proactive_patience_max_attempts.help",
+        "wire.settings.proactive_patience_max_attempts.label",
+        "wire.settings.proactive_patience_max_pending.help",
+        "wire.settings.proactive_patience_max_pending.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "projects",
+      "keys_read": 4,
+      "keys": [
+        "wire.settings.projects.description",
+        "wire.settings.projects.title",
+        "wire.settings.projects_stale_after_hours.help",
+        "wire.settings.projects_stale_after_hours.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "providers",
+      "keys_read": 82,
+      "keys": [
+        "wire.settings.providers.description",
+        "wire.settings.providers.title",
+        "wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.help",
+        "wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.label",
+        "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.help",
+        "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.label",
+        "wire.settings.providers_bedrock_auth.help",
+        "wire.settings.providers_bedrock_auth.label",
+        "wire.settings.providers_bedrock_region.help",
+        "wire.settings.providers_bedrock_region.label",
+        "wire.settings.providers_openai_api.choice.chat_completions.description",
+        "wire.settings.providers_openai_api.choice.chat_completions.label",
+        "wire.settings.providers_openai_api.choice.responses.description",
+        "wire.settings.providers_openai_api.choice.responses.label",
+        "wire.settings.providers_openai_api.help",
+        "wire.settings.providers_openai_api.label",
+        "wire.settings.providers_openai_use_max_context_window.help",
+        "wire.settings.providers_openai_use_max_context_window.label",
+        "wire.settings.providers_openrouter_allow_fallbacks.choice.false.description",
+        "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+        "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.description",
+        "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+        "wire.settings.providers_openrouter_allow_fallbacks.help",
+        "wire.settings.providers_openrouter_allow_fallbacks.label",
+        "wire.settings.providers_openrouter_data_collection.choice.allow.description",
+        "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+        "wire.settings.providers_openrouter_data_collection.choice.deny.description",
+        "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+        "wire.settings.providers_openrouter_data_collection.choice.unset.description",
+        "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+        "wire.settings.providers_openrouter_data_collection.help",
+        "wire.settings.providers_openrouter_data_collection.label",
+        "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.description",
+        "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+        "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.description",
+        "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+        "wire.settings.providers_openrouter_enforce_distillable_text.help",
+        "wire.settings.providers_openrouter_enforce_distillable_text.label",
+        "wire.settings.providers_openrouter_ignore.help",
+        "wire.settings.providers_openrouter_ignore.label",
+        "wire.settings.providers_openrouter_ignore.placeholder",
+        "wire.settings.providers_openrouter_max_price.help",
+        "wire.settings.providers_openrouter_max_price.label",
+        "wire.settings.providers_openrouter_max_price.placeholder",
+        "wire.settings.providers_openrouter_only.help",
+        "wire.settings.providers_openrouter_only.label",
+        "wire.settings.providers_openrouter_only.placeholder",
+        "wire.settings.providers_openrouter_order.help",
+        "wire.settings.providers_openrouter_order.label",
+        "wire.settings.providers_openrouter_order.placeholder",
+        "wire.settings.providers_openrouter_order.warning",
+        "wire.settings.providers_openrouter_preferred_max_latency.help",
+        "wire.settings.providers_openrouter_preferred_max_latency.label",
+        "wire.settings.providers_openrouter_preferred_min_throughput.help",
+        "wire.settings.providers_openrouter_preferred_min_throughput.label",
+        "wire.settings.providers_openrouter_provider_affinity.help",
+        "wire.settings.providers_openrouter_provider_affinity.label",
+        "wire.settings.providers_openrouter_quantizations.help",
+        "wire.settings.providers_openrouter_quantizations.label",
+        "wire.settings.providers_openrouter_quantizations.placeholder",
+        "wire.settings.providers_openrouter_require_parameters.choice.true.description",
+        "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+        "wire.settings.providers_openrouter_require_parameters.choice.unset.description",
+        "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+        "wire.settings.providers_openrouter_require_parameters.help",
+        "wire.settings.providers_openrouter_require_parameters.label",
+        "wire.settings.providers_openrouter_sort.choice.latency.description",
+        "wire.settings.providers_openrouter_sort.choice.latency.label",
+        "wire.settings.providers_openrouter_sort.choice.price.description",
+        "wire.settings.providers_openrouter_sort.choice.price.label",
+        "wire.settings.providers_openrouter_sort.choice.throughput.description",
+        "wire.settings.providers_openrouter_sort.choice.throughput.label",
+        "wire.settings.providers_openrouter_sort.choice.unset.description",
+        "wire.settings.providers_openrouter_sort.choice.unset.label",
+        "wire.settings.providers_openrouter_sort.help",
+        "wire.settings.providers_openrouter_sort.label",
+        "wire.settings.providers_openrouter_zdr.choice.true.description",
+        "wire.settings.providers_openrouter_zdr.choice.true.label",
+        "wire.settings.providers_openrouter_zdr.choice.unset.description",
+        "wire.settings.providers_openrouter_zdr.choice.unset.label",
+        "wire.settings.providers_openrouter_zdr.help",
+        "wire.settings.providers_openrouter_zdr.label"
+      ],
+      "verdict": "failed",
+      "major_findings": [
+        "ES-A-M1.1",
+        "ES-A-M1.2",
+        "ES-A-M1.3",
+        "ES-A-M1.4",
+        "ES-A-M1.5",
+        "ES-A-M1.6",
+        "ES-A-M1.7",
+        "ES-A-M1.8",
+        "ES-A-M1.9",
+        "ES-A-M1.10",
+        "ES-A-M1.11",
+        "ES-A-M1.12"
+      ],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "query",
+      "keys_read": 2,
+      "keys": [
+        "wire.settings.query_budget.description",
+        "wire.settings.query_budget.title"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "remote",
+      "keys_read": 6,
+      "keys": [
+        "wire.settings.remote_compute.description",
+        "wire.settings.remote_compute.title",
+        "wire.settings.remote_compute_enabled.choice.false.description",
+        "wire.settings.remote_compute_enabled.choice.true.description",
+        "wire.settings.remote_compute_enabled.help",
+        "wire.settings.remote_compute_enabled.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "retired",
+      "keys_read": 2,
+      "keys": [
+        "wire.settings.retired.description",
+        "wire.settings.retired.title"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "retry",
+      "keys_read": 34,
+      "keys": [
+        "wire.settings.retry_basedelayms.help",
+        "wire.settings.retry_basedelayms.label",
+        "wire.settings.retry_connectivitybackoffcapms.help",
+        "wire.settings.retry_connectivitybackoffcapms.label",
+        "wire.settings.retry_connectivitymaxretries.help",
+        "wire.settings.retry_connectivitymaxretries.label",
+        "wire.settings.retry_enabled.choice.false.description",
+        "wire.settings.retry_enabled.choice.true.description",
+        "wire.settings.retry_enabled.help",
+        "wire.settings.retry_enabled.label",
+        "wire.settings.retry_fallbackchains.help",
+        "wire.settings.retry_fallbackchains.label",
+        "wire.settings.retry_maxretries.help",
+        "wire.settings.retry_maxretries.label",
+        "wire.settings.retry_modelfallback.choice.false.description",
+        "wire.settings.retry_modelfallback.choice.true.description",
+        "wire.settings.retry_modelfallback.help",
+        "wire.settings.retry_modelfallback.label",
+        "wire.settings.retry_pinnedfallback.choice.cross_family.description",
+        "wire.settings.retry_pinnedfallback.choice.cross_family.label",
+        "wire.settings.retry_pinnedfallback.choice.same_family.description",
+        "wire.settings.retry_pinnedfallback.choice.same_family.label",
+        "wire.settings.retry_pinnedfallback.help",
+        "wire.settings.retry_pinnedfallback.label",
+        "wire.settings.retry_usageawareaccountpick.choice.false.description",
+        "wire.settings.retry_usageawareaccountpick.choice.true.description",
+        "wire.settings.retry_usageawareaccountpick.help",
+        "wire.settings.retry_usageawareaccountpick.label",
+        "wire.settings.retry_usageawarefallback.choice.false.description",
+        "wire.settings.retry_usageawarefallback.choice.true.description",
+        "wire.settings.retry_usageawarefallback.help",
+        "wire.settings.retry_usageawarefallback.label",
+        "wire.settings.retry_usagereservepercent.help",
+        "wire.settings.retry_usagereservepercent.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "runtime",
+      "keys_read": 12,
+      "keys": [
+        "wire.settings.runtime.description",
+        "wire.settings.runtime.title",
+        "wire.settings.runtime_background_on_resume.choice.false.description",
+        "wire.settings.runtime_background_on_resume.choice.true.description",
+        "wire.settings.runtime_background_on_resume.help",
+        "wire.settings.runtime_background_on_resume.label",
+        "wire.settings.runtime_keep_alive_max.help",
+        "wire.settings.runtime_keep_alive_max.label",
+        "wire.settings.runtime_keep_alive_seconds.help",
+        "wire.settings.runtime_keep_alive_seconds.label",
+        "wire.settings.runtime_unattended_gate_timeout.help",
+        "wire.settings.runtime_unattended_gate_timeout.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "send",
+      "keys_read": 2,
+      "keys": [
+        "wire.settings.send_journal_unconfirmed.help",
+        "wire.settings.send_journal_unconfirmed.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "session",
+      "keys_read": 44,
+      "keys": [
+        "wire.settings.session.description",
+        "wire.settings.session.title",
+        "wire.settings.session_cleanup.description",
+        "wire.settings.session_cleanup.title",
+        "wire.settings.session_cleanup_delegated_enabled.choice.false.description",
+        "wire.settings.session_cleanup_delegated_enabled.choice.true.description",
+        "wire.settings.session_cleanup_delegated_enabled.help",
+        "wire.settings.session_cleanup_delegated_enabled.label",
+        "wire.settings.session_cleanup_delegated_max_age_hours.help",
+        "wire.settings.session_cleanup_delegated_max_age_hours.label",
+        "wire.settings.session_cleanup_enabled.choice.false.description",
+        "wire.settings.session_cleanup_enabled.choice.true.description",
+        "wire.settings.session_cleanup_enabled.help",
+        "wire.settings.session_cleanup_enabled.label",
+        "wire.settings.session_cleanup_max_inactive_days.help",
+        "wire.settings.session_cleanup_max_inactive_days.label",
+        "wire.settings.session_cleanup_max_sessions.help",
+        "wire.settings.session_cleanup_max_sessions.label",
+        "wire.settings.session_cleanup_max_total_bytes.help",
+        "wire.settings.session_cleanup_max_total_bytes.label",
+        "wire.settings.session_cleanup_remove_empty.choice.false.description",
+        "wire.settings.session_cleanup_remove_empty.choice.true.description",
+        "wire.settings.session_cleanup_remove_empty.help",
+        "wire.settings.session_cleanup_remove_empty.label",
+        "wire.settings.session_compression.description",
+        "wire.settings.session_compression.title",
+        "wire.settings.session_compression_after_days.help",
+        "wire.settings.session_compression_after_days.label",
+        "wire.settings.session_compression_enabled.choice.false.description",
+        "wire.settings.session_compression_enabled.choice.true.description",
+        "wire.settings.session_compression_enabled.help",
+        "wire.settings.session_compression_enabled.label",
+        "wire.settings.session_delegated.description",
+        "wire.settings.session_delegated.title",
+        "wire.settings.session_scratchpad.description",
+        "wire.settings.session_scratchpad.title",
+        "wire.settings.session_scratchpad_max_bytes.help",
+        "wire.settings.session_scratchpad_max_bytes.label",
+        "wire.settings.session_cleanup_temporary_idle_minutes.choice.15m.label",
+        "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label",
+        "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label",
+        "wire.settings.session_cleanup_temporary_idle_minutes.choice.30m.label",
+        "wire.settings.session_cleanup_temporary_idle_minutes.help",
+        "wire.settings.session_cleanup_temporary_idle_minutes.label"
+      ],
+      "verdict": "failed",
+      "major_findings": [
+        "ES-A-M1.22",
+        "ES-A-M1.23",
+        "ES-A-M1.24"
+      ],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "shell",
+      "keys_read": 14,
+      "keys": [
+        "wire.settings.shell_environment.description",
+        "wire.settings.shell_environment.title",
+        "wire.settings.shell_environment_exclude.help",
+        "wire.settings.shell_environment_exclude.label",
+        "wire.settings.shell_environment_exclude.placeholder",
+        "wire.settings.shell_environment_inherit.help",
+        "wire.settings.shell_environment_inherit.label",
+        "wire.settings.shell_environment_inherit.placeholder",
+        "wire.settings.shell_environment_mode.choice.allowlist.description",
+        "wire.settings.shell_environment_mode.choice.allowlist.label",
+        "wire.settings.shell_environment_mode.choice.inherit.description",
+        "wire.settings.shell_environment_mode.choice.inherit.label",
+        "wire.settings.shell_environment_mode.help",
+        "wire.settings.shell_environment_mode.label"
+      ],
+      "verdict": "failed",
+      "major_findings": [
+        "ES-A-M1.13",
+        "ES-A-M1.14"
+      ],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "speech",
+      "keys_read": 48,
+      "keys": [
+        "wire.settings.speech.description",
+        "wire.settings.speech.title",
+        "wire.settings.speech_transcription_cleanup.choice.auto.description",
+        "wire.settings.speech_transcription_cleanup.choice.auto.label",
+        "wire.settings.speech_transcription_cleanup.choice.client.description",
+        "wire.settings.speech_transcription_cleanup.choice.client.label",
+        "wire.settings.speech_transcription_cleanup.choice.off.description",
+        "wire.settings.speech_transcription_cleanup.choice.off.label",
+        "wire.settings.speech_transcription_cleanup.choice.provider.description",
+        "wire.settings.speech_transcription_cleanup.choice.provider.label",
+        "wire.settings.speech_transcription_cleanup.help",
+        "wire.settings.speech_transcription_cleanup.label",
+        "wire.settings.speech_voice_accent.help",
+        "wire.settings.speech_voice_accent.label",
+        "wire.settings.speech_voice_expressiveness.choice.high.description",
+        "wire.settings.speech_voice_expressiveness.choice.high.label",
+        "wire.settings.speech_voice_expressiveness.choice.low.description",
+        "wire.settings.speech_voice_expressiveness.choice.low.label",
+        "wire.settings.speech_voice_expressiveness.choice.medium.description",
+        "wire.settings.speech_voice_expressiveness.choice.medium.label",
+        "wire.settings.speech_voice_expressiveness.help",
+        "wire.settings.speech_voice_expressiveness.label",
+        "wire.settings.speech_voice_gender.choice.auto.description",
+        "wire.settings.speech_voice_gender.choice.auto.label",
+        "wire.settings.speech_voice_gender.choice.female.description",
+        "wire.settings.speech_voice_gender.choice.female.label",
+        "wire.settings.speech_voice_gender.choice.male.description",
+        "wire.settings.speech_voice_gender.choice.male.label",
+        "wire.settings.speech_voice_gender.help",
+        "wire.settings.speech_voice_gender.label",
+        "wire.settings.speech_voice_instructions.help",
+        "wire.settings.speech_voice_instructions.label",
+        "wire.settings.speech_voice_language.help",
+        "wire.settings.speech_voice_language.label",
+        "wire.settings.speech_voice_pace.help",
+        "wire.settings.speech_voice_pace.label",
+        "wire.settings.speech_voice_tone.choice.authoritative.description",
+        "wire.settings.speech_voice_tone.choice.authoritative.label",
+        "wire.settings.speech_voice_tone.choice.bright.description",
+        "wire.settings.speech_voice_tone.choice.bright.label",
+        "wire.settings.speech_voice_tone.choice.calm.description",
+        "wire.settings.speech_voice_tone.choice.calm.label",
+        "wire.settings.speech_voice_tone.choice.neutral.description",
+        "wire.settings.speech_voice_tone.choice.neutral.label",
+        "wire.settings.speech_voice_tone.choice.warm.description",
+        "wire.settings.speech_voice_tone.choice.warm.label",
+        "wire.settings.speech_voice_tone.help",
+        "wire.settings.speech_voice_tone.label"
+      ],
+      "verdict": "failed",
+      "major_findings": [
+        "ES-A-M1.15",
+        "ES-A-M1.16",
+        "ES-A-M1.17",
+        "ES-A-M1.18",
+        "ES-A-M1.19",
+        "ES-A-M2"
+      ],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "static",
+      "keys_read": 6,
+      "keys": [
+        "wire.settings.static.description",
+        "wire.settings.static.title",
+        "wire.settings.static_roots.help",
+        "wire.settings.static_roots.label",
+        "wire.settings.static_roots.placeholder",
+        "wire.settings.static_roots.warning"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "subagents",
+      "keys_read": 22,
+      "keys": [
+        "wire.settings.subagents.description",
+        "wire.settings.subagents.title",
+        "wire.settings.subagents_max_running.help",
+        "wire.settings.subagents_max_running.label",
+        "wire.settings.subagents_max_team_depth.help",
+        "wire.settings.subagents_max_team_depth.label",
+        "wire.settings.subagents_model_choice.choice.model.description",
+        "wire.settings.subagents_model_choice.choice.model.label",
+        "wire.settings.subagents_model_choice.choice.operator.description",
+        "wire.settings.subagents_model_choice.choice.operator.label",
+        "wire.settings.subagents_model_choice.help",
+        "wire.settings.subagents_model_choice.label",
+        "wire.settings.subagents_models_hi.help",
+        "wire.settings.subagents_models_hi.label",
+        "wire.settings.subagents_models_lo.help",
+        "wire.settings.subagents_models_lo.label",
+        "wire.settings.subagents_models_med.help",
+        "wire.settings.subagents_models_med.label",
+        "wire.settings.subagents_slim_child_knowledge.choice.false.description",
+        "wire.settings.subagents_slim_child_knowledge.choice.true.description",
+        "wire.settings.subagents_slim_child_knowledge.help",
+        "wire.settings.subagents_slim_child_knowledge.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "supplements",
+      "keys_read": 29,
+      "keys": [
+        "wire.settings.supplements.description",
+        "wire.settings.supplements.title",
+        "wire.settings.supplements_denyprefixes.help",
+        "wire.settings.supplements_denyprefixes.label",
+        "wire.settings.supplements_denyprefixes.placeholder",
+        "wire.settings.supplements_enabled.choice.false.description",
+        "wire.settings.supplements_enabled.choice.true.description",
+        "wire.settings.supplements_enabled.help",
+        "wire.settings.supplements_enabled.label",
+        "wire.settings.supplements_files.choice.false.description",
+        "wire.settings.supplements_files.choice.true.description",
+        "wire.settings.supplements_files.help",
+        "wire.settings.supplements_files.label",
+        "wire.settings.supplements_graphics.choice.false.description",
+        "wire.settings.supplements_graphics.choice.true.description",
+        "wire.settings.supplements_graphics.help",
+        "wire.settings.supplements_graphics.label",
+        "wire.settings.supplements_maxcostusd.help",
+        "wire.settings.supplements_maxcostusd.label",
+        "wire.settings.supplements_maxfeatured.help",
+        "wire.settings.supplements_maxfeatured.label",
+        "wire.settings.supplements_maxoutputtokens.help",
+        "wire.settings.supplements_maxoutputtokens.label",
+        "wire.settings.supplements_maxturns.help",
+        "wire.settings.supplements_maxturns.label",
+        "wire.settings.supplements_model.help",
+        "wire.settings.supplements_model.label",
+        "wire.settings.supplements_timeouts.help",
+        "wire.settings.supplements_timeouts.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "team",
+      "keys_read": 18,
+      "keys": [
+        "wire.settings.team_bridge.description",
+        "wire.settings.team_bridge.title",
+        "wire.settings.team_bridge_enabled.help",
+        "wire.settings.team_bridge_enabled.label",
+        "wire.settings.team_bridge_screening_ambient_budget_per_hour.help",
+        "wire.settings.team_bridge_screening_ambient_budget_per_hour.label",
+        "wire.settings.team_bridge_screening_budget_per_hour.help",
+        "wire.settings.team_bridge_screening_budget_per_hour.label",
+        "wire.settings.team_bridge_screening_model.help",
+        "wire.settings.team_bridge_screening_model.label",
+        "wire.settings.team_bridge_screening_sender_budget_per_hour.help",
+        "wire.settings.team_bridge_screening_sender_budget_per_hour.label",
+        "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.help",
+        "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.label",
+        "wire.settings.team_bridge_session.help",
+        "wire.settings.team_bridge_session.label",
+        "wire.settings.team_bridge_hold_release.label",
+        "wire.settings.team_bridge_hold_release.help"
+      ],
+      "verdict": "failed",
+      "major_findings": [
+        "ES-A-M1.26"
+      ],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "tool",
+      "keys_read": 6,
+      "keys": [
+        "wire.settings.tool_approval_mode.choice.ask.description",
+        "wire.settings.tool_approval_mode.choice.ask.label",
+        "wire.settings.tool_approval_mode.choice.auto.description",
+        "wire.settings.tool_approval_mode.choice.auto.label",
+        "wire.settings.tool_approval_mode.help",
+        "wire.settings.tool_approval_mode.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "tools",
+      "keys_read": 10,
+      "keys": [
+        "wire.settings.tools.description",
+        "wire.settings.tools.title",
+        "wire.settings.tools_defer.help",
+        "wire.settings.tools_defer.label",
+        "wire.settings.tools_search_interception_block.help",
+        "wire.settings.tools_search_interception_block.label",
+        "wire.settings.tools_search_interception_enabled.help",
+        "wire.settings.tools_search_interception_enabled.label",
+        "wire.settings.tools_search_interception_rg_excludes.help",
+        "wire.settings.tools_search_interception_rg_excludes.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "tui",
+      "keys_read": 16,
+      "keys": [
+        "wire.settings.tui_sidebar_position.choice.left.description",
+        "wire.settings.tui_sidebar_position.choice.left.label",
+        "wire.settings.tui_sidebar_position.choice.right.description",
+        "wire.settings.tui_sidebar_position.choice.right.label",
+        "wire.settings.tui_sidebar_position.help",
+        "wire.settings.tui_sidebar_position.label",
+        "wire.settings.tui_sidebar_show_subagents.choice.false.description",
+        "wire.settings.tui_sidebar_show_subagents.choice.true.description",
+        "wire.settings.tui_sidebar_show_subagents.help",
+        "wire.settings.tui_sidebar_show_subagents.label",
+        "wire.settings.tui_sidebar_visible.choice.false.description",
+        "wire.settings.tui_sidebar_visible.choice.true.description",
+        "wire.settings.tui_sidebar_visible.help",
+        "wire.settings.tui_sidebar_visible.label",
+        "wire.settings.tui_theme.help",
+        "wire.settings.tui_theme.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "update",
+      "keys_read": 6,
+      "keys": [
+        "wire.settings.update_auto_prune.choice.false.description",
+        "wire.settings.update_auto_prune.choice.true.description",
+        "wire.settings.update_auto_prune.help",
+        "wire.settings.update_auto_prune.label",
+        "wire.settings.update_keep_generations.help",
+        "wire.settings.update_keep_generations.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "updates",
+      "keys_read": 2,
+      "keys": [
+        "wire.settings.updates.description",
+        "wire.settings.updates.title"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "wakes",
+      "keys_read": 14,
+      "keys": [
+        "wire.settings.wakes.description",
+        "wire.settings.wakes.title",
+        "wire.settings.wakes_triggers_enabled.choice.false.description",
+        "wire.settings.wakes_triggers_enabled.choice.true.description",
+        "wire.settings.wakes_triggers_enabled.help",
+        "wire.settings.wakes_triggers_enabled.label",
+        "wire.settings.wakes_triggers_max_per_day.help",
+        "wire.settings.wakes_triggers_max_per_day.label",
+        "wire.settings.wakes_triggers_min_gap_minutes.help",
+        "wire.settings.wakes_triggers_min_gap_minutes.label",
+        "wire.settings.wakes_triggers_project_staleness_enabled.choice.false.description",
+        "wire.settings.wakes_triggers_project_staleness_enabled.choice.true.description",
+        "wire.settings.wakes_triggers_project_staleness_enabled.help",
+        "wire.settings.wakes_triggers_project_staleness_enabled.label"
+      ],
+      "verdict": "clean",
+      "major_findings": [],
+      "minor_findings": []
+    },
+    {
+      "subgroup": "web",
+      "keys_read": 60,
+      "keys": [
+        "wire.settings.web_fetch.description",
+        "wire.settings.web_fetch.title",
+        "wire.settings.web_fetch_allow_private.choice.false.description",
+        "wire.settings.web_fetch_allow_private.choice.true.description",
+        "wire.settings.web_fetch_allow_private.help",
+        "wire.settings.web_fetch_allow_private.label",
+        "wire.settings.web_fetch_blocked_retry.choice.false.description",
+        "wire.settings.web_fetch_blocked_retry.choice.true.description",
+        "wire.settings.web_fetch_blocked_retry.help",
+        "wire.settings.web_fetch_blocked_retry.label",
+        "wire.settings.web_fetch_cache_ttl_seconds.help",
+        "wire.settings.web_fetch_cache_ttl_seconds.label",
+        "wire.settings.web_fetch_enabled.choice.false.description",
+        "wire.settings.web_fetch_enabled.choice.true.description",
+        "wire.settings.web_fetch_enabled.help",
+        "wire.settings.web_fetch_enabled.label",
+        "wire.settings.web_fetch_enrich.choice.false.description",
+        "wire.settings.web_fetch_enrich.choice.true.description",
+        "wire.settings.web_fetch_enrich.help",
+        "wire.settings.web_fetch_enrich.label",
+        "wire.settings.web_fetch_max_attempts.help",
+        "wire.settings.web_fetch_max_attempts.label",
+        "wire.settings.web_fetch_max_bytes.help",
+        "wire.settings.web_fetch_max_bytes.label",
+        "wire.settings.web_fetch_max_redirects.help",
+        "wire.settings.web_fetch_max_redirects.label",
+        "wire.settings.web_fetch_render_backend.choice.auto.description",
+        "wire.settings.web_fetch_render_backend.choice.auto.label",
+        "wire.settings.web_fetch_render_backend.choice.stdlib.description",
+        "wire.settings.web_fetch_render_backend.choice.stdlib.label",
+        "wire.settings.web_fetch_render_backend.help",
+        "wire.settings.web_fetch_render_backend.label",
+        "wire.settings.web_fetch_timeout_seconds.help",
+        "wire.settings.web_fetch_timeout_seconds.label",
+        "wire.settings.web_search.description",
+        "wire.settings.web_search.title",
+        "wire.settings.web_search_deepseek_evidence.help",
+        "wire.settings.web_search_deepseek_evidence.label",
+        "wire.settings.web_search_enabled.choice.false.description",
+        "wire.settings.web_search_enabled.choice.true.description",
+        "wire.settings.web_search_enabled.help",
+        "wire.settings.web_search_enabled.label",
+        "wire.settings.web_search_excluded_providers.help",
+        "wire.settings.web_search_excluded_providers.label",
+        "wire.settings.web_search_providers.help",
+        "wire.settings.web_search_providers.label",
+        "wire.settings.web_search_read_enabled.help",
+        "wire.settings.web_search_read_enabled.label",
+        "wire.settings.web_search_searxng_endpoint.help",
+        "wire.settings.web_search_searxng_endpoint.label",
+        "wire.settings.web_search_strategy.choice.ordered.description",
+        "wire.settings.web_search_strategy.choice.ordered.label",
+        "wire.settings.web_search_strategy.choice.round_robin.description",
+        "wire.settings.web_search_strategy.choice.round_robin.label",
+        "wire.settings.web_search_strategy.help",
+        "wire.settings.web_search_strategy.label",
+        "wire.settings.web_search_timeout_seconds.help",
+        "wire.settings.web_search_timeout_seconds.label",
+        "wire.settings.web_tools.description",
+        "wire.settings.web_tools.title"
+      ],
+      "verdict": "failed",
+      "major_findings": [
+        "ES-A-M1.20",
+        "ES-A-M1.21"
+      ],
+      "minor_findings": []
+    }
+  ],
+  "minor_findings": [
+    {
+      "id": "ES-A-m1",
+      "severity": "minor",
+      "origin": "inherited glossary drift",
+      "key": "wire.settings.agents.description",
+      "current": "Si los roles iniciales instalados (reviewer, coder, aida, …) se actualizan solos al texto del paquete al arrancar cuando no los has editado. Desactivado = las actualizaciones se siguen notificando; aplícalas con 'lop agents sync'.",
+      "proposed": "Si los roles de las plantillas incluidas que tienes instaladas (reviewer, coder, aida, …) se actualizan solos al texto del paquete al arrancar cuando no los has editado. Desactivado = las actualizaciones se siguen notificando; aplícalas con 'lop agents sync'.",
+      "reason": "Starter drifts from the Spanish guide’s recorded plantilla incluida to iniciales; preserve the embedded reviewer/coder/aida role identifiers."
+    },
+    {
+      "id": "ES-A-m2",
+      "severity": "minor",
+      "origin": "inherited idiom",
+      "key": "wire.settings.librarian_cadence_at.help",
+      "current": "Hora local HH:MM. Un valor no válido vuelve a 03:30 en el próximo armado.",
+      "proposed": "Hora local HH:MM. Un valor no válido vuelve a 03:30 en la próxima programación.",
+      "reason": "Próximo armado is an unnatural literal rendering of scheduler arming; aida_cadence_at.help already uses programación for the same operation."
+    },
+    {
+      "id": "ES-A-m3",
+      "severity": "minor",
+      "origin": "inherited idiom",
+      "key": "wire.settings.librarian_cadence_paused.help",
+      "current": "Pausar elimina sus filas programadas; reanudar arma la siguiente pasada. El escritorio y /librarian escriben la misma clave.",
+      "proposed": "Pausar elimina sus filas programadas; reanudar programa la siguiente pasada. El escritorio y /librarian escriben la misma clave.",
+      "reason": "Arma la siguiente pasada is an avoidable scheduling calque; programa is natural and matches the existing programming vocabulary."
+    }
+  ],
+  "width_flags": [
+    {
+      "key": "wire.settings.bash_query_budget_enabled.label",
+      "current": "Presupuesto de consultas de shell",
+      "english": "Shell query budget",
+      "english_chars": 18,
+      "spanish_chars": 33,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    },
+    {
+      "key": "wire.settings.classification_notice.label",
+      "current": "Aviso de sugerencias inteligentes",
+      "english": "Smart hints notice",
+      "english_chars": 18,
+      "spanish_chars": 33,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    },
+    {
+      "key": "wire.settings.display_composer_rate.label",
+      "current": "Banda: velocidad de decodificación",
+      "english": "Band: decode rate",
+      "english_chars": 17,
+      "spanish_chars": 34,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    },
+    {
+      "key": "wire.settings.display_reasoning.label",
+      "current": "Razonamiento del modelo en vivo",
+      "english": "Live model reasoning",
+      "english_chars": 20,
+      "spanish_chars": 31,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    },
+    {
+      "key": "wire.settings.display_time_format.label",
+      "current": "Formato de la hora de despertar",
+      "english": "Wake time format",
+      "english_chars": 16,
+      "spanish_chars": 31,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    },
+    {
+      "key": "wire.settings.model_effort.label",
+      "current": "Esfuerzo de razonamiento predeterminado",
+      "english": "Default reasoning effort",
+      "english_chars": 24,
+      "spanish_chars": 39,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    },
+    {
+      "key": "wire.settings.monitor_deltamaxchars.label",
+      "current": "Presupuesto de delta (caracteres)",
+      "english": "Delta budget (chars)",
+      "english_chars": 20,
+      "spanish_chars": 33,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    },
+    {
+      "key": "wire.settings.monitor_normalizetimestamps.label",
+      "current": "Ignorar el ruido de las marcas de tiempo",
+      "english": "Ignore timestamp churn",
+      "english_chars": 22,
+      "spanish_chars": 40,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    },
+    {
+      "key": "wire.settings.monitor_runtimeoutms.label",
+      "current": "Tiempo límite de ejecución (ms)",
+      "english": "Run timeout (ms)",
+      "english_chars": 16,
+      "spanish_chars": 31,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    },
+    {
+      "key": "wire.settings.monitor_snapshotmaxchars.label",
+      "current": "Límite de la instantánea (caracteres)",
+      "english": "Snapshot cap (chars)",
+      "english_chars": 20,
+      "spanish_chars": 37,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    },
+    {
+      "key": "wire.settings.network_audit_generations.label",
+      "current": "Generaciones de auditoría conservadas",
+      "english": "Audit generations kept",
+      "english_chars": 22,
+      "spanish_chars": 37,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    },
+    {
+      "key": "wire.settings.network_audit_max_age_days.label",
+      "current": "Límite de antigüedad de auditoría (días)",
+      "english": "Audit age cap (days)",
+      "english_chars": 20,
+      "spanish_chars": 40,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    },
+    {
+      "key": "wire.settings.network_credentials_grant_ttl_s.label",
+      "current": "Duración del inicio de sesión prestado (s)",
+      "english": "Borrowed login lifetime (s)",
+      "english_chars": 27,
+      "spanish_chars": 42,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    },
+    {
+      "key": "wire.settings.network_sync_debounce_s.label",
+      "current": "Periodo de calma de sincronización (s)",
+      "english": "Sync quiet period (s)",
+      "english_chars": 21,
+      "spanish_chars": 38,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    },
+    {
+      "key": "wire.settings.network_sync_tick_s.label",
+      "current": "Intervalo de comprobación de sincronización (s)",
+      "english": "Sync check interval (s)",
+      "english_chars": 23,
+      "spanish_chars": 47,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    },
+    {
+      "key": "wire.settings.providers_openai_api.label",
+      "current": "Superficie de la API de OpenAI",
+      "english": "OpenAI API surface",
+      "english_chars": 18,
+      "spanish_chars": 30,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    },
+    {
+      "key": "wire.settings.runtime_keep_alive_seconds.label",
+      "current": "Mantener en caliente las conversaciones cerradas (s)",
+      "english": "Keep closed conversations warm (s)",
+      "english_chars": 34,
+      "spanish_chars": 52,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    },
+    {
+      "key": "wire.settings.static_roots.label",
+      "current": "Raíces extra de vistas previas",
+      "english": "Extra preview roots",
+      "english_chars": 19,
+      "spanish_chars": 30,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    },
+    {
+      "key": "wire.settings.subagents_max_running.label",
+      "current": "Máx. trabajos en segundo plano",
+      "english": "Max background jobs",
+      "english_chars": 19,
+      "spanish_chars": 30,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    },
+    {
+      "key": "wire.settings.subagents_max_team_depth.label",
+      "current": "Profundidad máx. de equipos anidados",
+      "english": "Max nested-team depth",
+      "english_chars": 21,
+      "spanish_chars": 36,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    },
+    {
+      "key": "wire.settings.subagents_slim_child_knowledge.label",
+      "current": "Recortar el conocimiento del hijo",
+      "english": "Slim child knowledge",
+      "english_chars": 20,
+      "spanish_chars": 33,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    },
+    {
+      "key": "wire.settings.tool_approval_mode.label",
+      "current": "Modo de aprobación de herramientas",
+      "english": "Tool approval mode",
+      "english_chars": 18,
+      "spanish_chars": 34,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    },
+    {
+      "key": "wire.settings.tui_sidebar_show_subagents.label",
+      "current": "Capa de subagentes en la barra lateral",
+      "english": "Sidebar subagent layer",
+      "english_chars": 22,
+      "spanish_chars": 38,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    },
+    {
+      "key": "wire.settings.wakes_triggers_project_staleness_enabled.label",
+      "current": "Disparador de obsolescencia de proyectos",
+      "english": "Project staleness trigger",
+      "english_chars": 25,
+      "spanish_chars": 40,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    },
+    {
+      "key": "wire.settings.web_fetch_blocked_retry.label",
+      "current": "Reintento con perfil de navegador",
+      "english": "Browser-profile retry",
+      "english_chars": 21,
+      "spanish_chars": 33,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    },
+    {
+      "key": "wire.settings.mesh_move_working_set_max_bytes.label",
+      "current": "Límite de archivos de trabajo por movimiento (bytes)",
+      "english": "Working-files cap per move (bytes)",
+      "english_chars": 34,
+      "spanish_chars": 52,
+      "action": "Rendered check requested; relative expansion only, NOT observed clipping."
+    }
+  ],
+  "exceptions": [
+    {
+      "key": "wire.settings.bash_memory_mode.choice.auto.label",
+      "text": "auto",
+      "reason": "Idiomatic Spanish abbreviation of automático, explicitly allowed by Spanish width rules; not an authority claim."
+    },
+    {
+      "key": "wire.settings.bash_memory_mode.choice.manual.label",
+      "text": "manual",
+      "reason": "Natural Spanish cognate manual, not an untranslated English label."
+    },
+    {
+      "key": "wire.settings.classification_vendor.choice.auto.label",
+      "text": "auto",
+      "reason": "Idiomatic Spanish abbreviation of automático, explicitly allowed by Spanish width rules; not an authority claim."
+    },
+    {
+      "key": "wire.settings.classification_vendor.choice.openrouter.label",
+      "text": "openrouter",
+      "reason": "Named provider/brand."
+    },
+    {
+      "key": "wire.settings.classification_vendor.choice.radient.label",
+      "text": "radient",
+      "reason": "Named provider/brand."
+    },
+    {
+      "key": "wire.settings.classification_vendor.choice.typesafe.label",
+      "text": "typesafe",
+      "reason": "Named provider/brand."
+    },
+    {
+      "key": "wire.settings.compaction_strategy.choice.auto.label",
+      "text": "auto",
+      "reason": "Idiomatic Spanish abbreviation of automático, explicitly allowed by Spanish width rules; not an authority claim."
+    },
+    {
+      "key": "wire.settings.compaction_strategy.choice.context_full.label",
+      "text": "context-full",
+      "reason": "Named protocol/API or renderer/compaction implementation identifier; retained to identify the actual mechanism, not a generic English action."
+    },
+    {
+      "key": "wire.settings.compaction_strategy.choice.snapcompact.label",
+      "text": "snapcompact",
+      "reason": "Named protocol/API or renderer/compaction implementation identifier; retained to identify the actual mechanism, not a generic English action."
+    },
+    {
+      "key": "wire.settings.display_nerd_icons.choice.none.label",
+      "text": "auto",
+      "reason": "Idiomatic Spanish abbreviation of automático, explicitly allowed by Spanish width rules; not an authority claim."
+    },
+    {
+      "key": "wire.settings.model_effort.choice.unset.label",
+      "text": "auto",
+      "reason": "Idiomatic Spanish abbreviation of automático, explicitly allowed by Spanish width rules; not an authority claim."
+    },
+    {
+      "key": "wire.settings.network_rollout_on_update.choice.auto.label",
+      "text": "auto",
+      "reason": "Idiomatic Spanish abbreviation of automático, explicitly allowed by Spanish width rules; not an authority claim."
+    },
+    {
+      "key": "wire.settings.providers_openai_api.choice.chat_completions.label",
+      "text": "chat_completions",
+      "reason": "Named protocol/API or renderer/compaction implementation identifier; retained to identify the actual mechanism, not a generic English action."
+    },
+    {
+      "key": "wire.settings.providers_openai_api.choice.responses.label",
+      "text": "responses",
+      "reason": "Named protocol/API or renderer/compaction implementation identifier; retained to identify the actual mechanism, not a generic English action."
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+      "text": "auto",
+      "reason": "Idiomatic Spanish abbreviation of automático, explicitly allowed by Spanish width rules; not an authority claim."
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.auto.label",
+      "text": "auto",
+      "reason": "Idiomatic Spanish abbreviation of automático, explicitly allowed by Spanish width rules; not an authority claim."
+    },
+    {
+      "key": "wire.settings.web_fetch_render_backend.choice.auto.label",
+      "text": "auto",
+      "reason": "Idiomatic Spanish abbreviation of automático, explicitly allowed by Spanish width rules; not an authority claim."
+    },
+    {
+      "key": "wire.settings.web_fetch_render_backend.choice.stdlib.label",
+      "text": "stdlib",
+      "reason": "Named protocol/API or renderer/compaction implementation identifier; retained to identify the actual mechanism, not a generic English action."
+    }
+  ],
+  "controls": {
+    "runtime": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/local_operator/i18n/runtime.py",
+    "keys": 895,
+    "parse_and_structure_errors": [],
+    "argument_keys": [
+      [
+        "wire.settings.local_providers.base_url.label",
+        [
+          [
+            "name",
+            "simple"
+          ]
+        ]
+      ],
+      [
+        "wire.settings.local_providers.models.label",
+        [
+          [
+            "name",
+            "simple"
+          ]
+        ]
+      ]
+    ],
+    "plural_keys": [],
+    "missing_argument_checks": [
+      [
+        "wire.settings.local_providers.base_url.label",
+        "rejects missing arguments"
+      ],
+      [
+        "wire.settings.local_providers.models.label",
+        "rejects missing arguments"
+      ]
+    ],
+    "non_NFC": [],
+    "bidi_controls": [],
+    "over_declared_budget": [],
+    "new_labels": [
+      {
+        "key": "wire.settings.tool_approval_mode.choice.ask.label",
+        "en": "Ask",
+        "es": "preguntar",
+        "en_cells": 3,
+        "es_cells": 9,
+        "ast": [
+          "_Text"
+        ],
+        "literal_pseudo": "[preguntar~~~]",
+        "literal_pseudobidi": "⁧preguntar⁩"
+      },
+      {
+        "key": "wire.settings.tool_approval_mode.choice.auto.label",
+        "en": "Automatic",
+        "es": "automático",
+        "en_cells": 9,
+        "es_cells": 10,
+        "ast": [
+          "_Text"
+        ],
+        "literal_pseudo": "[automático~~~]",
+        "literal_pseudobidi": "⁧automático⁩"
+      }
+    ]
+  },
+  "extra_controls": {
+    "path": "/Users/damian/.local-operator/sessions/69bd93578cd9/scratchpad/approval-full-es-A-extra-controls.txt",
+    "CLDR": "Observed es categories many/one/other; 0 other, 1 one, 2 other, 1000000 many, 1500000 other, 2000000 many. Namespace contains zero plural messages, hence no missing million arm here.",
+    "negative": "Both actual {name} messages reject missing arguments; deliberately dropped placeholder signature differs. Synthetic missing-other plural unexpectedly parses but render at n=2 raises MessageFormatError; checked runtime.py:450-483, so no parser-level rejection claimed.",
+    "markup": "All backtick-code and angle-bracket tokens match exactly, zero mismatches.",
+    "pseudo": "Literal synthetic pseudo and RLI/PDI-wrapped strings constructed and rendered with pure runtime; not a UI or RTL layout test.",
+    "NFC": "All 895 NFC; no catalogue bidi controls."
+  },
+  "passed_vs_uncleared": {
+    "approval_labels": "2/2 passed semantic and literal integrity checks",
+    "whole_namespace": "FAILED; inherited English-human-copy and expressiveness explanation require repair",
+    "keys_without_major": 868,
+    "minor_findings_do_not_require_separate_wave": true
+  },
+  "limits": [
+    "No repo edits, translator fixes, current partner opinions, new public-copy reads, git operations, settings writes, suites, native app, server, browser, renderer, merge or release actions.",
+    "Spanish LTR: production RTL layout N/A. Synthetic bidirectional stress is NOT fit proof.",
+    "No real rendered fit/native speaker/human approval asserted. Relative expansion flags are not observed clipping; no declared maxCells violations in 104 available contexts.",
+    "Only 104 sidecar contexts exist; remaining 791 reviewed from EN/ES adjacent UI labels/help and selected consumer source, not invented metadata.",
+    "Original author/model for existing namespace not known; translator receipt limited to its exact new label.",
+    "Shared eval worker was repeatedly evicted; every semantic batch reconstructed the immutable approved inputs."
+  ],
+  "overall_verdict": "FAILED for full Spanish wire.settings despite passing the two approval display labels; no whole-UI clearance."
+}

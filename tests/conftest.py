@@ -54,6 +54,11 @@ _AMBIENT_VARS = (
     # the relay door and ``features.community`` in every cell, so the dark-by-
     # default assertions would pass the lit path; tests that need it on set it.
     "LOCAL_OPERATOR_COMMUNITY",
+    # The loopback peer-uid check switch (``server/peer_check.py``). ``off``
+    # waives the same-user rule, so a developer exporting it would make every
+    # serve test admit what it should refuse and the enforcement assertions
+    # pass the waived path; tests that need a mode pass it explicitly.
+    "LOCAL_OPERATOR_PEER_UID_CHECK",
     # The remote-compute API override names the host that receives the
     # operator's Radient bearer. Inheriting a developer's staging value would
     # point the suite's remote-compute client at a real host; tests that cover
@@ -64,6 +69,12 @@ _AMBIENT_VARS = (
     # in would widen the allowlist the host-policy tests assert on and could
     # aim a probe at a real host; tests that cover the override set their own.
     "LOCAL_OPERATOR_MOVE_PROBE_HOSTS",
+    # The working-set clone (``network/workset_transfer._run_clone``) keeps an
+    # inherited GIT_SSH_COMMAND instead of forcing ``ssh -o BatchMode=yes``. A
+    # developer's value (an agent-forwarding wrapper, a ProxyJump to a real
+    # bastion) would replace the batch-mode default under test and could reach a
+    # real machine; tests that cover the inherited case set their own.
+    "GIT_SSH_COMMAND",
     # The per-build runtime image root (``procname.runtime_root``) is resolved
     # against the PASSWD home, not ``$HOME``, so redirecting HOME above cannot
     # keep a plant out of the operator's real ``~/.local/share/lop/runtime``.
@@ -86,6 +97,16 @@ _AMBIENT_VARS = (
     # and how long it queues. Scrubbed; lease cells set their own.
     "LOCAL_OPERATOR_HEAVY_JOB_SLOTS",
     "LOCAL_OPERATOR_HEAVY_JOB_WAIT_S",
+    # The adopted-listener boot deadline (``cli.resolve_adopt_boot_deadline_seconds``):
+    # an operator's inherited small value would make a test's adopted serve
+    # exit early, changing what the serve cells assert. Scrubbed; deadline
+    # cells set their own.
+    "LOCAL_OPERATOR_SERVE_ADOPT_BOOT_DEADLINE_SECONDS",
+    # A suite launched from a leased command (a `pytest -n 8` through the bash
+    # tool) inherits the operator's slot marker; it names the REAL lease dir, so
+    # it can only fail verification here, but a cell asserting the queue must
+    # not depend on that. Scrubbed; the re-entrancy cells set their own.
+    "LOCAL_OPERATOR_HEAVY_LEASE",
     # The SIGINFO sensor's off-switch (``siginfo``): an inherited ``off`` would
     # disable the sensor in every cell, silently waiving what the sensor cells
     # assert. Scrubbed; the sensor-specific cells set it explicitly via
@@ -367,6 +388,7 @@ _AMBIENT_VARS = (
     # They turn strict --resume validation into adoption of a brand-new id.
     "LOP_RUNTIME_ADOPT_SESSION",
     "LOP_RUNTIME_DEFER_MATERIALISE",
+    "LOP_RUNTIME_GOAL_WAKE_DUE",
     # The wake supervisor's per-invocation ownership stamp (#3028,
     # ``wakes/owned_runtimes.OWNER_ENV``) and the flag that lets ``launch``
     # propagate it. serve() sets both in its own environment, so a suite run
@@ -528,6 +550,7 @@ _AMBIENT_VARS = (
     "GOOGLE_VERTEX_OAUTH_CLIENT_ID",
     "GOOGLE_VERTEX_OAUTH_CLIENT_SECRET",
     "GOOGLE_VERTEX_TOKEN_URI",
+    "GOOGLE_VERTEX_OAUTH_TOKEN_URI",
     "GOOGLE_VERTEX_ALLOW_CUSTOM_TOKEN_URI",
     "XAI_API_KEY",
     # Amazon Bedrock (``providers/bedrock``). The bearer token is a live
@@ -1655,10 +1678,14 @@ def refuse_real_secret_broker_spawn(request, monkeypatch):
         return
     from local_operator.secrets import client as secrets_client
 
+    # Match the explicit broker budget keywords: secret access forwards its
+    # shared deadline even when this guard selects the keyfile fallback. Accepting
+    # that budget must never start a daemon or change the fallback result; avoid
+    # **kwargs so future API drift still fails rather than silently going untested.
     monkeypatch.setattr(
         secrets_client,
         "ensure_broker",
-        lambda base=None, *, timeout=None: False,
+        lambda base=None, *, timeout=None, deadline=None: False,
     )
 
 

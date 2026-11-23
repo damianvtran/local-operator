@@ -1,0 +1,88 @@
+PYTHON /Users/damian/local-operator/.venv/bin/python HOME /Users/damian/.local-operator/sessions/caf2c0ebbb90/scratchpad/ur-a-home CONFIG /Users/damian/.local-operator/sessions/caf2c0ebbb90/scratchpad/ur-a-home/config
+MODULE local_operator.i18n.catalogues /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/catalogues.py
+MODULE local_operator.i18n.runtime /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/runtime.py
+OFFICIAL_SCOPED_CHECK []
+NEGATIVE missing_key ["ur/tui.model_persistence: missing key 'tui.model_persistence.persist'"]
+NEGATIVE missing_argument ["ur/tui.model_persistence: tui.model_persistence.with_model: arguments (('routes', 'simple'),) != en's (('label', 'simple'), ('routes', 'simple')): en has 2 argument(s), translation has 1"]
+KEY_PASS tui.model_persistence.persist arguments () plural/select=0 NFC=yes stored_bidi_controls=0
+KEY_PASS tui.model_persistence.settings arguments () plural/select=0 NFC=yes stored_bidi_controls=0
+KEY_PASS tui.model_persistence.saved arguments () plural/select=0 NFC=yes stored_bidi_controls=0
+KEY_PASS tui.model_persistence.with_model arguments (('label', 'simple'), ('routes', 'simple')) plural/select=0 NFC=yes stored_bidi_controls=0
+PSEUDO_PASS human prose doubled; commands/placeholders retained once; diagnostic fixture only
+PLAIN_RICH en pseudo False routes ('persist', 'saved', 'settings') label_chars 12 width 80 cells [80, 69] last 'boot default with /model saved · /settings edits the boot default too'
+PLAIN_RICH en pseudo False routes ('persist', 'saved', 'settings') label_chars 12 width 100 cells [99, 51] last '/model saved · /settings edits the boot default too'
+PLAIN_RICH en pseudo False routes ('persist', 'saved', 'settings') label_chars 12 width 120 cells [114, 36] last '/settings edits the boot default too'
+PLAIN_RICH en pseudo False routes ('persist', 'saved', 'settings') label_chars 81 width 80 cells [7, 80, 80, 51] last '/model saved · /settings edits the boot default too'
+PLAIN_RICH en pseudo False routes ('persist', 'saved', 'settings') label_chars 81 width 100 cells [98, 100, 20] last 'the boot default too'
+PLAIN_RICH en pseudo False routes ('persist', 'saved', 'settings') label_chars 81 width 120 cells [120, 98] last 'new sessions · switch to the boot default with /model saved · /settings edits the boot default too'
+PLAIN_RICH en pseudo False routes ('persist', 'settings') label_chars 12 width 80 cells [77, 26] last 'edits the boot default too'
+PLAIN_RICH en pseudo False routes ('persist', 'settings') label_chars 12 width 100 cells [100, 3] last 'too'
+PLAIN_RICH en pseudo False routes ('persist', 'settings') label_chars 12 width 120 cells [103] last 'model: openai/gpt-6 — /model default saves this for new sessions · /settings edits the boot default too'
+PLAIN_RICH en pseudo False routes ('persist', 'settings') label_chars 81 width 80 cells [7, 80, 74, 11] last 'default too'
+PLAIN_RICH en pseudo False routes ('persist', 'settings') label_chars 81 width 100 cells [98, 74] last 'default saves this for new sessions · /settings edits the boot default too'
+PLAIN_RICH en pseudo False routes ('persist', 'settings') label_chars 81 width 120 cells [120, 51] last 'new sessions · /settings edits the boot default too'
+PLAIN_RICH en pseudo False routes ('settings',) label_chars 12 width 80 cells [58] last 'model: openai/gpt-6 — /settings edits the boot default too'
+PLAIN_RICH en pseudo False routes ('settings',) label_chars 12 width 100 cells [58] last 'model: openai/gpt-6 — /settings edits the boot default too'
+PLAIN_RICH en pseudo False routes ('settings',) label_chars 12 width 120 cells [58] last 'model: openai/gpt-6 — /settings edits the boot default too'
+PLAIN_RICH en pseudo False routes ('settings',) label_chars 81 width 80 cells [7, 80, 40] last '9 — /settings edits the boot default too'
+PLAIN_RICH en pseudo False routes ('settings',) label_chars 81 width 100 cells [100, 26] last 'edits the boot default too'
+PLAIN_RICH en pseudo False routes ('settings',) label_chars 81 width 120 cells [116, 11] last 'default too'
+PLAIN_RICH en pseudo True routes ('persist', 'saved', 'settings') label_chars 12 width 80 cells [80, 75, 80, 11] last 'default too'
+PLAIN_RICH en pseudo True routes ('persist', 'saved', 'settings') label_chars 12 width 100 cells [94, 100, 53] last 'edits the boot default too edits the boot default too'
+PLAIN_RICH en pseudo True routes ('persist', 'saved', 'settings') label_chars 12 width 120 cells [119, 117, 11] last 'default too'
+PLAIN_RICH en pseudo True routes ('persist', 'saved', 'settings') label_chars 81 width 80 cells [14, 80, 80, 79, 63] last '/settings edits the boot default too edits the boot default too'
+PLAIN_RICH en pseudo True routes ('persist', 'saved', 'settings') label_chars 81 width 100 cells [100, 100, 99, 16] last 'boot default too'
+PLAIN_RICH en pseudo True routes ('persist', 'saved', 'settings') label_chars 81 width 120 cells [116, 117, 83] last 'with /model saved · /settings edits the boot default too edits the boot default too'
+PLAIN_RICH en pseudo True routes ('persist', 'settings') label_chars 12 width 80 cells [80, 76, 11] last 'default too'
+PLAIN_RICH en pseudo True routes ('persist', 'settings') label_chars 12 width 100 cells [94, 74] last 'sessions · /settings edits the boot default too edits the boot default too'
+PLAIN_RICH en pseudo True routes ('persist', 'settings') label_chars 12 width 120 cells [120, 47] last 'the boot default too edits the boot default too'
+PLAIN_RICH en pseudo True routes ('persist', 'settings') label_chars 81 width 80 cells [14, 80, 80, 63] last '/settings edits the boot default too edits the boot default too'
+PLAIN_RICH en pseudo True routes ('persist', 'settings') label_chars 81 width 100 cells [100, 98, 38] last 'default too edits the boot default too'
+PLAIN_RICH en pseudo True routes ('persist', 'settings') label_chars 81 width 120 cells [116, 118, 3] last 'too'
+PLAIN_RICH en pseudo True routes ('settings',) label_chars 12 width 80 cells [79, 16] last 'boot default too'
+PLAIN_RICH en pseudo True routes ('settings',) label_chars 12 width 100 cells [95] last 'model: model: openai/gpt-6 —  — /settings edits the boot default too edits the boot default too'
+PLAIN_RICH en pseudo True routes ('settings',) label_chars 12 width 120 cells [95] last 'model: model: openai/gpt-6 —  — /settings edits the boot default too edits the boot default too'
+PLAIN_RICH en pseudo True routes ('settings',) label_chars 81 width 80 cells [14, 80, 70] last '9 —  — /settings edits the boot default too edits the boot default too'
+PLAIN_RICH en pseudo True routes ('settings',) label_chars 81 width 100 cells [100, 63] last '/settings edits the boot default too edits the boot default too'
+PLAIN_RICH en pseudo True routes ('settings',) label_chars 81 width 120 cells [120, 43] last 'boot default too edits the boot default too'
+PLAIN_RICH ur pseudo False routes ('persist', 'saved', 'settings') label_chars 12 width 80 cells [80, 73, 57] last '/settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo False routes ('persist', 'saved', 'settings') label_chars 12 width 100 cells [98, 97, 15] last 'بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo False routes ('persist', 'saved', 'settings') label_chars 12 width 120 cells [120, 89] last 'لیے /model saved استعمال کریں · /settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo False routes ('persist', 'saved', 'settings') label_chars 81 width 80 cells [6, 80, 80, 80, 32] last 'ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo False routes ('persist', 'saved', 'settings') label_chars 81 width 100 cells [97, 97, 85] last '/model saved استعمال کریں · /settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo False routes ('persist', 'saved', 'settings') label_chars 81 width 120 cells [120, 119, 40] last 'سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo False routes ('persist', 'settings') label_chars 12 width 80 cells [80, 57] last '/settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo False routes ('persist', 'settings') label_chars 12 width 100 cells [97, 40] last 'سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo False routes ('persist', 'settings') label_chars 12 width 120 cells [118, 19] last 'بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo False routes ('persist', 'settings') label_chars 81 width 80 cells [6, 80, 80, 40] last 'سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo False routes ('persist', 'settings') label_chars 81 width 100 cells [97, 99, 10] last 'جا سکتا ہے'
+PLAIN_RICH ur pseudo False routes ('persist', 'settings') label_chars 81 width 120 cells [120, 86] last 'سیشنز کے لیے محفوظ کرتا ہے · /settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo False routes ('settings',) label_chars 12 width 80 cells [78] last 'ماڈل: openai/gpt-6 — /settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo False routes ('settings',) label_chars 12 width 100 cells [78] last 'ماڈل: openai/gpt-6 — /settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo False routes ('settings',) label_chars 12 width 120 cells [78] last 'ماڈل: openai/gpt-6 — /settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo False routes ('settings',) label_chars 81 width 80 cells [6, 80, 61] last '9 — /settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo False routes ('settings',) label_chars 81 width 100 cells [100, 47] last 'سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo False routes ('settings',) label_chars 81 width 120 cells [115, 32] last 'ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo True routes ('persist', 'saved', 'settings') label_chars 12 width 80 cells [79, 78, 77, 78, 55] last 'سکتا ہے سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo True routes ('persist', 'saved', 'settings') label_chars 12 width 100 cells [98, 96, 100, 72] last 'ماڈل بھی بدلا جا سکتا ہے سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo True routes ('persist', 'saved', 'settings') label_chars 12 width 120 cells [120, 120, 118, 7] last 'سکتا ہے'
+PLAIN_RICH ur pseudo True routes ('persist', 'saved', 'settings') label_chars 81 width 80 cells [12, 80, 79, 77, 80, 75, 32] last 'ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo True routes ('persist', 'saved', 'settings') label_chars 81 width 100 cells [99, 100, 97, 99, 40] last 'سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo True routes ('persist', 'saved', 'settings') label_chars 81 width 120 cells [117, 120, 118, 80] last 'ابتدائی ماڈل بھی بدلا جا سکتا ہے سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo True routes ('persist', 'settings') label_chars 12 width 80 cells [79, 77, 80] last 'ابتدائی ماڈل بھی بدلا جا سکتا ہے سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo True routes ('persist', 'settings') label_chars 12 width 100 cells [98, 98, 40] last 'سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo True routes ('persist', 'settings') label_chars 12 width 120 cells [120, 115] last 'کرتا ہے · /settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo True routes ('persist', 'settings') label_chars 81 width 80 cells [12, 80, 79, 79, 55] last 'سکتا ہے سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo True routes ('persist', 'settings') label_chars 81 width 100 cells [99, 100, 98, 7] last 'سکتا ہے'
+PLAIN_RICH ur pseudo True routes ('persist', 'settings') label_chars 81 width 120 cells [117, 120, 67] last 'بھی بدلا جا سکتا ہے سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo True routes ('settings',) label_chars 12 width 80 cells [80, 55] last 'سکتا ہے سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo True routes ('settings',) label_chars 12 width 100 cells [100, 35] last 'کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo True routes ('settings',) label_chars 12 width 120 cells [120, 15] last 'بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo True routes ('settings',) label_chars 81 width 80 cells [12, 80, 80, 32] last 'ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+PLAIN_RICH ur pseudo True routes ('settings',) label_chars 81 width 100 cells [99, 98, 7] last 'سکتا ہے'
+PLAIN_RICH ur pseudo True routes ('settings',) label_chars 81 width 120 cells [120, 83] last 'کا ابتدائی ماڈل بھی بدلا جا سکتا ہے سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+RENDER_NEGATIVE en MessageFormatError message argument 'label' was not supplied (have: routes)
+RENDER_NEGATIVE ur MessageFormatError message argument 'label' was not supplied (have: routes)
+FROZEN_HASHES {"context": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc", "en": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff", "ur": "0e00e1ee1715d3ec8ad8d07440984da33fcb05336a35ceefbd32a87180a3e5f9"}
+PASS four ordered keys; official scoped checker; negative controls; zero plural/select; protected commands; NFC; no stored bidi; pseudo; English-controlled 80/100/120 plain Rich widths
+NOT_PROVEN styled NoticeBlock/pristine/nonempty geometry, presentation isolators, terminal bidi/font/shaping, live consumer localization, B audit, eligibility/release

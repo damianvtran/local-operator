@@ -42,6 +42,27 @@ from local_operator.session.transcript import (
 
 TOKEN = "synthetic-desktop-token"
 
+#: How long a gated scan waits for its gate before finishing anyway. NOT a
+#: latency figure: a correct frame answers while the gate is still shut, so this
+#: only bounds how long a mutant that awaits the scan takes to fail.
+_SCAN_HANG_S = 10.0
+
+
+def _finished_without_suspending(coro: Any) -> Any:
+    """Run ``coro`` one step and return its value; fail if it awaited anything.
+
+    The open-frame read's "waits for none of it" arms are properties of control
+    flow -- there is no await on those paths -- so they are checked as such,
+    not as a wall-clock ceiling a loaded runner can cross. A coroutine that
+    reaches any real wait yields on its first step instead of finishing.
+    """
+    try:
+        coro.send(None)
+    except StopIteration as done:
+        return done.value
+    coro.close()
+    raise AssertionError("the read suspended: it waited on something it must not")
+
 
 @pytest.fixture(autouse=True)
 def _desktop_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -426,38 +447,59 @@ async def test_the_first_frame_spends_only_what_is_left_of_its_budget(
                 assert run["action_count"] is None and run["worked_seconds"] is None
 
         # A scan that cannot land inside the budget is not waited on.
+        #
+        # The scan is GATED rather than slept: it cannot finish until this test
+        # opens the gate, which it does only after the frame has answered. So
+        # "the frame answered while its scan was still running" is a fact about
+        # ordering that host load cannot change. It replaces `elapsed < 1.0`
+        # against a 2 s sleep, which a runner that stalls the request by a
+        # second crosses with the product unchanged (docs/TEST_TIME_ASSERTIONS.md).
+        # `_SCAN_HANG_S` only bounds a mutant that awaits the scan: it returns
+        # once the gate times out, with the scan finished, and fails below.
         ti._reset_for_tests()
         ti.index_path(harness.root, harness.session_id).unlink()
+        gate = threading.Event()
+        scan_finished = threading.Event()
 
-        def slow_refresh(*_: Any, **__: Any) -> Any:
-            time.sleep(2.0)
+        def gated_refresh(*_: Any, **__: Any) -> Any:
+            gate.wait(_SCAN_HANG_S)
+            scan_finished.set()
             return None
 
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(ti, "refresh_index", slow_refresh)
-            started = time.monotonic()
-            slow = (await harness.client.get(url, params={"limit": 5, "open_frame": 1})).json()[
-                "result"
-            ]
-            elapsed = time.monotonic() - started
-        assert slow["runs_state"] == "building" and slow["runs"] == []
-        # Bounded by the budget, not by the scan (2 s) and not by the request
-        # deadline: the frame answers without its facts rather than making the
-        # open pay for them.
-        assert elapsed < 1.0
+        try:
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(ti, "refresh_index", gated_refresh)
+                slow = (await harness.client.get(url, params={"limit": 5, "open_frame": 1})).json()[
+                    "result"
+                ]
+                scan_finished_at_answer = scan_finished.is_set()
+            assert slow["runs_state"] == "building" and slow["runs"] == []
+            # Bounded by the budget, not by the scan and not by the request
+            # deadline: the frame answers without its facts rather than making
+            # the open pay for them.
+            assert not scan_finished_at_answer, "the frame waited for its scan to finish"
+        finally:
+            gate.set()
 
         # THE DEADLINE ITSELF, at the seam a slow page read produces: a read whose
         # budget is already spent starts the build (so the frame after it is
-        # cheap) and waits for none of it.
+        # cheap) and waits for none of it. "None of it" is checked as "the read
+        # never suspended": `_frame_index` has no await before its spent-budget
+        # return, so any wait at all -- however short -- shows up as a
+        # suspension, on a fast host or a loaded one (was `elapsed < 0.5`).
         ti._reset_for_tests()
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(ti, "refresh_index", slow_refresh)
-            async with harness.pool.session(harness.session_id, read=True) as bridge:
-                started = time.monotonic()
-                index = await bridge._frame_index(time.monotonic() - 1.0)
-                elapsed_deadline = time.monotonic() - started
-        assert index is None
-        assert elapsed_deadline < 0.5
+        gate.clear()
+        scan_finished.clear()
+        try:
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(ti, "refresh_index", gated_refresh)
+                async with harness.pool.session(harness.session_id, read=True) as bridge:
+                    index = _finished_without_suspending(
+                        bridge._frame_index(time.monotonic() - 1.0)
+                    )
+            assert index is None
+        finally:
+            gate.set()
 
 
 @pytest.mark.asyncio
@@ -482,18 +524,45 @@ async def test_a_warm_reopen_does_not_wait_on_its_own_paused_scan(tmp_path: Path
             )
         )
         _write(session_dir, rows)
-        task, started = ti.start_refresh(harness.root, harness.session_id)
-        assert started
-        release = ti.hold_paint(harness.root, harness.session_id)
+        # THE PRECONDITION IS PINNED, not raced. "A scan still running, paused
+        # for this open's hold" used to rely on the real 6 MB scan still being
+        # in flight and the hold still young (< _YIELD_HOLD_STALE_S, 5 s) when
+        # the read arrived; under CPU starvation the bridge open outlasted
+        # that, the read (correctly) awaited a no-longer-paused scan, and the
+        # test failed 3/3 on `index is None` with the guard intact. The scan is
+        # gated so it is in flight by construction, and the hold cannot age.
+        scan_gate = threading.Event()
+        real_refresh = ti.refresh_index
+
+        def gated_refresh(*args: Any, **kwargs: Any) -> Any:
+            scan_gate.wait(_SCAN_HANG_S)
+            return real_refresh(*args, **kwargs)
+
+        patch = pytest.MonkeyPatch()
+        patch.setattr(ti, "refresh_index", gated_refresh)
+        patch.setattr(ti, "_YIELD_HOLD_STALE_S", 600.0)
         try:
-            async with harness.pool.session(harness.session_id, read=True) as bridge:
-                began = time.monotonic()
-                index = await bridge._frame_index(time.monotonic() + 1.0)
-                elapsed = time.monotonic() - began
+            task, started = ti.start_refresh(harness.root, harness.session_id)
+            assert started
+            release = ti.hold_paint(harness.root, harness.session_id)
+            try:
+                assert ti.refresh_paused_for_paint(
+                    harness.root, harness.session_id
+                ), "fixture: the scan must be running and paused for this open"
+                async with harness.pool.session(harness.session_id, read=True) as bridge:
+                    # A generous deadline, so the only way to answer at once is
+                    # to not wait on the paused scan at all -- asserted as
+                    # "never suspended" rather than `elapsed < 0.5`, which
+                    # measured the host as much as the guard.
+                    index = _finished_without_suspending(
+                        bridge._frame_index(time.monotonic() + 1.0)
+                    )
+            finally:
+                release()
         finally:
-            release()
-        assert index is None
-        assert elapsed < 0.5, f"waited {elapsed:.2f}s on a scan paused for this very open"
+            scan_gate.set()
+            patch.undo()
+        assert index is None, "answered with facts from a scan paused for this very open"
         assert await asyncio.wait_for(task, 30) is not None
 
 
@@ -1717,3 +1786,364 @@ async def test_a_slow_companion_does_not_hold_the_snapshots_first_frame(
             row["id"] == "ans05" and row.get("journal_seq") is not None for row in rows
         ), published
         assert ti.fresh_resident(harness.root, harness.session_id) is not None
+
+
+# ---------------------------------------------------------------------------
+# Large journals: the companion answers, serve never hydrates (ADR step 2,
+# docs/design/transcript-index-off-process.md). "Large" is
+# ``ti.COMPANION_FIRST_MIN_BYTES``; these tests lower it so a six-turn fixture
+# qualifies, because the behaviour under test is the branch, not the bytes.
+# ---------------------------------------------------------------------------
+
+
+def _count_hydrations(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every whole-index build or hydration serve performs, by session.
+
+    ``refresh_index`` is the one door ``start_refresh`` (and therefore every
+    open-path warm, correction and fallback) goes through to hydrate a persisted
+    index or scan a journal, so counting its calls counts hydrations.
+    """
+    calls: list[str] = []
+    original = ti.refresh_index
+
+    def counted(config_dir: Any, session_id: str) -> Any:
+        calls.append(session_id)
+        return original(config_dir, session_id)
+
+    monkeypatch.setattr(ti, "refresh_index", counted)
+    return calls
+
+
+def _append_raw(directory: Path, row: dict[str, Any]) -> None:
+    """Append one journal row in place (same inode), as a live runtime does."""
+    with (directory / TRANSCRIPT_FILENAME).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, separators=(",", ":")) + "\n")
+
+
+@pytest.mark.asyncio
+async def test_switching_across_six_large_sessions_never_hydrates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Six published large journals, each opened twice: zero ``refresh_index``.
+
+    On main a companion answer armed ``_warm_resident_scan`` -- a full hydration
+    of the persisted index on serve's GIL -- and the 4-slot resident LRU evicted
+    it again once the operator moved across more than four conversations, so
+    the hydration was re-paid on most switches. Counted, not timed.
+    """
+    monkeypatch.setattr(ti, "COMPANION_FIRST_MIN_BYTES", 1)
+    async with _Harness(tmp_path) as harness:
+        sids = [harness.session_id] + [
+            await harness.pool.create(str(harness.root)) for _ in range(5)
+        ]
+        for sid in sids:
+            _write(harness.root / "sessions" / sid, _conversation(6))
+            index = ti.refresh_index(harness.root, sid)
+            assert index is not None
+            _publish(harness.root, sid, index)
+        ti._reset_for_tests()  # a fresh serve: only the companions exist
+        calls = _count_hydrations(monkeypatch)
+        assert harness.client is not None
+        for _round in range(2):
+            for sid in sids:
+                url = f"/v1/desktop/sessions/{sid}/history"
+                for params in (
+                    _order_params(["ans05", "user05"]),
+                    {"limit": 5, "open_frame": 1, "journal_order": 1},
+                ):
+                    body = (await harness.client.get(url, params=params)).json()["result"]
+                    assert body["journal_order_state"] == "ready", (sid, params)
+                await asyncio.sleep(0)
+        # Let any armed background task run before counting.
+        for _ in range(10):
+            await asyncio.sleep(0.01)
+        assert calls == [], f"serve hydrated large journals on open: {calls}"
+        assert all(ti.fresh_resident(harness.root, sid) is None for sid in sids)
+
+
+@pytest.mark.asyncio
+async def test_a_large_journal_companion_answer_is_the_resident_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Byte-equal to the resident join for the same journal, both read shapes."""
+    monkeypatch.setattr(ti, "COMPANION_FIRST_MIN_BYTES", 1)
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=6)
+        index = ti.refresh_index(harness.root, harness.session_id)
+        assert index is not None
+        _publish(harness.root, harness.session_id, index)
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        for params in (
+            _order_params(["ans05", "user05", "user01"]),
+            {"limit": 5, "open_frame": 1, "journal_order": 1},
+        ):
+            ti._reset_for_tests()
+            projected = (await harness.client.get(url, params=params)).json()["result"]
+            ti._remember(
+                ti._key(harness.root, harness.session_id),
+                index,
+                ti.index_path(harness.root, harness.session_id).stat().st_mtime,
+            )
+            control = (await harness.client.get(url, params=params)).json()["result"]
+            assert control["journal_order_state"] == "ready"
+            assert json.dumps(projected, sort_keys=True) == json.dumps(control, sort_keys=True)
+
+
+@pytest.mark.asyncio
+async def test_a_grown_large_journal_answers_its_prefix_from_the_companion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE APPEND-PREFIX RULE: a journal grown by run-neutral rows stays ``ready``.
+
+    A live session appends bookkeeping rows (attention, spend, frontend state
+    checkpoints) constantly, which moved the journal's signature and made the
+    companion ``stale``: main answered ``building`` and hydrated serve's whole
+    index to correct it. The appended rows are read directly and given their
+    ordinals; every answer must equal the resident index of the GROWN journal,
+    for both read shapes, with zero hydrations on the way.
+    """
+    monkeypatch.setattr(ti, "COMPANION_FIRST_MIN_BYTES", 1)
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=6)
+        index = ti.refresh_index(harness.root, harness.session_id)
+        assert index is not None
+        _publish(harness.root, harness.session_id, index)
+        directory = harness.root / "sessions" / harness.session_id
+        for id_, custom_type, details in (
+            # No ``attention_started``: a start row can unsettle the tail run, so
+            # it is not answer-neutral (review round 1, M1) and falls back.
+            ("name-after", "conversation_name", {"name": "renamed"}),
+            ("spend-after", "session_spend.v1", {"usd": 0.01}),
+            ("bk-after", "frontend_state_checkpoint_v1", {"blob": "x" * 4096}),
+        ):
+            _append_raw(
+                directory,
+                {
+                    "id": id_,
+                    "ts": time.time(),
+                    "type": "custom",
+                    "payload": {"custom_type": custom_type, "details": details},
+                },
+            )
+        shapes = (
+            _order_params(["ans05", "user05", "user02", "bk-after"]),
+            {"limit": 5, "open_frame": 1, "journal_order": 1, "order_ids": ["user02"]},
+        )
+        ti._reset_for_tests()
+        calls = _count_hydrations(monkeypatch)
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        projected = []
+        for params in shapes:
+            body = (await harness.client.get(url, params=params)).json()["result"]
+            assert body["journal_order_state"] == "ready", (params, body.get("journal_order_state"))
+            projected.append(body)
+        assert "bk-after" in {row["id"] for row in projected[0]["entries"]}
+        assert calls == [], "a run-neutral append still hydrated"
+
+        grown = ti.refresh_index(harness.root, harness.session_id)
+        assert grown is not None and grown.sig["size"] > index.sig["size"]
+        ti._remember(
+            ti._key(harness.root, harness.session_id),
+            grown,
+            ti.index_path(harness.root, harness.session_id).stat().st_mtime,
+        )
+        for params, body in zip(shapes, projected):
+            control = (await harness.client.get(url, params=params)).json()["result"]
+            assert control["journal_order_state"] == "ready"
+            assert json.dumps(body, sort_keys=True) == json.dumps(control, sort_keys=True), params
+
+
+@pytest.mark.asyncio
+async def test_a_grown_large_journal_never_serves_a_stale_ready_for_new_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Visible rows past the prefix: ``building`` first, then every coordinate.
+
+    The prefix rule must not answer for a row the companion never derived; the
+    page that reaches one falls to the existing correction, which settles it.
+    """
+    monkeypatch.setattr(ti, "COMPANION_FIRST_MIN_BYTES", 1)
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=3)
+        index = ti.refresh_index(harness.root, harness.session_id)
+        assert index is not None
+        _publish(harness.root, harness.session_id, index)
+        directory = harness.root / "sessions" / harness.session_id
+        await Transcript(directory).append_message(
+            Message(role="user", content=[TextContent(text="after the publication")])
+        )
+        ti._reset_for_tests()
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        params = _order_params(["ans02", "user02"])
+        first = (await harness.client.get(url, params=params)).json()["result"]
+        assert first["journal_order_state"] == "building"
+        assert not first.get("journal_ordinals"), "a building frame carried coordinates"
+        steady: dict[str, Any] = first
+        for _ in range(200):
+            steady = (await harness.client.get(url, params=params)).json()["result"]
+            if steady["journal_order_state"] == "ready":
+                break
+            await asyncio.sleep(0.05)
+        assert steady["journal_order_state"] == "ready"
+        assert all(row.get("journal_seq") is not None for row in steady["entries"])
+
+
+@pytest.mark.asyncio
+async def test_a_small_journal_keeps_arming_the_resident_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Below the threshold nothing changed: a companion answer still warms."""
+    monkeypatch.setattr(ti, "COMPANION_FIRST_MIN_BYTES", 1 << 40)
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=6)
+        index = ti.refresh_index(harness.root, harness.session_id)
+        assert index is not None
+        _publish(harness.root, harness.session_id, index)
+        ti._reset_for_tests()
+        calls = _count_hydrations(monkeypatch)
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        first = (await harness.client.get(url, params=_order_params(["ans05"]))).json()["result"]
+        assert first["journal_order_state"] == "ready"
+        for _ in range(200):
+            if ti.fresh_resident(harness.root, harness.session_id) is not None:
+                break
+            await asyncio.sleep(0.02)
+        assert calls == [harness.session_id]
+
+
+async def _corrections_after_a_deadline_open(
+    harness: "_Harness", monkeypatch: pytest.MonkeyPatch, params: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Open with every companion read past the paint deadline; return the events.
+
+    This is the loaded-host shape the real-path rig measured: the 120 ms budget
+    is gone before the first companion read, the frame says ``building``, and
+    the after-paint ``_order_correction`` publishes the coordinates.
+    """
+    from local_operator.server.utils import desktop_sessions as module
+    from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
+
+    events: list[dict[str, Any]] = []
+    original_publish = module.DesktopSessionBridge.publish
+    original_bounded = module._bounded_frame_read
+
+    def publish(self: Any, kind: str, payload: dict[str, Any], **kwargs: Any) -> None:
+        if isinstance(payload, dict) and payload.get("type") == JOURNAL_ORDER_EVENT:
+            events.append(payload)
+        original_publish(self, kind, payload, **kwargs)
+
+    async def past_deadline(deadline: Any, func: Any, /, *args: Any, **kwargs: Any) -> Any:
+        if deadline is not None:
+            return False, None
+        return await original_bounded(deadline, func, *args, **kwargs)
+
+    monkeypatch.setattr(module.DesktopSessionBridge, "publish", publish)
+    monkeypatch.setattr(module, "_bounded_frame_read", past_deadline)
+    assert harness.client is not None
+    url = f"/v1/desktop/sessions/{harness.session_id}"
+    first = (await harness.client.get(url, params=params)).json()["result"]
+    history = first["payload"]["history"]
+    assert history.get("journal_order_state") == "building", history.get("journal_order_state")
+    for _ in range(200):
+        if events:
+            break
+        await asyncio.sleep(0.05)
+    monkeypatch.setattr(module.DesktopSessionBridge, "publish", original_publish)
+    monkeypatch.setattr(module, "_bounded_frame_read", original_bounded)
+    return events
+
+
+@pytest.mark.asyncio
+async def test_a_large_journal_correction_comes_from_the_companion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The after-paint correction publishes the resident path's events, unhydrated.
+
+    Main answered every deadline-missed open of a large journal by hydrating the
+    whole index (``start_refresh``) to publish these coordinates. Same journal,
+    same request: the companion arm's rows must equal the resident arm's, and
+    the companion arm must not call ``refresh_index`` at all.
+    """
+    params = {"open_frame": 1, "journal_order": 1, "limit": 5, "order_ids": ["user02"]}
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=6)
+        index = ti.refresh_index(harness.root, harness.session_id)
+        assert index is not None
+        _publish(harness.root, harness.session_id, index)
+        ti._reset_for_tests()
+
+        monkeypatch.setattr(ti, "COMPANION_FIRST_MIN_BYTES", 1)
+        calls = _count_hydrations(monkeypatch)
+        companion = await _corrections_after_a_deadline_open(harness, monkeypatch, params)
+        assert companion and all(event.get("rows") for event in companion), companion
+        assert calls == [], "the correction hydrated a large journal"
+        assert {event["journal_generation"] for event in companion} == {index.journal_generation}
+
+        monkeypatch.setattr(ti, "COMPANION_FIRST_MIN_BYTES", 1 << 40)
+        resident = await _corrections_after_a_deadline_open(harness, monkeypatch, params)
+        assert calls, "the control arm never took the resident path"
+        assert [event["rows"] for event in companion] == [event["rows"] for event in resident]
+        assert {event["journal_generation"] for event in resident} == {index.journal_generation}
+
+
+@pytest.mark.asyncio
+async def test_rows_queued_while_the_companion_correction_awaits_are_answered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1, m1: a page that queues rows mid-correction is not stranded.
+
+    While ``_companion_order_correction`` awaits its worker read, a page that
+    falls to ``_journal_page`` adds pending rows but starts no task of its own
+    (the correction is not done). The first version consumed only its snapshot
+    and returned ``True``, so those rows got no event until some later page
+    started another correction.
+    """
+    from local_operator.server.utils import desktop_sessions as module
+    from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
+
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=2)
+        source = (1, 2, 3.0)
+        async with harness.pool.session(harness.session_id, read=True) as bridge:
+            bridge._order_pending = {"user01": ({"id": "user01"}, source)}
+            reads: list[list[str]] = []
+
+            def order_selection(*_: Any, order_ids: list[str], **__: Any) -> Any:
+                reads.append(list(order_ids))
+                if len(reads) == 1:
+                    # The concurrent page, landing while the first read is out.
+                    bridge._order_pending["ans01"] = ({"id": "ans01"}, source)
+                return index_read_model.Result(
+                    "ready",
+                    index_read_model.FrameSelection(
+                        checkpoints=[],
+                        runs=[],
+                        messages=[],
+                        journal_rows={"user01": 0, "ans01": 1},
+                        journal_generation="gen",
+                    ),
+                )
+
+            events: list[dict[str, Any]] = []
+            monkeypatch.setattr(module.index_read_model, "order_selection", order_selection)
+            monkeypatch.setattr(
+                module.transcript_index,
+                "journal_order_correction_batches",
+                lambda _selection, rows: [rows] if rows else [],
+            )
+            monkeypatch.setattr(
+                bridge,
+                "publish",
+                lambda kind, payload, **_: (
+                    events.append(payload) if payload.get("type") == JOURNAL_ORDER_EVENT else None
+                ),
+            )
+            assert await bridge._companion_order_correction() is True
+            assert reads == [["user01"], ["ans01"]]
+            published = [row["id"] for event in events for row in event["rows"]]
+            assert published == ["user01", "ans01"]
+            assert bridge._order_pending == {}

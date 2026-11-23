@@ -119,7 +119,37 @@ def _card_source(sessions_root: Path, session_id: str, entry_id: str) -> dict[st
     return {
         **source,
         "is_thread_reply": bool(isinstance(body, str) and _THREAD_ROOT_LINE.search(body)),
+        "entry_ts": entry.ts,
     }
+
+
+def _card_facts(source: dict[str, Any]) -> dict[str, Any]:
+    """The answer's optional ``card`` object: facts of the card ROW itself.
+
+    WHY. An open card shows when the message arrived and whether it is a thread
+    reply next to the body, and the phone/desktop rows carry neither (the relay
+    transcript row has no timestamp; the thread marker lives only in the
+    model-facing carriage, which no client may render). Both come from the
+    card's own journal row — no hub read, no body text — so they ride every
+    answer for a found card, including local-only and every unavailable path,
+    and cost nothing beyond the row read the resolver already makes.
+
+    ``received_at`` is the journal entry's time (when this machine recorded the
+    delivery), ISO-8601 UTC; it is omitted if the row's ``ts`` is unusable.
+    Additive within ``v: 1``: an older client ignores the key.
+    """
+    from datetime import UTC, datetime
+
+    facts: dict[str, Any] = {"thread_reply": bool(source.get("is_thread_reply"))}
+    ts = source.get("entry_ts")
+    if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+        try:
+            stamp = datetime.fromtimestamp(float(ts), tz=UTC)
+        except (OverflowError, OSError, ValueError):
+            stamp = None
+        if stamp is not None:
+            facts["received_at"] = stamp.isoformat().replace("+00:00", "Z")
+    return facts
 
 
 def _hub_state(row: dict[str, Any]) -> str:
@@ -154,7 +184,11 @@ async def resolve_card_body(
     wire: Any = None,
     local_only: bool = False,
 ) -> dict[str, Any]:
-    """The ``{v:1, items:[...], more:n}`` answer for one card (design §4).
+    """The ``{v:1, items:[...], more:n, card:{...}}`` answer for one card (design §4).
+
+    ``card`` (additive, optional for readers): ``{received_at?: ISO-8601 UTC,
+    thread_reply: bool}`` from the card's own journal row (:func:`_card_facts`);
+    absent only on the nothing-to-resolve answer for a pre-receipt card.
 
     Raises :class:`CardBodyNotFound` for an entry that is not a Team Bridge card
     in that session. ``wire`` is the test seam for the hub client.
@@ -174,8 +208,10 @@ async def resolve_card_body(
     ids = all_ids[:ITEM_LIMIT]
     more = len(all_ids) - len(ids)
 
+    card = _card_facts(source)
+
     def answer(items: list[dict[str, Any]]) -> dict[str, Any]:
-        return {"v": 1, "items": items, "more": more}
+        return {"v": 1, "items": items, "more": more, "card": dict(card)}
 
     def every(state: str, **extra: Any) -> dict[str, Any]:
         return answer([_item(mid, conversation_id, state, **extra) for mid in ids])

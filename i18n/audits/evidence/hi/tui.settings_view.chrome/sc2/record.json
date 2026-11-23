@@ -1,0 +1,36 @@
+{
+  "locale": "hi",
+  "namespace": "tui.settings_view.chrome",
+  "round": 2,
+  "auditor": "translation-auditor",
+  "model": "anthropic/claude-opus-5-5 (fallback; primary openai/gpt-6.1-sol hit quota 429)",
+  "translator": "translator / anthropic/claude-opus-5-5",
+  "worktree": "~/local-operator/.worktrees/i18n-settings-leftovers",
+  "head": "183ed01e92cc",
+  "en_sha256": "2e04f79550d0b09cd262c32850a31c20d5dec2b88b09facd2369d967bd5ee930",
+  "context_sha256": "4d981004bb67852a6b4f8420ecb6eabba2f6c2c3d2328780830bcb4313dc8b40",
+  "target_sha256": "6288211ff1eeb5fba6e374d0b2abfdf64edeb4ecc63b0e53c90948107029e50f",
+  "keys_read": 49,
+  "check_py_catalogues_only": "0 problems (no hi lines)",
+  "caps": "49/49 within maxCells at realistic args; error.unexpected_structure 84 > 74 with path ~/.local-operator/config.yml, English 100 — truncation by design, cause words survive",
+  "findings": [
+    {
+      "id": "T1",
+      "severity": "minor",
+      "key": "hotkey.hold_refusal",
+      "current": "दबाए रखने वाली कुंजियाँ डेस्कटॉप ऐप में सेट होती हैं — टर्मिनल दबाए रखा मॉडिफ़ायर नहीं पकड़ सकता",
+      "proposed": "दबाए रखने वाली कुंजियाँ डेस्कटॉप ऐप में सेट होती हैं — टर्मिनल दबाकर रखे गए मॉडिफ़ायर को नहीं पकड़ सकता",
+      "reason": "'दबाए रखा मॉडिफ़ायर' uses a finite perfective as an attributive; native attributive is 'दबाकर रखे गए मॉडिफ़ायर को' (71 cells ≤ 80)"
+    },
+    {
+      "id": "T2",
+      "severity": "nit",
+      "key": "clause.would_remove",
+      "current": "one {अगले लॉन्च पर {shown} सत्र हटेगा}",
+      "proposed": "no change (CLDR hi one = 0,1)",
+      "reason": "count 0 is reachable and renders singular verb 'हटेगा'; acceptable, CLDR-inherent"
+    }
+  ],
+  "verdict": "clean-with-findings",
+  "at": "2026-11-21T14:58:40.619168+00:00"
+}

@@ -18,7 +18,8 @@ bounded, only while some declared ``mcp__`` name (``lop exec --tools``, the
 SDK's ``ApprovalPolicy.declared``) is not reachable yet AND a server that could
 provide it is still ``connecting``. The wait re-reads the inventory as each
 awaited server settles (``McpManager.wait_settled(first=True)``) and ends the
-moment every declared name is reachable. A tool name cannot be split back into (server, tool):
+moment every declared name is reachable. A tool name cannot be split back into
+(server, tool):
 ``mcp__bd_x_search`` is server ``bd`` + ``x_search`` or server ``bd_x`` +
 ``search``, so every configured server whose prefix matches is a candidate.
 Deciding on reachability is what keeps a wedged ``bd`` from holding, or
@@ -59,7 +60,29 @@ contract is exactly that distinction.
 CANCELLABLE. The wait runs before the turn's ``AbortSignal`` exists, so it
 polls the caller's ``cancelled`` predicate (``Session._abort_requested``)
 between short slices and returns early on an abort; the turn admission then
-drops the aborted turn exactly as it would have after the wait.
+interrupts the aborted turn exactly as it would have after the wait.
+
+EVERY CONFIGURED SERVER, FOR AN SDK OWNER (``wait_for_all``). An in-process
+SDK session (``sdk.open_session(mode="own")``) usually declares nothing, so
+the rule above waited on nothing and its first ``prompt()`` raced discovery:
+the measured repro (slow stdio fixture, fresh roots, loopback provider) sent
+the first request 0.36 s after ``prompt()`` with the server still
+``connecting``, and the model's call to ``mcp__slowfix_search`` came back
+"Tool not found". Unlike the TUI, an SDK caller has no later turn in which a
+late server's tools merge in front of a person; the first prompt IS the run.
+So the SDK opts its sessions in (``Session.set_first_turn_mcp_wait``) and the
+same bounded, cancellable loop also waits on every configured server that is
+still ``connecting``. Settled states never hold the turn: ``auth-required``
+and ``disconnected`` servers have no connect in flight, and a server parked in
+reconnect backoff reads ``connecting`` with no continuation, which the
+"nothing moved" exit below already ends without spinning. Only a server STILL
+connecting when the bound runs out raises :class:`McpServersNotReady`, before
+anything is sent, so a slow server is never silently a zero-tools first turn;
+a server that settled as failed is logged and the turn proceeds, because a
+wait cannot fix it and an undeclared server is not a declaration. Never in TUI
+or exec: they keep the declared-only rule (exec's undeclared runs are not
+held hostage to an unrelated slow server), and a delegated child still skips
+the gate entirely (see above).
 """
 
 from __future__ import annotations
@@ -119,7 +142,7 @@ class DeclaredMcpToolsUnavailable(RuntimeError):
         self.elapsed_s = elapsed_s
         bound_reached = elapsed_s >= timeout_s
         detail = "; ".join(
-            f"{name} {_failure_reason(status, timeout_s, bound_reached)}"
+            f"server {name} {_failure_reason(status, timeout_s, bound_reached)}"
             for name, status in sorted(servers.items())
         )
         super().__init__(
@@ -128,8 +151,55 @@ class DeclaredMcpToolsUnavailable(RuntimeError):
             # tool identifiers, never prose to translate.
             # i18n: ignore technical diagnostic (identifiers in exec's ignored prefix)
             f"declared MCP tools unreachable after {elapsed_s:.1f} s: {', '.join(self.tools)} "
-            f"(server {detail})"
+            f"({detail})"
         )
+
+
+class McpServersNotReady(RuntimeError):
+    """Configured MCP servers were still connecting when the wait's bound ran out.
+
+    Raised only under ``wait_for_all`` (an SDK owner's first prompt), before
+    any request is sent, so the caller learns its first turn would have gone
+    out without those servers' tools instead of reading "Tool not found" in a
+    transcript. Discovery is NOT cancelled: the servers keep connecting, and
+    because the gate records success only when it settles, the next
+    ``prompt()`` meets the gate again rather than racing. ``servers`` maps each
+    still-connecting server to its status; ``connected`` names the servers
+    whose tools were reachable; ``elapsed_s``/``timeout_s`` say how long the
+    gate actually waited against which bound.
+    """
+
+    def __init__(
+        self,
+        servers: dict[str, str],
+        connected: Collection[str],
+        timeout_s: float,
+        elapsed_s: float,
+    ) -> None:
+        self.servers = dict(servers)
+        self.connected = tuple(sorted(connected))
+        self.timeout_s = timeout_s
+        self.elapsed_s = elapsed_s
+        super().__init__(
+            # Technical diagnostic for a programmatic caller: server names,
+            # statuses, the SessionSpec field that sets the bound and seconds,
+            # the same class as DeclaredMcpToolsUnavailable's message above.
+            # i18n: ignore technical diagnostic (identifiers for an SDK caller)
+            f"MCP servers not ready after {elapsed_s:.1f} s, first prompt not sent: "
+            f"{', '.join(f'{name} {status}' for name, status in sorted(self.servers.items()))} "
+            f"at the {timeout_s:g} s bound (connected: {', '.join(self.connected) or 'none'}); "
+            "retry the prompt, raise SessionSpec.mcp_ready_timeout_s, or set it to None "
+            "to send without waiting"
+        )
+
+
+def _connecting(manager: Any) -> frozenset[str]:
+    """Every configured server that reads ``connecting`` right now."""
+    return frozenset(
+        server
+        for server in manager.get_all_server_names()
+        if manager.get_connection_status(server) == "connecting"
+    )
 
 
 def _failure_reason(status: str, timeout_s: float, bound_reached: bool) -> str:
@@ -227,6 +297,7 @@ async def await_named_mcp_servers(
     reachable: Callable[[], Collection[str]],
     materialize: Callable[[], object],
     wait_for_preload: bool = True,
+    wait_for_all: bool = False,
     cancelled: Callable[[], bool] = lambda: False,
     timeout_s: float = DECLARED_MCP_READY_TIMEOUT_S,
 ) -> bool:
@@ -244,22 +315,52 @@ async def await_named_mcp_servers(
     round-wide settle callback — the only other caller — fires only once EVERY
     deferred server is done, which an unrelated slow server can postpone past
     this turn.
+
+    ``wait_for_all`` also awaits every other ``connecting`` server and raises
+    :class:`McpServersNotReady` for any still connecting at the bound (module
+    docstring, "EVERY CONFIGURED SERVER").
     """
     if manager is None:
         return True
     started = time.monotonic()
     deadline = started + max(0.0, timeout_s)
     preload_seen: set[str] = set()
+    # Under ``wait_for_all``: the servers awaited only because they were
+    # configured (neither a declared candidate nor preload), and whether the
+    # loop ended on the bound rather than on everything settling.
+    others_seen: set[str] = set()
+    #: Seconds from ``started`` to the pass that first saw each awaited
+    #: ``others`` server stop ``connecting``: ITS settle time, for the warning
+    #: below. That warning printed the whole wait's length instead, so a server
+    #: refused 0.1 s in read "settled auth-required after 2.8 s" whenever a
+    #: slower server held the wait (PR #4349 QA round 1, Q3). ``first=True``
+    #: wakes the wait on the first server to settle, so the pass that notices
+    #: it runs right after the fact, not a poll slice later.
+    settled_after: dict[str, float] = {}
+    bound_reached = False
+
+    def pending() -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+        owners, preload = servers_to_await(
+            manager, declared, reachable(), wait_for_preload=wait_for_preload
+        )
+        others = _connecting(manager) - owners - preload if wait_for_all else frozenset()
+        return owners, preload, others
+
     try:
         materialize()
         while True:
-            owners, preload = servers_to_await(
-                manager, declared, reachable(), wait_for_preload=wait_for_preload
-            )
+            owners, preload, others = pending()
             preload_seen |= preload
-            awaited = owners | preload
-            remaining = deadline - time.monotonic()
-            if not awaited or remaining <= 0:
+            others_seen |= others
+            now = time.monotonic()
+            for server in others_seen - others:
+                settled_after.setdefault(server, now - started)
+            awaited = owners | preload | others
+            remaining = deadline - now
+            if not awaited:
+                break
+            if remaining <= 0:
+                bound_reached = True
                 break
             if cancelled():
                 return False
@@ -272,20 +373,44 @@ async def await_named_mcp_servers(
                 logger.debug("MCP first-turn wait failed", exc_info=True)
                 all_settled = True
             materialize()
-            if all_settled and servers_to_await(
-                manager, declared, reachable(), wait_for_preload=wait_for_preload
-            ) == (owners, preload):
+            if all_settled and pending() == (owners, preload, others):
                 # Nothing left to wait ON (no continuation for these servers,
                 # e.g. one parked in reconnect backoff) and nothing moved: a
                 # further pass would spin. Decide on what is reachable now.
                 break
         servers, names = _not_delivered(manager, declared, reachable())
+        statuses = {
+            server: manager.get_connection_status(server)
+            for server in sorted(preload_seen | others_seen)
+        }
+        # Only the BOUND makes a still-connecting server a refusal: one that
+        # reads ``connecting`` after an early exit has no connect in flight
+        # (reconnect backoff), so it is reported below like a failed one.
+        stalled = (
+            {s: status for s, status in statuses.items() if status == "connecting"}
+            if wait_for_all and bound_reached
+            else {}
+        )
+        connected = [
+            server
+            for server in manager.get_all_server_names()
+            if manager.get_connection_status(server) == "connected"
+        ]
     except Exception:  # noqa: BLE001 — a reduced manager (a host double) has no rounds to wait on
         logger.debug("MCP first-turn readiness unavailable on this manager", exc_info=True)
         return True
+    for server in sorted(others_seen):
+        status = statuses[server]
+        if status != "connected" and server not in stalled:
+            logger.warning(
+                "MCP server %r settled %s after %.1f s; first turn proceeds without its tools",
+                server,
+                status,
+                settled_after.get(server, time.monotonic() - started),
+            )
     for server in sorted(preload_seen):
-        status = manager.get_connection_status(server)
-        if status != "connected":
+        status = statuses[server]
+        if status != "connected" and server not in stalled:
             logger.warning(
                 "preload_tools MCP server %r not ready after %.1f s (%s); first turn proceeds "
                 "without it",
@@ -295,4 +420,6 @@ async def await_named_mcp_servers(
             )
     if names:
         raise DeclaredMcpToolsUnavailable(servers, names, timeout_s, time.monotonic() - started)
+    if stalled:
+        raise McpServersNotReady(stalled, connected, timeout_s, time.monotonic() - started)
     return True

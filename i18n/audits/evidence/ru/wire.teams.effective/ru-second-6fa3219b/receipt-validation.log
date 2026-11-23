@@ -1,0 +1,3 @@
+Command: ['/Users/damian/local-operator/.venv/bin/python', '-c', 'import sys,json;sys.path.insert(0,sys.argv[1]);from scripts.i18n.ledger import _rows; r=json.load(open(sys.argv[2]));assert len(_rows({"schema":1,"entries":[r]}))==1;print("Current append receipt structural validation: PASS; no ledger write")', '/Users/damian/local-operator/.worktrees/i18n-effective-reasons', '/Users/damian/.local-operator/sessions/6fa3219bb25e/scratchpad/ru-second-audit/receipt.json']
+Current append receipt structural validation: PASS; no ledger write
+exit_code=0

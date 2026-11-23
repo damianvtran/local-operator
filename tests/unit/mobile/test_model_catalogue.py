@@ -768,3 +768,76 @@ def test_an_undated_alias_of_a_no_effort_model_publishes_no_effort():
 
     published = daemon_module._configured_default()
     assert published is not None and published["effort"] is None
+
+
+def _vertex_sign_in(store: AuthStore, *, dead: bool) -> None:
+    """A SYNTHETIC Google Vertex OAuth row, never the operator's credential.
+
+    ``dead`` writes the store's own dead-grant tombstone through the method the
+    refresh path uses on an ``invalid_grant`` refusal, so the row is in exactly
+    the state the operator's was after the 16:20 refusal (no IdP request here).
+    """
+    row = store.upsert_credential(
+        "google-vertex",
+        {
+            "type": "oauth",
+            "access": "synthetic-vertex-access",
+            "refresh": "synthetic-vertex-refresh",
+            "expires": int((time.time() + 3600) * 1000),
+            "project_id": "synthetic-project",
+        },
+    )
+    if dead:
+        assert store._mark_grant_dead(row.id, rejected_refresh_token="synthetic-vertex-refresh")
+        assert store.grant_is_dead(row.id)
+
+
+def test_a_dead_vertex_sign_in_is_not_published_as_connected_and_says_reauth(monkeypatch):
+    """Reproduction: a refused Vertex grant kept 11 bundled rows ``connected``.
+
+    The store hands out no listing token for a dead grant, discovery answers
+    ``unauthenticated`` and falls back to the registry rows, and those went out
+    as ``connected: true`` with nothing telling the phone to sign in again.
+    """
+    calls: list[str] = []
+
+    def no_network(_transport, request):
+        calls.append(str(request.url))
+        return httpx.Response(503)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", no_network)
+    with contextlib.closing(AuthStore()) as store:
+        _vertex_sign_in(store, dead=True)
+    with TestClient(build_app(MobileDaemon(password="pw", dial_registrants=False))) as client:
+        client.post("/login", data={"password": "pw"})
+        response = client.get("/api/models")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    vertex = [row for row in body["models"] if row["provider"] == "google-vertex"]
+    assert vertex, body
+    assert not any(row["connected"] for row in vertex)
+    assert body["provider_status"] == {
+        "google-vertex": {"status": "reauth_required", "name": "Google Vertex AI (Cloud sign-in)"}
+    }
+    # Crosses the tunnel: id, name and status only, nothing about the credential.
+    assert "synthetic" not in response.text
+    # The verdict is the persisted tombstone: no refresh or listing was sent.
+    assert calls == []
+
+
+def test_a_live_vertex_sign_in_is_unchanged(monkeypatch):
+    """Control: a healthy stored grant keeps its rows connected and adds no key,
+    even when the listing itself fails (a transient outage is not a re-login)."""
+    monkeypatch.setattr(
+        httpx.HTTPTransport, "handle_request", lambda *_: httpx.Response(503, text="down")
+    )
+    with contextlib.closing(AuthStore()) as store:
+        _vertex_sign_in(store, dead=False)
+    with TestClient(build_app(MobileDaemon(password="pw", dial_registrants=False))) as client:
+        client.post("/login", data={"password": "pw"})
+        response = client.get("/api/models")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    vertex = [row for row in body["models"] if row["provider"] == "google-vertex"]
+    assert vertex and all(row["connected"] for row in vertex)
+    assert "provider_status" not in body

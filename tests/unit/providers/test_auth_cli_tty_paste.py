@@ -162,6 +162,74 @@ def test_slowly_typed_json_completes_on_its_closing_brace(terminal: tuple[int, i
     assert json.loads(value) == {"a": 'x}{"', "b": 1}
 
 
+#: Above FD_SETSIZE (1024), where ``select.select`` raises ValueError.
+HIGH_FD = 1100
+
+
+@pytest.fixture
+def high_fd_terminal(terminal: tuple[int, int]) -> Iterator[tuple[int, int]]:
+    """The pty's slave end moved to fd ``HIGH_FD``.
+
+    Why: the suite leaks fds, so in some shard placements ``pty.openpty()``
+    returns fds above 1023 (CI job 136728521591: ``terminal = (1171, 1172)``)
+    and the reader's ``select.select`` raised. ``dup2`` reproduces that
+    placement deterministically instead of waiting for a leak to line up.
+    ``F_DUPFD`` (lowest FREE fd >= ``HIGH_FD``), not ``dup2``: ``dup2`` would
+    silently close whatever already holds that number -- under a leaky run
+    that can be this very pty's master.
+    """
+    resource = pytest.importorskip("resource")
+    fcntl = pytest.importorskip("fcntl")
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    wanted = HIGH_FD + 256  # headroom in case fds just above HIGH_FD are taken
+    if hard != resource.RLIM_INFINITY and hard <= HIGH_FD:
+        pytest.skip(f"RLIMIT_NOFILE hard limit {hard} cannot hold fd {HIGH_FD}")
+    raised = soft != resource.RLIM_INFINITY and soft < wanted
+    if raised:
+        new_soft = wanted if hard == resource.RLIM_INFINITY else min(wanted, hard)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
+    master, slave = terminal
+    high = fcntl.fcntl(slave, fcntl.F_DUPFD, HIGH_FD)
+    try:
+        yield master, high
+    finally:
+        os.close(high)
+        if raised:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+def test_paste_on_a_terminal_above_fd_setsize_completes(
+    high_fd_terminal: tuple[int, int],
+) -> None:
+    master, slave = high_fd_terminal
+    assert slave >= 1024
+    text = _service_account_json()
+    # No Enter in the same read: the closing brace triggers the trailing-newline
+    # wait, which is the select() call that raised (CI job 136728521591).
+    typed = b"\x1b[200~" + text.encode().replace(b"\n", b"\r") + b"\x1b[201~"
+    value = _read(slave, master, typed)
+    assert not isinstance(value, BaseException), value
+    assert json.loads(value) == json.loads(text)
+
+
+def test_trailing_newline_is_consumed_above_fd_setsize(
+    high_fd_terminal: tuple[int, int],
+) -> None:
+    master, slave = high_fd_terminal
+    import tty
+
+    before = termios.tcgetattr(slave)
+    tty.setraw(slave)  # bytes reach the reader without waiting for a line
+    try:
+        os.write(master, b"\x1b[201~\rnext")
+        time.sleep(0.05)
+        auth_cli._consume_trailing_newline(slave)  # must not raise ValueError
+        # Everything up to and including the Enter was framing; the rest stays.
+        assert os.read(slave, 16) == b"next"
+    finally:
+        termios.tcsetattr(slave, termios.TCSANOW, before)
+
+
 def test_single_line_path_finishes_on_enter(terminal: tuple[int, int]) -> None:
     master, slave = terminal
     assert _read(slave, master, b"~/keys/sa.json\r") == "~/keys/sa.json"

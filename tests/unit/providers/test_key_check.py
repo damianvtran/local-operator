@@ -244,7 +244,7 @@ def test_a_key_with_impossible_characters_is_refused_before_any_request(pasted: 
 
     sent.clear()
     verdict = asyncio.run(go())
-    assert verdict == key_check.KeyCheck(False, key_check.INVALID_CHARACTERS_REASON)
+    assert verdict == key_check.KeyCheck(False, key_check.invalid_characters_reason())
     assert "Re-copy" in (verdict.reason or "")
     assert sent == [], "nothing is sent for a value that cannot be a key"
 
@@ -263,3 +263,40 @@ def test_an_unexpected_failure_is_unknown_and_logs_only_its_type(
     assert result.reason and SECRET not in result.reason
     assert "RuntimeError" in caplog.text
     assert SECRET not in caplog.text, "the message (which can carry the key) is never logged"
+
+
+def test_every_verdict_sentence_is_catalogue_copy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Desktop fr census row 11: the verdicts were f-strings no locale could reach.
+
+    ``_text`` is the one render seam (``render_resolved``); replacing it with the
+    message's identity proves every sentence now comes from
+    ``wire.providers.connect`` with the provider name as a parameter.
+    """
+    monkeypatch.setattr(key_check, "_text", lambda message: (message.code, message.params))
+    google = get_provider_definition("google")
+    assert google is not None
+
+    assert key_check.classify(google, 401, "").reason == (
+        "wire.providers.connect.key_rejected",
+        {"label": "Google"},
+    )
+    assert key_check.classify(google, 429, "").reason == (
+        "wire.providers.connect.key_unverified",
+        {"label": "Google", "status": "429"},
+    )
+    assert key_check.invalid_characters_reason() == (
+        "wire.providers.connect.key_invalid_characters",
+        {},
+    )
+
+
+def test_the_english_verdicts_are_unchanged() -> None:
+    google = get_provider_definition("google")
+    assert google is not None
+    assert key_check.classify(google, 401, "").reason == (
+        "Google rejected this API key. Check it and try again."
+    )
+    assert key_check.classify(google, 503, "").reason == (
+        "Google could not check this key right now (HTTP 503). "
+        "It was saved without being verified."
+    )

@@ -103,8 +103,23 @@ def _viewer(server: relay.RelayServer) -> None:
     server.start()
 
 
-def _dial_to(server: relay.RelayServer, record: Any, host: str, port: int) -> relay.PeerLink:
-    link, reason = server.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+def _dial_to(
+    server: relay.RelayServer, record: Any, host: str, port: int, *, expected_device: str = ""
+) -> relay.PeerLink:
+    # The dialer names whom it meant to reach (mesh-listener-auth): the caller's id,
+    # or else the one other active member of a two-device record, read from the
+    # dialer's OWN record.
+    if expected_device:
+        peer = expected_device
+    else:
+        (peer,) = [
+            m.device_id
+            for m in store.load(record.network_id, server.root).active_members()
+            if m.device_id != server.identity.device_id
+        ]
+    link, reason = server.dial(
+        record.network_id, host=f"{host}:{port}", epoch=record.epoch, expected_device=peer
+    )
     assert link is not None, reason
     return link
 
@@ -415,7 +430,16 @@ def _call(root: Path, op: str, **fields: Any) -> dict[str, Any]:
 
 
 def _dial(server: relay.RelayServer, record: Any, host: str, port: int) -> relay.PeerLink:
-    link, reason = server.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    # The dialer names whom it meant to reach (mesh-listener-auth): the one other
+    # active member of this two-device record, read from the dialer's OWN record.
+    (peer,) = [
+        m.device_id
+        for m in store.load(record.network_id, server.root).active_members()
+        if m.device_id != server.identity.device_id
+    ]
+    link, reason = server.dial(
+        record.network_id, host=f"{host}:{port}", epoch=record.epoch, expected_device=peer
+    )
     assert link is not None, reason
     return link
 
@@ -2086,7 +2110,13 @@ def test_two_links_reading_one_stored_page_share_the_relays_own_loop(
         _link.member_pulled_at = 0.0
     server_b.refresh_membership()
     _viewer(server_c)
-    link_c = _dial_to(server_c, store.load(record.network_id, server_c.root), host_b, port_b)
+    link_c = _dial_to(
+        server_c,
+        store.load(record.network_id, server_c.root),
+        host_b,
+        port_b,
+        expected_device=server_b.identity.device_id,
+    )
 
     loops: list[Any] = []
     reads: list[int] = []
@@ -3241,13 +3271,38 @@ def _warm_frame_index(root: Path, session_id: str) -> None:
     Through ``start_refresh`` rather than ``refresh_index``: the frame's fast path
     reads the RESIDENT index, which only the refresh task publishes (the desktop
     twin's ``_Harness.warm`` makes the same choice for the same reason).
+
+    THE PUBLISHED INDEX MUST DESCRIBE THE JOURNAL AS IT IS NOW. ``start_refresh``
+    joins a refresh already in flight — since PR #4224 across loops too, so a
+    refresh an EARLIER frame read armed on the relay's page loop is joined from
+    this ``asyncio.run`` loop. That scan may have read the journal before the
+    cell rewrote it, and its (correct, but older) index makes the next frame
+    answer ``runs_state: "building"`` and re-arm (gate run 44793529479). So the
+    joined scan is drained and the refresh re-run until the published
+    signature matches the journal on disk; a refresh that never catches up
+    still fails the assertion below rather than being accepted as warm.
     """
+    from local_operator.session.transcript import TRANSCRIPT_FILENAME
+
+    journal = root / "sessions" / session_id / TRANSCRIPT_FILENAME
 
     async def _warm() -> None:
         from local_operator.session import transcript_index as ti
 
-        task, _started = ti.start_refresh(root, session_id)
-        assert await task is not None
+        published: dict[str, Any] = {}
+        for _attempt in range(3):
+            task, _started = ti.start_refresh(root, session_id)
+            index = await task
+            assert index is not None
+            published = dict(index.sig)
+            st = journal.stat()
+            if (published.get("inode"), published.get("size"), published.get("mtime")) == (
+                st.st_ino,
+                st.st_size,
+                st.st_mtime,
+            ):
+                return
+        raise AssertionError(f"resident index never caught up with the journal: {published}")
 
     asyncio.run(_warm())
 
@@ -3803,6 +3858,103 @@ def test_a_stored_session_peek_is_served_from_the_journal_and_stays_cold(
         ]
         assert states == ["stored"], (
             "the peek started the session on its owner; its rows now read " f"{states!r}"
+        )
+    finally:
+        link.close("test")
+
+
+def test_peer_peek_shapes_over_a_real_link(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Exercise the actual CLI parser, relay, authorization and owner journal."""
+    from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
+    from local_operator.network import cli as network_cli
+    from local_operator.network.peek import SESSION_PEEK_REPLY_BUDGET_BYTES
+
+    owner, viewer, host, port = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="read")
+    admitted = record.member(viewer.identity.device_id)
+    assert admitted is not None and set(admitted.capabilities) == {"list", "view"}
+    _viewer(viewer)
+    texts = ["opening brief", "audit needle", *["filler"] * 120, "audit needle (later)"]
+    texts.append("x" * SESSION_PEEK_REPLY_BUDGET_BYTES)
+    ids = _seed_journal(owner.root, SESSION, texts)
+    link = _dial_to(viewer, record, host, port)
+    try:
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(viewer.root))
+        base = [
+            "network",
+            "sessions",
+            "--peer",
+            owner.identity.device_id,
+            "--peek",
+            SESSION,
+            "--json",
+        ]
+        parser = argparse.ArgumentParser()
+        network_cli.add_parser(parser.add_subparsers())
+
+        def ask(*flags: str) -> dict[str, Any]:
+            capsys.readouterr()
+            assert network_cli.main(parser.parse_args([*base, *flags])) == 0
+            return json.loads(capsys.readouterr().out)
+
+        head = ask("--head=2")
+        assert [step["body"] for step in head["window"]["steps"]] == texts[:2]
+        query = ask("--query=audit n[e]+dle", "--regex", "--steps=3")
+        window = query["window"]
+        assert (window["match_id"], window["match_count"], window["match_count_complete"]) == (
+            ids[1],
+            2,
+            True,
+        )
+        assert len(window["steps"]) == 3
+        fold = ask("--digest")["digest"]["text"]
+        assert "digest fold (not the full transcript)" in fold
+        assert len(fold.splitlines()) <= 10
+        assert [
+            row["state"] for row in owner.local_session_rows() if row["session_id"] == SESSION
+        ] == ["stored"]
+        print(f"read-only relay: head={texts[:2]!r}; {window['note']}; {fold.splitlines()[0]}")
+
+        # Numeric sender decoration must not hide a real hit; array-valued
+        # searchable text beyond the one-step window must still be skipped.
+        journal = owner.root / "sessions" / SESSION / "transcript.jsonl"
+        good_row = {
+            "id": "peer-hit",
+            "ts": 1_700_001_000,
+            "type": "message",
+            "payload": {
+                "kind": "custom",
+                "custom_type": PEER_MESSAGE_MESSAGE_TYPE,
+                "details": {"sender": {"pid": 27182}, "body": "real peer hit"},
+            },
+        }
+        bad_row = {
+            "id": "malformed-neighbor",
+            "ts": 1_700_001_001,
+            "type": "message",
+            "payload": {
+                "kind": "message",
+                "role": "user",
+                "content": [{"text": ["real peer hit"]}],
+            },
+        }
+        with journal.open("a", encoding="utf-8") as handle:
+            for row in (good_row, bad_row):
+                handle.write(json.dumps(row) + "\n")
+        window = ask("--query=real peer hit", "--steps=1")["window"]
+        assert [(step["heading"], step["body"]) for step in window["steps"]] == [
+            ("peer ← 27182", "real peer hit")
+        ]
+        assert (window["match_id"], window["match_count"], window["match_count_complete"]) == (
+            "peer-hit",
+            1,
+            False,
+        )
+        assert "1 unrenderable row skipped; count is a lower bound" in window["note"]
+        print(
+            f"read-only relay, PID and malformed neighbor: {window['steps'][0]}; {window['note']}"
         )
     finally:
         link.close("test")

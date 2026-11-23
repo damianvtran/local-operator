@@ -136,6 +136,88 @@ def test_bedrock_deferred_copy_remains_resolvable_without_the_eager_bundle(monke
         assert "wire.errors.bedrock" not in str(payload)
 
 
+def test_sdk_spec_refusals_render_without_the_eager_bundle() -> None:
+    """Deferring ``wire.errors.sdk_spec`` (PR #4349) must not cost a translation.
+
+    WHY. The namespace left the eager bundle so hi's eager total fits
+    ``EAGER_TOTAL_MAX_BYTES`` again. That is safe only while the refusal is a
+    FINISHED sentence rendered in the embedding process: both render points
+    (``session/spec.py`` and ``sdk.py``) are driven here in a non-English locale,
+    and the raised text must be the locale's catalogue sentence with no catalogue
+    key or code attribute left for a client to resolve.
+    """
+    from local_operator import sdk
+    from local_operator.i18n import text
+    from local_operator.session.spec import SessionSpec, SessionSpecError
+
+    namespace = "wire.errors.sdk_spec"
+    assert namespace in catalogues.DEFERRED_NAMESPACES
+    for locale in ("en", "hi"):
+        bundle = catalogues.wire_bundle(locale)
+        assert namespace not in bundle["namespaces"]
+        assert namespace in {entry["namespace"] for entry in bundle["deferred"]}
+
+    hi = catalogues.load_catalogue("hi", namespace)
+    guards = {
+        # session/spec.py: SessionSpec.__post_init__
+        "mcp_ready_timeout_invalid": lambda: SessionSpec(mcp_ready_timeout_s=-1.0),
+        # sdk.py: the attach guard, the other recorded render point (no params,
+        # so the raised sentence is the catalogue value verbatim)
+        "attach_output_unsupported": lambda: sdk._refuse_attach_extras(
+            SessionSpec(output_format="json")
+        ),
+    }
+    text.set_active_locale("hi")
+    try:
+        for key, guard in guards.items():
+            try:
+                guard()
+            except SessionSpecError as error:
+                raised = error
+            else:  # pragma: no cover - the guard is the subject under test
+                raise AssertionError(f"{key} did not refuse")
+            assert raised.args == (hi[f"{namespace}.{key}"],)
+            assert namespace not in str(raised)
+            assert not hasattr(raised, "code")
+    finally:
+        text.set_active_locale("en")
+    assert sdk.SessionSpecError is SessionSpecError
+
+
+def test_team_integration_consent_renders_without_the_eager_bundle() -> None:
+    """Consent cards carry finished strings, not deferred keys a client needs.
+
+    Keep the safety-critical approve/cancel labels in the same locale as the
+    question after deferral, without changing the audited catalogue bytes.
+    """
+    from local_operator.i18n import text
+    from local_operator.team_bridge.integrations import AskCopy, ask_question
+
+    namespace = "wire.team_integrations"
+    assert namespace in catalogues.DEFERRED_NAMESPACES
+    for locale in ("en", "hi"):
+        bundle = catalogues.wire_bundle(locale)
+        assert namespace not in bundle["namespaces"]
+        assert namespace in {entry["namespace"] for entry in bundle["deferred"]}
+        messages = catalogues.load_catalogue(locale, namespace)
+        text.set_active_locale(locale)
+        try:
+            question, affirm, decline = ask_question(
+                AskCopy(op="mint_token", app_name="Review app", org_name="Review org")
+            )
+        finally:
+            text.set_active_locale("en")
+        assert question["question"].startswith(
+            messages[f"{namespace}.ask.mint_token.question"]
+            .replace("{app_name}", "Review app")
+            .replace("{org_name}", "Review org")
+        )
+        assert affirm == messages[f"{namespace}.option.approve"]
+        assert decline == messages[f"{namespace}.option.cancel"]
+        assert [option["label"] for option in question["options"]] == [decline, affirm]
+        assert namespace not in json.dumps(question)
+
+
 def test_the_census_catches_one_added_reference(
     i18n_deferred_watch: ModuleType, tmp_path: Path
 ) -> None:

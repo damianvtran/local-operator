@@ -1,0 +1,81 @@
+interpreter /Users/damian/local-operator/.venv/bin/python module /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/catalogues.py
+isolated HOME /Users/damian/.local-operator/sessions/a776dd8a4364/scratchpad/hi-B-home config /Users/damian/.local-operator/sessions/a776dd8a4364/scratchpad/hi-B-home/config
+input hashes before {"local_operator/i18n/catalogues/en/tui.model_persistence.json": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff", "local_operator/i18n/catalogues/en/tui.model_persistence.context.json": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc", "local_operator/i18n/catalogues/hi/tui.model_persistence.json": "b64d9953f8abb7bc1e2e5f2bfab5d286d7b095d50e833211bf90df71d69eca68"}
+PASS official check.check_catalogues scoped en/hi + namespace; context, parity, ICU, plural validation
+PASS negative missing-key ["hi/tui.model_persistence: missing key 'tui.model_persistence.persist'"]
+PASS negative missing-arg ["hi/tui.model_persistence: tui.model_persistence.with_model: arguments (('label', 'simple'),) != en's (('label', 'simple'), ('routes', 'simple')): en has 2 argument(s), translation has 1"]
+PASS negative renamed-arg ["hi/tui.model_persistence: tui.model_persistence.with_model: arguments (('model', 'simple'), ('routes', 'simple')) != en's (('label', 'simple'), ('routes', 'simple')): argument 1 is 'model', en's is 'label' (renamed or reordered)"]
+PASS key en tui.model_persistence.persist args () plural/select=0 codepoints 42 cells 42 no maxCells/maxChars in sidecar
+WRAP en tui.model_persistence.persist width 80 label short rows 1 cells [42] ["/model default saves this for new sessions"]
+WRAP en tui.model_persistence.persist width 100 label short rows 1 cells [42] ["/model default saves this for new sessions"]
+WRAP en tui.model_persistence.persist width 120 label short rows 1 cells [42] ["/model default saves this for new sessions"]
+WRAP en tui.model_persistence.persist width 80 label long rows 1 cells [42] ["/model default saves this for new sessions"]
+WRAP en tui.model_persistence.persist width 100 label long rows 1 cells [42] ["/model default saves this for new sessions"]
+WRAP en tui.model_persistence.persist width 120 label long rows 1 cells [42] ["/model default saves this for new sessions"]
+PASS NFC, exact commands, untouched arguments, synthetic pseudo expansion en tui.model_persistence.persist
+PASS key hi tui.model_persistence.persist args () plural/select=0 codepoints 68 cells 50 no maxCells/maxChars in sidecar
+WRAP hi tui.model_persistence.persist width 80 label short rows 1 cells [50] ["/model default से इस मॉडल को नए सत्रों के डिफ़ॉल्ट के रूप में सहेजें"]
+WRAP hi tui.model_persistence.persist width 100 label short rows 1 cells [50] ["/model default से इस मॉडल को नए सत्रों के डिफ़ॉल्ट के रूप में सहेजें"]
+WRAP hi tui.model_persistence.persist width 120 label short rows 1 cells [50] ["/model default से इस मॉडल को नए सत्रों के डिफ़ॉल्ट के रूप में सहेजें"]
+WRAP hi tui.model_persistence.persist width 80 label long rows 1 cells [50] ["/model default से इस मॉडल को नए सत्रों के डिफ़ॉल्ट के रूप में सहेजें"]
+WRAP hi tui.model_persistence.persist width 100 label long rows 1 cells [50] ["/model default से इस मॉडल को नए सत्रों के डिफ़ॉल्ट के रूप में सहेजें"]
+WRAP hi tui.model_persistence.persist width 120 label long rows 1 cells [50] ["/model default से इस मॉडल को नए सत्रों के डिफ़ॉल्ट के रूप में सहेजें"]
+PASS NFC, exact commands, untouched arguments, synthetic pseudo expansion hi tui.model_persistence.persist
+PASS key en tui.model_persistence.settings args () plural/select=0 codepoints 36 cells 36 no maxCells/maxChars in sidecar
+WRAP en tui.model_persistence.settings width 80 label short rows 1 cells [36] ["/settings edits the boot default too"]
+WRAP en tui.model_persistence.settings width 100 label short rows 1 cells [36] ["/settings edits the boot default too"]
+WRAP en tui.model_persistence.settings width 120 label short rows 1 cells [36] ["/settings edits the boot default too"]
+WRAP en tui.model_persistence.settings width 80 label long rows 1 cells [36] ["/settings edits the boot default too"]
+WRAP en tui.model_persistence.settings width 100 label long rows 1 cells [36] ["/settings edits the boot default too"]
+WRAP en tui.model_persistence.settings width 120 label long rows 1 cells [36] ["/settings edits the boot default too"]
+PASS NFC, exact commands, untouched arguments, synthetic pseudo expansion en tui.model_persistence.settings
+PASS key hi tui.model_persistence.settings args () plural/select=0 codepoints 43 cells 31 no maxCells/maxChars in sidecar
+WRAP hi tui.model_persistence.settings width 80 label short rows 1 cells [31] ["/settings से भी नए सत्रों का डिफ़ॉल्ट बदलें"]
+WRAP hi tui.model_persistence.settings width 100 label short rows 1 cells [31] ["/settings से भी नए सत्रों का डिफ़ॉल्ट बदलें"]
+WRAP hi tui.model_persistence.settings width 120 label short rows 1 cells [31] ["/settings से भी नए सत्रों का डिफ़ॉल्ट बदलें"]
+WRAP hi tui.model_persistence.settings width 80 label long rows 1 cells [31] ["/settings से भी नए सत्रों का डिफ़ॉल्ट बदलें"]
+WRAP hi tui.model_persistence.settings width 100 label long rows 1 cells [31] ["/settings से भी नए सत्रों का डिफ़ॉल्ट बदलें"]
+WRAP hi tui.model_persistence.settings width 120 label long rows 1 cells [31] ["/settings से भी नए सत्रों का डिफ़ॉल्ट बदलें"]
+PASS NFC, exact commands, untouched arguments, synthetic pseudo expansion hi tui.model_persistence.settings
+PASS key en tui.model_persistence.saved args () plural/select=0 codepoints 44 cells 44 no maxCells/maxChars in sidecar
+WRAP en tui.model_persistence.saved width 80 label short rows 1 cells [44] ["switch to the boot default with /model saved"]
+WRAP en tui.model_persistence.saved width 100 label short rows 1 cells [44] ["switch to the boot default with /model saved"]
+WRAP en tui.model_persistence.saved width 120 label short rows 1 cells [44] ["switch to the boot default with /model saved"]
+WRAP en tui.model_persistence.saved width 80 label long rows 1 cells [44] ["switch to the boot default with /model saved"]
+WRAP en tui.model_persistence.saved width 100 label long rows 1 cells [44] ["switch to the boot default with /model saved"]
+WRAP en tui.model_persistence.saved width 120 label long rows 1 cells [44] ["switch to the boot default with /model saved"]
+PASS NFC, exact commands, untouched arguments, synthetic pseudo expansion en tui.model_persistence.saved
+PASS key hi tui.model_persistence.saved args () plural/select=0 codepoints 53 cells 41 no maxCells/maxChars in sidecar
+WRAP hi tui.model_persistence.saved width 80 label short rows 1 cells [41] ["/model saved से इस सत्र में सहेजे गए डिफ़ॉल्ट पर जाएँ"]
+WRAP hi tui.model_persistence.saved width 100 label short rows 1 cells [41] ["/model saved से इस सत्र में सहेजे गए डिफ़ॉल्ट पर जाएँ"]
+WRAP hi tui.model_persistence.saved width 120 label short rows 1 cells [41] ["/model saved से इस सत्र में सहेजे गए डिफ़ॉल्ट पर जाएँ"]
+WRAP hi tui.model_persistence.saved width 80 label long rows 1 cells [41] ["/model saved से इस सत्र में सहेजे गए डिफ़ॉल्ट पर जाएँ"]
+WRAP hi tui.model_persistence.saved width 100 label long rows 1 cells [41] ["/model saved से इस सत्र में सहेजे गए डिफ़ॉल्ट पर जाएँ"]
+WRAP hi tui.model_persistence.saved width 120 label long rows 1 cells [41] ["/model saved से इस सत्र में सहेजे गए डिफ़ॉल्ट पर जाएँ"]
+PASS NFC, exact commands, untouched arguments, synthetic pseudo expansion hi tui.model_persistence.saved
+PASS key en tui.model_persistence.with_model args (('label', 'simple'), ('routes', 'simple')) plural/select=0 codepoints 25 cells 25 no maxCells/maxChars in sidecar
+PASS render missing argument rejected en label
+PASS render missing argument rejected en routes
+WRAP en tui.model_persistence.with_model width 80 label short rows 2 cells [79, 73] ["model: openai/gpt-6.1 — /model default saves this for new sessions · switch to ", "the boot default with /model saved · /settings edits the boot default too"]
+WRAP en tui.model_persistence.with_model width 100 label short rows 2 cells [100, 51] ["model: openai/gpt-6.1 — /model default saves this for new sessions · switch to the boot default with", "/model saved · /settings edits the boot default too"]
+WRAP en tui.model_persistence.with_model width 120 label short rows 2 cells [116, 36] ["model: openai/gpt-6.1 — /model default saves this for new sessions · switch to the boot default with /model saved · ", "/settings edits the boot default too"]
+PASS render missing argument rejected en label
+PASS render missing argument rejected en routes
+WRAP en tui.model_persistence.with_model width 80 label long rows 5 cells [7, 80, 76, 77, 36] ["model: ", "provider/model-2026-11-22-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opaqu", "e-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opaque- — /model default ", "saves this for new sessions · switch to the boot default with /model saved · ", "/settings edits the boot default too"]
+WRAP en tui.model_persistence.with_model width 100 label long rows 4 cells [7, 100, 100, 69] ["model: ", "provider/model-2026-11-22-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opaq", "ue-opaque-opaque-opaque-opaque-opaque- — /model default saves this for new sessions · switch to the ", "boot default with /model saved · /settings edits the boot default too"]
+WRAP en tui.model_persistence.with_model width 120 label long rows 4 cells [7, 120, 113, 36] ["model: ", "provider/model-2026-11-22-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opa", "que-opaque-opaque- — /model default saves this for new sessions · switch to the boot default with /model saved · ", "/settings edits the boot default too"]
+PASS NFC, exact commands, untouched arguments, synthetic pseudo expansion en tui.model_persistence.with_model
+PASS key hi tui.model_persistence.with_model args (('label', 'simple'), ('routes', 'simple')) plural/select=0 codepoints 24 cells 23 no maxCells/maxChars in sidecar
+PASS render missing argument rejected hi label
+PASS render missing argument rejected hi routes
+WRAP hi tui.model_persistence.with_model width 80 label short rows 2 cells [74, 75] ["मॉडल: openai/gpt-6.1 — /model default से इस मॉडल को नए सत्रों के डिफ़ॉल्ट के रूप में सहेजें ·", "/model saved से इस सत्र में सहेजे गए डिफ़ॉल्ट पर जाएँ · /settings से भी नए सत्रों का डिफ़ॉल्ट बदलें"]
+WRAP hi tui.model_persistence.with_model width 100 label short rows 2 cells [98, 51] ["मॉडल: openai/gpt-6.1 — /model default से इस मॉडल को नए सत्रों के डिफ़ॉल्ट के रूप में सहेजें · /model saved से इस सत्र में", "सहेजे गए डिफ़ॉल्ट पर जाएँ · /settings से भी नए सत्रों का डिफ़ॉल्ट बदलें"]
+WRAP hi tui.model_persistence.with_model width 120 label short rows 2 cells [118, 31] ["मॉडल: openai/gpt-6.1 — /model default से इस मॉडल को नए सत्रों के डिफ़ॉल्ट के रूप में सहेजें · /model saved से इस सत्र में सहेजे गए डिफ़ॉल्ट पर जाएँ ·", "/settings से भी नए सत्रों का डिफ़ॉल्ट बदलें"]
+PASS render missing argument rejected hi label
+PASS render missing argument rejected hi routes
+WRAP hi tui.model_persistence.with_model width 80 label long rows 5 cells [5, 80, 80, 76, 31] ["मॉडल: ", "provider/model-2026-11-22-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opaqu", "e-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opaque- — /model default से इस", "मॉडल को नए सत्रों के डिफ़ॉल्ट के रूप में सहेजें · /model saved से इस सत्र में सहेजे गए डिफ़ॉल्ट पर जाएँ ·", "/settings से भी नए सत्रों का डिफ़ॉल्ट बदलें"]
+WRAP hi tui.model_persistence.with_model width 100 label long rows 4 cells [5, 100, 100, 68] ["मॉडल: ", "provider/model-2026-11-22-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opaq", "ue-opaque-opaque-opaque-opaque-opaque- — /model default से इस मॉडल को नए सत्रों के डिफ़ॉल्ट के रूप में सहेजें · /model", "saved से इस सत्र में सहेजे गए डिफ़ॉल्ट पर जाएँ · /settings से भी नए सत्रों का डिफ़ॉल्ट बदलें"]
+WRAP hi tui.model_persistence.with_model width 120 label long rows 4 cells [5, 120, 117, 31] ["मॉडल: ", "provider/model-2026-11-22-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opaque-opa", "que-opaque-opaque- — /model default से इस मॉडल को नए सत्रों के डिफ़ॉल्ट के रूप में सहेजें · /model saved से इस सत्र में सहेजे गए डिफ़ॉल्ट पर जाएँ ·", "/settings से भी नए सत्रों का डिफ़ॉल्ट बदलें"]
+PASS NFC, exact commands, untouched arguments, synthetic pseudo expansion hi tui.model_persistence.with_model
+input hashes after {"local_operator/i18n/catalogues/en/tui.model_persistence.json": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff", "local_operator/i18n/catalogues/en/tui.model_persistence.context.json": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc", "local_operator/i18n/catalogues/hi/tui.model_persistence.json": "b64d9953f8abb7bc1e2e5f2bfab5d286d7b095d50e833211bf90df71d69eca68"}
+PASS scoped mechanical audit complete; plain Rich only, NOT styled NoticeBlock, transcript-family or native Hindi shaping qualification; no fixed cap or no-wrap assertion

@@ -1,0 +1,77 @@
+"""Independent B scoped mechanical audit; no catalogue mutations or eligibility claims."""
+import hashlib, importlib.util, json, os, re, sys, unicodedata
+from pathlib import Path
+from unittest.mock import patch
+from rich.console import Console
+from rich.text import Text
+from rich.cells import cell_len
+ROOT=Path('/Users/damian/local-operator/.worktrees/i18n-model-persist-notice')
+NS='tui.model_persistence'
+from local_operator.i18n import catalogues, runtime
+assert Path(catalogues.__file__).resolve().is_relative_to(ROOT)
+assert Path(runtime.__file__).resolve().is_relative_to(ROOT)
+print('interpreter',sys.executable,'module',catalogues.__file__)
+assert Path.home()!=Path('/Users/damian')
+assert not any(k.startswith('CMUX_') for k in os.environ)
+print('isolated HOME',Path.home(),'config',os.environ['LOCAL_OPERATOR_CONFIG_DIR'])
+paths=[ROOT/'local_operator/i18n/catalogues'/loc/(NS+suffix) for loc,suffix in [('en','.json'),('en','.context.json'),('hi','.json')]]
+sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+before={str(p.relative_to(ROOT)):sha(p) for p in paths}
+print('input hashes before',json.dumps(before))
+spec=importlib.util.spec_from_file_location('scoped_check',ROOT/'scripts/i18n/check.py'); check=importlib.util.module_from_spec(spec);sys.modules[spec.name]=check;spec.loader.exec_module(check)
+load=catalogues.load_catalogue
+EN=load('en',NS); HI=load('hi',NS)
+assert len(EN)==len(HI)==4 and set(EN)==set(HI)
+def scoped(override=None):
+    def loader(loc,ns):
+        assert ns==NS and loc in ('en','hi')
+        return override if loc=='hi' and override is not None else load(loc,ns)
+    with patch.object(catalogues,'namespaces',lambda loc:(NS,)),patch.object(catalogues,'locales',lambda:('en','hi')),patch.object(catalogues,'load_catalogue',loader):
+        return check.check_catalogues()
+assert scoped()==[]
+print('PASS official check.check_catalogues scoped en/hi + namespace; context, parity, ICU, plural validation')
+for kind in ('missing-key','missing-arg','renamed-arg'):
+    candidate=dict(HI)
+    if kind=='missing-key': del candidate[NS+'.persist']
+    elif kind=='missing-arg': candidate[NS+'.with_model']=candidate[NS+'.with_model'].replace('{routes}','')
+    else: candidate[NS+'.with_model']=candidate[NS+'.with_model'].replace('{label}','{model}')
+    errors=scoped(candidate); assert errors
+    print('PASS negative',kind,json.dumps(errors,ensure_ascii=False))
+context=catalogues.context('en',NS); assert set(context)==set(EN)
+for key in EN:
+    for locale,data in [('en',EN),('hi',HI)]:
+        value=data[key]; args=runtime.message_arguments(value)
+        assert args==runtime.message_arguments(EN[key])
+        assert not runtime.plural_arguments(value) and not runtime.plural_selectors(value)
+        assert all(kind=='simple' for _,kind in args)
+        for arg,_ in args: assert value.count('{'+arg+'}')==1
+        assert value==unicodedata.normalize('NFC',value)
+        assert not any(c in value for c in ('\u200c','\u200d'))
+        assert re.findall(r'`[^`]*`|</?[^>]+>',value)==re.findall(r'`[^`]*`|</?[^>]+>',EN[key])
+        commands=re.findall(r'/model (?:default|saved)|/settings',EN[key]); assert re.findall(r'/model (?:default|saved)|/settings',value)==commands
+        print('PASS key',locale,key,'args',args,'plural/select=0','codepoints',len(value),'cells',cell_len(value),'no maxCells/maxChars in sidecar')
+        for label in ('openai/gpt-6.1','provider/model-2026-11-22-'+('opaque-'*16)):
+            params={'label':label,'routes':' · '.join(runtime.render_message(data[NS+'.'+part],{},locale) for part in ('persist','saved','settings'))} if key.endswith('.with_model') else {}
+            rendered=runtime.render_message(value,params,locale)
+            if params:
+                assert rendered.count(label)==1 and rendered.count(params['routes'])==1
+                for missing in ('label','routes'):
+                    try: runtime.render_message(value,{k:v for k,v in params.items() if k!=missing},locale)
+                    except runtime.MessageFormatError: print('PASS render missing argument rejected',locale,missing)
+                    else: raise AssertionError('missing parameter accepted')
+            for width in (80,100,120):
+                console=Console(width=width,color_system=None)
+                rows=Text(rendered).wrap(console,width)
+                assert all(cell_len(row.plain)<=width for row in rows)
+                print('WRAP',locale,key,'width',width,'label',('long' if len(label)>30 else 'short'),'rows',len(rows),'cells',[cell_len(row.plain) for row in rows],json.dumps([row.plain for row in rows],ensure_ascii=False))
+            # Synthetic expansion is a stress control, not a translation or a native render.
+            token=re.compile(r'(\{[^{}]+\}|/model (?:default|saved)|/settings)')
+            pseudo=''.join(chunk if token.fullmatch(chunk) else '［'+chunk+(' विस्तार' if locale=='hi' else ' expanded')+'］' for chunk in token.split(value) if chunk)
+            assert runtime.message_arguments(pseudo)==runtime.message_arguments(value)
+            assert re.findall(r'/model (?:default|saved)|/settings',pseudo)==commands
+            runtime.render_message(pseudo,params,locale)
+        print('PASS NFC, exact commands, untouched arguments, synthetic pseudo expansion',locale,key)
+assert scoped()==[]
+after={str(p.relative_to(ROOT)):sha(p) for p in paths}; assert before==after
+print('input hashes after',json.dumps(after))
+print('PASS scoped mechanical audit complete; plain Rich only, NOT styled NoticeBlock, transcript-family or native Hindi shaping qualification; no fixed cap or no-wrap assertion')

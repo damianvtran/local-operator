@@ -1,0 +1,150 @@
+{
+  "locale": "ru",
+  "namespace": "tui.settings_view",
+  "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+  "target_sha256": "660859830727cca6ab89212b533ecc8178032f2f39aa0d972561b5fac287330a",
+  "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20",
+    "provenance": "Task brief; not independently verified"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "session": "16c480601401",
+    "model": "openai/gpt-6.1-sol",
+    "fallback": "none",
+    "date": "2026-11-20",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "round": 2,
+  "changed_keys": [
+    "tui.settings_view.section.takes_effect"
+  ],
+  "keys_read": 10,
+  "semantic_scope": "One changed key, four scope composition neighbours; five editor hints read and mechanically rendered as required, not a renewed full-namespace audit. Other unchanged keys not re-audited.",
+  "findings": [],
+  "scope_renders": [
+    {
+      "en": {
+        "text": "takes effect: live",
+        "cells": 18,
+        "fallback": "live",
+        "fallback_cells": 4
+      },
+      "ru": {
+        "text": "вступает в силу: сразу",
+        "cells": 22,
+        "fallback": "сразу",
+        "fallback_cells": 5
+      }
+    },
+    {
+      "en": {
+        "text": "takes effect: never",
+        "cells": 19,
+        "fallback": "never",
+        "fallback_cells": 5
+      },
+      "ru": {
+        "text": "вступает в силу: никогда",
+        "cells": 24,
+        "fallback": "никогда",
+        "fallback_cells": 7
+      }
+    },
+    {
+      "en": {
+        "text": "takes effect: new launch",
+        "cells": 24,
+        "fallback": "new launch",
+        "fallback_cells": 10
+      },
+      "ru": {
+        "text": "вступает в силу: с перезапуска",
+        "cells": 30,
+        "fallback": "с перезапуска",
+        "fallback_cells": 13
+      }
+    },
+    {
+      "en": {
+        "text": "takes effect: new sessions",
+        "cells": 26,
+        "fallback": "new sessions",
+        "fallback_cells": 12
+      },
+      "ru": {
+        "text": "вступает в силу: с новой сессии",
+        "cells": 31,
+        "fallback": "с новой сессии",
+        "fallback_cells": 14
+      }
+    }
+  ],
+  "editor_renders": [
+    {
+      "key": "tui.settings_view.editor.contract",
+      "en": {
+        "text": "enter saves · esc cancels",
+        "cells": 25
+      },
+      "ru": {
+        "text": "enter сохранить · esc отмена",
+        "cells": 28
+      }
+    },
+    {
+      "key": "tui.settings_view.editor.contract_unset",
+      "en": {
+        "text": "enter saves · esc cancels · clear to unset",
+        "cells": 42
+      },
+      "ru": {
+        "text": "enter сохранить · esc отмена · пусто — сброс",
+        "cells": 44
+      }
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_long",
+      "en": {
+        "text": "↑↓ suggestions · tab completes · enter saves · esc",
+        "cells": 50
+      },
+      "ru": {
+        "text": "↑↓ подсказки · tab дополнить · enter сохранить · esc",
+        "cells": 52
+      }
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_medium",
+      "en": {
+        "text": "↑↓ browse · tab complete · enter saves",
+        "cells": 38
+      },
+      "ru": {
+        "text": "↑↓ выбор · tab дополнить · enter сохранить",
+        "cells": 42
+      }
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_short",
+      "en": {
+        "text": "↑↓ · tab · enter saves",
+        "cells": 22
+      },
+      "ru": {
+        "text": "↑↓ · tab · enter сохр.",
+        "cells": 22
+      }
+    }
+  ],
+  "note": "Changed Russian phrasing is idiomatic, accurate, impersonal and composes with all four scope words. Exact scope argument parity verified. No plurals or markup in changed key; LTR. Full Russian labels 22–31 cells vs English 18–26 (4–6-cell growth); actual settings_view.py lines 4131–4142 choose bare localized scope if full label does not fit, so no overflow defect. Editor unset hint is 44 vs English 42 cells; source lines 4443–4471 retain localized contract when full unset hint does not fit. Source and target values read side-by-side; no repository edits. Render checks are formatter/cell-width evidence, not a captured UI frame."
+}

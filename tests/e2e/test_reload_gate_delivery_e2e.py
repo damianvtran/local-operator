@@ -24,9 +24,29 @@ from tests.e2e.test_fork_e2e import _never_take_over, _pump
 from tests.e2e.watchdog import bounded
 
 
+def _successor_ask_ready(successor: AttachedSession, replacement: OperatorApp) -> bool:
+    # A published Q2 projection can precede its picker mounting; bind both.
+    gate = successor.pending_gate
+    picker = replacement._ask_screen
+    return (
+        gate is not None
+        and gate.kind == "ask"
+        and gate.question_index == 1
+        and picker is not None
+        and picker.question.id == gate.request_id
+    )
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["approval", "ask"])
-@pytest.mark.parametrize("timing", ["same-tick", "sending", "sidebar"])
+@pytest.mark.parametrize(
+    ("timing", "kind"),
+    [
+        (timing, kind)
+        for timing in ("same-tick", "sending", "sidebar")
+        for kind in ("approval", "ask")
+    ]
+    + [("delayed-publication", "ask")],
+)
 async def test_committed_gate_drains_before_viewer_disposal(
     headless_tui_env: Path,
     workspace: Path,
@@ -87,6 +107,24 @@ async def test_committed_gate_drains_before_viewer_disposal(
         await send_entered.wait()
         assert not cancelled
         release_send.set()
+
+    publication_held, release_publication = asyncio.Event(), asyncio.Event()
+    first_request_id = None
+    first_answer_future = None
+    if timing == "delayed-publication":
+        raise_gate_item = handle._raise_gate_item
+
+        async def hold_first_publication(gate_kind, title, detail, request_id):
+            nonlocal first_request_id, first_answer_future
+            if gate_kind == "ask" and not publication_held.is_set():
+                first_request_id = request_id
+                first_answer_future = handle._pending_futures[request_id]
+                publication_held.set()
+                # Publication precedes this await; hold retirement, not transport.
+                await release_publication.wait()
+            await raise_gate_item(gate_kind, title, detail, request_id)
+
+        monkeypatch.setattr(handle, "_raise_gate_item", hold_first_publication)
 
     answer_task = None
     delivery = None
@@ -149,7 +187,21 @@ async def test_committed_gate_drains_before_viewer_disposal(
                 replacement = OperatorApp(replacement_factory)
                 async with replacement.run_test(size=(120, 36)) as pilot:
                     await wait_for_adoption(replacement, pilot)
-                    await _pump(pilot, lambda: replacement._ask_screen is not None)
+                    if timing == "delayed-publication":
+                        await _pump(pilot, lambda: replacement._ask_screen is not None)
+                        assert publication_held.is_set()
+                        assert first_answer_future is not None
+                        assert first_answer_future.done()
+                        assert first_answer_future.result() == {"choice": ["Here"]}
+                        assert successor.pending_gate is not None
+                        assert successor.pending_gate.request_id == first_request_id
+                        assert successor.pending_gate.question_index == 0
+                        # A delivered answer ACK completes Q1's future before
+                        # its owner retires Q1/publishes Q2. The old picker is
+                        # real, but must not satisfy successor readiness.
+                        assert not _successor_ask_ready(successor, replacement)
+                        release_publication.set()
+                    await _pump(pilot, lambda: _successor_ask_ready(successor, replacement))
                     assert successor.pending_gate is not None
                     assert successor.pending_gate.question_index == 1
                     assert replacement._ask_screen is not None
@@ -173,6 +225,7 @@ async def test_committed_gate_drains_before_viewer_disposal(
                 }
             )
     finally:
+        release_publication.set()
         release_send.set()
         take_plan()
         if delivery is not None:

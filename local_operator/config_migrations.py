@@ -581,6 +581,12 @@ def run_startup_migrations(
             logger.warning("config migration: seed update pass skipped: %s", exc)
             logger.debug("config migration: traceback", exc_info=True)
     try:
+        from local_operator.wakes.install import bootstrap_goal_recovery
+
+        bootstrap_goal_recovery(config_dir)
+    except Exception as exc:  # noqa: BLE001 — an unavailable user manager cannot block startup
+        logger.warning("goal recovery supervisor bootstrap skipped: %s", exc)
+    try:
         # Host-facing ``account.json``: cheap (a read-only open and a byte
         # compare) and only writes when missing or stale, so a config dir that
         # predates the file, or one whose rows changed out of band, converges

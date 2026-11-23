@@ -1,0 +1,27 @@
+{
+  "record_reference": "i18n/audits/evidence/fr/tui.model_persistence/b-1bf2/record.json",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "1bf2a3e4c433",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "1ca940cf73ba",
+    "independent_from_A_auditor_session": "0ecda03",
+    "independent_from_source_author_session": "a97c7f76d5ee",
+    "actual_model_source": "Host [model switch] message before copy assessment: provider failure: quota; switched from anthropic/claude-opus-5-5 to openai/gpt-6.1-sol",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "audit_date": "2026-11-22",
+  "kind": "actual_execution_receipt",
+  "command": "mkdir -p \"$LOCAL_OPERATOR_SCRATCHPAD/fr-b-home\"; cd /Users/damian/local-operator/.worktrees/i18n-model-persist-notice && env -i HOME=\"$LOCAL_OPERATOR_SCRATCHPAD/fr-b-home\" LOCAL_OPERATOR_CONFIG_DIR=\"$LOCAL_OPERATOR_SCRATCHPAD/fr-b-home/config\" PATH=\"$PATH\" PYTHONPATH=/Users/damian/local-operator/.worktrees/i18n-model-persist-notice TERM=xterm-256color /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/fr/tui.model_persistence/b-1bf2/script.py.txt > i18n/audits/evidence/fr/tui.model_persistence/b-1bf2/audit.log 2>&1; result=$?; tail -4 i18n/audits/evidence/fr/tui.model_persistence/b-1bf2/audit.log; echo EXIT=$result",
+  "observed_audit_process_exit_code": 0,
+  "observed_wrapper_exit_code": 0,
+  "actual_output": "audit.log",
+  "official_scoped_invocation": "check.check_catalogues() with patched catalogue enumeration en/fr + tui.model_persistence; no checker implementation changes",
+  "ledger_append_executed": false,
+  "reason": "Manager serializes shared history; append-ready handoff only"
+}

@@ -1,0 +1,53 @@
+Discovery warning preserved: rg local_operator/i18n/{icu,catalogues,pseudo}.py exited 2: icu.py and pseudo.py do not exist. Corrected to runtime.py; no execution harness failure before scoped run.
+COMMAND: env -i HOME=<scratch ISO> LOCAL_OPERATOR_CONFIG_DIR=<ISO>/config PATH="$PATH" TERM=xterm-256color PYTHONPATH="$PWD" PYTHONDONTWRITEBYTECODE=1 /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/zh-CN/tui.provider_state/b-e800/script.py.txt
+interpreter /Users/damian/local-operator/.venv/bin/python module /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/i18n/runtime.py checker /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/scripts/i18n/check.py
+HOME /Users/damian/.local-operator/sessions/e800bd515a19/scratchpad/zhB-home.jJTDj3 CONFIG /Users/damian/.local-operator/sessions/e800bd515a19/scratchpad/zhB-home.jJTDj3/config
+before hashes {'local_operator/i18n/catalogues/en/tui.provider_state.json': '113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912', 'local_operator/i18n/catalogues/en/tui.provider_state.context.json': '67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be', 'local_operator/i18n/catalogues/zh-CN/tui.provider_state.json': 'ba73193e56b6b01a584418c0b8a392ee01af2c810789229f576895fbc978a5f1'}
+official scoped catalogue/context/ICU []
+missing-key negative ["zh-CN/tui.provider_state: missing key 'tui.provider_state.logged_in'"]
+added-argument negative ["zh-CN/tui.provider_state: tui.provider_state.logged_in: arguments (('unexpected', 'simple'),) != en's (): en has 0 argument(s), translation has 1"]
+ordered parity 5/5; context 5/5; CLDR zh-CN categories ['other']
+official render en tui.provider_state.logged_in 'logged in' zero_args/plural/select; NFC; protected_tokens=0
+PlainRich diagnostic en tui.provider_state.logged_in cells 9 sample_width 17 render 'logged in'
+PlainRich diagnostic en tui.provider_state.logged_in cells 9 sample_width 31 render 'logged in'
+synthetic pseudo (not official pseudo workflow) en tui.provider_state.logged_in cells 26
+official render zh-CN tui.provider_state.logged_in '已登录' zero_args/plural/select; NFC; protected_tokens=0
+PlainRich diagnostic zh-CN tui.provider_state.logged_in cells 6 sample_width 17 render '已登录'
+PlainRich diagnostic zh-CN tui.provider_state.logged_in cells 6 sample_width 31 render '已登录'
+synthetic pseudo (not official pseudo workflow) zh-CN tui.provider_state.logged_in cells 23
+official render en tui.provider_state.env_key 'env key' zero_args/plural/select; NFC; protected_tokens=0
+PlainRich diagnostic en tui.provider_state.env_key cells 7 sample_width 17 render 'env key'
+PlainRich diagnostic en tui.provider_state.env_key cells 7 sample_width 31 render 'env key'
+synthetic pseudo (not official pseudo workflow) en tui.provider_state.env_key cells 24
+official render zh-CN tui.provider_state.env_key '环境密钥' zero_args/plural/select; NFC; protected_tokens=0
+PlainRich diagnostic zh-CN tui.provider_state.env_key cells 8 sample_width 17 render '环境密钥'
+PlainRich diagnostic zh-CN tui.provider_state.env_key cells 8 sample_width 31 render '环境密钥'
+synthetic pseudo (not official pseudo workflow) zh-CN tui.provider_state.env_key cells 25
+official render en tui.provider_state.needs_login 'needs login' zero_args/plural/select; NFC; protected_tokens=0
+PlainRich diagnostic en tui.provider_state.needs_login cells 11 sample_width 17 render 'needs login'
+PlainRich diagnostic en tui.provider_state.needs_login cells 11 sample_width 31 render 'needs login'
+synthetic pseudo (not official pseudo workflow) en tui.provider_state.needs_login cells 28
+official render zh-CN tui.provider_state.needs_login '需登录' zero_args/plural/select; NFC; protected_tokens=0
+PlainRich diagnostic zh-CN tui.provider_state.needs_login cells 6 sample_width 17 render '需登录'
+PlainRich diagnostic zh-CN tui.provider_state.needs_login cells 6 sample_width 31 render '需登录'
+synthetic pseudo (not official pseudo workflow) zh-CN tui.provider_state.needs_login cells 23
+official render en tui.provider_state.local_ready 'configured server' zero_args/plural/select; NFC; protected_tokens=0
+PlainRich diagnostic en tui.provider_state.local_ready cells 17 sample_width 17 render 'configured server'
+PlainRich diagnostic en tui.provider_state.local_ready cells 17 sample_width 31 render 'configured server'
+synthetic pseudo (not official pseudo workflow) en tui.provider_state.local_ready cells 34
+official render zh-CN tui.provider_state.local_ready '服务器已配置' zero_args/plural/select; NFC; protected_tokens=0
+PlainRich diagnostic zh-CN tui.provider_state.local_ready cells 12 sample_width 17 render '服务器已配置'
+PlainRich diagnostic zh-CN tui.provider_state.local_ready cells 12 sample_width 31 render '服务器已配置'
+synthetic pseudo (not official pseudo workflow) zh-CN tui.provider_state.local_ready cells 29
+official render en tui.provider_state.local_unconfigured 'configure server' zero_args/plural/select; NFC; protected_tokens=0
+PlainRich diagnostic en tui.provider_state.local_unconfigured cells 16 sample_width 17 render 'configure server'
+PlainRich diagnostic en tui.provider_state.local_unconfigured cells 16 sample_width 31 render 'configure server'
+synthetic pseudo (not official pseudo workflow) en tui.provider_state.local_unconfigured cells 33
+official render zh-CN tui.provider_state.local_unconfigured '请配置服务器' zero_args/plural/select; NFC; protected_tokens=0
+PlainRich diagnostic zh-CN tui.provider_state.local_unconfigured cells 12 sample_width 17 render '请配置服务器'
+PlainRich diagnostic zh-CN tui.provider_state.local_unconfigured cells 12 sample_width 31 render '请配置服务器'
+synthetic pseudo (not official pseudo workflow) zh-CN tui.provider_state.local_unconfigured cells 29
+after hashes {'local_operator/i18n/catalogues/en/tui.provider_state.json': '113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912', 'local_operator/i18n/catalogues/en/tui.provider_state.context.json': '67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be', 'local_operator/i18n/catalogues/zh-CN/tui.provider_state.json': 'ba73193e56b6b01a584418c0b8a392ee01af2c810789229f576895fbc978a5f1'}
+PASS: 10 official zero-arg renders, 20 PlainRich width controls, 10 synthetic pseudo renders; both negative controls rejected; inputs immutable
+LIMITS: no real Settings geometry/CJK font/global UI; widths are diagnostics not max caps; no app startup; producer remains English pending adapter; original provider-before-offline claim UNVERIFIED; no network isolation/certificate claim
+EXIT_CODE=0

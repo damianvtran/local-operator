@@ -1,0 +1,18 @@
+{
+  "tui.tool_card.extra.compose.composed": "{size} redactados",
+  "tui.tool_card.extra.compose.composing": "redactando… {facts}",
+  "tui.tool_card.extra.compose.never_sent": "no enviado · {facts}",
+  "tui.tool_card.extra.compose.nothing_composed": "nada redactado",
+  "tui.tool_card.extra.fetch.attempts": "{count, plural, one {{shown} intento} many {{shown} de intentos} other {{shown} intentos}}",
+  "tui.tool_card.extra.fetch.attempts_profiles": "{count, plural, one {{shown} intento ({profiles})} many {{shown} de intentos ({profiles})} other {{shown} intentos ({profiles})}}",
+  "tui.tool_card.extra.fetch.lines": "{count, plural, one {{shown} línea} many {{shown} de líneas} other {{shown} líneas}}",
+  "tui.tool_card.extra.search.provider": "Proveedor: {provider}",
+  "tui.tool_card.extra.search.provider_auth": "Proveedor: {provider} ({auth_mode})",
+  "tui.tool_card.extra.search.sources": "Fuentes:",
+  "tui.tool_card.extra.search.untitled": "Resultado sin título",
+  "tui.tool_card.extra.send.failed_reason": "{word}: {cause}",
+  "tui.tool_card.extra.send.mode.now": "ahora",
+  "tui.tool_card.extra.send.mode.quiet": "buzón",
+  "tui.tool_card.extra.send.mode.wake": "despertar",
+  "tui.tool_card.extra.send.model": "modelo"
+}

@@ -1,0 +1,71 @@
+"""Independent A scoped catalogue audit. Plain Rich diagnostics, not native UI proof."""
+import hashlib, json, os, re, sys, unicodedata
+from pathlib import Path
+from unittest.mock import patch
+import local_operator
+from local_operator.i18n import catalogues, runtime
+from scripts.i18n import check
+from rich.console import Console
+from rich.text import Text
+ROOT=Path(__file__).resolve().parents[6]
+NS='tui.model_persistence'
+assert Path(local_operator.__file__).resolve()==ROOT/'local_operator/__init__.py'
+print('INTERPRETER',sys.executable,'MODULE',local_operator.__file__,'CHECK',check.__file__)
+print('HOME',os.environ['HOME'],'CONFIG',os.environ['LOCAL_OPERATOR_CONFIG_DIR'])
+assert not any(k.startswith(('CMUX_','LOP_')) for k in os.environ)
+expected={'en':('en/'+NS+'.json','4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff'),'context':('en/'+NS+'.context.json','b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc'),'es':('es/'+NS+'.json','253fc1d487b648e6c778ac0f102ca5a49865dd8e223374ad31981f92ff97cce4')}
+def hashes(stage):
+ for kind,(path,want) in expected.items():
+  got=hashlib.sha256((ROOT/'local_operator/i18n/catalogues'/path).read_bytes()).hexdigest(); assert got==want
+  print(stage,kind,got)
+hashes('BEFORE')
+load=catalogues.load_catalogue
+en=load('en',NS); es=load('es',NS)
+# Select only the requested namespace/locales, retaining the official checker implementation.
+with patch.object(catalogues,'namespaces',return_value=[NS]), patch.object(catalogues,'locales',return_value=['en','es']):
+ problems=check.check_catalogues(); print('OFFICIAL SCOPED CATALOGUE+CONTEXT+ICU',problems); assert not problems
+ for name,mutation in [('missing-key',{k:v for k,v in es.items() if not k.endswith('.saved')}),('missing-argument',{**es,NS+'.with_model':'modelo: {label}'})]:
+  with patch.object(catalogues,'load_catalogue',side_effect=lambda loc,ns: mutation if loc=='es' else load(loc,ns)):
+   errors=check.check_catalogues(); assert errors; print('NEGATIVE',name,'REJECTED',errors)
+commands={'persist':'/model default','settings':'/settings','saved':'/model saved'}
+assert list(en)==list(es) and len(es)==4
+for locale,msgs in [('en',en),('es',es)]:
+ for key,value in msgs.items():
+  assert unicodedata.normalize('NFC',value)==value
+  assert not runtime.plural_selectors(value)
+  args=runtime.message_arguments(value)
+  assert all(t=='simple' for n,t in args)
+  assert not re.search(r'<[^>]+>|\[[^]]+\]|`',value)
+  name=key.rsplit('.',1)[-1]
+  if name in commands: assert value.count(commands[name])==1
+  else: assert args==(('label','simple'),('routes','simple')) and value.count('{label}')==value.count('{routes}')==1
+  print('KEY',locale,key,'args',args,'NFC PASS','cells',Text(value).cell_len)
+ print('PLURAL/SELECT',locale,'0; no CLDR arms applicable')
+ for missing in ('label','routes'):
+  try: runtime.render_message(msgs[NS+'.with_model'],{k:'x' for k in ('label','routes') if k!=missing},locale)
+  except runtime.MessageFormatError as exc: print('NEGATIVE runtime',locale,missing,type(exc).__name__)
+  else: raise AssertionError('missing argument accepted')
+ routes={k:runtime.render_message(msgs[NS+'.'+k],{},locale) for k in commands}
+ states={'ordinary':[routes['persist'],routes['saved'],routes['settings']],'missing-model':[routes['persist'],routes['settings']],'absent-hosting':[routes['settings']],'unknown-hosting':[routes['settings']]}
+ for state,clauses in states.items():
+  route=' · '.join(clauses)
+  if state in ('absent-hosting','unknown-hosting'): assert '/model' not in route
+  for kind,label in [('short','x/y'),('long','provider/opaque-model-2026-11-22-'+'abc123-'*18+'end')]:
+   text=runtime.render_message(msgs[NS+'.with_model'],{'label':label,'routes':route},locale)
+   assert text.count(label)==text.count(route)==1
+   for command in commands.values(): assert text.count(command)==route.count(command)
+   for width in (80,100,120):
+    lines=Text(text).wrap(Console(width=width,color_system=None),width)
+    assert all(x.cell_len<=width for x in lines)
+    print('RICH',locale,state,kind,width,'cells',[x.cell_len for x in lines],'lone-final-command',lines[-1].plain.strip() in commands.values())
+   if kind=='short': print('RENDER',locale,state,text)
+# Local pseudo probe: expand human spans only; keep ICU placeholders and commands opaque.
+protected=re.compile(r'(/model default|/model saved|/settings|\{label\}|\{routes\})')
+for key,value in en.items():
+ pseudo=''.join(part if protected.fullmatch(part) else ''.join(c*2 if c.isalpha() else c for c in part) for part in protected.split(value))
+ assert protected.findall(pseudo)==protected.findall(value)
+ assert runtime.message_arguments(pseudo)==runtime.message_arguments(value)
+ rendered=runtime.render_message(pseudo,{'label':'opaque/model-123','routes':'ROUTES'},'en')
+ print('PSEUDO',key,rendered)
+hashes('AFTER')
+print('PASS all scoped checks and 48 plain-Rich cases; no global checker, styled NoticeBlock, native/RTL or release certification')

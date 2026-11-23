@@ -211,6 +211,20 @@ def _monitor_row(
     return row
 
 
+def test_mobile_schedules_use_live_monitor_counters_without_unparking() -> None:
+    from local_operator.monitors.state import write_counters
+
+    _monitor_entry(SESSION_A, rows=[_monitor_row(due=PAST)], stopped_at=PAST)
+    write_counters(config_dir(), SESSION_A, "m1", {"schema": 1, "next_due_at": FUTURE, "checks": 3})
+
+    listing = _body(_client())["monitors"]
+    entry = listing["entries"][0]
+    row = entry["monitors"][0]
+    assert (entry["next_due_at"], row["next_due_at"], row["checks"]) == (FUTURE, FUTURE, 3)
+    assert entry["dormant"] is True
+    assert row["state"] == "dormant"
+
+
 def test_the_gate_holds_and_login_unlocks_the_surface() -> None:
     client = TestClient(build_app(MobileDaemon(port=0, password="pw123")), follow_redirects=False)
     refused = client.get("/api/schedules")

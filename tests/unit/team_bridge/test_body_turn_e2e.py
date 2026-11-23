@@ -185,15 +185,21 @@ def _owner() -> OwnerSnapshot:
     )
 
 
-def _store(config_dir: Path) -> Store:
+def _store(config_dir: Path, *, multi_frame: bool = False) -> Store:
     store = Store(config_dir)
     store.commit_enrollment(
         _owner(), OwnerReceipt("bridge_consent_v1", "ref-1"), cos_session_id=SESSION_ID
     )
     # The follow-up waiter re-checks the full authority fence, which reads the
     # feature flag from disk (the one a connector-less unit fixture must write).
+    # ``multi_frame_turns`` defaults OFF here on purpose: the tests in this file
+    # pin the one-body-per-turn contract, which is exactly what ``off`` must
+    # keep reproducing; the multi-frame tests opt in with ``multi_frame=True``.
     (config_dir / "config.yml").write_text(
-        json.dumps({"values": {"team_bridge": {"enabled": True}}}), encoding="utf-8"
+        json.dumps(
+            {"values": {"team_bridge": {"enabled": True, "multi_frame_turns": multi_frame}}}
+        ),
+        encoding="utf-8",
     )
     store.publish_screening_policy(
         _owner(),
@@ -212,11 +218,16 @@ def _epoch(store: Store) -> int:
 
 
 def _reserve(
-    store: Store, message_id: str = MESSAGE_ID, seq: int = 3, config_dir: Path | None = None
+    store: Store,
+    message_id: str = MESSAGE_ID,
+    seq: int = 3,
+    config_dir: Path | None = None,
+    routed_session: str | None = None,
+    conversation_id: str = CONVERSATION_ID,
 ) -> None:
     assert store.record_body_reservation(
         _owner(),
-        conversation_id=CONVERSATION_ID,
+        conversation_id=conversation_id,
         message_id=message_id,
         conversation_seq=seq,
         mention=True,
@@ -226,6 +237,7 @@ def _reserve(
         consent_version="bridge_consent_v1",
         designated_session=SESSION_ID,
         now=time.time(),
+        routed_session=routed_session,
     )
     if config_dir is not None:
         _allow_receipt(config_dir, message_id)
@@ -270,13 +282,13 @@ def _allow_receipt(config_dir: Path, message_id: str) -> None:
         )
 
 
-def _runtime(config_dir: Path, client: FakeBridgeClient) -> Any:
+def _runtime(config_dir: Path, client: FakeBridgeClient, session_id: str = SESSION_ID) -> Any:
     return SimpleNamespace(
         client=client,
         config_dir=config_dir,
         tenant_id=TENANT,
         owner=_owner(),
-        session_id=SESSION_ID,
+        session_id=session_id,
     )
 
 
@@ -371,6 +383,60 @@ async def test_the_admitted_body_reaches_every_provider_call_of_the_turn(tmp_pat
     assert row["state"] == "completed", row["last_error"]
     assert row["completed_entry_id"]
     assert _transcript_text(tmp_path / "sess").count(BODY) == 0, "no body in the transcript"
+
+
+ROUTED_SESSION = "sess_task"
+
+
+async def _serve_as(
+    tmp_path, session_id: str, *, routed: str | None
+) -> tuple[CapturingStream, dict[str, Any], Any]:
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    store = _store(config_dir)
+    _reserve(store, config_dir=config_dir, routed_session=routed)
+    stream = CapturingStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = _session(tmp_path, stream, _runtime(config_dir, FakeBridgeClient(), session_id))
+    try:
+        session._ensure_pending_body_followup()
+        waiter = session._pending_body_followup_task
+        if waiter is not None:
+            await waiter
+    finally:
+        await session.dispose()
+    return stream, _row(config_dir), waiter
+
+
+@pytest.mark.asyncio
+async def test_a_busy_routed_session_serves_the_row_routed_to_it(tmp_path) -> None:
+    """The routed session is NOT the designated one: the follow-up waiter that serves
+    a body arriving mid-turn must still arm for it, or the row sits pending until the
+    sweep hands it to the designated session (the failure routing exists to remove)."""
+
+    stream, row, waiter = await _serve_as(tmp_path, ROUTED_SESSION, routed=ROUTED_SESSION)
+
+    assert waiter is not None, "a row routed to this session must arm the follow-up waiter"
+    assert len(stream.requests) == 1
+    assert len([t for t in stream.texts(0) if BODY in t]) == 1
+    assert row["state"] == "completed", row["last_error"]
+
+
+@pytest.mark.asyncio
+async def test_a_non_designated_session_never_serves_a_row_routed_elsewhere(tmp_path) -> None:
+    """Negative control: the relaxed fence admits ONLY a row routed to the caller."""
+
+    stream, row, waiter = await _serve_as(tmp_path, "sess_third", routed=ROUTED_SESSION)
+
+    assert waiter is None and stream.requests == []
+    assert row["state"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_a_non_designated_session_never_serves_an_unrouted_row(tmp_path) -> None:
+    stream, row, waiter = await _serve_as(tmp_path, ROUTED_SESSION, routed=None)
+
+    assert waiter is None and stream.requests == []
+    assert row["state"] == "pending"
 
 
 @pytest.mark.asyncio
@@ -1825,3 +1891,190 @@ async def test_atomic_card_wake_at_a_running_tool_boundary(
         )
     finally:
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_mid_turn_body_frame_stays_anchored_for_wire_prefix_stability(tmp_path) -> None:
+    """E2E regression: across a 2-call body turn (tool call -> answer), the
+    ephemeral frame stays anchored at its Call 1 position on BOTH Anthropic and
+    OpenAI-compat wires so the prefix through the frame is byte-identical, AND
+    Call 1's tail cache breakpoint lands on the last persistent message rather
+    than the trailing ephemeral frame."""
+    from local_operator.providers.clients import AnthropicClient, OpenAICompatClient
+
+    def _strip_cache_control(obj: Any) -> Any:
+        if isinstance(obj, dict):
+            if isinstance(obj.get("content"), str):
+                obj = {**obj, "content": [{"type": "text", "text": obj["content"]}]}
+            return {k: _strip_cache_control(v) for k, v in obj.items() if k != "cache_control"}
+        if isinstance(obj, list):
+            return [_strip_cache_control(v) for v in obj]
+        return obj
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    store = _store(config_dir)
+    _reserve(store, config_dir=config_dir)
+    client = FakeBridgeClient()
+    stream = CapturingStream(
+        [
+            _tool_call("call-1", "noop"),
+            [StreamTextDelta(delta="the answer"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="noop", content=[TextContent(text="done")]
+        )
+
+    session = _session(
+        tmp_path,
+        stream,
+        _runtime(config_dir, client),
+        tools=[AgentTool(name="noop", description="a tool", execute=execute)],
+    )
+    try:
+        # Seed a persistent user turn before the body turn so Call 1 has a
+        # persistent message preceding the trailing ephemeral frame.
+        await session._transcript.append_message(Message.user("prior persistent turn"))
+        session._context.messages.append(Message.user("prior persistent turn"))
+        await _serve_body_turn(session)
+    finally:
+        await session.dispose()
+
+    assert len(stream.requests) == 2
+    req1, req2 = stream.requests[0], stream.requests[1]
+    assert [m.model_dump() for m in req2.messages[: len(req1.messages)]] == [
+        m.model_dump() for m in req1.messages
+    ], "Call 2 must keep the exact Call 1 message prefix through the anchored frame"
+
+    # Verify BOTH wire formats keep byte-identical prefixes through Call 1,
+    # place Call 1's tail breakpoint on the persistent message (not the frame),
+    # and never leak ``_ephemeral`` onto the wire.
+    anth_spec = ModelSpec(provider="anthropic", model_id="claude-opus-5", context_window=200_000)
+    oai_spec = ModelSpec(
+        provider="radient",
+        model_id="anthropic/claude-sonnet-5.5",
+        context_window=200_000,
+        supports_prompt_cache=True,
+    )
+    for label, build in (
+        (
+            "anthropic",
+            lambda r: AnthropicClient()._build_body(r.model_copy(update={"model": anth_spec})),
+        ),
+        (
+            "openai_compat",
+            lambda r: OpenAICompatClient("https://api.radienthq.com/v1")._build_body(
+                r.model_copy(update={"model": oai_spec})
+            ),
+        ),
+    ):
+        b1 = build(req1)
+        b2 = build(req2)
+        assert "_ephemeral" not in json.dumps(b1)
+        assert "_ephemeral" not in json.dumps(b2)
+        m1, m2 = b1["messages"], b2["messages"]
+        assert _strip_cache_control(m2[: len(m1)]) == _strip_cache_control(
+            m1
+        ), f"{label}: Call 2 wire prefix diverged from Call 1"
+        # Call 1's trailing message is the ephemeral body frame: no marker on it,
+        # and the marker sits on the persistent message right before it.
+        assert BODY in json.dumps(m1[-1])
+        assert "cache_control" not in json.dumps(
+            m1[-1]
+        ), f"{label}: tail breakpoint must skip the trailing ephemeral frame"
+        assert "cache_control" in json.dumps(
+            m1[-2]
+        ), f"{label}: tail breakpoint must land on the last persistent message"
+
+
+# -- multi-frame turns (``team_bridge.multi_frame_turns``) ---------------------
+
+
+def _states(config_dir: Path) -> dict[str, str]:
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        return dict(conn.execute("SELECT message_id, state FROM body_reservations").fetchall())
+
+
+async def _serve_burst(tmp_path: Path, *, multi_frame: bool) -> tuple[CapturingStream, Path]:
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    store = _store(config_dir, multi_frame=multi_frame)
+    for n in range(1, 6):
+        _reserve(store, f"bcmsg_abcdef0{n}", 2 + n, config_dir)
+    stream = CapturingStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = _session(tmp_path, stream, _runtime(config_dir, FakeBridgeClient()))
+    try:
+        await _serve_body_turn(session)
+        await _settle(session)
+    finally:
+        await session.dispose()
+    return stream, config_dir
+
+
+@pytest.mark.asyncio
+async def test_a_five_message_burst_is_one_turn_of_five_frames(tmp_path) -> None:
+    """The operator's ask: a burst is answered ONCE. Before: 5 consecutive
+    full-context provider turns (``off`` below still does exactly that)."""
+
+    stream, config_dir = await _serve_burst(tmp_path, multi_frame=True)
+    assert len(stream.requests) == 1, _layout(stream)
+    frames = [t for t in stream.texts(0) if BODY in t]
+    assert len(frames) == 5, _layout(stream)
+    # Rules ride the first frame only; seq order on the wire.
+    assert [f.startswith("VERIFIED SOURCE") for f in frames] == [False, True, True, True, True]
+    seqs = [int(f.split("conversation_seq: ")[1].split("\n")[0]) for f in frames]
+    assert seqs == [3, 4, 5, 6, 7]
+    assert set(_states(config_dir).values()) == {"completed"}
+
+
+@pytest.mark.asyncio
+async def test_multi_frame_off_keeps_one_turn_per_body(tmp_path) -> None:
+    stream, config_dir = await _serve_burst(tmp_path, multi_frame=False)
+    assert len(stream.requests) == 5, _layout(stream)
+    assert all(sum(BODY in t for t in stream.texts(i)) == 1 for i in range(5))
+    assert set(_states(config_dir).values()) == {"completed"}
+
+
+async def _serve_interleaved(tmp_path: Path, *, multi_frame: bool) -> tuple[CapturingStream, Path]:
+    """Two conversations interleaved: aa1, bb1, aa2, bb2, aa3 (FIFO by admission)."""
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    store = _store(config_dir, multi_frame=multi_frame)
+    other = "bcv_qaconvbb"
+    for n, (conversation, message_id) in enumerate(
+        [
+            (CONVERSATION_ID, "bcmsg_aa000001"),
+            (other, "bcmsg_bb000001"),
+            (CONVERSATION_ID, "bcmsg_aa000002"),
+            (other, "bcmsg_bb000002"),
+            (CONVERSATION_ID, "bcmsg_aa000003"),
+        ],
+        start=1,
+    ):
+        _reserve(store, message_id, 2 + n, config_dir, conversation_id=conversation)
+    stream = CapturingStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = _session(tmp_path, stream, _runtime(config_dir, FakeBridgeClient()))
+    try:
+        await _serve_body_turn(session)
+        await _settle(session)
+    finally:
+        await session.dispose()
+    return stream, config_dir
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("multi_frame,requests", [(True, 2), (False, 5)])
+async def test_an_interleaved_two_conversation_burst_is_drained_in_one_pass(
+    tmp_path, multi_frame: bool, requests: int
+) -> None:
+    """Q1 (PR #4382): after the first row is attempted, the drain's exclusion
+    must not narrow the next read to that row's conversation. ``on``: one turn
+    per conversation; ``off``: one turn per body, exactly as before."""
+
+    stream, config_dir = await _serve_interleaved(tmp_path, multi_frame=multi_frame)
+    assert len(stream.requests) == requests, _layout(stream)
+    assert set(_states(config_dir).values()) == {"completed"}, _states(config_dir)

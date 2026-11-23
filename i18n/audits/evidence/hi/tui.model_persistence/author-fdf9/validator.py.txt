@@ -1,0 +1,100 @@
+"""Scoped mechanical author validation; neither self-audit nor native UI proof.
+Uses repository catalogue/context/ICU APIs without running the global checker.
+Rich wrapping is a diagnostic only, not styled NoticeBlock/native font evidence.
+"""
+from pathlib import Path
+from collections import Counter
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import sys
+from rich.console import Console
+from rich.text import Text
+from local_operator.i18n import catalogues, runtime
+
+ROOT = Path('/Users/damian/local-operator/.worktrees/i18n-model-persist-notice')
+NS = 'tui.model_persistence'
+assert Path.home() != Path('/Users/damian')
+assert not any(k.startswith('CMUX_') for k in os.environ)
+assert os.environ['LOCAL_OPERATOR_CONFIG_DIR'].startswith(str(Path.home()))
+print('ISOLATION PASS: scratch HOME/config; CMUX absent')
+for module in (catalogues, runtime):
+    assert Path(module.__file__).resolve().is_relative_to(ROOT)
+    print('MODULE', module.__name__, module.__file__)
+spec = importlib.util.spec_from_file_location('scoped_check', ROOT / 'scripts/i18n/check.py')
+check = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = check
+spec.loader.exec_module(check)
+paths = {loc: ROOT / f'local_operator/i18n/catalogues/{loc}/{NS}.json' for loc in ('en', 'hi')}
+paths['context'] = ROOT / f'local_operator/i18n/catalogues/en/{NS}.context.json'
+hashes = {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in paths.items()}
+assert hashes['en'] == '4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff'
+assert hashes['context'] == 'b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc'
+en = catalogues.load_catalogue('en', NS)
+hi = catalogues.load_catalogue('hi', NS)
+context = catalogues.context('en', NS)
+assert len(hi) == 4 and list(en) == list(hi) == list(context)
+assert list(hi) == [f'{NS}.{suffix}' for suffix in ('persist', 'settings', 'saved', 'with_model')]
+problems = []
+check._check_context_sidecar(problems, 'en', NS, en)
+plural = json.loads((ROOT / 'local_operator/i18n/data/plural_rules.json').read_text())
+controls = set(range(0x202A, 0x202F)) | set(range(0x2066, 0x206A)) | {0x200E, 0x200F, 0x061C}
+for key, source in en.items():
+    target = hi[key]
+    assert catalogues.context_entry_problem(context[key]) is None
+    source_args = runtime.message_arguments(source)
+    target_args = runtime.message_arguments(target)
+    assert check.arguments_match(source_args, target_args, translated_source=target, locale='hi', plural=plural)
+    assert all(kind == 'simple' for _, kind in target_args)
+    assert Counter(re.findall(r'\{(\w+)\}', source)) == Counter(re.findall(r'\{(\w+)\}', target))
+    for value in (source, target):
+        ast = runtime.parse_message(value)
+        assert not any(getattr(node, 'kind', None) in ('plural', 'select', 'selectordinal') for node in ast)
+        assert runtime.plural_selectors(value) == ()
+    check._check_plural_categories(problems, 'hi', NS, key, target, plural, 'hi')
+    assert not any(ord(c) in controls for c in target)
+    for command in ('/model default', '/model saved', '/settings'):
+        assert source.count(command) == target.count(command)
+    human = re.sub(r'/model default|/model saved|/settings|\{label\}|\{routes\}', '', target)
+    assert not re.search(r'[A-Za-z]', human)
+    print('KEY PASS', key, 'args=', target_args, 'plural/select arms=0')
+assert problems == [], problems
+print('OFFICIAL SCOPED CONTEXT/CATALOGUE/ICU CHECK PASS; problems=[]')
+route_sets = {
+    'ordinary': ('persist', 'saved', 'settings'),
+    'missing_model_setup': ('persist', 'settings'),
+    'absent_unknown_hosting': ('settings',),
+}
+labels = ('openai/gpt-6', 'anthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-0123456789')
+for family, suffixes in route_sets.items():
+    routes = ' · '.join(runtime.render_message(hi[f'{NS}.{s}'], {}, 'hi') for s in suffixes)
+    if family == 'absent_unknown_hosting':
+        assert '/model' not in routes and '/settings' in routes
+    print('ROUTES', family, repr(routes))
+    for label in labels:
+        rendered = runtime.render_message(hi[f'{NS}.with_model'], {'label': label, 'routes': routes}, 'hi')
+        assert rendered == f'मॉडल: {label} — {routes}'
+        assert rendered.count(label) == rendered.count(routes) == 1
+        print('RENDER', family, repr(rendered))
+        for width in (80, 100, 120):
+            lines = Text(rendered).wrap(Console(width=width, force_terminal=False, color_system=None), width)
+            print('RICH_WRAP_ONLY', family, 'label_chars=', len(label), 'width=', width, 'line_cells=', [line.cell_len for line in lines])
+for missing in ('label', 'routes'):
+    args = {'label': labels[0], 'routes': 'पहले से स्थानीयकृत {opaque} /settings'}
+    del args[missing]
+    try:
+        runtime.render_message(hi[f'{NS}.with_model'], args, 'hi')
+    except runtime.MessageFormatError as exc:
+        print('NEGATIVE PASS missing', missing, type(exc).__name__, str(exc))
+    else:
+        raise AssertionError('Missing argument accepted')
+opaque = {'label': 'provider/model-{opaque}[x]--flag', 'routes': 'पहले से स्थानीयकृत {opaque} /settings'}
+assert runtime.render_message(hi[f'{NS}.with_model'], opaque, 'hi') == f"मॉडल: {opaque['label']} — {opaque['routes']}"
+print('OPAQUE ARGUMENT PASS: no recursive interpolation/translation')
+for name, path in paths.items():
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == hashes[name]
+print('FROZEN INPUTS/TARGET BEFORE-AFTER PASS', json.dumps(hashes, sort_keys=True))
+print('PASS: 4 keys, ordered parity, official scoped APIs, commands exact, arguments once, negative controls, zero plural/select arms, no manual bidi controls')
+print('NOT PROVEN: native Devanagari shaping/fonts, styled NoticeBlock pristine/non-empty geometry, integration, independent audit A/B, admission, generator, eligibility, release')

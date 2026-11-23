@@ -53,6 +53,25 @@ The event JSON projection for line-oriented consumers is
 `local_operator.headless_print.printable_event` — the same mapping `lop exec
 --json` prints. The SDK does not invent a second serialization.
 
+## Verbose diagnostics
+
+Set `verbose=True` to log tool calls, output validation, turn usage, and
+terminal status at `INFO`. The SDK does not configure logging for your app.
+For example, in a standalone script (using the `spec` and `roots` above):
+
+```python
+import logging
+
+logging.basicConfig()  # In an existing app, use its configured handlers.
+logging.getLogger("local_operator.sdk").setLevel(logging.INFO)
+
+async with open_session(spec, roots=roots, verbose=True) as session:
+    await session.prompt("Summarize the workspace.")
+```
+
+A tool status of `returned` means the tool did not report a tool-level error;
+it does not imply that a subprocess it ran exited successfully.
+
 ## Entry points
 
 | Entry point | What it does | Exec-parity reference |
@@ -88,6 +107,7 @@ same construction, not a copy of it. On top:
 | `approvals` | See the table below. |
 | `name`, `goal` | Conversation title and standing goal. |
 | `output_format`, `output_schema`, `output_retries` | Enforce the final response's format (and optionally a schema) for every turn — the same contract `lop exec --output-format` installs, applied through the same post-open `Session.set_output_contract`. See [Enforcing the final response contract](#enforcing-the-final-response-contract). |
+| `mcp_ready_timeout_s` | How long the first `prompt()` of an in-process session waits for MCP servers still connecting (default `30.0` s; `None` opts out). See [Required-tool readiness](#required-tool-readiness--the-first-prompt-waits-by-default). |
 | `notifications` | A *spawned* runtime is silenced by default (the harness's "nobody is watching" posture); `True` lets it inherit the launcher's posture. In-process sessions leave notification policy to the host process. |
 
 Not carried, deliberately: `--effort` (a runner-level knob applied after
@@ -298,15 +318,49 @@ installation contains it before relying on localized SDK refusals. No provider
 request is needed to inspect version/source identity. See [the i18n HOWTO](I18N.md)
 for the distinct source, tag, publication and installation observations.
 
-## Required-tool readiness — wait before you prompt
+## Required-tool readiness — the first prompt waits by default
 
 MCP discovery is asynchronous: servers deferred past the startup gate connect
-on background continuations, so an inventory read right after `open_session`
-can catch a declared tool still arriving — and the first model request
-publishes its tool array once per turn, so a prompt that wins that race is
-answered with "Tool not found". Owning sessions expose a typed, bounded gate
-instead of leaving each caller to hand-roll a manager wait plus an inventory
-read:
+on background continuations, so a prompt sent right after `open_session` can
+win the race — measured against a 1.5 s stdio server in fresh roots, the first
+request left 0.36 s after `prompt()` with the server still `connecting`, and
+the model's `read mcp://slowfix/search` answered "Unknown tool".
+
+**So the first `prompt()` of an in-process session (`mode="own"`) waits,
+bounded, for every configured MCP server that is still connecting** — not
+only for declared tools. The wait ends the moment nothing is left connecting;
+servers that already settled (`auth-required`, a crashed command, one parked in
+reconnect backoff) never hold it, and a server that settles as failed is
+logged and the prompt proceeds without its tools. Later prompts do not wait
+again once the first one got through. Cancelling the `prompt()` task ends the
+wait at once, and `session.abort()` within a quarter-second poll; either way
+discovery keeps running and the next `prompt()` meets the wait again.
+
+```python
+# Default: wait up to 30 s (the measured first-turn bound; cold stdio servers
+# took median 0.68-0.85 s, max 3.48 s).
+spec = sdk.SessionSpec(hosting="anthropic", model="claude-sonnet-4-5")
+
+# A tighter (or looser) bound; 0 means "must already be connected".
+spec = sdk.SessionSpec(hosting="anthropic", model="claude-sonnet-4-5", mcp_ready_timeout_s=5.0)
+
+# Opt out: the first prompt is sent at once and may race discovery
+# (declared tools included); gate by hand with wait_for_tools() if needed.
+spec = sdk.SessionSpec(hosting="anthropic", model="claude-sonnet-4-5", mcp_ready_timeout_s=None)
+```
+
+A server **still connecting when the bound runs out** fails the prompt with
+`McpServersNotReady` (from `local_operator.session.declared_mcp_ready`)
+*before anything is sent*: `servers` maps each still-connecting server to its
+status, `connected` names the servers that made it, `elapsed_s`/`timeout_s`
+say how long it waited. Discovery is not cancelled, and the next `prompt()`
+meets the gate again rather than racing. A declared tool whose server failed
+keeps raising `DeclaredMcpToolsUnavailable`, as before. The setting applies to
+`open_session(mode="own")` only: `mode="attach"` and `spawn_session` refuse a
+non-default value, since neither runs the turn loop in this process.
+
+For a specific tool, owning sessions also expose a typed, bounded gate instead
+of leaving each caller to hand-roll a manager wait plus an inventory read:
 
 ```python
 async with sdk.open_session(spec, roots=roots) as session:
@@ -324,6 +378,11 @@ or after one bounded discovery wait), `pending` (still missing while
 discovery is in flight) or `missing` (discovery settled without it, or no
 discovery manager exists). The result also partitions the request into
 `present`/`missing` name tuples and reports whether discovery had settled.
+Naming a lazy MCP tool here activates it, exactly as a declaration does: a
+connected server's tools stay out of the enforced inventory until something
+selects them, so a named one is granted its schema (within the session's
+declaration, never past it; never in a delegated child) instead of reading
+`missing`.
 
 Details that matter: already-reachable names — built-ins included — return
 ready immediately without waiting on unrelated slow servers; a timeout

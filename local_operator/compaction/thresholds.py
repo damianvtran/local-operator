@@ -37,11 +37,13 @@ __all__ = [
     "DEFAULT_IDLE_THRESHOLD_TOKENS",
     "CompactionSettings",
     "RECOVERY_BAND",
+    "WIRE_LANDING_BAND",
     "WIRE_RECOVERY_BAND",
     "cleared_headroom",
     "cleared_wire_headroom",
     "resolve_wire_bytes_budget",
     "resolve_wire_bytes_trigger",
+    "wire_landing_bytes",
     "compaction_context_tokens",
     "effective_reserve_tokens",
     "resolve_advisor_floor_tokens",
@@ -720,6 +722,11 @@ def cleared_headroom(residual_tokens: int, threshold_tokens: int) -> int:
 #: Same 0.8 ratio, same meaning: a pass counts as having created byte headroom
 #: only when the residual request lands at or below ``0.8 x`` the soft byte
 #: trigger.
+#:
+#: This is the ACCEPTANCE line only. Where a pass AIMS is
+#: :data:`WIRE_LANDING_BAND`, which is lower: the cut and capture elision used
+#: to aim here as well, and a pass that lands exactly on the acceptance line
+#: is back at the trigger three screenshots later.
 WIRE_RECOVERY_BAND = 0.8
 
 
@@ -739,6 +746,82 @@ def cleared_wire_headroom(residual_bytes: int, settings: CompactionSettings) -> 
     if trigger <= 0:
         return True
     return residual_bytes <= WIRE_RECOVERY_BAND * trigger
+
+
+#: Where a byte-fired pass AIMS, as a share of the soft byte trigger: the size
+#: the byte-aware cut and capture elision land the kept window at. A separate
+#: number from :data:`WIRE_RECOVERY_BAND` because the two answer different
+#: questions and sharing one constant made the landing as shallow as the
+#: acceptance line allows:
+#:
+#: - ``WIRE_RECOVERY_BAND`` is the ACCEPTANCE line ("did this pass create any
+#:   real headroom?", read by the auto-continue gate). It has to tolerate a
+#:   pass the cut's protections stopped short, so it sits high.
+#: - This is the TARGET. Whatever is left between it and the trigger is all
+#:   the room the session has before the next byte-fired pass, and every pass
+#:   rewrites the prompt prefix, so that room is what sets how often the
+#:   prompt cache is lost.
+#:
+#: Aiming at the acceptance line left ``0.2 x 16 MB = 3.2 MB``, which is fewer
+#: than three 1280x720 PNG screenshots (median 1.24 MB as base64 on the
+#: episode below). Measured on three recorded long screen-driving episodes
+#: (local-operator 18af15e938a8): 25 / 18 / 11 byte-fired passes, the first at
+#: only ~35k-71k tokens of a 400k token threshold; prompt-cache share of input
+#: fell from 99-100% on the request before a pass to 18-20% on the request
+#: after, and those first-after-pass requests carried 76-89% of each episode's
+#: uncached input.
+#:
+#: Sized by replaying the longest of those episodes (361 tool turns, 121
+#: screenshots) through the real gate, cut walk and elision, varying only
+#: this share. A replay, not a live run:
+#:
+#: ====== ====== ================== ================= ================
+#: share  passes screenshots between room left, median raw frames kept
+#: ====== ====== ================== ================= ================
+#: 0.8    25     4 (min 3)          3.9-4.3 MB        10
+#: 0.625  17     6 (min 5)          6.5-6.8 MB        8
+#: 0.5    14     7-8 (min 7)        8.3-8.5 MB        6
+#: 0.375  11     9.5-10 (min 9)     10.2-10.6 MB      4-5
+#: 0.25   9-10   11 (min 10)        12.3-12.6 MB      3
+#: ====== ====== ================== ================= ================
+#:
+#: (0.8 reproduces the 25 passes the episode recorded.) On this replay the
+#: saving flattens while the raw frames a pass keeps go on falling:
+#: 0.8 -> 0.5 removes 11 passes for 4 frames,
+#: 0.5 -> 0.25 removes 4-5 more for another 3. Half the trigger is where a
+#: pass keeps as much image history as the room it buys, and it is past the
+#: steep part of that curve; a lower share is a reasonable retune if live
+#: sessions show six raw frames is more than they use.
+#:
+#: Superseded captures are elided first and the cut only moves for the
+#: shortfall (see ``cutpoint.advance_cut_to_wire_band``), and the newest frame
+#: and user-attached images are never traded for the target, so a lower
+#: target costs older raw frames (they move into the archive), not the
+#: current observation.
+#:
+#: MUST stay at or below ``WIRE_RECOVERY_BAND``: a pass that lands exactly on
+#: target and is then judged "no headroom" would have its auto-continue
+#: suppressed, the dead loop that constant exists to prevent.
+#: :func:`wire_landing_bytes` enforces the relation rather than trusting it.
+WIRE_LANDING_BAND = 0.5
+
+
+def wire_landing_bytes(settings: CompactionSettings) -> int:
+    """Byte size a byte-fired pass aims to leave the request at; 0 = disabled.
+
+    The ONE definition of the landing target for the two places that must
+    agree on it, the byte-aware cut and capture elision at the commit. ``0``
+    when the byte trigger is disabled, so a session that never opted into
+    byte pressure does no byte-side work at all.
+
+    Clamped to the acceptance band so retuning either constant alone can never
+    produce a pass that hits its target and still fails
+    :func:`cleared_wire_headroom`.
+    """
+    trigger = resolve_wire_bytes_trigger(settings)
+    if trigger <= 0:
+        return 0
+    return int(min(WIRE_LANDING_BAND, WIRE_RECOVERY_BAND) * trigger)
 
 
 def resolve_strategy(

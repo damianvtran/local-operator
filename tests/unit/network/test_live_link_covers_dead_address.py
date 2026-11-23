@@ -79,7 +79,14 @@ def _inbound_link(
 ) -> None:
     """B dials A: the link A holds is real and cannot be pinned to a declared address."""
     _bind_and_start(server_b, record)
-    peer_link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    # B names A as the listener it expects (mesh-listener-auth), so A proves its
+    # identity before the link is trusted: the covering link is a PROVEN one.
+    peer_link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert peer_link is not None, reason
     link = server_a._link_for(server_b.identity.device_id)  # noqa: SLF001 — the one link seam
     assert link is not None

@@ -1,0 +1,3 @@
+{
+  "session.remote_peek.display_too_large": "Try `head=20` for the opening steps or `digest` for a compact fold.\nThe newest history exceeded a display page or runtime socket limit.\nDisplay page limits: {bytes} bytes or {messages} messages.\nFor exact history, open the conversation on the owning device."
+}

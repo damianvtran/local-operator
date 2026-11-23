@@ -1,0 +1,691 @@
+{
+  "schema": "approval-repair-r2-exit-matrix/v1",
+  "head": "4880031aeed59ef17ae6ffccc15d28e1fc0db104",
+  "freeze_reason": "R1 full audits failed; completed R2 still has concrete ES/VI majors. Freeze before third wave; no new scope.",
+  "frozen_major_ids": [
+    "R2-M01",
+    "R2-M02",
+    "R2-M03",
+    "R2-M04",
+    "R2-M05",
+    "R2-M06",
+    "R2-M07",
+    "R2-M08"
+  ],
+  "rows": [
+    {
+      "id": "R2-M01",
+      "locale": "es",
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.help",
+      "severity": "major",
+      "status": "accepted_by_Root; unresolved at K",
+      "citations": [
+        {
+          "receipt": "i18n/audits/evidence/approval-repair-r2-originals/es-A.json",
+          "pointer": "/findings/0",
+          "id": "ES-A-R2-M1",
+          "proposal_quoted_from_source": "'predeterminado' no envía nada (OpenRouter pasa a otro servidor cuando falla el preferido); 'desactivado' hace que la petición falle en vez de pasar a un servidor fuera de tus preferencias.",
+          "finding_original": {
+            "id": "ES-A-R2-M1",
+            "severity": "major",
+            "key": "wire.settings.providers_openrouter_allow_fallbacks.help",
+            "current": "'default' no envía nada (OpenRouter pasa a otro host cuando falla el preferido); 'false' falla en vez de pasar a un host fuera de tus preferencias.",
+            "proposed": "'predeterminado' no envía nada (OpenRouter pasa a otro servidor cuando falla el preferido); 'desactivado' hace que la petición falle en vez de pasar a un servidor fuera de tus preferencias.",
+            "reason": "Meaning is accurate, but display help names untranslated default/false instead of the Spanish selectable labels.",
+            "path": "local_operator/settings_io.py localized Setting.help -> local_operator/tui/widgets/settings_view.py:5284; Choice.label independently painted at :4396-4410",
+            "exception_decision": "Quoted words here identify UI choices, not executable/config examples. In particular default is not the serialized value: these OpenRouter choices use empty string. Preserve actual Choice.value and config/CLI spelling in code."
+          }
+        },
+        {
+          "receipt": "i18n/audits/evidence/approval-repair-r2-originals/es-B.json",
+          "pointer": "/findings/0",
+          "id": "ES-B-R2-M1",
+          "proposal_quoted_from_source": "«predeterminado» no envía nada (OpenRouter pasa a otro servidor cuando falla el preferido); «desactivado» (`false`) falla en vez de pasar a un servidor fuera de tus preferencias.",
+          "finding_original": {
+            "id": "ES-B-R2-M1",
+            "severity": "major",
+            "key": "wire.settings.providers_openrouter_allow_fallbacks.help",
+            "current": "'default' no envía nada (OpenRouter pasa a otro host cuando falla el preferido); 'false' falla en vez de pasar a un host fuera de tus preferencias.",
+            "source": "'default' sends nothing (OpenRouter falls through to another host when the preferred one fails); 'false' fails rather than fall through to a host outside your preferences.",
+            "proposed": "«predeterminado» no envía nada (OpenRouter pasa a otro servidor cuando falla el preferido); «desactivado» (`false`) falla en vez de pasar a un servidor fuera de tus preferencias.",
+            "reason": "The help refers to selectable modes using raw English tokens although their displayed labels are now Spanish; it never names the translated choice a user must select. Keep real config values as explicit code adjuncts, not substitutes for localized display references.",
+            "code_path": "local_operator/settings_io.py:2217-2424,5250-5282 constructs localized Setting.help and separate localized Choice.label; local_operator/tui/widgets/settings_view.py:4397-4400 paints Choice.label and :5284 paints Setting.help",
+            "scope": "explicit R2 direct-help neighbor of repaired human labels",
+            "group": "localized-choice-reference-mismatch"
+          }
+        }
+      ],
+      "source_state": "human help references raw English options rather than actual visible localized Choice.label",
+      "intended_transition": "Reference actual current localized human Choice.label; preserve any explicitly named stable API/config token as code, never substitute it for the human label",
+      "authority_owner": {
+        "role": "fresh locale translator, not integrator",
+        "session": "87094744ea9d"
+      },
+      "pinned_K_choice_label_evidence": [
+        {
+          "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+          "label_quoted_from_pinned_K": "desactivado",
+          "value_sha256": "7ecad529e3cd1b96d328458f0b40d73b234392aff7ee4c95bc7c9606946f7e12"
+        },
+        {
+          "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+          "label_quoted_from_pinned_K": "predeterminado",
+          "value_sha256": "85e6c42a8581b8e91a8e3f1da9c9cf5473f52152edd2b3082ab0712648ac40c2"
+        }
+      ],
+      "proposal_authority": "Quoted audit proposals are leads, NOT approved new translations; do not blindly use activado/desactivado when current visible labels differ",
+      "exit_criteria": [
+        "Exact helper value authored by fresh locale LLM against pinned source/context/glossary",
+        "Human option references agree with actual current Choice.label; technical wire values/config commands unchanged",
+        "Independent A and B delta audit of exact failed keys and direct neighbors on one new pinned head; no unresolved blocker/major",
+        "Preserve original failed R1 and R2 verdicts; do not relabel them PASS"
+      ]
+    },
+    {
+      "id": "R2-M02",
+      "locale": "es",
+      "key": "wire.settings.providers_openrouter_data_collection.help",
+      "severity": "major",
+      "status": "accepted_by_Root; unresolved at K",
+      "citations": [
+        {
+          "receipt": "i18n/audits/evidence/approval-repair-r2-originals/es-A.json",
+          "pointer": "/findings/1",
+          "id": "ES-A-R2-M2",
+          "proposal_quoted_from_source": "'denegar' excluye los servidores que puedan entrenar con tus prompts o retenerlos. 'predeterminado' no envía ninguna preferencia (el valor predeterminado de OpenRouter es permitir).",
+          "finding_original": {
+            "id": "ES-A-R2-M2",
+            "severity": "major",
+            "key": "wire.settings.providers_openrouter_data_collection.help",
+            "current": "'deny' excluye los hosts que puedan entrenar con tus prompts o retenerlos. 'default' no envía preferencia (el valor predeterminado de OpenRouter: allow).",
+            "proposed": "'denegar' excluye los servidores que puedan entrenar con tus prompts o retenerlos. 'predeterminado' no envía ninguna preferencia (el valor predeterminado de OpenRouter es permitir).",
+            "reason": "Meaning is accurate but deny/default/allow are English selector references; nearby labels now say denegar/predeterminado/permitir.",
+            "path": "local_operator/settings_io.py localized Setting.help -> local_operator/tui/widgets/settings_view.py:5284; Choice.label independently painted at :4396-4410",
+            "exception_decision": "Quoted words here identify UI choices, not executable/config examples. In particular default is not the serialized value: these OpenRouter choices use empty string. Preserve actual Choice.value and config/CLI spelling in code."
+          }
+        },
+        {
+          "receipt": "i18n/audits/evidence/approval-repair-r2-originals/es-B.json",
+          "pointer": "/findings/1",
+          "id": "ES-B-R2-M2",
+          "proposal_quoted_from_source": "«denegar» (`deny`) excluye los servidores que puedan entrenar con tus prompts o retenerlos. «predeterminado» no envía preferencia (el valor predeterminado de OpenRouter es «permitir», `allow`).",
+          "finding_original": {
+            "id": "ES-B-R2-M2",
+            "severity": "major",
+            "key": "wire.settings.providers_openrouter_data_collection.help",
+            "current": "'deny' excluye los hosts que puedan entrenar con tus prompts o retenerlos. 'default' no envía preferencia (el valor predeterminado de OpenRouter: allow).",
+            "source": "'deny' excludes hosts that may train on or retain your prompts. 'default' sends no preference (OpenRouter's default: allow).",
+            "proposed": "«denegar» (`deny`) excluye los servidores que puedan entrenar con tus prompts o retenerlos. «predeterminado» no envía preferencia (el valor predeterminado de OpenRouter es «permitir», `allow`).",
+            "reason": "The help refers to selectable modes using raw English tokens although their displayed labels are now Spanish; it never names the translated choice a user must select. Keep real config values as explicit code adjuncts, not substitutes for localized display references.",
+            "code_path": "local_operator/settings_io.py:2217-2424,5250-5282 constructs localized Setting.help and separate localized Choice.label; local_operator/tui/widgets/settings_view.py:4397-4400 paints Choice.label and :5284 paints Setting.help",
+            "scope": "explicit R2 direct-help neighbor of repaired human labels",
+            "group": "localized-choice-reference-mismatch"
+          }
+        }
+      ],
+      "source_state": "human help references raw English options rather than actual visible localized Choice.label",
+      "intended_transition": "Reference actual current localized human Choice.label; preserve any explicitly named stable API/config token as code, never substitute it for the human label",
+      "authority_owner": {
+        "role": "fresh locale translator, not integrator",
+        "session": "87094744ea9d"
+      },
+      "pinned_K_choice_label_evidence": [
+        {
+          "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+          "label_quoted_from_pinned_K": "permitir",
+          "value_sha256": "7f23cf67a86d3be64dce1939e13a974c7efc227802f395dc6aa6b2922098daec"
+        },
+        {
+          "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+          "label_quoted_from_pinned_K": "denegar",
+          "value_sha256": "134e109925dee01635b41b126c908fa8839a41c4196cd425247e60ea5e82cb90"
+        },
+        {
+          "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+          "label_quoted_from_pinned_K": "predeterminado",
+          "value_sha256": "85e6c42a8581b8e91a8e3f1da9c9cf5473f52152edd2b3082ab0712648ac40c2"
+        }
+      ],
+      "proposal_authority": "Quoted audit proposals are leads, NOT approved new translations; do not blindly use activado/desactivado when current visible labels differ",
+      "exit_criteria": [
+        "Exact helper value authored by fresh locale LLM against pinned source/context/glossary",
+        "Human option references agree with actual current Choice.label; technical wire values/config commands unchanged",
+        "Independent A and B delta audit of exact failed keys and direct neighbors on one new pinned head; no unresolved blocker/major",
+        "Preserve original failed R1 and R2 verdicts; do not relabel them PASS"
+      ]
+    },
+    {
+      "id": "R2-M03",
+      "locale": "es",
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.help",
+      "severity": "major",
+      "status": "accepted_by_Root; unresolved at K",
+      "citations": [
+        {
+          "receipt": "i18n/audits/evidence/approval-repair-r2-originals/es-A.json",
+          "pointer": "/findings/2",
+          "id": "ES-A-R2-M3",
+          "proposal_quoted_from_source": "'activado': restringe a los endpoints cuya salida de texto pueda destilarse. 'predeterminado': no se envía nada.",
+          "finding_original": {
+            "id": "ES-A-R2-M3",
+            "severity": "major",
+            "key": "wire.settings.providers_openrouter_enforce_distillable_text.help",
+            "current": "'true': restringe a los endpoints cuya salida de texto pueda destilarse. 'default': no se envía nada.",
+            "proposed": "'activado': restringe a los endpoints cuya salida de texto pueda destilarse. 'predeterminado': no se envía nada.",
+            "reason": "Endpoint is endorsed technical vocabulary; true/default are stale untranslated display-option references.",
+            "path": "local_operator/settings_io.py localized Setting.help -> local_operator/tui/widgets/settings_view.py:5284; Choice.label independently painted at :4396-4410",
+            "exception_decision": "Quoted words here identify UI choices, not executable/config examples. In particular default is not the serialized value: these OpenRouter choices use empty string. Preserve actual Choice.value and config/CLI spelling in code."
+          }
+        },
+        {
+          "receipt": "i18n/audits/evidence/approval-repair-r2-originals/es-B.json",
+          "pointer": "/findings/2",
+          "id": "ES-B-R2-M3",
+          "proposal_quoted_from_source": "«activado» (`true`): restringe a los endpoints cuya salida de texto pueda destilarse. «predeterminado»: no se envía nada.",
+          "finding_original": {
+            "id": "ES-B-R2-M3",
+            "severity": "major",
+            "key": "wire.settings.providers_openrouter_enforce_distillable_text.help",
+            "current": "'true': restringe a los endpoints cuya salida de texto pueda destilarse. 'default': no se envía nada.",
+            "source": "'true': restrict to endpoints whose text output may be distilled. 'default': nothing sent.",
+            "proposed": "«activado» (`true`): restringe a los endpoints cuya salida de texto pueda destilarse. «predeterminado»: no se envía nada.",
+            "reason": "The help refers to selectable modes using raw English tokens although their displayed labels are now Spanish; it never names the translated choice a user must select. Keep real config values as explicit code adjuncts, not substitutes for localized display references.",
+            "code_path": "local_operator/settings_io.py:2217-2424,5250-5282 constructs localized Setting.help and separate localized Choice.label; local_operator/tui/widgets/settings_view.py:4397-4400 paints Choice.label and :5284 paints Setting.help",
+            "scope": "explicit R2 direct-help neighbor of repaired human labels",
+            "group": "localized-choice-reference-mismatch"
+          }
+        }
+      ],
+      "source_state": "human help references raw English options rather than actual visible localized Choice.label",
+      "intended_transition": "Reference actual current localized human Choice.label; preserve any explicitly named stable API/config token as code, never substitute it for the human label",
+      "authority_owner": {
+        "role": "fresh locale translator, not integrator",
+        "session": "87094744ea9d"
+      },
+      "pinned_K_choice_label_evidence": [
+        {
+          "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+          "label_quoted_from_pinned_K": "activado",
+          "value_sha256": "57e5cd63206e2c42f3ec866d0e1154bd68cb0c2e9a1c2eb2605d9d67d2d1b2de"
+        },
+        {
+          "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+          "label_quoted_from_pinned_K": "predeterminado",
+          "value_sha256": "85e6c42a8581b8e91a8e3f1da9c9cf5473f52152edd2b3082ab0712648ac40c2"
+        }
+      ],
+      "proposal_authority": "Quoted audit proposals are leads, NOT approved new translations; do not blindly use activado/desactivado when current visible labels differ",
+      "exit_criteria": [
+        "Exact helper value authored by fresh locale LLM against pinned source/context/glossary",
+        "Human option references agree with actual current Choice.label; technical wire values/config commands unchanged",
+        "Independent A and B delta audit of exact failed keys and direct neighbors on one new pinned head; no unresolved blocker/major",
+        "Preserve original failed R1 and R2 verdicts; do not relabel them PASS"
+      ]
+    },
+    {
+      "id": "R2-M04",
+      "locale": "es",
+      "key": "wire.settings.providers_openrouter_require_parameters.help",
+      "severity": "major",
+      "status": "accepted_by_Root; unresolved at K",
+      "citations": [
+        {
+          "receipt": "i18n/audits/evidence/approval-repair-r2-originals/es-A.json",
+          "pointer": "/findings/3",
+          "id": "ES-A-R2-M4",
+          "proposal_quoted_from_source": "'activado' restringe a los servidores que admiten todos los parámetros que envías (herramientas, salida estructurada); con 'predeterminado', OpenRouter puede descartar los no admitidos en silencio.",
+          "finding_original": {
+            "id": "ES-A-R2-M4",
+            "severity": "major",
+            "key": "wire.settings.providers_openrouter_require_parameters.help",
+            "current": "'true' restringe a los hosts que admiten todos los parámetros que envías (herramientas, salida estructurada); con 'default', OpenRouter puede descartar los no admitidos en silencio.",
+            "proposed": "'activado' restringe a los servidores que admiten todos los parámetros que envías (herramientas, salida estructurada); con 'predeterminado', OpenRouter puede descartar los no admitidos en silencio.",
+            "reason": "Safety consequence preserved, but true/default no longer match the human selector labels.",
+            "path": "local_operator/settings_io.py localized Setting.help -> local_operator/tui/widgets/settings_view.py:5284; Choice.label independently painted at :4396-4410",
+            "exception_decision": "Quoted words here identify UI choices, not executable/config examples. In particular default is not the serialized value: these OpenRouter choices use empty string. Preserve actual Choice.value and config/CLI spelling in code."
+          }
+        },
+        {
+          "receipt": "i18n/audits/evidence/approval-repair-r2-originals/es-B.json",
+          "pointer": "/findings/3",
+          "id": "ES-B-R2-M4",
+          "proposal_quoted_from_source": "«activado» (`true`) restringe a los servidores que admiten todos los parámetros que envías (herramientas, salida estructurada); con «predeterminado», OpenRouter puede descartar los no admitidos en silencio.",
+          "finding_original": {
+            "id": "ES-B-R2-M4",
+            "severity": "major",
+            "key": "wire.settings.providers_openrouter_require_parameters.help",
+            "current": "'true' restringe a los hosts que admiten todos los parámetros que envías (herramientas, salida estructurada); con 'default', OpenRouter puede descartar los no admitidos en silencio.",
+            "source": "'true' restricts to hosts that support every parameter you send (tools, structured output); 'default' lets OpenRouter silently drop unsupported ones.",
+            "proposed": "«activado» (`true`) restringe a los servidores que admiten todos los parámetros que envías (herramientas, salida estructurada); con «predeterminado», OpenRouter puede descartar los no admitidos en silencio.",
+            "reason": "The help refers to selectable modes using raw English tokens although their displayed labels are now Spanish; it never names the translated choice a user must select. Keep real config values as explicit code adjuncts, not substitutes for localized display references.",
+            "code_path": "local_operator/settings_io.py:2217-2424,5250-5282 constructs localized Setting.help and separate localized Choice.label; local_operator/tui/widgets/settings_view.py:4397-4400 paints Choice.label and :5284 paints Setting.help",
+            "scope": "explicit R2 direct-help neighbor of repaired human labels",
+            "group": "localized-choice-reference-mismatch"
+          }
+        }
+      ],
+      "source_state": "human help references raw English options rather than actual visible localized Choice.label",
+      "intended_transition": "Reference actual current localized human Choice.label; preserve any explicitly named stable API/config token as code, never substitute it for the human label",
+      "authority_owner": {
+        "role": "fresh locale translator, not integrator",
+        "session": "87094744ea9d"
+      },
+      "pinned_K_choice_label_evidence": [
+        {
+          "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+          "label_quoted_from_pinned_K": "activado",
+          "value_sha256": "57e5cd63206e2c42f3ec866d0e1154bd68cb0c2e9a1c2eb2605d9d67d2d1b2de"
+        },
+        {
+          "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+          "label_quoted_from_pinned_K": "predeterminado",
+          "value_sha256": "85e6c42a8581b8e91a8e3f1da9c9cf5473f52152edd2b3082ab0712648ac40c2"
+        }
+      ],
+      "proposal_authority": "Quoted audit proposals are leads, NOT approved new translations; do not blindly use activado/desactivado when current visible labels differ",
+      "exit_criteria": [
+        "Exact helper value authored by fresh locale LLM against pinned source/context/glossary",
+        "Human option references agree with actual current Choice.label; technical wire values/config commands unchanged",
+        "Independent A and B delta audit of exact failed keys and direct neighbors on one new pinned head; no unresolved blocker/major",
+        "Preserve original failed R1 and R2 verdicts; do not relabel them PASS"
+      ]
+    },
+    {
+      "id": "R2-M05",
+      "locale": "es",
+      "key": "wire.settings.providers_openrouter_sort.help",
+      "severity": "major",
+      "status": "accepted_by_Root; unresolved at K",
+      "citations": [
+        {
+          "receipt": "i18n/audits/evidence/approval-repair-r2-originals/es-A.json",
+          "pointer": "/findings/4",
+          "id": "ES-A-R2-M5",
+          "proposal_quoted_from_source": "Cómo clasifica OpenRouter los servidores para esta llamada. Puede desviarse del servidor que tiene tu caché de prompts en caliente (inicio en frío en conversaciones largas); 'predeterminado' no envía preferencia alguna.",
+          "finding_original": {
+            "id": "ES-A-R2-M5",
+            "severity": "major",
+            "key": "wire.settings.providers_openrouter_sort.help",
+            "current": "Cómo clasifica OpenRouter los hosts para esta llamada. Puede desviarse del host que tiene tu caché de prompts en caliente (inicio en frío en conversaciones largas); 'default' no envía preferencia alguna.",
+            "proposed": "Cómo clasifica OpenRouter los servidores para esta llamada. Puede desviarse del servidor que tiene tu caché de prompts en caliente (inicio en frío en conversaciones largas); 'predeterminado' no envía preferencia alguna.",
+            "reason": "Cache/cold-start meaning survives; default is a human state reference, not an actual serialized value for the empty-string default.",
+            "path": "local_operator/settings_io.py localized Setting.help -> local_operator/tui/widgets/settings_view.py:5284; Choice.label independently painted at :4396-4410",
+            "exception_decision": "Quoted words here identify UI choices, not executable/config examples. In particular default is not the serialized value: these OpenRouter choices use empty string. Preserve actual Choice.value and config/CLI spelling in code."
+          }
+        },
+        {
+          "receipt": "i18n/audits/evidence/approval-repair-r2-originals/es-B.json",
+          "pointer": "/findings/4",
+          "id": "ES-B-R2-M5",
+          "proposal_quoted_from_source": "Cómo clasifica OpenRouter los servidores para esta llamada. Puede desviarse del servidor que tiene tu caché de prompts en caliente (inicio en frío en conversaciones largas); «predeterminado» no envía preferencia alguna.",
+          "finding_original": {
+            "id": "ES-B-R2-M5",
+            "severity": "major",
+            "key": "wire.settings.providers_openrouter_sort.help",
+            "current": "Cómo clasifica OpenRouter los hosts para esta llamada. Puede desviarse del host que tiene tu caché de prompts en caliente (inicio en frío en conversaciones largas); 'default' no envía preferencia alguna.",
+            "source": "How OpenRouter ranks hosts for this call. May route away from the host holding your warm prompt cache (a cold start on long conversations); 'default' sends no preference at all.",
+            "proposed": "Cómo clasifica OpenRouter los servidores para esta llamada. Puede desviarse del servidor que tiene tu caché de prompts en caliente (inicio en frío en conversaciones largas); «predeterminado» no envía preferencia alguna.",
+            "reason": "The help refers to selectable modes using raw English tokens although their displayed labels are now Spanish; it never names the translated choice a user must select. Keep real config values as explicit code adjuncts, not substitutes for localized display references.",
+            "code_path": "local_operator/settings_io.py:2217-2424,5250-5282 constructs localized Setting.help and separate localized Choice.label; local_operator/tui/widgets/settings_view.py:4397-4400 paints Choice.label and :5284 paints Setting.help",
+            "scope": "explicit R2 direct-help neighbor of repaired human labels",
+            "group": "localized-choice-reference-mismatch"
+          }
+        }
+      ],
+      "source_state": "human help references raw English options rather than actual visible localized Choice.label",
+      "intended_transition": "Reference actual current localized human Choice.label; preserve any explicitly named stable API/config token as code, never substitute it for the human label",
+      "authority_owner": {
+        "role": "fresh locale translator, not integrator",
+        "session": "87094744ea9d"
+      },
+      "pinned_K_choice_label_evidence": [
+        {
+          "key": "wire.settings.providers_openrouter_sort.choice.latency.label",
+          "label_quoted_from_pinned_K": "latencia",
+          "value_sha256": "8419b0685b7ad11e442c8c93f8d4fed24897468f2a614ba9caf02083c34738ad"
+        },
+        {
+          "key": "wire.settings.providers_openrouter_sort.choice.price.label",
+          "label_quoted_from_pinned_K": "precio",
+          "value_sha256": "97ea8f5e4eeaedb6168518787ecf897198366203b3ad03107c982731554ab13d"
+        },
+        {
+          "key": "wire.settings.providers_openrouter_sort.choice.throughput.label",
+          "label_quoted_from_pinned_K": "rendimiento",
+          "value_sha256": "a27ebec9795c1df8c136acb0beff060752e805f7efe2b90873e7204ea1c6dae2"
+        },
+        {
+          "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+          "label_quoted_from_pinned_K": "predeterminado",
+          "value_sha256": "85e6c42a8581b8e91a8e3f1da9c9cf5473f52152edd2b3082ab0712648ac40c2"
+        }
+      ],
+      "proposal_authority": "Quoted audit proposals are leads, NOT approved new translations; do not blindly use activado/desactivado when current visible labels differ",
+      "exit_criteria": [
+        "Exact helper value authored by fresh locale LLM against pinned source/context/glossary",
+        "Human option references agree with actual current Choice.label; technical wire values/config commands unchanged",
+        "Independent A and B delta audit of exact failed keys and direct neighbors on one new pinned head; no unresolved blocker/major",
+        "Preserve original failed R1 and R2 verdicts; do not relabel them PASS"
+      ]
+    },
+    {
+      "id": "R2-M06",
+      "locale": "es",
+      "key": "wire.settings.providers_openrouter_zdr.help",
+      "severity": "major",
+      "status": "accepted_by_Root; unresolved at K",
+      "citations": [
+        {
+          "receipt": "i18n/audits/evidence/approval-repair-r2-originals/es-A.json",
+          "pointer": "/findings/5",
+          "id": "ES-A-R2-M6",
+          "proposal_quoted_from_source": "'activado': restringe a los endpoints con retención de datos cero. 'predeterminado': no se envía nada.",
+          "finding_original": {
+            "id": "ES-A-R2-M6",
+            "severity": "major",
+            "key": "wire.settings.providers_openrouter_zdr.help",
+            "current": "'true': restringe a los endpoints con retención de datos cero. 'default': no se envía nada.",
+            "proposed": "'activado': restringe a los endpoints con retención de datos cero. 'predeterminado': no se envía nada.",
+            "reason": "Restriction is accurate but true/default remain English instead of activado/predeterminado.",
+            "path": "local_operator/settings_io.py localized Setting.help -> local_operator/tui/widgets/settings_view.py:5284; Choice.label independently painted at :4396-4410",
+            "exception_decision": "Quoted words here identify UI choices, not executable/config examples. In particular default is not the serialized value: these OpenRouter choices use empty string. Preserve actual Choice.value and config/CLI spelling in code."
+          }
+        },
+        {
+          "receipt": "i18n/audits/evidence/approval-repair-r2-originals/es-B.json",
+          "pointer": "/findings/5",
+          "id": "ES-B-R2-M6",
+          "proposal_quoted_from_source": "«activado» (`true`): restringe a los endpoints con retención de datos cero. «predeterminado»: no se envía nada.",
+          "finding_original": {
+            "id": "ES-B-R2-M6",
+            "severity": "major",
+            "key": "wire.settings.providers_openrouter_zdr.help",
+            "current": "'true': restringe a los endpoints con retención de datos cero. 'default': no se envía nada.",
+            "source": "'true': restrict to zero-data-retention endpoints. 'default': nothing sent.",
+            "proposed": "«activado» (`true`): restringe a los endpoints con retención de datos cero. «predeterminado»: no se envía nada.",
+            "reason": "The help refers to selectable modes using raw English tokens although their displayed labels are now Spanish; it never names the translated choice a user must select. Keep real config values as explicit code adjuncts, not substitutes for localized display references.",
+            "code_path": "local_operator/settings_io.py:2217-2424,5250-5282 constructs localized Setting.help and separate localized Choice.label; local_operator/tui/widgets/settings_view.py:4397-4400 paints Choice.label and :5284 paints Setting.help",
+            "scope": "explicit R2 direct-help neighbor of repaired human labels",
+            "group": "localized-choice-reference-mismatch"
+          }
+        }
+      ],
+      "source_state": "human help references raw English options rather than actual visible localized Choice.label",
+      "intended_transition": "Reference actual current localized human Choice.label; preserve any explicitly named stable API/config token as code, never substitute it for the human label",
+      "authority_owner": {
+        "role": "fresh locale translator, not integrator",
+        "session": "87094744ea9d"
+      },
+      "pinned_K_choice_label_evidence": [
+        {
+          "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+          "label_quoted_from_pinned_K": "activado",
+          "value_sha256": "57e5cd63206e2c42f3ec866d0e1154bd68cb0c2e9a1c2eb2605d9d67d2d1b2de"
+        },
+        {
+          "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+          "label_quoted_from_pinned_K": "predeterminado",
+          "value_sha256": "85e6c42a8581b8e91a8e3f1da9c9cf5473f52152edd2b3082ab0712648ac40c2"
+        }
+      ],
+      "proposal_authority": "Quoted audit proposals are leads, NOT approved new translations; do not blindly use activado/desactivado when current visible labels differ",
+      "exit_criteria": [
+        "Exact helper value authored by fresh locale LLM against pinned source/context/glossary",
+        "Human option references agree with actual current Choice.label; technical wire values/config commands unchanged",
+        "Independent A and B delta audit of exact failed keys and direct neighbors on one new pinned head; no unresolved blocker/major",
+        "Preserve original failed R1 and R2 verdicts; do not relabel them PASS"
+      ]
+    },
+    {
+      "id": "R2-M07",
+      "locale": "es",
+      "key": "wire.settings.shell_environment_mode.help",
+      "severity": "major",
+      "status": "accepted_by_Root; unresolved at K",
+      "citations": [
+        {
+          "receipt": "i18n/audits/evidence/approval-repair-r2-originals/es-A.json",
+          "pointer": "/findings/6",
+          "id": "ES-A-R2-M7",
+          "proposal_quoted_from_source": "'heredar' deja que un comando que ejecuta el agente vea tu entorno (gh, aws y npm conservan sus tokens). 'lista de permitidos' solo pasa PATH/HOME/SHELL/TERM/USER/LOGNAME más las dos listas que acompañan a este ajuste, así que la clave del proveedor con la que se lanzó esta sesión no se entrega a ningún comando que escriba el modelo. Se lee una vez por sesión: el cambio surte efecto en el siguiente arranque.",
+          "finding_original": {
+            "id": "ES-A-R2-M7",
+            "severity": "major",
+            "key": "wire.settings.shell_environment_mode.help",
+            "current": "'inherit' deja que un comando que ejecuta el agente vea tu entorno (gh, aws y npm conservan sus tokens). 'allowlist' solo pasa PATH/HOME/SHELL/TERM/USER/LOGNAME más las dos listas que acompañan a este ajuste, así que la clave del proveedor con la que se lanzó esta sesión no se entrega a ningún comando que escriba el modelo. Se lee una vez por sesión: el cambio surte efecto en el siguiente arranque.",
+            "proposed": "'heredar' deja que un comando que ejecuta el agente vea tu entorno (gh, aws y npm conservan sus tokens). 'lista de permitidos' solo pasa PATH/HOME/SHELL/TERM/USER/LOGNAME más las dos listas que acompañan a este ajuste, así que la clave del proveedor con la que se lanzó esta sesión no se entrega a ningún comando que escriba el modelo. Se lee una vez por sesión: el cambio surte efecto en el siguiente arranque.",
+            "reason": "Critical scope and restart timing preserved, but help still names English options inherit/allowlist instead of heredar/lista de permitidos.",
+            "path": "local_operator/settings_io.py localized Setting.help -> local_operator/tui/widgets/settings_view.py:5284; Choice.label independently painted at :4396-4410",
+            "exception_decision": "Quoted words here identify UI choices, not executable/config examples. In particular default is not the serialized value: these OpenRouter choices use empty string. Preserve actual Choice.value and config/CLI spelling in code."
+          }
+        },
+        {
+          "receipt": "i18n/audits/evidence/approval-repair-r2-originals/es-B.json",
+          "pointer": "/findings/6",
+          "id": "ES-B-R2-M7",
+          "proposal_quoted_from_source": "«heredar» (`inherit`) deja que un comando que ejecuta el agente vea tu entorno (gh, aws y npm conservan sus tokens). «lista de permitidos» (`allowlist`) solo pasa PATH/HOME/SHELL/TERM/USER/LOGNAME más las dos listas que acompañan a este ajuste, así que la clave del proveedor con la que se lanzó esta sesión no se entrega a ningún comando que escriba el modelo. Se lee una vez por sesión: el cambio surte efecto en el siguiente arranque.",
+          "finding_original": {
+            "id": "ES-B-R2-M7",
+            "severity": "major",
+            "key": "wire.settings.shell_environment_mode.help",
+            "current": "'inherit' deja que un comando que ejecuta el agente vea tu entorno (gh, aws y npm conservan sus tokens). 'allowlist' solo pasa PATH/HOME/SHELL/TERM/USER/LOGNAME más las dos listas que acompañan a este ajuste, así que la clave del proveedor con la que se lanzó esta sesión no se entrega a ningún comando que escriba el modelo. Se lee una vez por sesión: el cambio surte efecto en el siguiente arranque.",
+            "source": "'inherit' lets a command the agent runs see your environment (gh, aws, npm keep their tokens). 'allowlist' passes only PATH/HOME/SHELL/TERM/USER/LOGNAME plus the two lists beside this, so the provider key this session launched with is not handed to a command the model writes. Read once per session: changing it takes effect at the next launch.",
+            "proposed": "«heredar» (`inherit`) deja que un comando que ejecuta el agente vea tu entorno (gh, aws y npm conservan sus tokens). «lista de permitidos» (`allowlist`) solo pasa PATH/HOME/SHELL/TERM/USER/LOGNAME más las dos listas que acompañan a este ajuste, así que la clave del proveedor con la que se lanzó esta sesión no se entrega a ningún comando que escriba el modelo. Se lee una vez por sesión: el cambio surte efecto en el siguiente arranque.",
+            "reason": "The help refers to selectable modes using raw English tokens although their displayed labels are now Spanish; it never names the translated choice a user must select. Keep real config values as explicit code adjuncts, not substitutes for localized display references.",
+            "code_path": "local_operator/settings_io.py:2217-2424,5250-5282 constructs localized Setting.help and separate localized Choice.label; local_operator/tui/widgets/settings_view.py:4397-4400 paints Choice.label and :5284 paints Setting.help",
+            "scope": "explicit R2 direct-help neighbor of repaired human labels",
+            "group": "localized-choice-reference-mismatch"
+          }
+        }
+      ],
+      "source_state": "human help references raw English options rather than actual visible localized Choice.label",
+      "intended_transition": "Reference actual current localized human Choice.label; preserve any explicitly named stable API/config token as code, never substitute it for the human label",
+      "authority_owner": {
+        "role": "fresh locale translator, not integrator",
+        "session": "87094744ea9d"
+      },
+      "pinned_K_choice_label_evidence": [
+        {
+          "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+          "label_quoted_from_pinned_K": "lista de permitidos",
+          "value_sha256": "d8ec6afc2828d015c5e3fdd358c9cfc07e97ab24e175612a9dec7676df68786e"
+        },
+        {
+          "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+          "label_quoted_from_pinned_K": "heredar",
+          "value_sha256": "ae27dc63dc7fd399384f1fb6201fbedce5af00c55e556afca49978760ea1c604"
+        }
+      ],
+      "proposal_authority": "Quoted audit proposals are leads, NOT approved new translations; do not blindly use activado/desactivado when current visible labels differ",
+      "exit_criteria": [
+        "Exact helper value authored by fresh locale LLM against pinned source/context/glossary",
+        "Human option references agree with actual current Choice.label; technical wire values/config commands unchanged",
+        "Independent A and B delta audit of exact failed keys and direct neighbors on one new pinned head; no unresolved blocker/major",
+        "Preserve original failed R1 and R2 verdicts; do not relabel them PASS"
+      ]
+    },
+    {
+      "id": "R2-M08",
+      "locale": "vi",
+      "key": "wire.settings.display_nerd_icons.help",
+      "severity": "major",
+      "status": "accepted_by_Root; unresolved at K",
+      "citations": [
+        {
+          "receipt": "i18n/audits/evidence/approval-repair-r2-originals/vi-B.json",
+          "pointer": "/findings/0",
+          "id": "VI-B-R2-M1",
+          "proposal_quoted_from_source": "Biểu tượng mở rộng cho hàng công cụ. “Tự động” đọc các dấu hiệu của trình giả lập thiết bị đầu cuối.",
+          "finding_original": {
+            "id": "VI-B-R2-M1",
+            "severity": "major",
+            "key": "wire.settings.display_nerd_icons.help",
+            "current_text": "Biểu tượng mở rộng cho hàng công cụ. “Tự động” đọc các dấu hiệu của trình mô phỏng terminal.",
+            "proposed_text": "Biểu tượng mở rộng cho hàng công cụ. “Tự động” đọc các dấu hiệu của trình giả lập thiết bị đầu cuối.",
+            "reason": "The newly edited help retains ordinary English terminal in trình mô phỏng terminal; it is neither a command/ID nor a named technology/product, and the complete Vietnamese kept-English list does not exempt it, so this visible help does not satisfy the explicit no-English-interface intent.",
+            "code_path": "local_operator/settings_io.py:2808-2811 builds the enum setting with localized display_nerd_icons.help, making the English noun visible in settings help.",
+            "scope_basis": "Present in the exact R2 set and among the 57 actual changed Vietnamese values; not an untouched historical issue.",
+            "policy_evidence": [
+              "AGENTS.md:13-18",
+              "i18n/style-guides/vi.md:19-28",
+              "i18n/glossary.md:19-50"
+            ],
+            "backtranslation": "Expanded tool-row icons. Automatic reads markers from the terminal emulator.",
+            "disposition": "repair in one batched Root major-remediation wave"
+          }
+        }
+      ],
+      "source_state": "changed visible human help retains ordinary English terminal without named exception",
+      "intended_transition": "Fresh Vietnamese LLM translator replaces ordinary English terminal with native term; technical IDs unchanged",
+      "authority_owner": {
+        "role": "fresh locale translator, not integrator",
+        "session": "f0f530be0d7f"
+      },
+      "pinned_K_choice_label_evidence": [
+        {
+          "key": "wire.settings.display_nerd_icons.choice.false.label",
+          "label_quoted_from_pinned_K": "tắt",
+          "value_sha256": "187123b1653a6f695b9f42ba87753a6e5302a8d1734420988795c4f53ae11b9a"
+        },
+        {
+          "key": "wire.settings.display_nerd_icons.choice.none.label",
+          "label_quoted_from_pinned_K": "Tự động",
+          "value_sha256": "db2f24b9db5d7d819634da01b59e10d21b29cb8017709614148b464d21295b90"
+        },
+        {
+          "key": "wire.settings.display_nerd_icons.choice.true.label",
+          "label_quoted_from_pinned_K": "bật",
+          "value_sha256": "2637ab99030acf3b065cd230da3fcf79342c4fdf5d0a17468659a62a6ea3d83e"
+        }
+      ],
+      "proposal_authority": "Quoted audit proposals are leads, NOT approved new translations; do not blindly use activado/desactivado when current visible labels differ",
+      "exit_criteria": [
+        "Exact helper value authored by fresh locale LLM against pinned source/context/glossary",
+        "Human option references agree with actual current Choice.label; technical wire values/config commands unchanged",
+        "Independent A and B delta audit of exact failed keys and direct neighbors on one new pinned head; no unresolved blocker/major",
+        "Preserve original failed R1 and R2 verdicts; do not relabel them PASS"
+      ]
+    }
+  ],
+  "same_failed_VI_wave_minors": [
+    {
+      "locale": "vi",
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.help",
+      "citation": {
+        "receipt": "i18n/audits/evidence/approval-repair-r2-originals/vi-B.json",
+        "pointer": "/findings/1",
+        "id": "VI-B-R2-m1",
+        "proposal_quoted_from_source": "“Có”: chỉ dùng các endpoint có đầu ra văn bản được phép dùng để chưng cất mô hình. “Mặc định”: không gửi tùy chọn nào.",
+        "finding_original": {
+          "id": "VI-B-R2-m1",
+          "severity": "minor",
+          "key": "wire.settings.providers_openrouter_enforce_distillable_text.help",
+          "current_text": "“Có”: chỉ dùng các điểm cuối có đầu ra văn bản được phép dùng để chưng cất mô hình. “Mặc định”: không gửi tùy chọn nào.",
+          "proposed_text": "“Có”: chỉ dùng các endpoint có đầu ra văn bản được phép dùng để chưng cất mô hình. “Mặc định”: không gửi tùy chọn nào.",
+          "reason": "The meaning is accurate and natural, but the shared glossary §2 Wave-2 kept-English set explicitly retains endpoint and pip extra; this newly edited help translates that established technical term.",
+          "scope_basis": "Freshly reviewed R2 changed help; glossary-only consistency issue, not a safety or meaning failure.",
+          "disposition": "non-gating; fold into the one existing major repair wave or defer in the private audit record, never a separate minor cycle",
+          "policy_evidence": [
+            "i18n/glossary.md:118-127"
+          ]
+        }
+      },
+      "disposition": "fold into SAME existing VI major wave; no independent minor cycle"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.settings.providers_openrouter_zdr.help",
+      "citation": {
+        "receipt": "i18n/audits/evidence/approval-repair-r2-originals/vi-B.json",
+        "pointer": "/findings/2",
+        "id": "VI-B-R2-m2",
+        "proposal_quoted_from_source": "“Có”: chỉ dùng các endpoint không lưu giữ dữ liệu. “Mặc định”: không gửi tùy chọn nào.",
+        "finding_original": {
+          "id": "VI-B-R2-m2",
+          "severity": "minor",
+          "key": "wire.settings.providers_openrouter_zdr.help",
+          "current_text": "“Có”: chỉ dùng các điểm cuối không lưu giữ dữ liệu. “Mặc định”: không gửi tùy chọn nào.",
+          "proposed_text": "“Có”: chỉ dùng các endpoint không lưu giữ dữ liệu. “Mặc định”: không gửi tùy chọn nào.",
+          "reason": "The meaning is accurate and natural, but the shared glossary §2 Wave-2 kept-English set explicitly retains endpoint and pip extra; this newly edited help translates that established technical term.",
+          "scope_basis": "Freshly reviewed R2 changed help; glossary-only consistency issue, not a safety or meaning failure.",
+          "disposition": "non-gating; fold into the one existing major repair wave or defer in the private audit record, never a separate minor cycle",
+          "policy_evidence": [
+            "i18n/glossary.md:118-127"
+          ]
+        }
+      },
+      "disposition": "fold into SAME existing VI major wave; no independent minor cycle"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.settings.web_fetch_render_backend.help",
+      "citation": {
+        "receipt": "i18n/audits/evidence/approval-repair-r2-originals/vi-B.json",
+        "pointer": "/findings/3",
+        "id": "VI-B-R2-m3",
+        "proposal_quoted_from_source": "“Tự động” dùng markdownify khi đã cài extra [fetch].",
+        "finding_original": {
+          "id": "VI-B-R2-m3",
+          "severity": "minor",
+          "key": "wire.settings.web_fetch_render_backend.help",
+          "current_text": "“Tự động” dùng markdownify khi đã cài phần bổ sung [fetch].",
+          "proposed_text": "“Tự động” dùng markdownify khi đã cài extra [fetch].",
+          "reason": "The meaning is accurate and natural, but the shared glossary §2 Wave-2 kept-English set explicitly retains endpoint and pip extra; this newly edited help translates that established technical term.",
+          "scope_basis": "Freshly reviewed R2 changed help; glossary-only consistency issue, not a safety or meaning failure.",
+          "disposition": "non-gating; fold into the one existing major repair wave or defer in the private audit record, never a separate minor cycle",
+          "policy_evidence": [
+            "i18n/glossary.md:118-127"
+          ]
+        }
+      },
+      "disposition": "fold into SAME existing VI major wave; no independent minor cycle"
+    }
+  ],
+  "round3": {
+    "locales": [
+      "es",
+      "vi"
+    ],
+    "exact_authored_values": {
+      "es": [
+        "wire.settings.providers_openrouter_allow_fallbacks.help",
+        "wire.settings.providers_openrouter_data_collection.help",
+        "wire.settings.providers_openrouter_enforce_distillable_text.help",
+        "wire.settings.providers_openrouter_require_parameters.help",
+        "wire.settings.providers_openrouter_sort.help",
+        "wire.settings.providers_openrouter_zdr.help",
+        "wire.settings.shell_environment_mode.help"
+      ],
+      "vi": [
+        "wire.settings.display_nerd_icons.help",
+        "wire.settings.providers_openrouter_enforce_distillable_text.help",
+        "wire.settings.providers_openrouter_zdr.help",
+        "wire.settings.web_fetch_render_backend.help"
+      ]
+    },
+    "expected_changed_value_count": 11,
+    "audit_scope": "ONLY exact ES seven helpers and VI four helpers plus direct Choice.label/help-description/source-context neighbors needed to validate references; retain all other compatible records, not fresh895",
+    "authority": "Root coordinates fresh ES/VI LLM authors and two independent A/B auditors per failed locale on one actual pinned K2",
+    "immutable": "Wire values/config commands, source keys, CLDR, RTL, pseudo locale behavior unchanged; no hand-generated translations/baselines",
+    "retained_clean_locales": [
+      "zh-CN",
+      "fr",
+      "ru",
+      "hi",
+      "ur"
+    ],
+    "no_clean_locale_reaudit": true,
+    "retention_manifest": "i18n/audits/evidence/approval-repair-r2-clean-stream-retention.json",
+    "exit": "Eight accepted majors resolved; three VI non-gating glossary minors folded into same failed-stream wave; independent A/B both pass exact ES/VI delta; Root proves all other byte/source/context compatibility; original R1/R2 fails remain immutable",
+    "es_label_authority": "Actual pinned current Choice.label, not unapproved audit proposal wording; explicitly distinguish stable API code tokens",
+    "vi_glossary_constraints": [
+      "endpoint in two helpers",
+      "actual pip extra [fetch] code name in fetch helper"
+    ]
+  },
+  "economy": "No new minor-only cycle; defer all other clean-stream minors. Past three waves or ~2x diff growth split follow-on scope, never waive unresolved majors.",
+  "limits": [
+    "This evidence integration performs no translation or semantic adjudication",
+    "No native/rendered/CI/shipping pass claimed"
+  ]
+}

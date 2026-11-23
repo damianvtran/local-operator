@@ -1,0 +1,129 @@
+{
+  "locale": "vi",
+  "namespace": "tui.provider_state",
+  "audit_date": "2026-11-22",
+  "recorded_at": "2026-11-22T12:31:49.943594+00:00",
+  "key_count": 5,
+  "source_audit_revision": "2b924d84f0e663302fd93a7b36411ee6035576fe",
+  "auditor": {
+    "agent": "i18n-auditor / provider-state-vi-audit-A",
+    "session": "6640da3c0b72",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "translator_session": "5644d4838456",
+    "actual_model_source": "Explicit host model-switch message: openai/gpt-6.1-sol replacing anthropic/claude-opus-5-5; per-response serving telemetry unavailable, identity not independently measured",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "date": "2026-11-22",
+    "result": "passed",
+    "findings": 0
+  },
+  "translator": {
+    "agent": "i18n-translator / provider-state-vi-author",
+    "session": "5644d4838456",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": false,
+    "actual_model_source": "Explicit host/user model-switch message: openai/gpt-6.1-sol replaces anthropic/claude-opus-5-5 due to provider failure: quota",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "translator_record": {
+    "path": "i18n/audits/evidence/vi/tui.provider_state/author-5644/record.json",
+    "sha256": "f686a27a84e6f1c4d3f1e30a1135499537cc821b73cbe95e97c751c2c0fe78e7"
+  },
+  "translator_record_is_approval": false,
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.json",
+      "sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.context.json",
+      "sha256": "67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/vi/tui.provider_state.json",
+      "sha256": "74e6607520947d1910479a85be916e8fa3e0efa6104230d19cef8d74a3aa4867"
+    }
+  },
+  "guidance_hashes": [
+    {
+      "path": "i18n/style-guides/vi.md",
+      "sha256": "99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51"
+    },
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "per_key_judgment_report": "i18n/audits/evidence/vi/tui.provider_state/a6640/report.md",
+  "audit_notes_not_execution_log": "i18n/audits/evidence/vi/tui.provider_state/a6640/report.md",
+  "actual_execution_log": "i18n/audits/evidence/vi/tui.provider_state/a6640/audit.log",
+  "mechanical_validation": {
+    "entrypoint": "scripts.i18n.check.check_catalogues",
+    "scope": "en/vi tui.provider_state only",
+    "actual_exit_code": 0,
+    "initial_result": [],
+    "restored_result": [],
+    "negative_controls": [
+      "missing key rejected",
+      "added argument rejected"
+    ],
+    "ordered_keys": 5,
+    "arguments": 0,
+    "plural_select_constructs": 0,
+    "plain_rich_cells_vi": [
+      12,
+      23,
+      13,
+      19,
+      16
+    ],
+    "plain_rich_cells_en": [
+      9,
+      7,
+      11,
+      17,
+      16
+    ],
+    "pseudo": "synthetic padded Rich plain-text diagnostic, not official pseudo locale"
+  },
+  "ledger_applied": false,
+  "limitations": [
+    "Independent lexical audit only; separate B pass needed",
+    "No styled integration/native font/UI evidence",
+    "No eligibility/release clearance",
+    "Host-disclosed fallback identity; per-response serving telemetry unknown"
+  ],
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/vi/tui.provider_state/a6640/report.md",
+      "sha256": "1f39341b6cbc53c30f9d917861cb8ad29c2f736bd4891cdc1bf13171c5d35ba1"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/tui.provider_state/a6640/script.py.txt",
+      "sha256": "27e1c9134c5367f0fe63b0368be2b1736a86f486f24693600fe7fac9b0f4c9c7"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/tui.provider_state/a6640/audit.log",
+      "sha256": "910f6594cf4275120cc5e007beeade98402b6aab039a5121804ad2155e036dd4"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/tui.provider_state/a6640/directledger-receipt.json",
+      "sha256": "cf3f90da73c7d4afc8a6e2df719a3432458e2a7e9fb3a4d243b48271bdc30ca6"
+    }
+  ]
+}

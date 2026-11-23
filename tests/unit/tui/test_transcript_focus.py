@@ -28,6 +28,7 @@ from local_operator.tui.session_presentation import (
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import (
+    NoticeBlock,
     PeerMessageBlock,
     TranscriptBlock,
     TranscriptView,
@@ -43,9 +44,21 @@ def _app() -> OperatorApp:
 
 
 def _seed_cards(app: OperatorApp, count: int) -> list[ToolCard]:
-    """Append ``count`` settled tool rows and hand them back in order."""
+    """Append ``count`` settled tool rows and hand them back in order.
+
+    A ONE-ROW NOTICE SEPARATES THEM, and that is a fixture fact rather than
+    decoration: the transcript's tool fold condenses three or more consecutive
+    calls into one bar (``tui/tool_fold.py``), and every test here is about a
+    reader standing on an individual row — a row inside a closed fold cannot
+    take focus, so the fixture would be asserting against a surface the reader
+    cannot reach. A notice is not a ledger row: it splits the run and leaves the
+    shared name column alone. Fold behaviour itself is pinned in
+    ``test_tool_fold_layer.py``.
+    """
     cards = []
     for index in range(count):
+        if index:
+            app._append_block(NoticeBlock("step", "info"))
         card = ToolCard(f"t{index}", "bash", {"command": "ls"})
         app._append_block(card)
         card.mark_done(f"output {index}")

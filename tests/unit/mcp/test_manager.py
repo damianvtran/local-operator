@@ -2007,18 +2007,23 @@ class TestStdioStopIsEventDriven:
     """
 
     @pytest.mark.asyncio
-    async def test_prompt_child_costs_no_polling_tick(self) -> None:
-        """A child that exits on stdin EOF is reaped in well under 0.1 s.
+    async def test_prompt_child_costs_no_polling_tick(self, monkeypatch) -> None:
+        """A child that exits on stdin EOF is reaped without a polling tick.
 
-        Wall-clock bound on purpose: the property under test IS latency, and
-        the old implementation fails this by construction (its first
-        returncode check happens at the 0.1 s tick). The margin (0.09 s vs
-        the old floor of ~0.1 s) is small, so the child does nothing but
-        exit; a busier assertion would flake instead of measure.
+        The latency this guards is a SLEEP the teardown chooses to take: the
+        polling loop slept 0.1 s between ``returncode`` checks, while the
+        event-driven ``_stop`` awaits ``process.wait()`` and sleeps not at all.
+        So the test counts timed sleeps during teardown instead of timing it.
+        It used to assert ``elapsed < 0.09`` -- a 10 ms margin over the old
+        floor -- which a loaded runner crosses on scheduling alone with the
+        event-driven code intact (docs/TEST_TIME_ASSERTIONS.md). A sleep of 0
+        is a checkpoint, not a tick, so only positive delays count.
         """
         import sys
-        import time
 
+        import anyio
+
+        from local_operator.mcp import manager as manager_mod
         from local_operator.mcp.config import MCPStdioServerConfig
         from local_operator.mcp.manager import McpServerStderr, _stdio_transport
 
@@ -2026,12 +2031,31 @@ class TestStdioStopIsEventDriven:
         script = "import sys\nsys.stdin.read()\n"
         cfg = MCPStdioServerConfig(command=sys.executable, args=["-c", script])
         stderr_log = McpServerStderr("prompt")
+        ticks: list[float] = []
+
+        def spy(real: Any) -> Any:
+            async def sleep(delay: float = 0, *args: Any, **kwargs: Any) -> Any:
+                if delay > 0:
+                    ticks.append(delay)
+                return await real(delay, *args, **kwargs)
+
+            return sleep
+
         async with _stdio_transport(cfg, lambda: None, stderr_log):
             # Give the child a beat to reach its read() before teardown.
             await asyncio.sleep(0.3)
-            t0 = time.monotonic()
-        elapsed = time.monotonic() - t0
-        assert elapsed < 0.09, f"teardown took {elapsed:.3f}s; polling tick is back"
+            # Armed only for the teardown, so the beat above is not counted.
+            # Both spellings, and the module's own binding if it ever imports
+            # one directly, so a re-introduced poll cannot dodge the spy.
+            monkeypatch.setattr(anyio, "sleep", spy(anyio.sleep))
+            monkeypatch.setattr(asyncio, "sleep", spy(asyncio.sleep))
+            # getattr, not hasattr: pyright does not narrow a module attribute
+            # on hasattr, and the module has no `sleep` binding today.
+            real_sleep = getattr(manager_mod, "sleep", None)
+            if real_sleep is not None:
+                monkeypatch.setattr(manager_mod, "sleep", spy(real_sleep))
+        monkeypatch.undo()
+        assert ticks == [], f"teardown slept {ticks}; the polling tick is back"
 
     @pytest.mark.asyncio
     async def test_stubborn_child_is_killed_on_cancellation(self, monkeypatch) -> None:

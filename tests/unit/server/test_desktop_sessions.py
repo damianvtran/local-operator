@@ -525,6 +525,86 @@ async def test_active_bridge_is_never_evicted_or_duplicated(tmp_path, monkeypatc
         assert first not in pool.bridges
 
 
+def test_prompt_delivery_enum_validates_at_the_wire() -> None:
+    """``Prompt.delivery``: out-of-vocabulary is a 422-equivalent never-coerce."""
+    from pydantic import ValidationError
+
+    body = Prompt(request_id="12345678-1234-4678-9234-567812345678", text="hi", delivery="queue")
+    assert body.delivery == "queue"
+    assert Prompt(request_id="12345678-1234-4678-9234-567812345678", text="hi").delivery is None
+    with pytest.raises(ValidationError):
+        Prompt(
+            request_id="12345678-1234-4678-9234-567812345678",
+            text="hi",
+            delivery=cast(Any, "whenever"),
+        )
+    with pytest.raises(ValidationError):
+        Prompt(
+            request_id="12345678-1234-4678-9234-567812345678",
+            text="hi",
+            delivery=cast(Any, ""),
+        )
+
+
+def test_prompt_without_delivery_dumps_byte_identically_to_before() -> None:
+    """The receipt fingerprint must not move for a body without delivery.
+
+    ``desktop_receipts`` hashes ``body.model_dump()`` bytes, so a same-id
+    retry claimed before the field existed reads as "different input" the
+    moment the field starts dumping ``"delivery": None``. The wrap
+    serializer omits the key when it is ``None``; this pins it with a REAL
+    ``Prompt`` (not a hand-built dict), because the property is the model's
+    own dump, not the receipts layer's.
+    """
+    import json
+
+    body = Prompt(request_id="12345678-1234-4678-9234-567812345678", text="hi")
+    dump = body.model_dump()
+    assert "delivery" not in dump, dump
+    assert json.dumps(body.model_dump()) == json.dumps(
+        {
+            "request_id": "12345678-1234-4678-9234-567812345678",
+            "text": "hi",
+            "images": [],
+            "files": [],
+            "audio": [],
+            "mode": "prompt",
+            "input_mode": None,
+            "input_path": None,
+        }
+    )
+    # A pinned mode DOES ride, so the hash still distinguishes it.
+    pinned = Prompt(request_id="12345678-1234-4678-9234-567812345678", text="hi", delivery="queue")
+    assert pinned.model_dump()["delivery"] == "queue"
+    assert json.dumps(pinned.model_dump()) != json.dumps(dump)
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_delivery_is_part_of_receipt_identity(tmp_path):
+    """Same-id replay: the pinned delivery hashes; a changed delivery conflicts."""
+    calls: list[dict[str, Any]] = []
+
+    async def op():
+        calls.append({"delivery": "queue"})
+        return {"result": "queued"}
+
+    receipts = DesktopReceipts(tmp_path)
+    body = {"text": "held", "delivery": "queue"}
+    assert (await receipts.run("s:id", body, op))["result"] == "queued"
+    replay = await receipts.run("s:id", body, op)
+    assert replay["replayed"] is True, replay
+    with pytest.raises(ReceiptConflict, match="different input"):
+        await receipts.run("s:id", {"text": "held", "delivery": "both"}, op)
+    with pytest.raises(ReceiptConflict, match="different input"):
+        await receipts.run("s:id", {"text": "held"}, op)
+    assert len(calls) == 1
+    # And a legacy body hashes as legacy: no key added, receipt unchanged.
+    legacy = DesktopReceipts(tmp_path)
+    legacy_body: dict[str, Any] = {"text": "held"}
+    assert (await legacy.run("s:legacy", legacy_body, op))["result"] == "queued"
+    assert (await legacy.run("s:legacy", legacy_body, op))["replayed"] is True
+
+
 @pytest.mark.asyncio
 async def test_receipts_survive_adapter_restart_and_reject_changed_body(tmp_path):
     calls = []
@@ -572,6 +652,107 @@ async def test_the_read_only_probe_never_clips_the_truncated_path(tmp_path, sigi
     # Everything before the sigil is a different path, and the unescaped shape
     # opened (and created) exactly that.
     assert not (tmp_path / "root").exists(), "the probe wrote at a truncated path"
+
+
+@pytest.mark.asyncio
+async def test_the_fingerprint_read_creates_nothing_and_names_the_claimed_fingerprint(tmp_path):
+    """The fingerprint lookup is a READ, on the same terms as the probe itself.
+
+    The voice route calls it before every utterance, so a lookup that opened
+    through ``_db`` would mkdir, chmod, adopt WAL and ``CREATE TABLE`` on a path
+    whose docstring promises it creates nothing (review round 2, MINOR 1). Both
+    halves are asserted because the defect answered correctly while writing: only
+    the absent file proves the read.
+    """
+    receipts = DesktopReceipts(tmp_path)
+    assert receipts.recorded_fingerprint("s:id") is None, "an absent store names no fingerprint"
+    assert not receipts.path.exists(), "the lookup created the store it only reads"
+
+    async def op():
+        return {"result": "real receipt"}
+
+    body = {"op": "create"}
+    assert await receipts.run("s:id", body, op) == {"result": "real receipt"}
+    assert receipts.recorded_fingerprint("s:id") == DesktopReceipts.fingerprint(body)
+    assert receipts.recorded_fingerprint("other:id") is None
+
+
+def test_a_store_without_the_receipts_table_answers_none_and_writes_nothing(tmp_path):
+    """A file that opens but carries no schema is still no answer, and no write.
+
+    The store half-created by an older or interrupted process must not be upgraded
+    by a mere lookup either: the bytes and the directory listing are compared,
+    because ``_db``'s WAL adoption and DDL would both show up there.
+    """
+    import sqlite3
+
+    receipts = DesktopReceipts(tmp_path)
+    sqlite3.connect(receipts.path).close()  # a real, empty database file: no schema
+    listing = sorted(entry.name for entry in tmp_path.iterdir())
+    before = receipts.path.read_bytes()
+
+    assert receipts.recorded_fingerprint("s:id") is None
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == listing
+    assert receipts.path.read_bytes() == before, "the lookup wrote to the store"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sigil", ["?", "#"])
+async def test_the_fingerprint_lookup_never_clips_the_truncated_path(tmp_path, sigil):
+    """``recorded``'s R11 lesson applies here too: the path is a ``file:`` URI.
+
+    Raw interpolation truncates at the sigil, so the open CREATES a 0-byte file at
+    the truncated path and then answers ``None`` for a key the store does hold.
+    The recorded key is what separates the escaped read from the broken one.
+    """
+    root = tmp_path / f"root{sigil}odd"
+    receipts = DesktopReceipts(root)
+
+    async def op():
+        return {"result": "real receipt"}
+
+    assert receipts.recorded_fingerprint("s:id") is None, "an absent store records nothing"
+    assert not receipts.path.exists(), "the lookup created the store it only reads"
+
+    body = {"op": "create"}
+    await receipts.run("s:id", body, op)
+    assert receipts.recorded_fingerprint("s:id") == DesktopReceipts.fingerprint(body)
+    assert receipts.recorded_fingerprint("other:id") is None
+    assert not (tmp_path / "root").exists(), "the lookup wrote at a truncated path"
+
+
+@pytest.mark.slow
+def test_a_held_write_lock_answers_none_instead_of_raising(tmp_path):
+    """REAL contention, on a store that stayed in rollback mode.
+
+    ``_adopt_wal`` is optional -- a filesystem that cannot host WAL leaves the
+    store in ``delete`` mode, and there another connection's EXCLUSIVE lock blocks
+    readers. Before the lookup shared ``recorded``'s read-only door it raised
+    ``sqlite3.OperationalError`` after the store's own busy window, which the
+    route would have answered as a 500; the contract is "nothing recorded, the
+    caller runs its admissions", which is ``None``.
+
+    ``slow``: the wait is the store's own 10 s busy timeout, not a sleep.
+    """
+    import sqlite3
+
+    receipts = DesktopReceipts(tmp_path)
+    with contextlib.closing(sqlite3.connect(receipts.path)) as seed:
+        seed.execute(
+            "CREATE TABLE receipts (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT)"
+        )
+        seed.execute("INSERT INTO receipts VALUES ('s:id', 'fp', NULL)")
+        seed.commit()
+
+    holder = sqlite3.connect(receipts.path, timeout=5)
+    holder.execute("BEGIN EXCLUSIVE")
+    try:
+        assert receipts.recorded_fingerprint("s:id") is None, "a lock is no answer, never a raise"
+    finally:
+        holder.rollback()
+        holder.close()
+    # The store still reads afterwards, and the lock changed nothing in it.
+    assert receipts.recorded_fingerprint("s:id") == "fp"
 
 
 @pytest.mark.asyncio
@@ -9480,7 +9661,14 @@ def _install_ask_remote(app: FastAPI, remote: Any, *, remote_row: Any = None) ->
 
     class _Pool:
         @contextlib.asynccontextmanager
-        async def session(self, session_id: str, *, read: bool = False, allow_draft: bool = False):
+        async def session(
+            self,
+            session_id: str,
+            *,
+            read: bool = False,
+            allow_draft: bool = False,
+            control_only: bool = False,
+        ):
             del session_id, read, allow_draft
             yield bridge
 
@@ -11286,3 +11474,107 @@ async def test_the_desktop_bridge_keeps_adr_0009_routing_facts_off_its_frames(
     assert not {"origin", "needs_user"} & set(capture.attention)
     snapshot = module._wire_state_of(capture)["snapshot"]
     assert not {"origin", "needs_user"} & set(snapshot["attention"])
+
+
+# --- team targets whose roster names hub-pulled roles ------------------------
+#
+# Operator report: a new chat on a hub-pulled team showed "This conversation's
+# model was not resolved". ``sessions.preview`` ran ``validate_target``, which
+# raised a bare ``KeyError('iac-engineer')`` because the pulled roster role
+# carried only hub provenance tags. Both halves are pinned here: the member now
+# resolves, and a member that genuinely does not resolve is NAMED in the 404.
+
+
+def _seed_hub_team(root: Path, *, member_tags: list[str]) -> None:
+    from local_operator.agents import AgentRegistry
+    from local_operator.teams import TeamEditFields, TeamRegistry, parse_members
+    from tests.unit.test_agent_avatar import _edit_fields
+
+    agents = AgentRegistry(root)
+    for name, tags in (("hub-manager", ["role"]), ("iac-engineer", member_tags)):
+        row = agents.create_agent(_edit_fields(name=name, description="d", tags=tags))
+        agents.set_agent_system_prompt(row.id, f"{name} body")
+    TeamRegistry(root).create_team(
+        TeamEditFields(
+            name="pergamondev",
+            description=None,
+            manager="hub-manager",
+            members=parse_members(["iac-engineer"]),
+            instructions=None,
+            project=None,
+        )
+    )
+
+
+HUB_MEMBER_TAGS = ["hub:f5580f4a-0000-4000-8000-000000000001", "hub_sha256:" + "0" * 64]
+
+
+@pytest.mark.asyncio
+async def test_a_team_whose_member_is_a_hub_pulled_role_previews(draft_api) -> None:
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    _seed_hub_team(root, member_tags=HUB_MEMBER_TAGS)
+
+    pane = await client.post(
+        "/v1/desktop/sessions/preview",
+        json={
+            "request_id": str(uuid.uuid4()),
+            "cwd": str(root),
+            "target": {"kind": "team", "name": "pergamondev"},
+        },
+    )
+
+    assert pane.status_code == 200, pane.text
+
+
+@pytest.mark.asyncio
+async def test_an_unresolvable_team_member_is_named_in_the_404(draft_api) -> None:
+    """Same 404 and sentence as before; the failing team/slot/member ride as data."""
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    # A private chat agent: no role tag, no specialist category, no provenance.
+    _seed_hub_team(root, member_tags=[])
+    body = {
+        "request_id": str(uuid.uuid4()),
+        "cwd": str(root),
+        "target": {"kind": "team", "name": "pergamondev"},
+    }
+
+    pane = await client.post("/v1/desktop/sessions/preview", json=body)
+    created = await client.post("/v1/desktop/sessions", json=body)
+
+    assert pane.status_code == 404, pane.text
+    detail = pane.json()["detail"]
+    assert detail["code"] == "wire.errors.desktop.requested_not_found"
+    assert detail["unresolved"] == {
+        "team": "pergamondev",
+        "slot": "member",
+        "member": "iac-engineer",
+    }
+    assert created.status_code == 404, created.text
+    assert created.json()["detail"] == detail
+
+
+def test_validate_target_names_the_unresolved_member(tmp_path) -> None:
+    from local_operator.agents import AgentRegistry
+    from local_operator.server.utils.desktop_profiles import (
+        UnresolvedTarget,
+        validate_target,
+    )
+    from local_operator.teams import TeamRegistry
+
+    _seed_hub_team(tmp_path, member_tags=[])
+    with pytest.raises(UnresolvedTarget) as raised:
+        validate_target(AgentRegistry(tmp_path), TeamRegistry(tmp_path), "team", "pergamondev")
+
+    assert isinstance(raised.value, KeyError), "the 404 contract keys on KeyError"
+    assert str(raised.value) == (
+        "team 'pergamondev' member 'iac-engineer' is not an installed role, specialist or team"
+    )
+    with pytest.raises(UnresolvedTarget) as missing:
+        validate_target(AgentRegistry(tmp_path), TeamRegistry(tmp_path), "team", "nope")
+    assert missing.value.wire_fields()["unresolved"] == {
+        "team": None,
+        "slot": "team",
+        "member": "nope",
+    }

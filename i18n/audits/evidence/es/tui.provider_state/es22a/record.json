@@ -1,0 +1,104 @@
+{
+  "record_kind": "translation_author_receipt_not_independent_audit",
+  "locale": "es",
+  "namespace": "tui.provider_state",
+  "audit_date": null,
+  "translation_date": "2026-11-22",
+  "key_count": 5,
+  "status": "translated",
+  "source_revision": "a54ec02de48a94b68d6c3dc92e1307c97ea776ad",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "d37edc1334b7",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Session model-switch notice before authoring; no independent per-response served-model telemetry available",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "auditor": {
+    "agent": null,
+    "session": null,
+    "model": null,
+    "independent_from_translator_session": null,
+    "actual_model_source": null,
+    "status": "not_performed"
+  },
+  "source_author": {
+    "session_prefix": "93b7",
+    "source": "delegation; not this translator"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.json",
+      "sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.context.json",
+      "sha256": "67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be"
+    },
+    "es": {
+      "path": "local_operator/i18n/catalogues/es/tui.provider_state.json",
+      "sha256": "4567c719cd1492b7edc62ae85ef4769f40a2adc774a1eb49dca072883a36b490"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.provider_state/es22a/notes.md",
+      "sha256": "aa05f04a7ab04e75f193db5b94c599205e4a4a5bcac06eeef2fe3f44bdb5bb9e"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.provider_state/es22a/validator.py.txt",
+      "sha256": "03d1c9edffc5771d347c75ab4e9ca338bcc59cac0ddd38ec0612e94167a93d00"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.provider_state/es22a/validation.log",
+      "sha256": "2027486d7dfb91d0a96e04a5f1ce9981585c5a2fc37880fcaca885d96ed730f6"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "translated",
+    "unresolved_blocker_major_count": null,
+    "finding_ids": [],
+    "independent_audit_performed": false
+  },
+  "mechanical_validation": {
+    "exit_code": 0,
+    "scope": "official check.check_catalogues(), enumeration narrowed to en/es tui.provider_state only",
+    "official_scoped_catalogue_problems": 0,
+    "ordered_keys": 5,
+    "icu_arguments_per_key": 0,
+    "plural_select_branches": 0,
+    "nfc": true,
+    "render_api_checked": true,
+    "missing_key_negative_rejected": true,
+    "added_argument_negative_rejected": true,
+    "es_cell_lengths": [
+      15,
+      17,
+      23,
+      20,
+      19
+    ],
+    "pseudo": "synthetic bracketed/padded expansion through real ICU renderer; not shipped pseudo-locale or UI proof"
+  },
+  "notes_classification": "audit_notes_not_execution_log",
+  "execution_log": "i18n/audits/evidence/es/tui.provider_state/es22a/validation.log",
+  "glossary_proposals": {
+    "logged in": "sesión iniciada",
+    "sign in / log in": "iniciar sesión",
+    "login required": "requiere iniciar sesión",
+    "environment key": "clave del entorno",
+    "configured server": "servidor configurado",
+    "configure server": "configurar servidor"
+  },
+  "limitations": [
+    "Independent A/B audits pending; author has not self-audited",
+    "Plain Rich width diagnostics only; no real settings/native-font/rendered-frame evidence",
+    "No universal maxCells; three labels truncate in illustrative 17-cell budget, requirement truncates at 21",
+    "Current producer remains English; this is not consumer implementation or shipping eligibility proof",
+    "No ledger/history/generated/eligibility/cap/baseline/consumer changes; no staging/commit/push"
+  ]
+}
