@@ -7197,11 +7197,13 @@ class JumpToLatestChip(Static):
 
     def __init__(self) -> None:
         super().__init__("", markup=False)
-        self._label = ""
-
-    def on_mount(self) -> None:
-        # Hidden until the view can prove there is unseen output below.
+        # Hidden from construction, and never re-hidden on mount: the view owns
+        # this bit (`_sync_jump_chip`) and mounts the chip on the first growth
+        # that has something to offer. An `on_mount` hide here ran AFTER the
+        # view's mount and erased the display it had just set (measured: the
+        # chip mounted, then read back False).
         self.display = False
+        self._label = ""
 
     def label_for_width(self, width: int) -> str:
         """The widest label whose PLATE fits ``width`` cells, glyph included.
@@ -7588,8 +7590,6 @@ class TranscriptView(ScrollableContainer):
         affordance and this is a progressive-enhancement bonus.
         """
         self.vertical_scrollbar.styles.pointer = "grab"
-        if self._jump_chip is not None:
-            self.mount(self._jump_chip)
 
     def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
         """A click that lands on THIS container, and not on a descendant,
@@ -9371,6 +9371,31 @@ class TranscriptView(ScrollableContainer):
             target = min(target, max(0, self.max_scroll_y - TAIL_TOLERANCE_ROWS - 1))
         self.scroll_to(y=max(0, min(target, self.max_scroll_y)), animate=False)
 
+    def _mount_jump_chip(self) -> None:
+        """Mount the chip on first use, already wearing the state it must show.
+
+        NOT at transcript mount: a child mounted from `on_mount` re-runs this
+        container's layout on the frame the sidebar switch gate captures its
+        evidence map from, and the gate then refuses that stale map until its
+        15 s timer (measured on #4440 — an inert hidden `Static` in this hook
+        reproduces it, and the same chip with no child at all does not). The
+        chip exists to answer output the reader has not seen; until there is
+        such output there is nothing to mount.
+
+        `mount` lands the child a pump turn later, so `is_mounted` is still
+        False when it returns and `_sync_jump_chip` would defer again. The
+        visibility and placement are therefore written here, before the tree
+        grows the child.
+        """
+        chip = self._jump_chip
+        if chip is None or chip.is_mounted or not self.is_mounted:
+            return
+        chip.display = bool(self._unseen_below and not self._tail_anchor.following)
+        self._jump_chip_offset = -1
+        if chip.display:
+            self._jump_chip_layout(chip)
+        self.mount(chip)
+
     def _sync_jump_chip(self) -> None:
         """Bring the chip's visibility, label and offset in line with the state.
 
@@ -9387,13 +9412,23 @@ class TranscriptView(ScrollableContainer):
         label plus the declared padding, so the arithmetic is the same answer.
         """
         chip = self._jump_chip
-        if chip is None or not chip.is_mounted:
+        if chip is None:
             return
         visible = self._unseen_below and not self._tail_anchor.following
+        if not chip.is_mounted:
+            # Mounted on FIRST USE, never at transcript mount — see
+            # `_mount_jump_chip` for the measured gate failure that motivated it.
+            if visible:
+                self.call_after_refresh(self._mount_jump_chip)
+            return
         if chip.display != visible:
             chip.display = visible
         if not visible:
             return
+        self._jump_chip_layout(chip)
+
+    def _jump_chip_layout(self, chip: JumpToLatestChip) -> None:
+        """Apply the fitting label and right margin; the one placement write."""
         width = self.scrollable_content_region.width
         label = chip.apply_label(width)
         plate = cell_len(label) + 2 * JUMP_CHIP_PAD_CELLS
