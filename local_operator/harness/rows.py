@@ -857,6 +857,23 @@ def _strip_spans(text: str, spans: Sequence[tuple[int, int]]) -> str:
     return joined
 
 
+def _voice_note_spans(text: str) -> list[tuple[int, int]]:
+    """Spans of the voice spoken-summary note a dictated turn carries.
+
+    The note is instruction for the model, not the user's words, so a row hides
+    it exactly as it hides an expanded reference block. Lazy-imported and
+    failure-swallowing for the same reason as :func:`_skill_block_spans`.
+    """
+    try:
+        from local_operator.voice.summary_note import note_spans
+    except Exception:  # noqa: BLE001 — replay must never fail on this
+        return []
+    try:
+        return note_spans(text)
+    except Exception:  # noqa: BLE001 — replay must never fail on this
+        return []
+
+
 def _skill_block_spans(text: str) -> list[tuple[int, int]]:
     """Complete skill-block spans, or none when the grammar cannot load.
 
@@ -973,7 +990,7 @@ def user_row_text(text: str) -> str:
     phone. The fallback returns the stripped text so both surfaces paint one
     row, not one padded and one not.
     """
-    spans = _reference_block_spans(text) + _skill_block_spans(text)
+    spans = _reference_block_spans(text) + _skill_block_spans(text) + _voice_note_spans(text)
     stripped = _strip_spans(text, spans).strip()
     return typed_line_of(stripped) or stripped
 

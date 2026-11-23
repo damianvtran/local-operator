@@ -31,7 +31,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import Literal
 
 #: The registry default for ``voice.max_spoken_chars`` (``settings_io.py``
 #: carries the same literal; ``tests/unit/test_settings_io.py`` pins the two).
@@ -109,12 +110,18 @@ _MAX_EMPHASIS_LINE = 2000
 _SENTENCE_END = re.compile(r"[.!?](?=\s|$)")
 
 
+#: Where the spoken words came from: the agent's own ``Spoken:`` paragraph
+#: (``summary``) or the whole reply (``reply``, today's behaviour and the fallback).
+SpokenSource = Literal["summary", "reply"]
+
+
 @dataclass(frozen=True)
 class Speakable:
-    """The text to speak, and whether the cap cut it."""
+    """The text to speak, whether the cap cut it, and which part of the reply it is."""
 
     text: str
     truncated: bool
+    source: SpokenSource = "reply"
 
 
 def normalise_max_chars(value: object) -> int:
@@ -131,6 +138,51 @@ def normalise_max_chars(value: object) -> int:
     except (TypeError, ValueError):
         return DEFAULT_MAX_SPOKEN_CHARS
     return max(MIN_MAX_SPOKEN_CHARS, min(MAX_MAX_SPOKEN_CHARS, number))
+
+
+#: The structural marker the agent opens its spoken paragraph with. Machinery, not
+#: copy: never translated, never spoken, matched case-insensitively and only at the
+#: start of a paragraph. Models bold or italicise labels, so ``**Spoken:**``,
+#: ``**Spoken**:`` and ``_Spoken:_`` all count; group 1 is the opening emphasis so
+#: a ``**Spoken: …**`` that wraps the whole paragraph can drop its closing marker.
+_SPOKEN_LABEL = re.compile(r"\s*(\*\*|__|\*|_)?spoken(?:\1)?[ \t]*:(?:\1)?[ \t]*", re.IGNORECASE)
+#: A blank line, however many follow: the end of a paragraph.
+_PARAGRAPH_BREAK = re.compile(r"\n[ \t\r]*\n(?:[ \t\r]*\n)*")
+#: Private-use filler that hides a code fence's bytes from the paragraph scan.
+_FENCE_MASK = "\ue002"
+
+
+def select_spoken(text: str) -> str | None:
+    """The agent's ``Spoken:`` paragraph, label removed, or ``None`` for no marker.
+
+    A PURE function of ``text``: ``/voice/text`` and every ``/voice/speech``
+    segment re-resolve the same message and must agree on what is spoken, so
+    nothing here may read state, a clock or a setting.
+
+    The LAST paragraph that opens with the label wins: a model that writes it
+    twice means the later one. A paragraph runs to the next blank line. A code
+    fence is masked first, so ``Spoken:`` quoted inside one (an example of this
+    very protocol) is not a marker and a blank line inside one does not end a
+    paragraph. A trailing partial message simply has no marker yet.
+
+    Returns ``""`` for a marker with nothing after it; the caller reads that as
+    "fall back to the reply", never as silence.
+    """
+    masked = _DISPLAY_FENCE.sub(lambda match: _FENCE_MASK * len(match.group(0)), text)
+    found: str | None = None
+    start = 0
+    for stop in (*(match.start() for match in _PARAGRAPH_BREAK.finditer(masked)), len(text)):
+        label = _SPOKEN_LABEL.match(masked, start, stop)
+        if label is not None:
+            body = text[label.end() : stop].strip()
+            # ``**Spoken: …**`` wraps the whole paragraph: its closer has no opener left.
+            opener = label.group(1)
+            if opener and label.group(0).count(opener) % 2 == 1 and body.endswith(opener):
+                body = body[: -len(opener)].rstrip()
+            found = body
+        if stop < len(text):
+            start = _PARAGRAPH_BREAK.match(masked, stop).end()  # type: ignore[union-attr]
+    return found
 
 
 def clean(text: str, *, code_omitted: str = CODE_PLACEHOLDER, link: str = LINK_WORD) -> str:
@@ -329,8 +381,25 @@ def speakable(
     tail: str = TRUNCATION_TAIL,
     code_omitted: str = CODE_PLACEHOLDER,
     link: str = LINK_WORD,
+    summary: bool = True,
 ) -> Speakable:
-    """Clean then cap: the one call ``/voice/text`` makes."""
-    return cap(
-        clean(text, code_omitted=code_omitted, link=link), normalise_max_chars(max_chars), tail=tail
-    )
+    """Select, clean, then cap: the one call ``/voice/text`` makes.
+
+    The agent's ``Spoken:`` paragraph is spoken when it wrote one that survives
+    ``clean`` (``source="summary"``); a missing, empty or cleaned-away paragraph
+    falls back to the whole reply, byte-for-byte what shipped before selection
+    existed. Either way the same ``clean`` and the same cap apply, so
+    ``max_chars`` guards a six-sentence summary exactly as it guards a reply.
+
+    ``summary=False`` skips selection. A pending approval card's text can quote
+    model-written arguments, and a paragraph in one that happened to open with
+    the label would otherwise stand in for the whole card: what is spoken for a
+    gate must stay the whole card.
+    """
+    limit = normalise_max_chars(max_chars)
+    chosen = select_spoken(text) if summary else None
+    if chosen:
+        cleaned = clean(chosen, code_omitted=code_omitted, link=link)
+        if cleaned:
+            return replace(cap(cleaned, limit, tail=tail), source="summary")
+    return cap(clean(text, code_omitted=code_omitted, link=link), limit, tail=tail)

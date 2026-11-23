@@ -270,3 +270,104 @@ def test_display_text_leaves_a_very_long_line_unemphasised_and_stays_fast() -> N
     many = "\n".join("_a " * 660 for _ in range(30))
     sp.display_text(many)
     assert time.perf_counter() - started < 2.0
+
+
+# -- spoken summary: the agent's ``Spoken:`` paragraph (docs/design/voice-spoken-summary.md) --
+
+
+REPLY = "Here is the long report with many details.\n\nSecond paragraph of detail."
+
+
+def test_no_marker_is_byte_identical_to_the_whole_reply_path() -> None:
+    plain = sp.speakable(REPLY)
+    assert plain == sp.cap(sp.clean(REPLY), sp.DEFAULT_MAX_SPOKEN_CHARS)
+    assert plain.source == "reply"
+    assert sp.select_spoken(REPLY) is None
+
+
+@pytest.mark.parametrize(
+    "marker",
+    ["Spoken:", "**Spoken:**", "**Spoken**:", "_Spoken:_", "spoken:", "SPOKEN:", "  Spoken:"],
+)
+def test_a_paragraph_opening_with_the_label_is_spoken_without_the_label(marker: str) -> None:
+    spoken = sp.speakable(f"{REPLY}\n\n{marker} The point is done.")
+    assert spoken.text == "The point is done."
+    assert spoken.source == "summary" and spoken.truncated is False
+
+
+def test_a_label_wrapping_the_whole_paragraph_leaves_no_stray_marker() -> None:
+    assert sp.speakable("Long.\n\n**Spoken: all wrapped.**").text == "all wrapped."
+
+
+def test_the_last_marker_paragraph_wins() -> None:
+    text = "Spoken: Early.\n\nMore work.\n\nspoken: Final answer.\n\nTail."
+    assert sp.speakable(text).text == "Final answer."
+
+
+def test_the_paragraph_runs_to_the_next_blank_line_only() -> None:
+    text = "Intro.\n\nSpoken: First line.\nSecond line.\n\nAfter."
+    assert sp.speakable(text).text == "First line. Second line."
+
+
+def test_an_empty_marker_falls_back_to_the_whole_reply_not_silence() -> None:
+    for text in (f"{REPLY}\n\nSpoken:", f"{REPLY}\n\nSpoken:   \n", f"{REPLY}\n\n**Spoken:**"):
+        spoken = sp.speakable(text)
+        assert spoken.source == "reply" and spoken.text
+        assert "Here is the long report" in spoken.text
+
+
+def test_a_marker_that_cleans_to_nothing_falls_back_too() -> None:
+    spoken = sp.speakable("Real reply here.\n\nSpoken: `` ")
+    assert spoken.source == "reply" and "Real reply here." in spoken.text
+
+
+def test_the_label_only_counts_at_a_paragraph_start() -> None:
+    for text in (
+        "He said Spoken: nothing at all.",
+        "A line\nSpoken: not after one newline.",
+        "The spoken: word in a sentence.",
+        "- Spoken: inside a list.",
+    ):
+        assert sp.select_spoken(text) is None, text
+        assert sp.speakable(text).source == "reply"
+
+
+def test_a_code_fence_containing_the_label_is_not_a_marker() -> None:
+    fenced = "Example:\n\n```\nSpoken: do not say this\n\nSpoken: nor this\n```\n\nDone."
+    assert sp.select_spoken(fenced) is None
+    assert sp.select_spoken("Example:\n\n~~~\nSpoken: x\n~~~") is None
+    # An unfinished fence (a message cut mid-stream) hides its tail as well.
+    assert sp.select_spoken("Working.\n\n```\nSpoken: x") is None
+    # A fence inside the paragraph does not end it at the fence's own blank line.
+    inside = "Spoken: Before.\n```\nx\n\ny\n```\nAfter."
+    assert sp.speakable(inside).text == f"Before. {sp.CODE_PLACEHOLDER} After."
+
+
+def test_a_trailing_partial_message_has_no_marker_and_falls_back() -> None:
+    partial = f"{REPLY}\n\nSpok"
+    assert sp.select_spoken(partial) is None
+    assert sp.speakable(partial).source == "reply"
+
+
+def test_the_selected_paragraph_is_cleaned_like_any_other_text() -> None:
+    spoken = sp.speakable("Report.\n\nSpoken: **Done**, see https://x.y/z and `run it`.")
+    assert spoken.text == "Done, see link and run it."
+
+
+def test_a_long_summary_is_cut_by_the_cap_and_says_so() -> None:
+    summary = " ".join(f"Sentence {n} is here." for n in range(80))
+    spoken = sp.speakable(f"Short reply.\n\nSpoken: {summary}", max_chars=200)
+    assert spoken.source == "summary" and spoken.truncated is True
+    assert len(spoken.text) <= 200 and spoken.text.endswith(sp.TRUNCATION_TAIL)
+    assert "Short reply" not in spoken.text
+
+
+def test_summary_false_never_selects() -> None:
+    text = f"{REPLY}\n\nSpoken: Only this."
+    gate = sp.speakable(text, summary=False)
+    assert gate.source == "reply" and "Here is the long report" in gate.text
+
+
+def test_selection_is_a_pure_function_of_the_text() -> None:
+    text = f"{REPLY}\n\nSpoken: Same every time."
+    assert {sp.speakable(text) for _ in range(5)} == {sp.speakable(text)}

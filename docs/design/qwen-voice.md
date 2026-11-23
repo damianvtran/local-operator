@@ -122,7 +122,7 @@ machine `code` in `detail.code` and a sentence in `detail.text`.
 | `GET /v1/desktop/voice` | — | `{active: {session_id, enabled_at} \| null, settings: {max_spoken_chars}}` | — |
 | `POST /v1/desktop/voice` | JSON `{op: enable \| disable, session_id}` | `{active, replaced}` | 404 `unknown_session`; 409 `voice_store_busy` |
 | `POST /v1/desktop/voice/utterance` | form `session_id`, `request_id` (dashed UUID), `text` (required), `text_origin?` ∈ {`qwen_s2s`} | `{text, path, admission}` | 409 `voice_not_enabled` \| `approval_pending`; 422 `invalid_voice_request` \| `empty_transcript` |
-| `POST /v1/desktop/voice/text` | JSON `{session_id, source}`; `source` is `{kind: "message", message_id}` or `{kind: "gate", request_id}` | `{text, spoken_chars, truncated, segments, full_text}` | 409 `voice_not_enabled`; 404 `unknown_source` |
+| `POST /v1/desktop/voice/text` | JSON `{session_id, source}`; `source` is `{kind: "message", message_id}` or `{kind: "gate", request_id}` | `{text, spoken_chars, truncated, segments, full_text, spoken_source}` | 409 `voice_not_enabled`; 404 `unknown_source` |
 
 - `/voice/text` accepts no free text: an unknown `kind` or an extra field is a
   422. A message source resolves only an ASSISTANT message; a user row, a tool
@@ -135,6 +135,9 @@ machine `code` in `detail.code` and a sentence in `detail.text`.
   inline-code contents as written, no closing sentence): the History panel
   shows it while the audio stays capped. Additive, so a client falls back to `text`
   on an older server. See `docs/DESKTOP_API.md` for the contract row.
+- `spoken_source` (`"summary" | "reply"`, missing = `"reply"`) says whether `text` is
+  the agent's own `Spoken:` paragraph or the whole reply; `truncated` then reports a
+  cut of whichever was spoken. Additive. See `voice-spoken-summary.md`.
 - `truncated` on the answer is `speakable`'s own report: true only when the cap
   actually cut the reply. It is forwarded, never recomputed, because the backend
   may have clamped a hand-edited `voice.max_spoken_chars`. A cut reply ends with

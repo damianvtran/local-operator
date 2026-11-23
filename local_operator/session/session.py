@@ -11132,6 +11132,22 @@ class Session:
             # default to None on ``Message``).
             if input_mode is not None:
                 extra["input_mode"] = input_mode
+            # SPOKEN-SUMMARY NOTE (docs/design/voice-spoken-summary.md): only a
+            # voice-DICTATED prompt, and only while this session holds the voice
+            # slot. A typed prompt, a wake, a monitor and a subagent's turn reach
+            # no listener, so none is asked for a spoken paragraph. The note rides
+            # the NEWEST message (the cached prefix is untouched) and
+            # ``user_row_text`` hides it from every rendered row. One small slot
+            # read, so it is off the session loop and costs nothing for a prompt
+            # that was not dictated.
+            if input_mode == "dictated" and not harness_injected:
+                from local_operator.voice import slot as voice_slot
+                from local_operator.voice.summary_note import with_note
+
+                if await asyncio.to_thread(
+                    voice_slot.is_voice_session, self._config_dir, self._session_id
+                ):
+                    text = with_note(text)
             if audio:
                 # The audio door is DAEMON-DERIVED, never client-asserted (the
                 # vocabulary's own rule): the blocks are on the message this
