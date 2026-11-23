@@ -972,7 +972,7 @@ def _openrouter_no_route(status: int | None, message: str) -> bool:
 
 # A code-less error from the upstream HTTP/2 body reader, not the generic
 # “Stream error” heading (which can also carry a provider's refusal).
-_H2_BODY_READ_STREAM_ERROR = "stream error: h2 protocol error: error reading a body from connection"
+_H2_BODY_READ_STREAM_ERROR = "Stream error: h2 protocol error: error reading a body from connection"
 
 
 def _has_explicit_error_disposition(fields: Mapping[str, Any]) -> bool:
@@ -986,12 +986,53 @@ def _has_explicit_error_disposition(fields: Mapping[str, Any]) -> bool:
     )
 
 
-def _has_relayed_error_disposition(error: Mapping[str, Any]) -> bool:
-    # metadata.raw can retain a structured upstream code even when its message
-    # matches the outer diagnostic word for word. Rendering folds that duplicate
-    # text away; it must not also fold away a verdict about the request.
-    upstream = _openrouter_upstream_error(error)
-    return upstream is not None and _has_explicit_error_disposition(upstream)
+def _is_simple_h2_body_read_frame(chunk: Mapping[str, Any], data: str) -> bool:
+    # Only the synthetic simple frame qualifies without an authoritative code.
+    # An extra field may carry a disposition hidden by message rendering (for
+    # example metadata.raw). Leave unknown shapes on the ordinary error path;
+    # coded relay failures have their own classifier in failover.
+    if chunk.keys() != {"error", "id", "object", "created", "model", "choices"}:
+        return False
+    error, choices = chunk["error"], chunk["choices"]
+    if not isinstance(error, Mapping) or error != {"message": _H2_BODY_READ_STREAM_ERROR}:
+        return False
+    response_id, model, created = chunk["id"], chunk["model"], chunk["created"]
+    if not (
+        chunk["object"] == "chat.completion.chunk"
+        and isinstance(response_id, str)
+        and response_id.strip()
+        and isinstance(model, str)
+        and model.strip()
+        and type(created) is int
+        and created >= 0
+        and isinstance(choices, list)
+        and len(choices) == 1
+    ):
+        return False
+    choice = choices[0]
+    # JSON booleans and floats compare equal to Python integers. They aren't
+    # valid index framing and must not qualify by equality alone.
+    if not (
+        isinstance(choice, Mapping)
+        and type(choice.get("index")) is int
+        and choice == {"index": 0, "delta": {}, "finish_reason": "error"}
+    ):
+        return False
+
+    # The normal JSON decoder is last-wins. Recheck only a recovery candidate
+    # so a duplicate key cannot erase a verdict, without changing other SSE
+    # handling (including coded relays).
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        fields = dict(pairs)
+        if len(fields) != len(pairs):
+            raise ValueError("duplicate SSE object key")
+        return fields
+
+    try:
+        json.loads(data, object_pairs_hook=unique_object)
+    except ValueError:
+        return False
+    return True
 
 
 def _has_competing_stream_choice(chunk: Mapping[str, Any]) -> bool:
@@ -1021,7 +1062,7 @@ def _has_competing_stream_choice(chunk: Mapping[str, Any]) -> bool:
 
 
 def _compat_stream_error(
-    chunk: Mapping[str, Any], *, prior_disposition: bool = False
+    chunk: Mapping[str, Any], *, prior_disposition: bool = False, wire_data: str | None = None
 ) -> ProviderError:
     """An in-band mid-stream failure on an OpenAI-compatible stream.
 
@@ -1085,26 +1126,10 @@ def _compat_stream_error(
         retryable=(relayed_upstream or status is None or status == 429 or status >= 500),
         auth_error=status in (401, 403),
     )
-    # Classify from the raw in-band fields, not rendered text or status=None:
-    # a non-HTTP policy code also parses to None, and metadata or formatting
-    # can make unrelated errors sound like a transport failure.
     failure.in_band_h2_body_read_failure = (
-        isinstance(error, Mapping)
-        and _first_text(error.get("message")).lower() == _H2_BODY_READ_STREAM_ERROR
-        and message.lower() == _H2_BODY_READ_STREAM_ERROR
-        and not prior_disposition
-        and not _has_explicit_error_disposition(error)
-        # These fields lose to error.message in the rendering cascade. A
-        # different diagnosis there makes the narrow transport stamp ambiguous.
-        and all(
-            _first_text(fields.get(key)).lower() in ("", _H2_BODY_READ_STREAM_ERROR)
-            for fields in (chunk, error)
-            for key in ("message", "detail", "msg")
-        )
-        and not _has_explicit_error_disposition(chunk)
-        and not _has_relayed_error_disposition(error)
-        and not _has_competing_stream_choice(chunk)
-        and not _names_content_verdict(chunk)
+        not prior_disposition
+        and wire_data is not None
+        and _is_simple_h2_body_read_frame(chunk, wire_data)
     )
     return failure
 
@@ -4079,7 +4104,9 @@ class OpenAICompatClient:
                         # 200, so this chunk is the only channel the failure has.
                         # Raise it NAMED; swallowing it left turns dying as
                         # wordless interruptions (see _compat_stream_error).
-                        raise _compat_stream_error(chunk, prior_disposition=prior_disposition)
+                        raise _compat_stream_error(
+                            chunk, prior_disposition=prior_disposition, wire_data=data
+                        )
                     if not prior_disposition:
                         # A refusal/finish can arrive in a separate SSE frame.
                         # Retain it for the narrow H2 recovery decision only.

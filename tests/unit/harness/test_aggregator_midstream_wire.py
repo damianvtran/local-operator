@@ -175,14 +175,14 @@ def gateway(notes_path):
                 )
                 if prior_delta := state.get("prior_delta"):
                     self.wfile.write(_chunk(prior_delta))
-                self.wfile.write(
-                    _chunk(
-                        {
-                            **_delta({}, "error"),
-                            **state["terminal"],
-                        }
+                terminal = _chunk({**_delta({}, "error"), **state["terminal"]})
+                if state.get("duplicate_finish"):
+                    terminal = terminal.replace(
+                        b'"finish_reason": "error"',
+                        b'"finish_reason": "content_filter", "finish_reason": "error"',
+                        1,
                     )
-                )
+                self.wfile.write(terminal)
             elif call == 1:
                 # The continued turn: the model re-issues the aborted call, this
                 # time complete, and the harness must actually run it.
@@ -383,6 +383,53 @@ async def test_the_incident_is_recovered_over_the_wire(
             None,
             id="relayed-upstream-status",
         ),
+        pytest.param(
+            {
+                "error": {
+                    "message": _H2_BODY_READ_ERROR,
+                    "metadata": {
+                        "raw": json.dumps(
+                            {"status": 403, "error": {"message": _H2_BODY_READ_ERROR}}
+                        )
+                    },
+                }
+            },
+            None,
+            id="relay-wrapper-status",
+        ),
+        pytest.param(
+            {
+                "error": {
+                    "message": _H2_BODY_READ_ERROR,
+                    "metadata": {
+                        "raw": json.dumps(
+                            {
+                                "error": {
+                                    "message": _H2_BODY_READ_ERROR,
+                                    "detail": "Request refused",
+                                }
+                            }
+                        )
+                    },
+                }
+            },
+            None,
+            id="relay-nested-detail",
+        ),
+        pytest.param({"unrecognized": {}}, None, id="unknown-envelope-field"),
+        pytest.param(
+            {"error": {"message": _H2_BODY_READ_ERROR, "unrecognized": {}}},
+            None,
+            id="unknown-error-field",
+        ),
+        pytest.param(_delta({"unrecognized": {}}, "error"), None, id="nonempty-terminal-delta"),
+        pytest.param({"object": "chat.completion"}, None, id="wrong-object"),
+        pytest.param({"created": True}, None, id="boolean-created"),
+        pytest.param(
+            {"choices": [{"index": False, "delta": {}, "finish_reason": "error"}]},
+            None,
+            id="boolean-choice-index",
+        ),
     ],
 )
 @pytest.mark.asyncio
@@ -392,6 +439,14 @@ async def test_mixed_transport_and_disposition_stays_terminal(
     _, state = gateway
     state["terminal"] = {"error": {"message": _H2_BODY_READ_ERROR}, **terminal_fields}
     state["prior_delta"] = prior_delta
+    await _assert_wire_outcome(gateway, write_tool, notes_path, executed, "radient", "auto", False)
+
+
+@pytest.mark.asyncio
+async def test_duplicate_finish_verdict_stays_terminal(gateway, write_tool, notes_path, executed):
+    _, state = gateway
+    state["terminal"] = {"error": {"message": _H2_BODY_READ_ERROR}}
+    state["duplicate_finish"] = True
     await _assert_wire_outcome(gateway, write_tool, notes_path, executed, "radient", "auto", False)
 
 
