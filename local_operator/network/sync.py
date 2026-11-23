@@ -1278,6 +1278,7 @@ def _member_stamps(
     attachments_dir: Path,
     *,
     whole_transcript: bool = False,
+    staged_original_attachment: Path | None = None,
 ) -> dict[str, _MemberStamp]:
     """ONE pass over the copy set: every member's digest, size and stat.
 
@@ -1301,7 +1302,13 @@ def _member_stamps(
     directory = Path(directory)
     stamps: dict[str, _MemberStamp] = {}
     for name in list(COPY_SET_NAMES) + family_entries(directory):
-        path = directory / name
+        # Rollback recovery must prove the original bytes under the original wire
+        # name without first replacing a staged file. No other member is substituted.
+        path = (
+            staged_original_attachment
+            if name == "attachment.json" and staged_original_attachment is not None
+            else directory / name
+        )
         try:
             if name == TRANSCRIPT_NAME:
                 raw = path.read_bytes()
@@ -1574,7 +1581,13 @@ def plan_id(
     )
 
 
-def copy_content_digest(directory: Path, session_id: str, attachments_dir: Path) -> str:
+def copy_content_digest(
+    directory: Path,
+    session_id: str,
+    attachments_dir: Path,
+    *,
+    staged_original_attachment: Path | None = None,
+) -> str:
     """``_content_digest`` for a MOVE: whole transcript, names an adopter writes skipped.
 
     What a move compares across devices: the source's own directory against the copy the
@@ -1584,12 +1597,16 @@ def copy_content_digest(directory: Path, session_id: str, attachments_dir: Path)
     taken whole because a move carries every byte of it (``_safe_region``'s cut is for a
     live source, and cutting it here is what deleted a torn tail in review round 2).
     """
-    return _content_digest(
-        directory,
+    return _content_digest_from(
+        _member_stamps(
+            directory,
+            session_id,
+            attachments_dir,
+            whole_transcript=True,
+            staged_original_attachment=staged_original_attachment,
+        ),
         session_id,
-        attachments_dir,
         skip=ADOPTED_LOCALLY,
-        whole_transcript=True,
     )
 
 

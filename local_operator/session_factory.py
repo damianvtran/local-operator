@@ -4042,14 +4042,14 @@ async def _select_knowledge_block(
         # Keep local guides, discovery scope and model-invocation opt-outs;
         # matching metadata neither grants nor removes explicit skill access.
         picked = [item for item in picked if item.resource_type != "skill"]
-        for name, fingerprint in hooks.pinned_skill_manifest.items():
+        for name, expected_description in hooks.pinned_skill_manifest.items():
             skill = hooks.skills_by_name.get(name)
             # Names from a peer are data, not free-form prompt text. Use the
             # same percent encoding as a skill URL for legacy names with spaces.
             label = quote(name, safe="")
             if skill is None or skill.hide:
                 skill_notes.append(f"- Unavailable on this device: {label}")
-            elif description_fingerprint(skill) != fingerprint:
+            elif description_fingerprint(skill) != expected_description:
                 skill_notes.append(f"- Different description on this device: {label}")
             else:
                 picked.append(skill)

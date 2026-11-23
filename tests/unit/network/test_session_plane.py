@@ -918,6 +918,7 @@ def test_peer_spawn_pins_exact_source_skills_and_names_omissions(
     from local_operator.config import ConfigManager
     from local_operator.harness.types import ToolContext
     from local_operator.resume import read_session_attachment
+    from local_operator.session.session import Session
     from local_operator.session_factory import create_session
     from local_operator.skills import api as skills_api
     from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
@@ -986,6 +987,8 @@ def test_peer_spawn_pins_exact_source_skills_and_names_omissions(
             world_root=device.root,
         )
         try:
+            # This fixture renders a local runtime's prompt, not an attached proxy.
+            assert isinstance(session, Session)
             if origin:
                 session.attach_team(TeamRegistry(device.root).get_team_by_name(team_name))
                 if case == "legacy":
@@ -993,7 +996,9 @@ def test_peer_spawn_pins_exact_source_skills_and_names_omissions(
                     return ""
             await session.prompt(query)
             assert session.active_team_name == team_name
-            return "\n".join(session._last_system_blocks)
+            blocks = session._last_system_blocks
+            assert blocks is not None, "prompt did not render any system blocks"
+            return "\n".join(blocks)
         finally:
             await session.dispose()
 

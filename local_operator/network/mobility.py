@@ -1666,7 +1666,13 @@ def _unreachable(peer: str | None) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _staging_content_digest(server: "RelayServer", session_id: str, staging: Path) -> str:
+def _staging_content_digest(
+    server: "RelayServer",
+    session_id: str,
+    staging: Path,
+    *,
+    original_attachment: Path | None = None,
+) -> str:
     """The digest of the bytes a copy holds, as the adopting device sees them.
 
     ``sync.copy_content_digest`` over the staging directory and this install's
@@ -1680,15 +1686,45 @@ def _staging_content_digest(server: "RelayServer", session_id: str, staging: Pat
     # ``<dir>/<ref>.bin``, so passing the root silently dropped every attachment from the
     # comparison — a copy whose blobs were all zeroed would have matched. Both ends pass
     # the same directory now, which is what makes the comparison mean what it says.
-    return sync_mod.copy_content_digest(staging, session_id, Path(server.root) / "attachments")
+    return sync_mod.copy_content_digest(
+        staging,
+        session_id,
+        Path(server.root) / "attachments",
+        staged_original_attachment=original_attachment,
+    )
 
 
 _SKILL_PIN_ORIGINAL = ".skill-pin-original"
+_UNSAFE_STAGING_REASON = (
+    "the staged conversation was not adopted: its path must be contained in network/staging "
+    "with no symlink components, and its handoff markers and attachment must be regular files"
+)
+
+
+def _staging_for_verification(root: Path, session_id: str, staging: Path) -> Path | None:
+    from local_operator.resume import ATTACHMENT_SIDECAR_NAME
+
+    checked = _contained_handoff_path(
+        root, staging, parent_parts=("network", "staging"), leaf=session_id
+    )
+    if checked is None:
+        return None
+    # The restore touches these sidecars before _promote runs its own check.
+    # Carried symlinks elsewhere in the copy are content, not rollback paths.
+    for name in ("ready.json", _SKILL_PIN_ORIGINAL, ATTACHMENT_SIDECAR_NAME):
+        try:
+            if not stat.S_ISREG((checked / name).lstat().st_mode):
+                return None
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return None
+    return checked
 
 
 def _verify_staging(
     server: "RelayServer", session_id: str, staging: Path, ready: dict[str, Any]
-) -> str:
+) -> tuple[str, str] | None:
     """Re-hash a staged copy against what ``ready.json`` recorded, before adopting.
 
     THE LAST CHECK BEFORE THE ONLY ``os.replace`` INTO ``sessions/``. The
@@ -1703,21 +1739,35 @@ def _verify_staging(
     record one, and it is refused rather than trusted: the whole point of the field
     is that the adopting device has a value to check against.
     """
+    checked = _staging_for_verification(Path(server.root), session_id, staging)
+    if checked is None:
+        return "unsafe_staging", _UNSAFE_STAGING_REASON
     expected = str(ready.get("content_digest") or "")
     if not expected:
         return (
+            "digest_mismatch",
             "the copy of that conversation was staged before this build recorded what it "
-            "verified, so it was not adopted; asking again evaluates it from scratch"
+            "verified, so it was not adopted; asking again evaluates it from scratch",
         )
-    # A relay that stopped between pinning and publication left the exact
-    # source attachment under this locally written rollback marker. Restore
-    # it and perform the SAME full digest check, never accept a second digest.
-    original = staging / _SKILL_PIN_ORIGINAL
-    if original.exists():
+    # An interrupted pin leaves the source's original bytes under the rollback
+    # marker. Hash those bytes under their original name before changing either
+    # file, so a digest refusal leaves the verified-copy evidence untouched.
+    backup = checked / _SKILL_PIN_ORIGINAL
+    original = backup if backup.is_file() else None
+    if (
+        _staging_content_digest(server, session_id, checked, original_attachment=original)
+        != expected
+    ):
+        return (
+            "digest_mismatch",
+            "the staged copy of that conversation no longer matches the bytes that were "
+            "verified, so it was not adopted and nothing was deleted",
+        )
+    if original is not None:
         from local_operator.resume import ATTACHMENT_SIDECAR_NAME
 
         try:
-            original.replace(staging / ATTACHMENT_SIDECAR_NAME)
+            original.replace(checked / ATTACHMENT_SIDECAR_NAME)
             # rename is a no-op if both names still point at the original inode.
             original.unlink(missing_ok=True)
         except OSError:
@@ -1725,13 +1775,10 @@ def _verify_staging(
             from local_operator.i18n.keys import network_skill_transfer
             from local_operator.i18n.text import tr
 
-            return tr("network.skill_transfer")(network_skill_transfer.receipt_write_failed())
-    if _staging_content_digest(server, session_id, staging) != expected:
-        return (
-            "the staged copy of that conversation no longer matches the bytes that were "
-            "verified, so it was not adopted and nothing was deleted"
-        )
-    return ""
+            return "digest_mismatch", tr("network.skill_transfer")(
+                network_skill_transfer.receipt_write_failed()
+            )
+    return None
 
 
 def _manifest_digest(plan_id: str, transcript_digest: str) -> str:
@@ -2529,17 +2576,19 @@ def _destination_move(
     # are re-hashed against what this device recorded when it verified them, so a
     # copy damaged between the two moments is never presented as a session (M-2's
     # destination half, and the structural form of M-5's "never a partial copy").
-    damaged = _verify_staging(server, target_id, staging, ready)
-    if damaged:
-        # THE STAGING DIRECTORY IS KEPT, deliberately: by now the owner may already
-        # have deleted its copy, so sweeping it would destroy the only one left. The
-        # id is released and the sentence names where the bytes are.
-        clear_handoff_entry(server.root, session_id)
+    verification_refusal = _verify_staging(server, target_id, staging, ready)
+    if verification_refusal is not None:
+        code, damaged = verification_refusal
+        # The owner may have deleted its copy already, so keep the staging bytes.
+        # An unsafe path also keeps the journal: this device cannot account for
+        # its copy and should not release the handoff on that evidence.
+        if code != "unsafe_staging":
+            clear_handoff_entry(server.root, session_id)
         return (
             None,
             _move_refusal(
                 session_id,
-                "digest_mismatch",
+                code,
                 f"{damaged} (the copy is still under {staging}, and this device's "
                 "``lop sessions sync`` cannot replace it)",
                 phase_reached="handing_off",
@@ -2914,9 +2963,22 @@ def _finish_from_tombstone(
     from local_operator.network import sync as sync_mod
     from local_operator.session.placement import clear_handoff_entry
 
-    progress = progress_for(server)
     staging = sync_mod.staging_dir(server.root, session_id)
-    ready_path = staging / "ready.json"
+    checked = _staging_for_verification(Path(server.root), session_id, staging)
+    if checked is None:
+        return (
+            None,
+            _move_refusal(
+                session_id,
+                "unsafe_staging",
+                _UNSAFE_STAGING_REASON,
+                phase_reached="handing_off",
+                changed=True,
+            ),
+            "",
+        )
+    progress = progress_for(server)
+    ready_path = checked / "ready.json"
     if not ready_path.is_file():
         return (
             None,
@@ -2936,13 +2998,14 @@ def _finish_from_tombstone(
     # thing that says the bytes were ever verified (M-2). A ``ready.json`` whose
     # digest no longer describes the staged bytes refuses here, keeping the
     # staging directory so the bytes are not lost with the id.
-    damaged = _verify_staging(server, session_id, staging, ready)
-    if damaged:
+    verification_refusal = _verify_staging(server, session_id, staging, ready)
+    if verification_refusal is not None:
+        code, damaged = verification_refusal
         return (
             None,
             _move_refusal(
                 session_id,
-                "digest_mismatch",
+                code,
                 f"{damaged} (the copy is still under {staging})",
                 phase_reached="handing_off",
                 changed=True,

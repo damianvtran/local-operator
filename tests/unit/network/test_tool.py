@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.harness.types import ToolContext
+from local_operator.harness.types import ToolContext, ToolResult
 from local_operator.network import cli as net_cli
 from local_operator.network import tool as net_tool
 from local_operator.network.tool import NetworkParams
@@ -2134,8 +2134,6 @@ def test_a_non_completing_send_keeps_its_receipt_and_marks_the_call(
 def test_the_tools_create_names_its_own_source_session(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from local_operator.harness.types import ToolContext
-
     source = "aabbeeff1122"
     monkeypatch.setenv("LOCAL_OPERATOR_SESSION_ID", "000000000000")
     forwarded: list[str | None] = []
@@ -2148,13 +2146,17 @@ def test_the_tools_create_names_its_own_source_session(
         return 0, json.dumps({"ok": True, "session_id": "112233445566"}), ""
 
     monkeypatch.setattr(net_tool, "_run_cli", fake_cli)
-    result = asyncio.run(
-        net_tool.execute_network(
+
+    async def create() -> ToolResult:
+        return await net_tool.execute_network(
             "create",
             {"action": "sessions", "peer": "device-b", "create": True},
-            context=ToolContext(session_dir=str(tmp_path / "sessions" / source)),
+            None,
+            None,
+            ToolContext(session_dir=str(tmp_path / "sessions" / source)),
         )
-    )
+
+    result = asyncio.run(create())
     assert not result.is_error
     assert forwarded == [source]
 
