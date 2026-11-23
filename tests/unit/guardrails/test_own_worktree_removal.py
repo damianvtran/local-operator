@@ -641,8 +641,9 @@ async def test_own_plain_cleanup_sheds_os_folder_metadata(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("force", ["", "--force "], ids=["plain", "force"])
 async def test_own_ui_qa_worktree_sheds_out_symlink_and_finder_metadata(
-    home: Path, mobile: Path
+    home: Path, mobile: Path, force: str
 ) -> None:
     """PR #4493 field case (local-operator-ui ``qa2069-head``/``-base``): an
     own finished tree holding electron-vite ``out/``, a ``node_modules``
@@ -671,9 +672,19 @@ async def test_own_ui_qa_worktree_sheds_out_symlink_and_finder_metadata(
         link.unlink()
     link.symlink_to(elsewhere)
     judge = _Judge("BLOCK: should not be asked")
-    outcome = await _check(home, COMMAND_1, judge)
+    # The field's bare spelling: nothing unlinks node_modules first.
+    command = f"cd ~/local-operator-mobile && git worktree remove {force}.worktrees/refused-connect"
+    outcome = await _check(home, command, judge)
     assert outcome is None or not outcome.blocked, outcome and outcome.text
     assert judge.prompts == []
+    # Review SEC-R4-n1: run the allowed removal for real, then prove the
+    # link's target outlived it.
+    subprocess.run(
+        ["git", "-C", str(mobile), "worktree", "remove", *force.split(), str(tree)],
+        check=True,
+        capture_output=True,
+    )
+    assert not tree.exists()
     assert (elsewhere / "pkg" / "index.js").is_file()
 
 
@@ -695,3 +706,44 @@ async def test_sibling_tree_still_holds_a_foreign_symlink(home: Path, mobile: Pa
     own = plain_cleanup_ignored_inventory(real, own_regenerable=True)
     assert foreign is not None and foreign.unverified_ignored >= 1
     assert own is not None and own.unverified_ignored == 0
+
+
+@pytest.mark.parametrize("payload", ["ui-qa", "dotenv"])
+def test_exact_force_route_sheds_own_regenerable_payload(
+    home: Path, mobile: Path, payload: str
+) -> None:
+    """QA Q-R4-1 (PR #4493): the canonical ``git -C <repo> worktree remove
+    --force -- <tree>`` spelling reads ``_interrupted_cleanup_state``, which
+    accepted only the shared ``../../node_modules`` link, so an own tree whose
+    ignored payload was ``out/``, a ``node_modules`` link elsewhere and
+    ``.DS_Store`` read dirty there while the plain route allowed it. Tested at
+    this boundary because the route's later origin/identity proof needs a
+    forge remote the fixture does not have (QA round 4 ran it end to end).
+    An ignored ``.env`` stays dirty; a foreign caller (``own=False``) too."""
+    tree = mobile / ".worktrees" / "refused-connect"
+    exclude = subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-path", "info/exclude"],
+        cwd=tree,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    Path(exclude).parent.mkdir(parents=True, exist_ok=True)
+    with open(exclude, "a") as fh:
+        fh.write("out/\n.DS_Store\nnode_modules\n.env\n")
+    (tree / "out" / "main").mkdir(parents=True)
+    (tree / "out" / "main" / "index.js").write_text("x\n")
+    (tree / ".DS_Store").write_bytes(b"\0")
+    elsewhere = home / "deps-elsewhere"
+    elsewhere.mkdir()
+    link = tree / "node_modules"
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    link.symlink_to(elsewhere)
+    if payload == "dotenv":
+        (tree / ".env").write_text("TOKEN=hand-made\n")
+    real = os.path.realpath(tree)
+    own = prov._interrupted_cleanup_state(real, None, own_regenerable=True)
+    foreign = prov._interrupted_cleanup_state(real, None)
+    assert foreign == "dirty"
+    assert own == ("clean" if payload == "ui-qa" else "dirty")

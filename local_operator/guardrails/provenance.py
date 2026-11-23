@@ -2287,7 +2287,9 @@ def worktree_state(
     if live is not False:
         return "busy"  # unknown process inventory also fails closed
     if interrupted_cleanup:
-        return "locked" if stale_initializing else _interrupted_cleanup_state(real, facts)
+        if stale_initializing:
+            return "locked"
+        return _interrupted_cleanup_state(real, facts, own_regenerable=own and bool(session_id))
     # ``git worktree remove`` deletes IGNORED content too (review R1-MAJOR-4 /
     # QA Q1: an ignored ``.env`` and an ignored nested repo with the only copy
     # of its history went with it). Only regenerable entries may remain. A
@@ -2560,7 +2562,20 @@ def plain_cleanup_ignored_preserved(real: str) -> bool | None:
     return inventory.unverified_ignored == 0
 
 
-def _interrupted_cleanup_state(real: str, facts: dict[str, bool] | None) -> str:
+def _interrupted_cleanup_state(
+    real: str, facts: dict[str, bool] | None, *, own_regenerable: bool = False
+) -> str:
+    """The payload state for the exact-removal (``--force``) route.
+
+    ``own_regenerable`` (PR #4493, QA Q-R4-1): the caller proved through the
+    creation ledger that this session or its delegating family made the tree
+    (``classify`` drops kin/sibling attribution before calling). Then an
+    ignored symlink (Git removes the link, never its target) or an ignored
+    entry on :data:`_REGENERABLE` with no nested repository is shed here
+    exactly as in :func:`plain_cleanup_ignored_inventory`; without that the
+    ``--force`` spelling held an own tree whose only ignored file was
+    ``.DS_Store`` while plain ``git worktree remove`` allowed it. Any other
+    ignored entry (``.env``) still makes it dirty."""
     # An index entry marked assume-unchanged or skip-worktree can conceal a
     # modified file from status. Gitlinks can conceal an independent repo.
     index = _git_quiet(["ls-files", "-v", "--stage", "-z"], real)
@@ -2595,8 +2610,14 @@ def _interrupted_cleanup_state(real: str, facts: dict[str, bool] | None) -> str:
         # A name or package manifest cannot account for the bytes under an
         # ignored directory. The only supported witness is a shared dependency
         # link: Git removes the reproducible link entry, not its referent.
-        if not _shared_dependencies_link(real, entry):
-            return "dirty"
+        if _shared_dependencies_link(real, entry):
+            continue
+        if own_regenerable and (
+            os.path.islink(physical)
+            or (_regenerable(os.path.basename(entry)) and not _holds_git(physical))
+        ):
+            continue
+        return "dirty"
     if _nested_repository(real, worktrees=True, linked_root=True) is not None:
         return "dirty"
     return "deletions-only" if deleted else "clean"

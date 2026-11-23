@@ -477,7 +477,11 @@ async def test_exact_cleanup_preserves_unverified_work(
     elif obstacle == "locked":
         _git("worktree", "lock", str(wt), cwd=repo)
     elif obstacle in ("ignored", "foreign-ignored", "stale-link"):
-        (home / "excludes").write_text("build/\nnode_modules\n")
+        # PR #4493: an OWN tree sheds regenerable names (``build``) and any
+        # ignored link on this route too, so the own-tree obstacle is an
+        # ignored name off that list, and the stale shared-link witness is
+        # exercised where it still decides: a tree another session made.
+        (home / "excludes").write_text("build/\nlocal-notes/\nnode_modules\n")
         _git("config", "core.excludesFile", str(home / "excludes"), cwd=repo)
         (wt / "a.txt").unlink()
         if obstacle == "stale-link":
@@ -485,11 +489,12 @@ async def test_exact_cleanup_preserves_unverified_work(
             (wt / "node_modules").symlink_to("../../node_modules")
             (repo / "pnpm-lock.yaml").write_text("different bytes\n")
         else:
-            (wt / "build").mkdir()
-            (wt / "build" / "notes.txt").write_text("keep this local note\n")
+            kept = "local-notes" if obstacle == "ignored" else "build"
+            (wt / kept).mkdir()
+            (wt / kept / "notes.txt").write_text("keep this local note\n")
     elif obstacle == "missing-force":
         (wt / "a.txt").unlink()
-    if obstacle != "foreign-ignored":
+    if obstacle not in ("foreign-ignored", "stale-link"):
         _record(home, wt, creator=ME)
     target = repo if obstacle == "primary" else wt
     if obstacle == "residue":

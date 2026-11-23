@@ -1123,6 +1123,46 @@ async def test_pick_that_approves_no_named_path_cannot_supersede_timeout(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("question", "pick", "allowed"),
+    [
+        # Review SEC-R4-B1: a descriptor narrows "all" to a subset.
+        (
+            "Delete ~/hyperplane-cpp/build (dirty) or ~/other/x (clean)?",
+            "Delete all clean worktrees",
+            False,
+        ),
+        ("Delete ~/hyperplane-cpp/build or ~/other/x?", "Delete all caches", False),
+        # Review SEC-R4-M1: only a size in parentheses is dropped.
+        ("Delete ~/hyperplane-cpp/build or ~/other/x?", "Delete them (only x)", False),
+        # Controls: a stated count covering the list, a plain plural, and
+        # (SEC-R4-m1) a single path ending in "?" counted once.
+        (
+            "Delete ~/hyperplane-cpp/build or ~/other/x?",
+            "Delete all 2 clean worktrees (~1.2 GiB)",
+            True,
+        ),
+        ("Delete ~/hyperplane-cpp/build or ~/other/x?", "Delete both", True),
+        ("Delete ~/hyperplane-cpp/build?", "Delete it", True),
+    ],
+    ids=["clean-subset", "caches-subset", "paren-only", "counted", "both", "single-it"],
+)
+async def test_descriptor_and_parenthesis_picks_after_timeout(
+    deep: Path, question: str, pick: str, allowed: bool
+) -> None:
+    """PR #4493 round 4: which listed paths a path-less pick covers."""
+    _deep_ask(deep, expired=True, age_ms=120_000)
+    _answered_ask(deep, "a-feed", question, [{"label": pick}, {"label": "Keep"}], answer=pick)
+    judge = _Judge("ALLOW ask=a-feed")
+    result = await _check(deep, "rm -rf ~/hyperplane-cpp/build", judge)
+    blocked = result is not None and result.blocked
+    assert blocked is (not allowed), result and result.text
+    assert not judge.prompts
+    if not allowed:
+        assert (deep / "hyperplane-cpp/build").is_dir()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "question",
     [
         "Keep ~/hyperplane-cpp/build instead of deleting it?",

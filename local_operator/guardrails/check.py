@@ -1263,58 +1263,34 @@ _DELETE_PICK = re.compile(
     r"(?:force[- ])?(?:delete|remove|deletion|removal|deleting|removing)\b"
 )
 #: Words a path-less delete pick may carry after its verb (SEC-R3-B2): which
-#: of the question's paths it means, said only with quantifiers and the set
-#: descriptions agents write in cleanup asks. Parenthesised text (a size,
-#: "(~17.3 GiB)") is dropped first. Anything else fails closed.
+#: of the question's paths it means, said only with quantifiers, neutral
+#: nouns and the set descriptions agents write in cleanup asks. Anything else
+#: fails closed. Only a SIZE in parentheses ("(~17.3 GiB)") is dropped first
+#: (SEC-R4-M1): "Delete them (only x)" keeps "only" and fails closed.
 _PICK_PLURAL = frozenset({"all", "both", "every", "each", "everything", "them", "these", "those"})
-_PICK_SET_WORDS = _PICK_PLURAL | frozenset(
+_PICK_NEUTRAL = frozenset(
     {
-        "the",
-        "of",
-        "and",
-        "it",
-        "this",
-        "that",
-        "listed",
-        "above",
-        "named",
-        "clean",
-        "dirty",
-        "merged",
-        "closed",
-        "finished",
-        "old",
-        "stale",
-        "detached",
-        "worktree",
-        "worktrees",
-        "tree",
-        "trees",
-        "checkout",
-        "checkouts",
-        "clone",
-        "clones",
-        "folder",
-        "folders",
-        "dir",
-        "dirs",
-        "directory",
-        "directories",
-        "repo",
-        "repos",
-        "qa",
-        "bench",
-        "build",
-        "builds",
-        "output",
-        "outputs",
-        "cache",
-        "caches",
-        "ignored",
-        "file",
-        "files",
+        "the", "of", "and", "it", "this", "that", "listed", "above", "named",
+        "worktree", "worktrees", "tree", "trees", "checkout", "checkouts",
+        "clone", "clones", "folder", "folders", "dir", "dirs", "directory",
+        "directories", "repo", "repos", "file", "files",
     }
-)
+)  # fmt: skip
+#: Descriptors NARROW the list ("all clean worktrees" when the question marks
+#: one "(dirty)"; "all caches"), so a pick carrying one covers the whole list
+#: only when it also states a count of at least the number of listed paths
+#: ("all 33 clean merged/closed worktrees"), review SEC-R4-B1.
+_PICK_DESCRIPTORS = frozenset(
+    {
+        "clean", "dirty", "merged", "closed", "finished", "old", "stale", "detached",
+        "qa", "bench", "build", "builds", "output", "outputs", "cache", "caches",
+        "ignored",
+    }
+)  # fmt: skip
+_PICK_SET_WORDS = _PICK_PLURAL | _PICK_NEUTRAL | _PICK_DESCRIPTORS
+_PICK_SIZE = re.compile(r"(?i)\(\s*~?\s*[\d.,]+\s*(?:[kmgt]i?b|bytes?|b)\s*\)")
+
+
 #: A bare yes; only consent with an imperative delete question.
 _BARE_YES = re.compile(r"(?i)(?:yes|approve|approved|confirm|go ahead)[.! ]*")
 _DELETE_QUESTION = re.compile(r"(?i)^(?:delete|remove)\s+")
@@ -1441,17 +1417,22 @@ def _exact_firm_ask(ask: Any, path: str, *, home: str, cwd: str | None) -> bool:
             # in it), and it covers the question's whole list only through a
             # plural quantifier ("all 33 …", "them", "both") or a bare yes to
             # an imperative "Delete …?"; otherwise only a single-path question.
+            # One entry per listed path: the as-written and prose readings of
+            # "…/build?" are the same path (review SEC-R4-m1).
             listed = {
-                t
+                t.rstrip("?!")
                 for word, _ in prov._path_readings(question)
                 if (t := prov._expand_word(word, home, cwd)) is not None
             }
             if label_delete:
-                rest = re.sub(r"\([^)]*\)", " ", label[label_delete.end() :])
-                rest_words = re.findall(r"[A-Za-z]+", rest.replace("/", " "))
-                if any(w.lower() not in _PICK_SET_WORDS for w in rest_words):
+                rest = _PICK_SIZE.sub(" ", label[label_delete.end() :])
+                rest_words = [w.lower() for w in re.findall(r"[A-Za-z]+", rest.replace("/", " "))]
+                if any(w not in _PICK_SET_WORDS for w in rest_words):
                     continue
-                plural = any(w.lower() in _PICK_PLURAL for w in rest_words)
+                plural = any(w in _PICK_PLURAL for w in rest_words)
+                if plural and any(w in _PICK_DESCRIPTORS for w in rest_words):
+                    counts = [int(n) for n in re.findall(r"\b\d+\b", rest)]
+                    plural = bool(counts) and max(counts) >= len(listed)
             else:
                 plural = True  # a bare yes to "Delete <list>?" takes the list
             if (plural or len(listed) == 1) and names(question):
