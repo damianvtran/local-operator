@@ -275,23 +275,25 @@ FRAME_CAP_ENTRY_TEXT_CHARS = 4_000
 FRAME_CAP_ENTRY_TEXT_FLOOR = 200
 
 #: Row kinds whose ``text`` is the READER'S ANSWER, and so the one field the
-#: text tier bounds once and never spends again: ``FRAME_CAP_ENTRY_TEXT_CHARS``
-#: is the floor for these rows, not the start of a walk down to
-#: ``FRAME_CAP_ENTRY_TEXT_FLOOR``.
+#: text tier spends LAST: ``FRAME_CAP_ENTRY_TEXT_CHARS`` is where these rows stop
+#: while everything else walks down to ``FRAME_CAP_ENTRY_TEXT_FLOOR``. Only a
+#: frame still over the cap after that walks the answers too (the old behaviour),
+#: because a frame over the cap is dropped whole by the daemon's reader.
 #:
-#: WHY THEY ARE EXEMPT. The tier is the last one, reached only when everything
-#: cheaper has been spent, and it used to apply the SAME falling bound to every
-#: field of every row. Two real messages of 3,012 and 1,842 source characters
-#: therefore crossed to the phone as 200-character rows ending in "…" — the
-#: phone's rendering matched frame for frame — and nothing could get the text
-#: back: the flag is not a recovery path (its only reader, the peer-cycle
-#: restore predicate, uses it to refuse a drill-in) and the row is never
-#: re-fetched.
-#: The walk that did it cannot even buy the frame it is spent for: the tail is
-#: at most ``FRAME_CAP_TRANSCRIPT_FLOOR`` rows, so 4,000 chars/row is ~64 KB of
-#: a 700 KB budget, and a frame still over the cap at that point is over it for
-#: a reason row text cannot shrink (an unbounded sibling payload, say). The
-#: tier was spending the answer and losing the frame anyway.
+#: WHY THEY ARE SPARED FIRST. The tier is the last one, reached only when
+#: everything cheaper has been spent, and it used to apply the SAME falling
+#: bound to every field of every row. Two real messages of 3,012 and 1,842
+#: source characters therefore crossed to the phone as 200-character rows ending
+#: in "…" — the phone's rendering matched frame for frame — and nothing could
+#: get the text back: the flag is not a recovery path (its only reader, the
+#: peer-cycle restore predicate, uses it to refuse a drill-in) and the row is
+#: never re-fetched.
+#: The walk that did it usually cannot even buy the frame it is spent for: the
+#: tail is at most ``FRAME_CAP_TRANSCRIPT_FLOOR`` rows, so 4,000 ASCII chars/row
+#: is ~64 KB of a 700 KB budget, and a frame still over the cap at that point is
+#: over it for a reason row text cannot shrink (an unbounded sibling payload,
+#: say). Non-ASCII text escapes to 6-12 bytes a character on the wire, which is
+#: why the answers still walk as a last resort rather than never.
 #:
 #: Tool output, notices and every other kind keep the old behaviour: their text
 #: is the leading line of a result that expands, while the answer is the answer.
@@ -1209,10 +1211,10 @@ def cap_projection_frame(
        file can exceed the whole cap by itself, and tiers 1-5 cannot touch it,
        so without this the function returned a frame the socket then dropped
        whole. The full text stays one /history fetch away. ONE EXEMPTION: the
-       ``text`` of an ``assistant``/``user`` row is bounded ONCE at
-       ``FRAME_CAP_ENTRY_TEXT_CHARS`` and never walked down with the rest (see
-       ``FRAME_CAP_ANSWER_TEXT_KINDS``) — the answer is not what pays for a
-       frame this tier cannot otherwise shrink.
+       ``text`` of an ``assistant``/``user`` row is bounded at
+       ``FRAME_CAP_ENTRY_TEXT_CHARS`` and walked down only in a second pass,
+       when the frame is still over the cap after everything else reached the
+       floor (see ``FRAME_CAP_ANSWER_TEXT_KINDS``).
     7. The roster drops to identity rows (``FRAME_CAP_ROSTER_IDENTITY_FIELDS``).
        A viewer renders one row per child with its label, lifecycle state and
        parent; per-child detail is fetched on demand, the same trade the
@@ -1473,47 +1475,58 @@ def cap_projection_frame(
     # Tier 6: truncate row text. Tiers 1-5 cannot shrink a single oversized
     # row, so this is the only tier that bounds the pasted-file case.
     #
-    # ANSWER TEXT IS BOUNDED ONCE, NOT WALKED (``FRAME_CAP_ANSWER_TEXT_KINDS``).
-    # ``text`` on an ``assistant``/``user`` row is clipped to
-    # ``FRAME_CAP_ENTRY_TEXT_CHARS`` and never touched again, however far the
-    # tier walks for everything else. Tool output and notices keep the falling
-    # bound: their text is an expandable result's first line, the answer is the
-    # answer. The old behaviour spent both equally, and a 3,012-character reply
-    # reached the phone as 200 characters and an ellipsis with no way back
-    # (the flag is not a recovery path — its only reader refuses a drill-in —
-    # and nothing re-fetches the row) — usually in a frame that stayed over the
-    # cap anyway, because at the tail floor this tier's own budget is ~64 KB of
-    # 700 KB.
+    # ANSWER TEXT IS SPENT LAST (``FRAME_CAP_ANSWER_TEXT_KINDS``).
+    # Pass 1 clips ``text`` on an ``assistant``/``user`` row to
+    # ``FRAME_CAP_ENTRY_TEXT_CHARS`` and never touches it again while everything
+    # else walks down to ``FRAME_CAP_ENTRY_TEXT_FLOOR``. Tool output and notices
+    # are an expandable result's first line; the answer is the answer. The old
+    # behaviour spent both equally, and a 3,012-character reply reached the phone
+    # as 200 characters and an ellipsis with no way back (the flag is not a
+    # recovery path — its only reader refuses a drill-in — and nothing
+    # re-fetches the row) — usually in a frame that stayed over the cap anyway,
+    # because at the tail floor this tier's own budget is ~64 KB of 700 KB.
+    #
+    # "Usually" is not "always": that ~64 KB is ASCII. JSON-escaped, a CJK
+    # character costs 6 bytes and an emoji 12, so a frame carrying an unbounded
+    # sibling payload AND non-ASCII answers can fit only if the answers are walked
+    # too, and a frame still over the cap is dropped whole by the daemon's reader.
+    # So pass 2 runs ONLY when pass 1 left the frame over the cap: it is the old
+    # walk, answers included. Every limit pass 2 visits is one the old walk
+    # visited, with every other field already at or below the old walk's size, so
+    # a frame the old code kept is never dropped by this code.
     #
     # ``len(value) > limit`` is the ONLY edit condition, so a row already inside
     # the bound is skipped rather than re-normalised: an answer row bounded on
     # the first pass is byte-identical on every later pass and every repaint.
     # The completeness flag is written only where a clip actually happened — a
     # row still clipped reports ``false``, a full row keeps its ``true``.
-    text_limit = FRAME_CAP_ENTRY_TEXT_CHARS
-    while True:
-        for entry in data.get("transcript") or []:
-            answer_text = entry.get("kind") in FRAME_CAP_ANSWER_TEXT_KINDS
-            for field in ("text", "summary", "error"):
-                value = entry.get(field)
-                if not isinstance(value, str):
-                    continue
-                limit = (
-                    FRAME_CAP_ENTRY_TEXT_CHARS if answer_text and field == "text" else text_limit
-                )
-                if len(value) <= limit:
-                    continue
-                entry[field] = _compact_multiline(value, limit)
-                if field == "text":
-                    # Keep this fact across runtime -> relay serialization.
-                    # The retained ID names a prefix, not the final result end.
-                    entry["text_complete"] = False
-        dirty.add("transcript")
-        if fits():
-            return data, True
-        if text_limit <= FRAME_CAP_ENTRY_TEXT_FLOOR:
-            break
-        text_limit = max(FRAME_CAP_ENTRY_TEXT_FLOOR, text_limit // 4)
+    for spare_answers in (True, False):
+        text_limit = FRAME_CAP_ENTRY_TEXT_CHARS
+        while True:
+            for entry in data.get("transcript") or []:
+                answer_text = spare_answers and (entry.get("kind") in FRAME_CAP_ANSWER_TEXT_KINDS)
+                for field in ("text", "summary", "error"):
+                    value = entry.get(field)
+                    if not isinstance(value, str):
+                        continue
+                    limit = (
+                        FRAME_CAP_ENTRY_TEXT_CHARS
+                        if answer_text and field == "text"
+                        else text_limit
+                    )
+                    if len(value) <= limit:
+                        continue
+                    entry[field] = _compact_multiline(value, limit)
+                    if field == "text":
+                        # Keep this fact across runtime -> relay serialization.
+                        # The retained ID names a prefix, not the final result end.
+                        entry["text_complete"] = False
+            dirty.add("transcript")
+            if fits():
+                return data, True
+            if text_limit <= FRAME_CAP_ENTRY_TEXT_FLOOR:
+                break
+            text_limit = max(FRAME_CAP_ENTRY_TEXT_FLOOR, text_limit // 4)
 
     # Tier 7: identity rows. What stays is what a reader can neither derive nor
     # fetch per child: the job id, the label, the parent edge and the lifecycle

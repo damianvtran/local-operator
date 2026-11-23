@@ -1613,14 +1613,14 @@ def test_the_text_tier_never_walks_the_answer_down_to_the_floor(
     peer-cycle restore predicate, refuses a drill-in over a clipped row) and
     nothing re-fetches the row.
 
-    The walk cannot even buy the frame it is spent for. The tail floor keeps at
-    most ``FRAME_CAP_TRANSCRIPT_FLOOR`` rows, so 4,000 chars/row is ~64 KB of a
-    700 KB budget: a frame still over the cap HERE is over it for a reason row
-    text cannot shrink. This fixture supplies exactly that reason — the
-    ``asks`` list, which no tier bounds — so the walk reaches its floor and
-    both behaviours are visible side by side: the answer stops at its first
-    bound, while the notice's text and the tool rows' summary/error go all the
-    way down.
+    The walk usually cannot even buy the frame it is spent for. The tail floor
+    keeps at most ``FRAME_CAP_TRANSCRIPT_FLOOR`` rows, so 4,000 ASCII chars/row
+    is ~64 KB of a 700 KB budget. This fixture is sized (``asks``, which no tier
+    bounds, plus a ``cap_bytes`` just above what the floor reaches) so the tool
+    and notice walk reaches its floor and FITS there, and both behaviours are
+    visible side by side: the answer stops at its first bound, while the
+    notice's text and the tool rows' summary/error go all the way down. A frame
+    that does not fit even then is the next test's case.
     """
     import local_operator.mobile.projection as projection_module
     from local_operator.mobile.projection import (
@@ -1662,7 +1662,7 @@ def test_the_text_tier_never_walks_the_answer_down_to_the_floor(
     projection.asks = [
         PendingAskWire(
             ask_id="a1",
-            questions=[{"qid": f"q{index}", "question": "Q" * 300_000} for index in range(3)],
+            questions=[{"qid": f"q{index}", "question": "Q" * 225_000} for index in range(3)],
         )
     ]
 
@@ -1677,9 +1677,12 @@ def test_the_text_tier_never_walks_the_answer_down_to_the_floor(
 
     monkeypatch.setattr(projection_module, "_compact_multiline", spy)
 
-    data, degraded = cap_projection_frame(projection)
+    # 693,000 sits between what the floor reaches (692,708) and what the 250
+    # step reaches (693,958): the walk must go to the floor to fit.
+    data, degraded = cap_projection_frame(projection, cap_bytes=693_000)
 
     assert degraded is True
+    assert len(json.dumps({"op": "projection", "data": data}).encode()) <= 693_000
     rows = {row["id"]: row for row in data["transcript"]}
     assert len(rows) == FRAME_CAP_TRANSCRIPT_FLOOR, "the tail was already at its floor"
 
@@ -1728,6 +1731,62 @@ def test_the_text_tier_never_walks_the_answer_down_to_the_floor(
     assert not any(
         length in (3_012, 21) for length, _limit in calls
     ), "a row already inside the bound must be skipped, not rewritten"
+
+
+def test_the_answers_walk_too_when_sparing_them_would_drop_the_frame(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Sparing the answer must never cost the frame: a frame over the cap is lost.
+
+    The daemon's reader drops a frame still over the cap whole, so a repaint the
+    old walk kept and this tier lost would be a worse outcome than a clipped
+    answer. The ~64 KB the first bound costs is ASCII: JSON-escaped, an emoji is
+    12 bytes, so thirty answers of 6,000 emoji beside an unbounded ``asks``
+    question stayed at 1,055,475 bytes with the answers held at 4,000 characters,
+    where the old walk fit them at 515,475. The answers are therefore spared
+    FIRST and walked only when everything else is already at its floor and the
+    frame is still over the cap.
+    """
+    import logging
+
+    from local_operator.mobile.projection import (
+        FRAME_CAP_ENTRY_TEXT_CHARS,
+        FRAME_CAP_ENTRY_TEXT_FLOOR,
+        PROJECTION_FRAME_SOFT_CAP_BYTES,
+        cap_projection_frame,
+    )
+    from local_operator.mobile.types import (
+        PendingAskWire,
+        SessionProjection,
+        TranscriptEntry,
+    )
+
+    projection = SessionProjection(session_id="s1", pid=1, kind="tui")
+    projection.transcript = [
+        TranscriptEntry(id="opener", kind="user", text="open the conversation"),
+        *[
+            TranscriptEntry(id=f"answer-{index}", kind="assistant", text="\U0001f600" * 6_000)
+            for index in range(30)
+        ],
+    ]
+    projection.asks = [
+        PendingAskWire(ask_id="a1", questions=[{"qid": "q0", "question": "Q" * 330_000}])
+    ]
+
+    with caplog.at_level(logging.WARNING):
+        data, degraded = cap_projection_frame(projection)
+
+    assert degraded is True
+    size = len(json.dumps({"op": "projection", "data": data}).encode())
+    assert size <= PROJECTION_FRAME_SOFT_CAP_BYTES, "the frame the old walk kept was lost"
+    assert not [r for r in caplog.records if "after every degradation tier" in r.getMessage()]
+    answers = [row for row in data["transcript"] if row["kind"] == "assistant"]
+    assert answers and all(row["text_complete"] is False for row in answers)
+    longest = max(len(row["text"]) for row in answers)
+    assert (
+        FRAME_CAP_ENTRY_TEXT_FLOOR < longest < FRAME_CAP_ENTRY_TEXT_CHARS
+    ), "the answers walk only as far as the frame needs, not straight to the floor"
+    assert data["transcript"][0]["text"] == "open the conversation"
 
 
 def test_a_text_heavy_frame_still_fits_with_the_answer_at_its_bound() -> None:
