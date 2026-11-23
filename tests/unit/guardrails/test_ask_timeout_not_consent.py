@@ -1257,15 +1257,22 @@ async def test_a48e3_unverified_answer_is_refused_and_says_it_was_unproven(home:
     text = " ".join(outcome.text.split())
     assert "could not prove it is the operator's" in text
     assert "did not start this session's runtime" in text
-    # The recovery LEADS with the route that always works (R1-M1/Q1): a
-    # runtime the wake supervisor started has no surface that can prove the
-    # operator, so an unconditional "ask again" loops on the same card.
+    # The recovery names the routes that DO prove the operator (UI PR #2073
+    # UX U1 / QA Q2): a fresh ask confirmed on the desktop's native sheet is
+    # attested, so the old "background runtime has none" / "same desktop card
+    # is refused the same way" claims are gone. Re-ask stays capped at once
+    # (R1-M1/Q1) and the exact command stays the fallback.
     recovery = text.split("leave it in place.", 1)[1]
-    assert recovery.startswith(" To proceed, hand the exact command to the operator")
-    assert "helps only if the operator answers in the terminal or TUI process" in text
-    assert "a runtime started in the background has none" in text
-    assert "another answer on the same desktop card is refused the same way" in text
-    assert "ask again at most once, naming every exact full path" in text
+    assert recovery.startswith(" To proceed, ask again at most once, naming every exact full path")
+    assert 'answer with "Confirm and send…" in the desktop app' in text
+    assert "or in the terminal or TUI that started this runtime" in text
+    assert "A plain Send answer, an answer revised after a plain Send" in text
+    # The command fallback comes last, after the re-ask route.
+    assert recovery.index("ask again at most once") < recovery.index(
+        "Otherwise hand the exact command to the operator to run themselves"
+    )
+    assert "background has none" not in text and "has none" not in text
+    assert "refused the same way" not in text
     assert "peer, bridge or relayed message" in text
     # Never steer the proof source: no "restart the runtime" / "start it from".
     lowered = text.lower()
@@ -1314,10 +1321,15 @@ def test_ask_docs_say_name_every_full_path_and_descriptions_approve_nothing() ->
     notes = " ".join(TOOL_NOTES["ask"].notes.split())
     assert "name every exact full path" in notes
     assert "a description approves nothing" in notes
-    assert "relayed by a peer or bridge message, never authorises" in notes
-    # Kept in sync with ``lapsed_refusal_reason`` (R1-M1/Q1): hand over the
-    # command first, re-ask at most once, never steer who starts the runtime.
-    first = notes.index("hand the operator the exact command")
-    assert first < notes.index("ask again at most once")
-    assert "background-started runtime has none" in notes
+    assert "relayed by a peer or bridge message never authorises" in notes
+    # Kept in sync with ``lapsed_refusal_reason`` (UI PR #2073 UX U1): name the
+    # attested desktop door, cap the re-ask at once, fall back to the command,
+    # never steer who starts the runtime.
+    assert '"Confirm and send…" in the desktop app' in notes
+    assert "terminal or TUI that started this runtime" in notes
+    assert "A plain Send answer, an answer revised after a plain Send" in notes
+    assert notes.index("ask again at most once") < notes.index(
+        "hand the operator the exact command"
+    )
+    assert "background-started runtime has none" not in notes
     assert "restart" not in notes.lower()

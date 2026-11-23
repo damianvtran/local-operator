@@ -5219,9 +5219,9 @@ def unanswered_label(status: str) -> str:
 #: is indistinguishable from a proof-less window. The unforgeable desktop
 #: credential (Electron fuse hardening + code-signature check) has since
 #: shipped as ``asks/app_attest.py`` (F2, 2026-11-16): the desktop app's main
-#: process attests each answer from its native confirm sheet, and an attested
-#: answer is stamped ``desktop``, so this label now marks only answers no
-#: attestation or capability vouched for. :func:`lapsed_refusal_reason` keys
+#: process attests an answer the operator confirms on its native sheet, and
+#: an attested answer is stamped ``desktop``, so this label now marks only
+#: answers no attestation or capability vouched for. :func:`lapsed_refusal_reason` keys
 #: its recovery text on this exact string.
 UNPROVEN_SURFACE_LABEL = (
     "answered from a surface that could not prove it is the operator's "

@@ -39,7 +39,10 @@ import pytest
 
 from local_operator.asks import app_attest, surfaces
 from local_operator.asks.app_attest import AttestationTable, AttestService
-from local_operator.session.runtime.server import _ask_answer_stamp, _ConnectionAuthority
+from local_operator.session.runtime.server import (
+    _ask_answer_stamp,
+    _ConnectionAuthority,
+)
 from tests.unit.asks.test_app_attest import (  # noqa: F401
     _Clock,
     _dial,
