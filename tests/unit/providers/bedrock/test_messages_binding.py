@@ -373,6 +373,7 @@ async def test_later_block_proved_dependent_on_an_omission(wire):
         first = await _send(client, _request([user]))
         stale = Message.assistant("portable output", provider_payload=first.provider_payload)
         legacy = stale.model_copy(deep=True)
+        assert legacy.provider_payload is not None
         del legacy.provider_payload["native_replay"][FIELD]
         tools = [build_library_tool()]
         # Intentionally let the no-send oracle mint a continuation on an
