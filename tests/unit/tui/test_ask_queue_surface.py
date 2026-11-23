@@ -2427,3 +2427,103 @@ async def test_the_copy_hint_is_painted_before_the_exit_hint_and_dropped_first(e
         # Dropping it BUYS a hint — the exit key survives at a width where the
         # full set cannot fit.
         assert "esc collapse" in narrow or "enter answer" in narrow, narrow
+
+
+# -- the receipt row, after PR A's design round 1 (D-1, D-2, D-3) -------------
+
+
+def _receipt(**extra: Any) -> dict[str, Any]:
+    """One ask receipt as the runtime stores it, with the parts ``rows.py`` reads."""
+    details: dict[str, Any] = {
+        "ask_id": "a-1c09",
+        "status": "answered",
+        "text": "Answered — delivering",
+        "questions": [{"id": "q1", "question": "Run the relay smoke first?"}],
+        "answers": {"q1": ["Yes"]},
+    }
+    details.update(extra)
+    return details
+
+
+def test_a_pointer_on_a_receipt_never_re_cuts_its_name():
+    """D-1: the ⟨expand⟩ hint used to be subtracted BEFORE the fit.
+
+    It takes nine cells, so hovering a receipt trimmed a name that had been
+    fitted to the full line — the row changed its WORDS under the pointer. The
+    fit is now taken from the unhovered budget and the hint may only ride in the
+    padding that fit left over.
+    """
+    from local_operator.tui.widgets.tool_card import EXPAND_HINT
+    from local_operator.tui.widgets.transcript import AskResponseBlock
+
+    block = AskResponseBlock(_receipt(), kind="response")
+    resting = block._build_content(120).plain
+    block._hovered = True
+    hovered = block._build_content(120).plain
+    assert hovered.startswith(resting), (resting, hovered)
+    # 120 columns leave padding, so the affordance is still offered there.
+    assert EXPAND_HINT in hovered, hovered
+    # ...and the hint is the ONLY difference on the line.
+    assert hovered.replace(EXPAND_HINT, "").rstrip() == resting
+
+    # Where the summary fills the row, hover shows NO hint rather than re-cutting
+    # the name: the words win, the affordance yields.
+    narrow = AskResponseBlock(_receipt(), kind="response")
+    resting_narrow = narrow._build_content(80).plain
+    narrow._hovered = True
+    assert narrow._build_content(80).plain == resting_narrow
+    assert EXPAND_HINT not in resting_narrow
+
+
+def test_the_receipts_id_is_painted_muted_and_the_state_keeps_its_ink():
+    """D-3: the id is a HANDLE, and `dim` (4.18:1/3.46:1) is too faint for it."""
+    from local_operator.tui import theme as theme_mod
+    from local_operator.tui.widgets.transcript import AskResponseBlock
+
+    block = AskResponseBlock(_receipt(status="late"), kind="timeout")
+    text = block._build_content(120)
+    id_at = text.plain.index("a-1c09")
+    id_span = next(span for span in text.spans if span.start <= id_at < span.end)
+    assert isinstance(id_span.style, Style)
+    colour = id_span.style.color
+    assert colour is not None
+    resolved = colour if isinstance(colour, Color) else Color.parse(str(colour))
+    assert (
+        resolved.get_truecolor() == Color.parse(theme_mod.semantic_color("muted")).get_truecolor()
+    )
+    # The state phrase is the audit content and keeps the severity ink.
+    state_at = text.plain.index("Timed out")
+    state_span = next(span for span in text.spans if span.start <= state_at < span.end)
+    assert isinstance(state_span.style, Style)
+    state_colour = state_span.style.color
+    assert state_colour is not None
+    painted_state = (
+        state_colour if isinstance(state_colour, Color) else Color.parse(str(state_colour))
+    )
+    assert (
+        painted_state.get_truecolor()
+        == Color.parse(theme_mod.semantic_color("warning")).get_truecolor()
+    )
+
+
+def test_the_receipt_fit_cuts_the_state_only_when_the_row_cannot_hold_it():
+    """D-2: the docstring claimed the state is never cut; at a tiny budget it is.
+
+    What is true is narrower and worth pinning: no width that can carry
+    ``id — state`` loses any of it, and the name is what gives way before that.
+    """
+    from local_operator.tui.widgets.transcript import AskResponseBlock
+
+    block = AskResponseBlock(_receipt(), kind="response")
+    # A budget that holds the name gets the name.
+    wide = block._fit_summary("", 60)
+    assert "Run" in wide and "Answered, delivering" in wide
+    # A budget too small for the name drops it whole rather than stubbing it,
+    # and the state fits.
+    no_name = block._fit_summary("", 40)
+    assert '"' not in no_name, no_name
+    assert no_name == "a-1c09 — Answered, delivering"
+    # Below the id-and-state width there is nothing left to drop but the tail.
+    tiny = block._fit_summary("", 12)
+    assert tiny.endswith("…"), tiny
+    assert "Answered, delivering" not in tiny
