@@ -112,6 +112,7 @@ from local_operator.update import BuildStamp
 
 if TYPE_CHECKING:
     from local_operator.owned_process import OwnershipGuarantee
+    from local_operator.session.spec import SessionRoots
 
 EXIT_OK = 0
 EXIT_EPISODE = 1
@@ -693,6 +694,21 @@ def _open_store(config_dir: Path | None) -> tuple[Any, Path]:
     return AuthStore(config_dir=root), root
 
 
+def _validate_reasoning_effort(
+    provider: str, model: str, effort: str, ladder: Sequence[str], *, session: bool = False
+) -> None:
+    # The ordinary runtime can clamp or drop unsupported levels. An explicit
+    # run override must instead be refused before allocating a benchmark guest.
+    if effort not in ladder:
+        route = f"{provider}/{model}"
+        if session:
+            route = f"session route {route}"
+        raise ValueError(  # i18n: ignore checkout-only evaluation diagnostic
+            f"{route} does not accept reasoning effort {effort!r}; its ladder is "
+            f"{', '.join(ladder) if ladder else '(none: this model has no effort ladder)'}"
+        )
+
+
 def _model_client(
     *,
     auth_store: Any,
@@ -714,21 +730,7 @@ def _model_client(
 
     model_spec = build_model_spec(provider, model)
     if reasoning_effort is not None:
-        # Validated against the model's OWN ladder rather than a fixed list of
-        # level names: the ladder differs per model, and the client silently
-        # DROPS an effort the spec does not list (providers/clients.py
-        # ``_reasoning_effort``). Dropping it is right mid-episode, where the
-        # alternative is losing the turn — but here it would mean a paid run
-        # quietly executing at the default effort while the operator believed
-        # otherwise, and comparing that against published maximum-effort
-        # numbers. Fail before anything is allocated instead.
-        ladder = model_spec.reasoning_efforts
-        if reasoning_effort not in ladder:
-            raise ValueError(
-                f"{provider}/{model} does not accept reasoning effort "
-                f"{reasoning_effort!r}; its ladder is "
-                f"{', '.join(ladder) if ladder else '(none: this model has no effort ladder)'}"
-            )
+        _validate_reasoning_effort(provider, model, reasoning_effort, model_spec.reasoning_efforts)
         # ModelSpec is mutable at runtime by design — this is the same field
         # ``/effort`` writes — so setting it here is the supported path.
         model_spec.reasoning_effort = reasoning_effort
@@ -1215,6 +1217,46 @@ def _ensure_lease_outlasts_wall(
     )
 
 
+def _session_roots() -> tuple[Path, SessionRoots]:
+    """Require the launcher's scratch environment; never default to ambient roots."""
+    from local_operator import paths
+    from local_operator.session.spec import SessionIsolationError, SessionRoots
+
+    missing = [
+        name
+        for name in ("HOME", "LOCAL_OPERATOR_CONFIG_DIR", "LOP_RUN_SCRATCH_ROOT")
+        if not os.environ.get(name)
+    ]
+    if missing:
+        raise SessionIsolationError(
+            "--engagement session requires " + ", ".join(missing) + " (the episode "
+            "scratch the launcher sets); refusing to run the session against an "
+            "ambient home"
+        )
+    scratch_root = Path(os.environ["LOP_RUN_SCRATCH_ROOT"]).resolve()
+    # The world is a sibling of the launcher-seeded HOME, not a parent of it:
+    # the model may read its world, but not the controller's credential store.
+    roots = SessionRoots(
+        config_dir=paths.config_dir(), agent_home=paths.agent_home_dir(), cwd=scratch_root / "world"
+    )
+    roots.assert_durable()
+    return scratch_root, roots
+
+
+def _validate_session_effort(args: argparse.Namespace, roots: SessionRoots, effort: str) -> None:
+    from local_operator.model.configure import build_model_spec, resolve_model_info
+    from local_operator.sdk import _check_resolved_roots
+
+    # This can discover models absent from the built-in registry. Apply the
+    # same ambient-root guard and explicit config base as the owning Session
+    # before any such lookup, without constructing a client or a guest.
+    _check_resolved_roots(roots)
+    provider, model = args.session_route or args.route
+    info = resolve_model_info(provider, model, base=roots.config_path)
+    ladder = build_model_spec(provider, model, info).reasoning_efforts
+    _validate_reasoning_effort(provider, model, effort, ladder, session=True)
+
+
 async def _run_session_arm(
     *,
     args: argparse.Namespace,
@@ -1257,7 +1299,6 @@ async def _run_session_arm(
     from local_operator.session.spec import (
         ApprovalPolicy,
         SessionIsolationError,
-        SessionRoots,
         SessionSpec,
         VolatileRootError,
     )
@@ -1278,48 +1319,19 @@ async def _run_session_arm(
         print(str(error), file=sys.stderr)
         return EXIT_PREFLIGHT
 
-    missing = [
-        name
-        for name in ("HOME", "LOCAL_OPERATOR_CONFIG_DIR", "LOP_RUN_SCRATCH_ROOT")
-        if not os.environ.get(name)
-    ]
-    if missing:
-        print(
-            "--engagement session requires " + ", ".join(missing) + " (the episode "
-            "scratch the launcher sets); refusing to run the session against an "
-            "ambient home",
-            file=sys.stderr,
-        )
-        return EXIT_PREFLIGHT
-    home = Path(os.environ["HOME"]).resolve()
-    scratch_root = Path(os.environ["LOP_RUN_SCRATCH_ROOT"]).resolve()
-    config_dir = Path(os.environ["LOCAL_OPERATOR_CONFIG_DIR"]).resolve()
-    agent_home = Path(
-        os.environ.get("LOCAL_OPERATOR_HOME") or (home / "local-operator-home")
-    ).resolve()
-    # THE WORLD SPLIT (world-boundary slice). The launcher seeds controller
-    # state (the secret store, auth.db, config) under ``$SCRATCH/home``; the
-    # model's world must NOT contain it, or the seatbelt jail would hand the
-    # model's own shell read access to a decryptable store. So the episode's
-    # world is its own sibling directory: ``scratch/world`` is the
-    # confinement root, the cwd, and the discovery boundary, while
-    # HOME/config/agent-home, records and the bridge stay outside it.
-    world = scratch_root / "world"
-    world.mkdir(mode=0o700, parents=True, exist_ok=True)
-    cwd = world
     try:
-        roots = SessionRoots(
-            config_dir=config_dir, agent_home=agent_home, cwd=cwd, allow_volatile=False
-        )
-        roots.assert_durable()
+        scratch_root, roots = _session_roots()
     except (VolatileRootError, SessionIsolationError) as error:
         print(str(error), file=sys.stderr)
         return EXIT_PREFLIGHT
+    world = scratch_root / "world"
+    world.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     session_provider, session_model = args.session_route or route
     session_spec = SessionSpec(
         hosting=session_provider,
         model=session_model,
+        birth_effort=getattr(args, "reasoning_effort", None),
         # The world boundary + the pinned surface: validate_episode_session_spec
         # refuses anything else, and the declaration is the approval for
         # exactly the tools it names (see session_arm.EPISODE_TOOL_SURFACE for
@@ -1719,6 +1731,11 @@ async def _run_managed_frontend(
         # something proves otherwise.
         observed = _owner_observation(lease)
         lost = observed.state is JobState.ABSENT
+        if lost:
+            # The owner may have admitted and sealed while liveness was being read.
+            terminal = owner_status()
+            if terminal is not None and terminal.phase in owned_process.TERMINAL_PHASES:
+                return _report_owner_outcome(lease, terminal)
         detail = (
             "the owner exited without admitting: no terminal status and no live holder "
             "were observable. Its retained state is UNVERIFIED (it may have admitted "
@@ -1761,6 +1778,10 @@ async def _run_managed_frontend(
             return _report_owner_outcome(lease, status)
         observed = _owner_observation(lease)
         if observed.state is JobState.ABSENT:
+            # A terminal receipt can land between the status read and owner exit.
+            terminal = owner_status()
+            if terminal is not None and terminal.phase in owned_process.TERMINAL_PHASES:
+                return _report_owner_outcome(lease, terminal)
             print(
                 json.dumps(
                     {
@@ -1888,6 +1909,11 @@ def _report_owner_outcome(lease: Any, status: Any) -> int:
     is printed so the caller still gets a truthful shape. The failed/complete
     exit contract stays the same as the foreground used to provide.
     """
+    if status.phase == "ended" and status.receipt.get("session_effort_preflight_refused") is True:
+        # An invalid effort has no outcome bundle to read. Keep the foreground
+        # refusal contract instead of reporting an unreadable terminal outcome.
+        print(status.detail, file=sys.stderr)
+        return EXIT_PREFLIGHT
     if status.outcome_path:
         try:
             body = Path(status.outcome_path).read_text()
@@ -2024,6 +2050,18 @@ async def run(
     owner_status = _owned_host_status_channel(args)
     if owner_status is not None:
         owner_status.phase("admitted", detail="managed owner verified before prepare")
+    effort = getattr(args, "reasoning_effort", None)
+    if args.engagement == "session" and effort is not None:
+        try:
+            _, roots = _session_roots()
+            _validate_session_effort(args, roots, effort)
+        except ValueError as error:
+            if owner_status is not None:
+                owner_status.phase(
+                    "ended", detail=str(error), receipt={"session_effort_preflight_refused": True}
+                )
+            print(str(error), file=sys.stderr)
+            return EXIT_PREFLIGHT
     try:
         infra_refs = _parse_infra_refs(args.infra_ref, args.infra_purpose)
         if infra_refs:
@@ -2163,13 +2201,9 @@ async def run(
             # unconditionally for the same lost-stamp reason.
             "progress_guards": bool(getattr(args, "progress_guards", False))
             or args.engagement != "session",
-            # The effort the decisions were made at, beside the route they were
-            # made on. A score is not comparable across effort levels, and the
-            # published numbers this run is read against are at maximum effort,
-            # so the bundle has to carry the level rather than leave it to the
-            # operator's memory of which flags were passed. Absent when not
-            # overridden: the effective value is then the model table's
-            # documented default for the route already stamped above.
+            # The requested effort override, not an observation of any wire
+            # request. A score is not comparable across effort levels, so the
+            # bundle carries the flag when supplied without guessing defaults.
             **(
                 {"reasoning_effort": args.reasoning_effort}
                 if args.reasoning_effort is not None
