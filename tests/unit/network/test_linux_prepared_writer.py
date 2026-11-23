@@ -33,10 +33,15 @@ pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux mechanics
 
 #: select(2)'s FD_SETSIZE ceiling: the descriptor height these tests exist to
 #: clear when they lease a high slot. CPython does not export the C macro
-#: (``select.FD_SETSIZE`` does not exist), so it is spelled once, here, and every
-#: use derives from it -- a floor quietly lowered below this number would
-#: otherwise stop exercising the high-descriptor path while still passing.
+#: (``select.FD_SETSIZE`` does not exist), so it is spelled once, here, every use
+#: derives from it, and the assert below makes that derivation enforceable rather
+#: than aspirational: a floor quietly lowered would otherwise stop exercising the
+#: high-descriptor path while still passing.
 FDSET_CEILING = 1024
+# Deliberately a literal, not FDSET_CEILING -- a guard phrased in terms of the value
+# it guards could never fire. Lowering the constant now fails at import instead of
+# silently turning these tests back into ordinary low-descriptor runs.
+assert FDSET_CEILING >= 1024, "never below select(2)'s FD_SETSIZE"
 
 
 @contextlib.contextmanager
@@ -134,8 +139,9 @@ def receive_all(peer):
 
 @contextlib.contextmanager
 def high_descriptor(writer, attribute):
-    """Lease one high slot in this disposable test process, not the service.
+    """Lease one slot at or above FD_SETSIZE here, not in the service.
 
+    "At or above", not "above": the shrunken-limit branch can land on exactly 1024.
     F_DUPFD_CLOEXEC avoids opening thousands of descriptors merely to reproduce
     fd_set's ceiling. Restore the soft limit even when the old source fails.
     """
@@ -145,6 +151,8 @@ def high_descriptor(writer, attribute):
     limits = resource.getrlimit(resource.RLIMIT_NOFILE)
     try:
         if limits[0] <= FDSET_CEILING:
+            # Width stays +2, not +1: it must still admit the lease when 1024 is already
+            # occupied -- the dup then lands on 1025, the last slot this window allows.
             assert limits[1] >= FDSET_CEILING + 2, "high-descriptor test lease unavailable"
             resource.setrlimit(resource.RLIMIT_NOFILE, (FDSET_CEILING + 2, limits[1]))
         low = getattr(writer, attribute)
