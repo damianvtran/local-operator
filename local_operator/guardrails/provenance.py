@@ -2443,6 +2443,35 @@ def _shared_dependencies_link(real: str, entry: str) -> bool:
     return False
 
 
+def _finder_metadata_file(real: str, entry: str) -> bool:
+    """An ignored ``.DS_Store`` that is a plain regular file inside the tree.
+
+    Why (operator request 2026-11-23, guard 0.112.5 field case): removing an
+    agent's own clean, merged worktree was held for "ignored entries the guard
+    cannot prove regenerable" when the only ignored entries were Finder
+    ``.DS_Store`` files. Finder rewrites them whenever a folder is viewed, so
+    that hold can never be satisfied on an indexed tree, and they carry only
+    view state (icon positions, sort order): losing them loses no user data.
+
+    Constraints: exact basename only, and only a regular file by ``lstat`` — a
+    directory, symlink or special file under that name is not Finder's and
+    stays held. This is deliberately NOT the broad regenerable basename set
+    (build/dist/.venv stay held, PR #4399), and AppleDouble ``._*`` files are
+    excluded because they can carry resource-fork data. Fails closed.
+    """
+    if os.path.basename(entry) != ".DS_Store":
+        return False
+    physical = os.path.join(real, entry)
+    try:
+        if not stat.S_ISREG(os.lstat(physical).st_mode):
+            return False
+        # A symlinked parent would put the file outside the tree being removed.
+        parent = os.path.realpath(os.path.dirname(physical))
+    except OSError:
+        return False
+    return parent == real or parent.startswith(real + os.sep)
+
+
 def _strict_cleanup_status(real: str) -> str | None:
     return _git_quiet(
         [
@@ -2482,8 +2511,8 @@ class IgnoredInventory:
     the verdict already needed — no extra filesystem walk, no file names.
     """
 
-    #: Ignored entries Git would delete that are not the one supported
-    #: regenerable witness (the shared ``node_modules`` link).
+    #: Ignored entries Git would delete that are not a supported witness (the
+    #: shared ``node_modules`` link or a regular-file Finder ``.DS_Store``).
     unverified_ignored: int
     #: Tracked or untracked status rows (the work plain Git itself refuses).
     changes: int
@@ -2505,7 +2534,14 @@ def plain_cleanup_ignored_inventory(real: str) -> IgnoredInventory | None:
         entry = _cleanup_status_path(row)
         if entry is None:
             return None
-        if not _shared_dependencies_link(real, entry):
+        # The ``.DS_Store`` witness applies to plain removal ONLY, and
+        # ``_interrupted_cleanup_state`` (reached via ``--force``) deliberately
+        # keeps the shared-link witness alone. Plain Git never deletes tracked
+        # or untracked work, so the only bytes at stake here are ignored ones,
+        # and the operator request (2026-11-23) was for plain cleanup. Widening
+        # what ``--force`` may discard is out of scope for that request
+        # (PR #4503 round 1, R1/Q1) and is pinned by a regression test.
+        if not (_shared_dependencies_link(real, entry) or _finder_metadata_file(real, entry)):
             unverified += 1
     return IgnoredInventory(unverified, changes)
 
@@ -2553,6 +2589,8 @@ def _interrupted_cleanup_state(real: str, facts: dict[str, bool] | None) -> str:
         # A name or package manifest cannot account for the bytes under an
         # ignored directory. The only supported witness is a shared dependency
         # link: Git removes the reproducible link entry, not its referent.
+        # Finder ``.DS_Store`` files are NOT a witness on this ``--force`` route
+        # (see ``plain_cleanup_ignored_inventory`` for why the routes differ).
         if not _shared_dependencies_link(real, entry):
             return "dirty"
     if _nested_repository(real, worktrees=True, linked_root=True) is not None:
