@@ -10515,7 +10515,19 @@ class TranscriptView(ScrollableContainer):
         ran in and then drifted off the end of everything that arrived after.
         """
         self._tail_anchor.acquire()
-        self.call_after_refresh(self._scroll_to_tail)
+        # The deferred scroll carries the release revision it was asked under,
+        # like ``_land_on_tail``: a reader who scrolls away between this call
+        # and the refresh has made a newer choice, and landing the tail then
+        # would also hand the anchor back (the deferred resync reads "near the
+        # bottom" and re-acquires it), undoing their release for good.
+        self.call_after_refresh(
+            self._scroll_to_tail_unless_released, self._tail_anchor.release_revision
+        )
+
+    def _scroll_to_tail_unless_released(self, release_revision: int) -> None:
+        if release_revision != self._tail_anchor.release_revision:
+            return
+        self._scroll_to_tail()
 
     def note_user_scroll(self, *, continuous: bool = False, upward: bool = True) -> None:
         """A person moved the viewport: release, then re-decide where they land.

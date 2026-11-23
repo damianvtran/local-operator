@@ -4927,6 +4927,49 @@ async def test_the_unavailable_note_clears_when_the_transcript_appears(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_a_refresh_between_file_creation_and_first_row_does_not_hide_the_row(
+    tmp_path,
+) -> None:
+    """Deterministic form of the launch race the test above only hits by luck.
+
+    ``Transcript`` creates ``transcript.jsonl`` before its first row is written,
+    so a 1 Hz refresh can land on a file that exists and is still empty. That
+    read must not conclude "nothing here, nothing more": the row written a
+    moment later has to render on the next refresh. The window is made exact by
+    creating the empty file by hand instead of racing the writer.
+    """
+    job = _job_with(TRAJECTORY, status="running")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    child_dir = tmp_path / "child"
+    child_dir.mkdir()
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: child_dir}
+    )()
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        view._maybe_load_history(initial=True)
+        await _wait_history(pilot, view)
+        assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
+
+        # The file exists; its first row has not been written.
+        (child_dir / "transcript.jsonl").touch()
+        app._refresh_subagent_view(view.job_id)
+        await _wait_history(pilot, view)
+
+        transcript = Transcript(child_dir)
+        await transcript.append_message(Message.assistant("durable row", id="durable-1"))
+
+        app._refresh_subagent_view(view.job_id)
+        await _wait_history(pilot, view)
+
+        assert HISTORY_UNAVAILABLE_NOTE not in view._history_state_text()
+        assert "durable row" in " ".join(view.rendered_rows())
+
+
+@pytest.mark.asyncio
 async def test_a_child_with_no_directory_never_probes_and_keeps_the_note(tmp_path) -> None:
     """The permanent half: no directory is an absence no refresh revises.
 

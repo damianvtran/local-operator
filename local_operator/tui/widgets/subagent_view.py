@@ -2829,7 +2829,21 @@ class SubagentView(Vertical):
         # empty. This is the clear the note never had: the flag was written
         # only by the failure path and by a retarget, so a directory that
         # gained its transcript kept the stale note for the life of the page.
-        self._history_unavailable = False
+        #
+        # EXCEPT the first page of a transcript with no row in it yet. The
+        # writer creates ``transcript.jsonl`` before it writes its first row,
+        # so a refresh can land in that gap and read a file that exists and
+        # holds nothing. Concluding "empty, and nothing more" there would drop
+        # the note AND latch ``_history_exhausted`` below, and the row written
+        # a moment later would never be looked for. Leaving both untouched
+        # keeps the note true (there is nothing to show yet) and leaves the
+        # change-driven re-look armed: it fires only once the file exists, so
+        # it costs one read per refresh until the first row lands.
+        first_page_still_empty = (
+            not page.entries and not page.has_more and (self._history_cursor is None)
+        )
+        if not first_page_still_empty:
+            self._history_unavailable = False
         rows = list(page.entries)
         if page.reconciled:
             # Replacement is a new canonical window, not an additive page.
@@ -2863,7 +2877,8 @@ class SubagentView(Vertical):
             ),
         )
         self._history_cursor = rows[0].id if rows else self._history_cursor
-        self._history_exhausted = not page.has_more
+        if not first_page_still_empty:
+            self._history_exhausted = not page.has_more
         self._paint_history_state()
         self._reconcile_current_body(
             anchor=anchor,
