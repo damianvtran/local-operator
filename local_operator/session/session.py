@@ -386,13 +386,13 @@ if TYPE_CHECKING:
     from local_operator.harness.types import DurableWriteIntent
     from local_operator.harness.verifier import VerifierLimits, VerifierVerdict
     from local_operator.harness.verifier_evidence import VerifierEvidence
-    from local_operator.research_evidence import AuxiliaryUsageReceipt
     from local_operator.mcp.manager import McpManager
 
     # Type-only: the contract itself is built by the host that installs it
     # (``exec_startup`` / ``sdk._build_session``), and the session holds the
     # object without ever constructing one.
     from local_operator.output_contract import OutputContract
+    from local_operator.research_evidence import AuxiliaryUsageReceipt
 
     # Type-only for the same reason ``resume`` is imported lazily at its two
     # call sites below: ``cli.py``'s startup path is guarded by a test that
