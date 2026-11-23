@@ -34,7 +34,7 @@ import unicodedata
 import urllib.parse
 import uuid
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Collection, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Collection, Mapping, Sequence
 from datetime import timezone
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol, runtime_checkable
 
@@ -5084,6 +5084,9 @@ def _anthropic_cache_marker_ttl_ms(body: dict[str, Any]) -> int:
 _ANTHROPIC_NATIVE_PROTOCOL = "anthropic-messages"
 
 
+_NativeCommit = Callable[[dict[str, Any], list[dict[str, Any]]], None]
+
+
 def _anthropic_native_payload(
     model: ModelSpec,
     endpoint: str,
@@ -5091,6 +5094,8 @@ def _anthropic_native_payload(
     tool_json: dict[int, list[str]],
     text: str,
     scope: str | None,
+    *,
+    commit: _NativeCommit | None = None,
 ) -> dict[str, Any] | None:
     """The ``native_replay`` payload for one streamed response, or ``None``.
 
@@ -5125,7 +5130,10 @@ def _anthropic_native_payload(
             items.append({"type": "tool_use", "id": block["id"], "name": block["name"]})
         else:
             items.append(block)
-    return native_payload(model, endpoint, _ANTHROPIC_NATIVE_PROTOCOL, items, text, calls, scope)
+    payload = native_payload(model, endpoint, _ANTHROPIC_NATIVE_PROTOCOL, items, text, calls, scope)
+    if commit is not None and len(items) == len(ordered):
+        commit(payload["native_replay"], calls)
+    return payload
 
 
 def _anthropic_native_blocks(
@@ -5669,6 +5677,7 @@ class AnthropicClient:
         epoch_ids = _frozen_prefix_ids(request)
         epoch_block: dict[str, Any] | None = None
         ephemeral_indices: set[int] = set()
+        native_rows: dict[int, Message] = {}
         for message in _without_unrenderable_tool_calls(wire_messages):
             # Anthropic 400s on an assistant message whose content array is
             # empty, which is exactly what an errored/aborted model turn
@@ -5683,6 +5692,7 @@ class AnthropicClient:
                 # pass below writes ``cache_control`` into rendered blocks IN
                 # PLACE, and the stored payload must stay byte-identical for
                 # every later request (and on disk).
+                native_rows[len(messages)] = message
                 messages.append({"role": "assistant", "content": [dict(b) for b in native]})
             elif message.role == "assistant" and message.tool_calls:
                 content = self._message_blocks(message, doc_form, doc_budget, doc_text_cap)
@@ -5740,22 +5750,11 @@ class AnthropicClient:
             if message.id in epoch_ids:
                 epoch_block = _last_block(messages)
 
-        # Bind after credentials/replay gates are known, before output sizing.
-        # The tracker includes only the appended native suffix over its already
-        # provider-counted prefix; cold or edited history counts all retained
-        # thinking. Anthropic's binding deliberately survives new user turns.
-        request = bind_native_context(
-            request,
-            self._base_url,
-            _ANTHROPIC_NATIVE_PROTOCOL,
-            scope,
-            _estimate_slope(request.model),
-        )
         body: dict[str, Any] = {
             "model": request.model.model_id,
             "stream": True,
             "messages": messages,
-            "max_tokens": _effective_max_tokens(request),
+            "max_tokens": 0,  # Bound after the complete prefix is rendered, below.
         }
         # The identity block is PREPENDED, not appended, because Anthropic checks
         # the first block specifically. It is a constant, so it makes ideal
@@ -5780,6 +5779,19 @@ class AnthropicClient:
                 }
                 for tool in request.tools
             ]
+        # Resolve any transport-specific prefix binding before both output
+        # sizing and cache decoration. These passes must see the actual blocks
+        # that will go out, and the prefix proof excludes only cache markers.
+        selected = self._select_native_replay(request, body, native_rows, scope)
+        request = bind_native_context(
+            request,
+            self._base_url,
+            _ANTHROPIC_NATIVE_PROTOCOL,
+            scope,
+            _estimate_slope(request.model),
+            selected_native=selected,
+        )
+        body["max_tokens"] = _effective_max_tokens(request)
         ttl = self._cache_ttl_for(request, body, oauth=oauth, account=account)
         if request.cache_markers != "auto":
             # One-shot auxiliary calls (see ``ChatRequest.cache_markers``):
@@ -5933,10 +5945,27 @@ class AnthropicClient:
     # ``_stream_once`` did inline before the extraction (pinned by
     # ``tests/unit/providers/bedrock/test_client.py`` T4 regression cells).
 
+    def _select_native_replay(
+        self,
+        request: ChatRequest,
+        body: dict[str, Any],
+        native_rows: dict[int, Message],
+        scope: str | None,
+    ) -> list[Any] | None:
+        """Optional transport proof; return the exact selection for admission."""
+        return None
+
     async def _messages_request(
-        self, body: dict[str, Any], headers: dict[str, str], api_key: str | None
-    ) -> tuple[str, bytes, dict[str, str]]:
-        """``(url, exact body bytes, headers)`` for one Messages POST.
+        self,
+        body: dict[str, Any],
+        headers: dict[str, str],
+        api_key: str | None,
+        *,
+        proof_scope: str | None = None,
+    ) -> tuple[str, bytes, dict[str, str], _NativeCommit | None]:
+        """URL, exact bytes, headers and optional completed-response binder.
+
+        ``proof_scope`` is absent if any request-private overlay is armed.
 
         Async because a signing transport may have to resolve credentials
         (network) and must sign the EXACT bytes that go on the wire — which is
@@ -5944,8 +5973,8 @@ class AnthropicClient:
         ``json=``. Called once per send, so the diagnostics retry below
         re-encodes (and a signer re-signs) after the body changed.
         """
-        del api_key  # first party authenticates through ``headers`` already
-        return f"{self._base_url}/v1/messages", _encode_json_body(body), headers
+        del api_key, proof_scope  # first party authenticates through ``headers`` already
+        return f"{self._base_url}/v1/messages", _encode_json_body(body), headers, None
 
     def _iter_events(self, response: httpx.Response) -> AsyncIterator[Any]:
         """Decoded Anthropic stream events, in order (first party: SSE ``data:``)."""
@@ -5965,8 +5994,13 @@ class AnthropicClient:
 
     @contextlib.asynccontextmanager
     async def _open_messages_stream(
-        self, body: dict[str, Any], headers: dict[str, str], api_key: str | None = None
-    ) -> AsyncIterator[httpx.Response]:
+        self,
+        body: dict[str, Any],
+        headers: dict[str, str],
+        api_key: str | None = None,
+        *,
+        proof_scope: str | None = None,
+    ) -> AsyncIterator[tuple[httpx.Response, _NativeCommit | None]]:
         """Open the Messages stream, shedding a refused ``diagnostics`` key once.
 
         The fail-closed half of cache diagnostics: if the API answers 400
@@ -5976,12 +6010,16 @@ class AnthropicClient:
         identical request is sent again. Nothing has been streamed yet, so the
         retry is invisible to the turn; every other status passes through.
         """
-        url, content, sent_headers = await self._messages_request(body, headers, api_key)
+        url, content, sent_headers, commit = await self._messages_request(
+            body, headers, api_key, proof_scope=proof_scope
+        )
         async with self._http.stream(
             "POST", url, content=content, headers=sent_headers
         ) as response:
             if not ("diagnostics" in body and await _refuses_diagnostics(response)):
-                yield response
+                # A redirect under a supplied HTTP pool must not attest to a
+                # different route than the one which actually produced output.
+                yield response, commit if not response.history else None
                 return
         _ANTHROPIC_DIAGNOSTICS_REFUSED[0] = True
         body.pop("diagnostics", None)
@@ -5989,11 +6027,13 @@ class AnthropicClient:
             "anthropic: cache diagnostics refused by the API (HTTP 400); "
             "disabled for this process"
         )
-        url, content, sent_headers = await self._messages_request(body, headers, api_key)
+        url, content, sent_headers, commit = await self._messages_request(
+            body, headers, api_key, proof_scope=proof_scope
+        )
         async with self._http.stream(
             "POST", url, content=content, headers=sent_headers
         ) as response:
-            yield response
+            yield response, commit if not response.history else None
 
     async def stream(
         self,
@@ -6047,6 +6087,9 @@ class AnthropicClient:
         #: request names the ROUTE the harness asked for, never the checkpoint
         #: that answered; last carrier wins, ``None`` when the wire never sends it.
         served_model: str | None = None
+        native_complete = False
+        native_started = False
+        native_open: set[int] = set()
 
         async with self._open_messages_stream(
             body,
@@ -6066,7 +6109,11 @@ class AnthropicClient:
                 ),
             ),
             api_key,
-        ) as response:
+            # A raw one-turn overlay must never become a durable digest, even
+            # if a caller uses this codec below the router's payload scrubber.
+            proof_scope=None if request.has_one_turn_secrets else scope,
+        ) as (response, commit):
+            native_proven = commit is not None
             if overage_account:
                 # Before the status check: a 429 carries the same headers, and
                 # "plan limits spent, overage allowed" is exactly what the NEXT
@@ -6081,6 +6128,53 @@ class AnthropicClient:
                 self._raise_for_status(response)
             async for event in self._iter_events(response):
                 event_type = event.get("type")
+                if native_proven:
+                    # Prove only stream shapes the existing native decoder
+                    # reconstructs exactly. Unknown block/delta types can be
+                    # visible to the model without appearing in our envelope.
+                    if event_type == "message_start":
+                        native_proven = not native_started and not (event.get("message") or {}).get(
+                            "content"
+                        )
+                        native_started = True
+                    elif event_type == "content_block_start":
+                        index = event.get("index")
+                        block = event.get("content_block") or {}
+                        kind = block.get("type")
+                        native_proven = (
+                            native_started
+                            and not native_complete
+                            and not native_open
+                            and isinstance(index, int)
+                            and index == len(native_blocks)
+                            and (
+                                kind in ("thinking", "redacted_thinking")
+                                or block == {"type": "text", "text": ""}
+                                or (
+                                    kind == "tool_use"
+                                    and block.keys() == {"type", "id", "name", "input"}
+                                    and block["input"] == {}
+                                )
+                            )
+                        )
+                        if native_proven:
+                            native_open.add(index)
+                    elif event_type in ("content_block_delta", "content_block_stop"):
+                        index = event.get("index")
+                        native_proven = isinstance(index, int) and index in native_open
+                        if native_proven and event_type == "content_block_stop":
+                            native_open.remove(index)
+                        elif native_proven:
+                            target = native_blocks[index]["type"]
+                            native_proven = (event.get("delta") or {}).get("type") in {
+                                "thinking": ("thinking_delta", "signature_delta"),
+                                "redacted_thinking": (),
+                                "text": ("text_delta",),
+                                "tool_use": ("input_json_delta",),
+                            }[target]
+                    elif event_type == "message_stop":
+                        native_proven = native_started and not native_open and not native_complete
+                        native_complete = True
                 if event_type == USAGE_FILL_EVENT:
                     # Synthesised by a transport, never sent by Anthropic: the
                     # receipt a wrapper carries OUTSIDE the Messages events
@@ -6244,6 +6338,11 @@ class AnthropicClient:
                 tool_json,
                 "".join(visible_text),
                 scope,
+                commit=(
+                    commit
+                    if native_proven and native_complete and mapped in ("stop", "toolUse")
+                    else None
+                ),
             ),
         )
 

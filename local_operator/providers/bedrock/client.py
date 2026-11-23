@@ -5,7 +5,8 @@ Messages body almost verbatim, so ``AnthropicClient``'s whole tuned request
 (cache breakpoints, Saver frozen prefix, 1h TTL policy, effort/adaptive
 thinking, native thinking replay) and its event loop (usage incl. cache
 counters, tool_use deltas, thinking signatures) are reused unchanged. Only the
-three transport hooks differ:
+transport hooks differ (and Sonnet 5.5 Messages has an additional local
+native-prefix check):
 
 * ``_messages_request``: URL ``/model/{id}/invoke-with-response-stream``, a
   small body transform (``anthropic_version``, betas moved from headers into
@@ -33,20 +34,29 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
 from collections.abc import AsyncIterator, Mapping
 from typing import Any
 from urllib.parse import quote, unquote
 
 import httpx
 
+from local_operator.harness.types import ChatRequest, Message
+from local_operator.model.registry import bedrock_anthropic_id
 from local_operator.providers.bedrock import auth as bauth
 from local_operator.providers.bedrock import connection as bconn
 from local_operator.providers.bedrock import errors as berrors
+from local_operator.providers.bedrock.messages_binding import (
+    THINKING,
+    Prefix,
+    read_witnesses,
+)
 from local_operator.providers.clients import (
     STREAM_READ_TIMEOUT_S,
     USAGE_FILL_EVENT,
     AnthropicClient,
     _encode_json_body,
+    _NativeCommit,
 )
 
 #: Bedrock's Messages API version string (body field, not a header).
@@ -267,13 +277,106 @@ class BedrockAnthropicClient(AnthropicClient):
             return None
         return ttl
 
+    @staticmethod
+    def _prefix_bound(model_id: str) -> bool:
+        base = bedrock_anthropic_id(model_id)
+        return bool(base and re.fullmatch(r"claude-sonnet-5-5(?:-\d{8})?", base))
+
+    @staticmethod
+    def _binding_route(url: str) -> str:
+        # The invocation path includes model/profile and Region. Never fold
+        # URL auth material (e.g. from a relay override) into the digest.
+        return str(
+            httpx.URL(url).copy_with(username=None, password=None, query=None, fragment=None)
+        )
+
+    def _select_native_replay(
+        self,
+        request: ChatRequest,
+        body: dict[str, Any],
+        native_rows: dict[int, Message],
+        scope: str | None,
+    ) -> list[Any] | None:
+        if self._region is None or not self._prefix_bound(request.model.model_id):
+            return None
+        messages = body["messages"]
+        witnesses = {
+            row: proof
+            for row, message in native_rows.items()
+            if (proof := read_witnesses((message.provider_payload or {})["native_replay"]))
+        }
+        if witnesses:
+            route = self._binding_route(invoke_url(self._region, request.model.model_id))
+            prefix = Prefix(route, scope, body)
+            original: Prefix | None = None
+            last_proven = max(witnesses)
+            for row, message in enumerate(messages):
+                if row > last_proven:
+                    break
+                row_proof = witnesses.get(row)
+                if not row_proof:
+                    prefix.message(message)
+                    if original is not None:
+                        original.message(message)
+                    continue
+                prefix.begin(message["role"])
+                if original is not None:
+                    original.begin(message["role"])
+                kept = []
+                for index, block in enumerate(message["content"]):
+                    expected = row_proof.get(str(index))
+                    drop = False
+                    if expected is not None and block.get("type") in THINKING:
+                        exact, portable = prefix.witness()
+                        # A fresh block can match the post-splice prefix. An
+                        # unknown legacy block has no witness; don't equate
+                        # absence with a match or a proved dependency.
+                        drop = exact != expected[0] and (
+                            portable != expected[1]
+                            or (original is not None and original.witness()[0] == expected[0])
+                        )
+                    if drop and original is None:
+                        original = prefix.fork()
+                    if original is not None:
+                        original.block(block)
+                    if not drop:
+                        kept.append(block)
+                        prefix.block(block)
+                message["content"] = kept
+                prefix.end()
+                if original is not None:
+                    original.end()
+        # Use these very blocks for admission, not the pre-filter payload.
+        selected = {id(message): messages[row]["content"] for row, message in native_rows.items()}
+        return [selected.get(id(message)) for message in request.messages]
+
     async def _messages_request(
-        self, body: dict[str, Any], headers: dict[str, str], api_key: str | None
-    ) -> tuple[str, bytes, dict[str, str]]:
+        self,
+        body: dict[str, Any],
+        headers: dict[str, str],
+        api_key: str | None,
+        *,
+        proof_scope: str | None = None,
+    ) -> tuple[str, bytes, dict[str, str], _NativeCommit | None]:
         assert self._region is not None  # only regional instances send
-        resolved = await self._resolve(api_key)
-        url = invoke_url(self._region, str(body.get("model") or ""))
-        content = _encode_json_body(transform_body(body, headers))
+        model_id = str(body.get("model") or "")
+        prefix_bound = self._prefix_bound(model_id)
+        resolved = None if prefix_bound else await self._resolve(api_key)
+        url = invoke_url(self._region, model_id)
+        # Do not yield between the replay selection and encoding: mutable
+        # schemas belong to a specific request, even while auth is resolving.
+        wire_body = transform_body(body, headers)
+        content = _encode_json_body(wire_body)
+        commit = None
+        if proof_scope is not None and prefix_bound:
+            # Freeze the actual transformed prefix at encoding; only two
+            # incremental hash states outlive this attempt's encode.
+            prefix = Prefix(self._binding_route(url), proof_scope, wire_body)
+            for message in wire_body["messages"]:
+                prefix.message(message)
+            commit = prefix.bind_assistant
+        if resolved is None:
+            resolved = await self._resolve(api_key)
         # Exactly the headers botocore's own client sends for
         # ``invoke_model_with_response_stream(contentType=..., accept=...)``:
         # ``accept`` is the MODEL body's MIME type and travels as
@@ -284,7 +387,8 @@ class BedrockAnthropicClient(AnthropicClient):
             "Content-Type": "application/json",
             "X-Amzn-Bedrock-Accept": "application/json",
         }
-        return url, content, bauth.sign_headers(resolved, "POST", url, content, base_headers)
+        signed = bauth.sign_headers(resolved, "POST", url, content, base_headers)
+        return url, content, signed, commit
 
     async def _resolve(self, api_key: str | None) -> bauth.ResolvedAuth:
         if not api_key:

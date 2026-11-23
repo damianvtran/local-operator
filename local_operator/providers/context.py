@@ -230,15 +230,25 @@ def bind_native_context(
     validity = []
     reasoning = extra_native_tokens
     for index, message in enumerate(request.messages):
-        # Converse signatures bind the entire preceding rendered conversation.
-        # The serializer supplies its exact selection so admission cannot revive
-        # a block rejected by that stricter prefix proof.
+        # Bedrock serializers can supply the exact selection from their prefix
+        # check so admission cannot revive a rejected block.
         native = (
             selected_native[index]
             if selected_native is not None
             else replay_items(message, request.model, endpoint, protocol, scope)
         )
-        validity.append(native is not None)
+        if selected_native is not None and protocol == "anthropic-messages":
+            # A splice may keep some thinking in this row. A boolean would
+            # reuse an authoritative baseline that includes the removed blocks.
+            validity.append(
+                tuple(
+                    _native_key(item)
+                    for item in (native or [])
+                    if item.get("type") in ("thinking", "redacted_thinking")
+                )
+            )
+        else:
+            validity.append(native is not None)
         if protocol == "bedrock-converse" and native is not None:
             reasoning += sum(
                 max(1, len(json.dumps(item["reasoningContent"], ensure_ascii=False)) // 4)
