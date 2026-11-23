@@ -450,6 +450,7 @@ from local_operator.tui.widgets.editor import (
     EditorCopied,
     EditorCopyStale,
     EditorDraftStarted,
+    EditorPageRequested,
     EditorPasteAttached,
     EditorPasteEmpty,
     EditorQuit,
@@ -5188,7 +5189,8 @@ class OperatorApp(App[None]):
         # `down`, `pageup`, `pagedown` and `home`/`end` are TextArea cursor
         # bindings, `tab` never leaves the composer, `shift+tab` is effort
         # cycling (priority), and `ctrl+up`/`ctrl+down` page the todo overflow.
-        # So without a chord of its own, "scroll up to load" was mouse-only.
+        # Plain page keys now fall through from the editor at its draft
+        # boundaries; these chords still jump straight to either endpoint.
         #
         # `ctrl+home`/`ctrl+end` because TextArea binds NEITHER (audited
         # against textual 8.2.8: it binds `home,ctrl+a` and `end,ctrl+e` for
@@ -49631,6 +49633,19 @@ class OperatorApp(App[None]):
         performs.
         """
         self._transcript_view().action_scroll_end()
+
+    def on_editor_page_requested(self, message: EditorPageRequested) -> None:
+        # Reuse the focused transcript's page path so scroll provenance
+        # releases tail-follow before a later stream update can move the reader.
+        if self.screen.focused is not message.editor:
+            return
+        view = self._transcript_view()
+        if not view.allow_vertical_scroll:
+            return
+        if message.upward:
+            view.action_page_up()
+        else:
+            view.action_page_down()
 
     def _scroll_todos(self, *, down: bool) -> None:
         """Drive the todo panel's keyboard scroll, the one path both keys share.

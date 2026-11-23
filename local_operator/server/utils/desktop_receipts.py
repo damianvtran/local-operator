@@ -315,6 +315,20 @@ class DesktopReceipts:
             replay_guard=replay_guard,
         )
 
+    @classmethod
+    def prompt_fingerprints(cls, body: dict[str, Any]) -> tuple[str, str, str]:
+        """Return the absent, false and true digests for the same prompt.
+
+        Voice mode recovery must use the same aliases as the eventual claim:
+        only presentation support may differ; mode and words stay fingerprinted.
+        """
+        base = {field: value for field, value in body.items() if field != "inline_ui"}
+        return (
+            cls.fingerprint(base),
+            cls.fingerprint({**base, "inline_ui": False}),
+            cls.fingerprint({**base, "inline_ui": True}),
+        )
+
     async def run_prompt(
         self,
         key: str,
@@ -330,10 +344,7 @@ class DesktopReceipts:
         matching digest rather than rewriting it also keeps older receipt rows
         readable without a schema migration.
         """
-        base = {field: value for field, value in body.items() if field != "inline_ui"}
-        legacy = self.fingerprint(base)
-        false = self.fingerprint({**base, "inline_ui": False})
-        true = self.fingerprint({**base, "inline_ui": True})
+        legacy, false, true = self.prompt_fingerprints(body)
         return await self._run(
             key,
             true if body.get("inline_ui") is True else legacy,

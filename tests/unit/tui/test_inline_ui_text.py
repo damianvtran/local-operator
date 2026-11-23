@@ -237,6 +237,124 @@ async def test_real_assistant_stream_and_settled_frame(size, tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_page_keys_read_a_narrow_grid_from_the_focused_composer(tmp_path: Path) -> None:
+    from local_operator.harness.types import (
+        Message,
+        MessageEndEvent,
+        MessageStartEvent,
+        MessageUpdateEvent,
+    )
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.editor import Editor
+    from local_operator.tui.widgets.transcript import TranscriptView
+    from tests.unit.session.test_session import wait_for
+    from tests.unit.tui.conftest import await_session_boot
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    labels = ("actual", "target", "prior", "net", "gross", "forecast", "high")
+    columns = ["Region", *(f"Revenue {label}" for label in labels)]
+    rows = [
+        ["North", *range(1234567, 1234574)],
+        ["South", *range(2234567, 2234574)],
+    ]
+    source = (
+        "Collecting exact values.\n\n"
+        + _widget("spreadsheet", title="Quarterly planning values", columns=columns, rows=rows)
+        + "\n\n"
+        + _widget(
+            "series",
+            title="Share of requests",
+            mode="percent",
+            labels=["Q1", "Q2"],
+            unit="requests",
+            series=[{"label": "Red", "values": [4, 4000]}, {"label": "Blue", "values": [9, 9000]}],
+        )
+        + "\n"
+    )
+    late = "\nEnd of report.\n\nAnd a late update."
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(60, 20)) as pilot:
+        await await_session_boot(app)
+        editor = app.query_one(Editor)
+        view = app.query_one(TranscriptView)
+        assert app.focused is editor
+        await pilot.press("x")
+        caret = editor.selection
+
+        async def frame(name: str) -> str:
+            await pilot.pause()
+            assert app.focused is editor and editor.text == "x" and editor.selection == caret
+            path = tmp_path / f"{name}.svg"
+            save_capture(app, path)
+            return "\n".join("".join(row) for row in svg_text_runs_by_row(path.read_text()))
+
+        message = Message(role="assistant")
+        message._inline_ui_source_version = 1
+        session.emit(MessageStartEvent(message=message))
+        session.emit(MessageUpdateEvent(message=message, delta=source))
+        await wait_for(
+            lambda: app._streaming_block is not None
+            and "Quarterly planning values" in app._streaming_block.text(),
+            timeout=10,
+        )
+        await pilot.press("ctrl+home")
+        await pilot.wait_for_scheduled_animations()
+        top = await frame("narrow-top")
+        assert view.scroll_offset.y == 0
+
+        await pilot.press("pagedown")
+        await pilot.wait_for_scheduled_animations()
+        middle = await frame("narrow-middle")
+        middle_y = view.scroll_offset.y
+        assert 0 < middle_y < view.max_scroll_y
+        assert "Revenue forecast: 1234572" not in top
+        assert "Revenue forecast: 1234572" in middle
+
+        session.emit(MessageUpdateEvent(message=message, delta=late))
+        await wait_for(
+            lambda: app._streaming_block is not None
+            and "And a late update." in app._streaming_block.text(),
+            timeout=10,
+        )
+        await frame("narrow-late-append")
+        assert view.scroll_offset.y == middle_y
+        final = Message.assistant(source + late).model_copy(update={"id": message.id})
+        final._inline_ui_source_version = 1
+        session.emit(MessageEndEvent(message=final))
+        await wait_for(lambda: app._streaming_block is None, timeout=10)
+        await frame("narrow-late-final")
+        assert view.scroll_offset.y == middle_y
+
+        pages = [top, middle]
+        # Each press must advance until the measured tail, never jump back to
+        # the start or lose the middle of the wrapped grid.
+        while view.scroll_offset.y < view.max_scroll_y:
+            before = view.scroll_offset.y
+            await pilot.press("pagedown")
+            await pilot.wait_for_scheduled_animations()
+            pages.append(await frame(f"narrow-page-{len(pages)}"))
+            assert view.scroll_offset.y > before
+        assert "And a late update." in pages[-1]
+        for row in rows:
+            for column, value in zip(columns, row, strict=True):
+                assert any(f"{column}: {value}" in page for page in pages)
+        assert not view.show_horizontal_scrollbar
+        assert app.screen.virtual_size == app.screen.size
+
+        await pilot.press("pageup")
+        await pilot.wait_for_scheduled_animations()
+        await frame("narrow-page-up")
+        before = view.scroll_offset.y
+        assert 0 < before < view.max_scroll_y
+
+        # The same key still navigates the draft if its caret can move.
+        await pilot.press("shift+enter", "z", "up", "pagedown")
+        assert editor.selection.end[0] == 1 and editor.text == "x\nz"
+        assert view.scroll_offset.y == before and app.focused is editor
+
+
+@pytest.mark.asyncio
 async def test_authoritative_empty_final_removes_a_widget_only_terminal_row():
     from local_operator.harness.types import (
         Message,

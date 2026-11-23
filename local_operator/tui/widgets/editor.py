@@ -1242,6 +1242,15 @@ class EditorDraftStarted(Message):
     """
 
 
+class EditorPageRequested(Message):
+    """A page key had no cursor or viewport movement left in the draft."""
+
+    def __init__(self, editor: Editor, *, upward: bool) -> None:
+        super().__init__()
+        self.editor = editor
+        self.upward = upward
+
+
 class EditorCopyStale(Message):
     """Posted when the buffer is edited after a copy receipt was raised.
 
@@ -9029,6 +9038,26 @@ class Editor(TextArea):
         """
         super()._on_resize()
         self._sync_ghost()
+
+    def action_cursor_page_up(self) -> None:
+        self._page_draft_or_transcript(upward=True)
+
+    def action_cursor_page_down(self) -> None:
+        self._page_draft_or_transcript(upward=False)
+
+    def _page_draft_or_transcript(self, *, upward: bool) -> None:
+        # Keep TextArea's cursor/selection and scroll behavior first. A page
+        # that had nothing left to move in the draft (the common one-line
+        # composer, or the edge of a longer draft) can read the transcript
+        # without giving up focus. The app owns that separate viewport.
+        selection = self.selection
+        at_edge = self.scroll_y == 0 if upward else self.scroll_y >= self.max_scroll_y
+        if upward:
+            super().action_cursor_page_up()
+        else:
+            super().action_cursor_page_down()
+        if at_edge and self.selection == selection:
+            self.post_message(EditorPageRequested(self, upward=upward))
 
     def action_cursor_right(self, select: bool = False) -> None:
         """Move the caret one cell right. NEVER accept the ghost.

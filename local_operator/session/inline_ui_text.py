@@ -282,6 +282,7 @@ def _parts(source: str, *, streaming: bool) -> Iterator[str | _Widget]:
         parse_source = source[:tail_start] + short[1] + short[2][0] * 3
         partial = _MAYBE_OPENER.fullmatch(parse_source[tail_start:])
     cursor = 0
+    separator = "\n"
     # Use the same block grammar as Rich rather than mistaking samples in
     # quotes, lists, longer code fences, or HTML blocks for top-level widgets.
     for token in _MARKDOWN.parse(parse_source):
@@ -317,12 +318,17 @@ def _parts(source: str, *, streaming: bool) -> Iterator[str | _Widget]:
         # can append a non-whitespace character and make it ordinary content.
         confirmed = not streaming or end < len(starts)
         widget = _decode(token.content) if closed and confirmed and info == _TAG else None
-        yield source[cursor:low]
-        # Separate retained prose so removing a block cannot join Markdown
-        # constructs across the gap.
+        prefix = source[cursor:low]
+        yield prefix
+        # Separate retained prose without turning a lone CR immediately before
+        # a widget into half of a CRLF: the placement sits before this synthetic
+        # break, and clients rightly reject offsets inside a CRLF. Adjacent
+        # fences have no retained prefix, so inherit the previous separator.
+        if prefix:
+            separator = "\r" if prefix.endswith("\r") else "\n"
         if widget is not None:
             yield widget
-        yield "\n"
+        yield separator
         cursor = high
     yield source[cursor:]
 

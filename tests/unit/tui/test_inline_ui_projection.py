@@ -3,6 +3,8 @@
 import json
 from typing import Any
 
+import pytest
+
 from local_operator.session.inline_ui_text import INLINE_UI_V1, project_inline_ui
 
 _RICH = frozenset({INLINE_UI_V1})
@@ -70,6 +72,40 @@ def test_unmarked_history_keeps_literal_markdown_and_invalid_widget_is_dropped()
         source_version=1,
         capabilities=_RICH,
     ) == {"text": "Text.\n\n\nEnd."}
+
+
+@pytest.mark.parametrize(
+    ("break_", "basis", "offset"),
+    [("\n", "Hi😀\n\nBye", 5), ("\r", "Hi😀\r\rBye", 5), ("\r\n", "Hi😀\r\n\nBye", 6)],
+)
+def test_serialized_widget_starts_at_complete_line_boundary(break_, basis, offset) -> None:
+    source = f"Hi😀{break_}" + _fence(_WIDGET).replace("\n", break_) + "Bye"
+    for streaming in (True, False):
+        rich = project_inline_ui(source, streaming=streaming, source_version=1, capabilities=_RICH)
+        legacy = project_inline_ui(
+            source, streaming=streaming, source_version=1, capabilities=_LEGACY
+        )
+        wire = json.loads(json.dumps(rich))
+        assert wire["text"] == legacy["text"] == basis
+        assert wire["inline_ui"]["widgets"] == [{"offset": offset, "payload": _WIDGET}]
+        utf16 = wire["text"].encode("utf-16-le")
+        left = utf16[: 2 * offset].decode("utf-16-le")
+        right = utf16[2 * offset :].decode("utf-16-le")
+        assert left == f"Hi😀{break_}"
+        assert right.lstrip("\r\n") == "Bye"
+        assert not (left.endswith("\r") and right.startswith("\n"))
+
+
+def test_adjacent_widgets_inherit_the_lone_cr_splice() -> None:
+    source = "Hi😀\r" + _fence(_WIDGET) * 2 + "Bye"
+    rich = project_inline_ui(source, streaming=False, source_version=1, capabilities=_RICH)
+    assert rich == {
+        "text": "Hi😀\r\r\rBye",
+        "inline_ui": {
+            "version": 1,
+            "widgets": [{"offset": n, "payload": _WIDGET} for n in (5, 6)],
+        },
+    }
 
 
 def test_grid_payload_drops_unvalidated_optional_fields() -> None:

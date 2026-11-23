@@ -884,8 +884,9 @@ async def _streaming(request: Request, session_id: str) -> bool:
 async def _with_recorded_or_current_mode(request: Request, session_id: str, body: Prompt) -> Prompt:
     """Pick ``body.mode``, keeping a retry's body the one its first attempt had.
 
-    ``/messages`` fingerprints the WHOLE body, ``mode`` included, but this route
-    chooses the mode from the turn's state (steer while streaming), and that
+    ``/messages`` fingerprints the body, including ``mode`` and the words, but
+    tolerates changes in rendering support. Voice chooses the mode from the
+    turn's state (steer while streaming), and that
     state moves between a client's attempt and its retry: a prompt that started
     the turn retries as a steer, a steer whose turn ended retries as a prompt.
     Either would be refused "Request ID was already used with different input"
@@ -900,7 +901,7 @@ async def _with_recorded_or_current_mode(request: Request, session_id: str, body
     if recorded is not None:
         for mode in ("prompt", "steer"):
             candidate = body.model_copy(update={"mode": mode})
-            if DesktopReceipts.fingerprint(candidate.model_dump()) == recorded:
+            if recorded in DesktopReceipts.prompt_fingerprints(candidate.model_dump()):
                 return candidate
     if await _streaming(request, session_id):
         return body.model_copy(update={"mode": "steer"})
