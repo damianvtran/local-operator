@@ -60,6 +60,7 @@ from local_operator.harness.types import (
     StreamEndEvent,
     StreamEvent,
     StreamReasoningDelta,
+    StreamResponseIdentityEvent,
     StreamStartEvent,
     StreamTextDelta,
     StreamToolCallDelta,
@@ -4384,6 +4385,7 @@ class OpenAICompatClient:
         terminal_stop: str | None = None
         terminal_error: str | None = None
         started = False
+        announced_id: str | None = None
         #: The model the upstream says actually answered (``response.model``), read
         #: off frames this loop already parses. Same contract as the chat wire's
         #: capture: the last carrier wins and a refused value leaves the previous
@@ -4518,6 +4520,13 @@ class OpenAICompatClient:
                     continue
                 self._observe_responses_event(payload)
                 event_type = payload.get("type", "")
+                if started and announced_id is None and event_type == "response.created":
+                    # A missing ID can be filled by the native opener, not by
+                    # item/terminal metadata. Even in the metadata tail this
+                    # is proof only: it neither reopens output nor starts again.
+                    announced_id = _stream_id((payload.get("response") or {}).get("id"))
+                    if announced_id is not None:
+                        yield StreamResponseIdentityEvent(response_id=announced_id)
                 if terminal_stop is not None:
                     # Completion closes generated output, not the transport's
                     # metadata tail. Muse's subscription receipt arrives AFTER
@@ -4545,8 +4554,9 @@ class OpenAICompatClient:
                     # not acceptance proof, and a late created cannot start it
                     # again. Errors and transport metadata never start a turn.
                     started = True
+                    announced_id = _stream_id((payload.get("response") or {}).get("id"))
                     yield StreamStartEvent(
-                        response_id=_stream_id((payload.get("response") or {}).get("id")),
+                        response_id=announced_id,
                         inline_ui_source_version=1 if request.inline_ui_hint is not None else None,
                     )
                 if event_type == "response.created":
@@ -6089,6 +6099,7 @@ class AnthropicClient:
         tool_json: dict[int, list[str]] = {}
         visible_text: list[str] = []
         started = False
+        announced_id: str | None = None
         #: The model the API says served this turn (``message.model`` on
         #: ``message_start``). Captured for the per-call ledger record because the
         #: request names the ROUTE the harness asked for, never the checkpoint
@@ -6171,12 +6182,19 @@ class AnthropicClient:
                         else (None, 0)
                     )
                     started = True
+                    announced_id = _stream_id(message.get("id"))
                     yield StreamStartEvent(
-                        response_id=_stream_id(message.get("id")),
+                        response_id=announced_id,
                         inline_ui_source_version=1 if request.inline_ui_hint is not None else None,
                         cache_miss_type=miss_type,
                         cache_missed_tokens=missed_tokens,
                     )
+                elif started and announced_id is None and event_type == "message_start":
+                    # This attempt already published its discovery receipt.
+                    # Report only the missing native ID, never a second Start.
+                    announced_id = _stream_id((event.get("message") or {}).get("id"))
+                    if announced_id is not None:
+                        yield StreamResponseIdentityEvent(response_id=announced_id)
                 if event_type == "message_start":
                     start_model = _served_model_slug((event.get("message") or {}).get("model"))
                     if start_model:

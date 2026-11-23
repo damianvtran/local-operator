@@ -113,6 +113,7 @@ from local_operator.harness.types import (
     NoticeEvent,
     OneTurnSecretScopeError,
     OutputValidationEvent,
+    ProviderTurnIdentityEvent,
     ProviderTurnStartEvent,
     ReasoningDeltaEvent,
     RenderedStreamError,
@@ -121,6 +122,7 @@ from local_operator.harness.types import (
     StreamEvent,
     StreamModelEvent,
     StreamReasoningDelta,
+    StreamResponseIdentityEvent,
     StreamStartEvent,
     StreamTextDelta,
     StreamToolCallDelta,
@@ -4959,6 +4961,15 @@ class AgentLoop:
                         provider=one_turn_public_text(request, model.provider),
                         model_id=one_turn_public_text(request, model.model_id),
                     )
+                elif isinstance(event, StreamResponseIdentityEvent):
+                    # Start already set the serving attempt's receipt. This
+                    # update only completes proof, and is omitted if scrubbed.
+                    if event.response_id:
+                        yield ProviderTurnIdentityEvent(
+                            response_id=event.response_id,
+                            provider=one_turn_public_text(request, model.provider),
+                            model_id=one_turn_public_text(request, model.model_id),
+                        )
                 elif isinstance(event, StreamTextDelta):
                     text_parts.append(event.delta)
                     if not secret_active:

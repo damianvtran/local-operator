@@ -14,13 +14,17 @@ import pytest
 
 from local_operator.harness.types import (
     AbortSignal,
+    AgentEndEvent,
     ChatRequest,
     Message,
+    MessageEndEvent,
     MessageUpdateEvent,
     ModelSpec,
+    ProviderTurnIdentityEvent,
     ProviderTurnStartEvent,
     StreamEndEvent,
     StreamEvent,
+    StreamResponseIdentityEvent,
     StreamStartEvent,
     StreamTextDelta,
     TextContent,
@@ -34,8 +38,12 @@ from local_operator.providers.clients import (
     OpenAICompatClient,
 )
 from local_operator.providers.failover import stream_with_failover
+from local_operator.server.utils.event_broker import EventBroker, job_channel
+from local_operator.server.utils.sse_bridge import attach_broker
 from local_operator.session.inline_ui import INSTRUCTIONS
 from local_operator.session.runtime.inline_ui_egress import InlineUiEvents
+from local_operator.variables import VariableStore
+from tests.unit.harness.test_one_turn_secret import _secret_tool, _tool_delta
 from tests.unit.providers.bedrock.test_converse_body import NOVA, TOOL
 from tests.unit.providers.bedrock.test_converse_stream import KEY, events, wire
 from tests.unit.providers.test_failover import FakeAuth
@@ -245,42 +253,61 @@ async def test_gemini_diagnostics_distinguish_hint_movement_from_history_change(
 _OPENER = 'Result: 42.\n\n```lop-ui\n{"type":"bar","title":"June'
 _CLOSER = ' counts","data":[["June",42]]}\n```\n'
 _WIDGET = {"type": "bar", "title": "June counts", "data": [["June", 42]]}
-_CREATED = {"type": "response.created", "response": {"id": "resp-actual"}}
-_COMPLETED = {"type": "response.completed", "response": {"id": "resp-actual", "output": []}}
+_NATIVE_IDS = {"messages": "wire-anthropic", "responses": "resp-actual"}
+_CREATED = {"type": "response.created", "response": {"id": _NATIVE_IDS["responses"]}}
 
 
-def _responses_reply(lifecycle: str) -> bytes:
-    first = {
-        "type": "response.output_text.delta",
-        "item_id": "msg-not-a-response",
-        "delta": _OPENER,
-    }
-    second = {**first, "delta": _CLOSER}
+def _native_reply(route: str, lifecycle: str, *, native_id: str | None = None) -> bytes:
+    if route == "messages":
+        opener_type, envelope = "message_start", "message"
+        block_start, template, *terminal = _ANTHROPIC_CONTENT
+        prefix = [block_start]
+        first = {**template, "delta": {"type": "text_delta", "text": _OPENER}}
+        second = {**template, "delta": {"type": "text_delta", "text": _CLOSER}}
+    else:
+        opener_type, envelope = "response.created", "response"
+        prefix = []
+        first = {
+            "type": "response.output_text.delta",
+            "item_id": "msg-not-a-response",
+            "delta": _OPENER,
+        }
+        second = {**first, "delta": _CLOSER}
+        terminal = [
+            {"type": "response.completed", "response": {"id": "not-an-opener-id", "output": []}}
+        ]
+
+    opener = {"type": opener_type, envelope: {"id": native_id or _NATIVE_IDS[route]}}
+    blank = {**opener, envelope: {"id": "  "}}
+    conflict = {**opener, envelope: {"id": "conflicting-id"}}
     if lifecycle == "early":
-        return sse([_CREATED, first, second, _COMPLETED])
-    if lifecycle == "late":
-        return sse([first, _CREATED, second, _COMPLETED])
+        return sse([opener, *prefix, first, second, *terminal])
     if lifecycle == "duplicate":
-        return sse([_CREATED, _CREATED, first, second, _COMPLETED])
+        return sse([opener, opener, conflict, *prefix, first, second, *terminal])
+    if lifecycle == "late":
+        return sse([*prefix, first, blank, opener, opener, conflict, second, *terminal])
+    if lifecycle == "tail":
+        return sse([*prefix, first, second, *terminal, opener])
     assert lifecycle == "missing"
-    return sse([first, second, _COMPLETED])
+    return sse([*prefix, first, second, *terminal])
 
 
 @pytest.mark.parametrize(
-    ("lifecycle", "primary", "hinted"),
+    ("route", "lifecycle", "primary", "hinted"),
     [
-        ("early", None, True),
-        ("late", None, True),
-        ("missing", None, True),
-        ("missing", None, False),
-        ("duplicate", None, True),
-        ("missing", "anthropic", False),
-        ("chat", "anthropic", False),
-        ("late", "openrouter", True),
+        *[("responses", row, None, True) for row in ("early", "late", "missing", "duplicate")],
+        *[("messages", row, None, True) for row in ("early", "late", "missing", "duplicate")],
+        ("responses", "tail", None, True),
+        ("responses", "missing", None, False),
+        ("responses", "missing", "anthropic", False),
+        ("chat/completions", "early", "anthropic", False),
+        ("responses", "late", "openrouter", True),
+        ("messages", "late", "openrouter", True),
     ],
 )
-async def test_responses_acceptance_precedes_egress_even_without_created(
+async def test_native_acceptance_and_identity_preserve_egress(
     tmp_path: Path,
+    route: str,
     lifecycle: str,
     primary: Literal["anthropic", "openrouter"] | None,
     hinted: bool,
@@ -290,14 +317,19 @@ async def test_responses_acceptance_precedes_egress_even_without_created(
     def post(path: str, headers: dict[str, str], body: dict[str, Any]) -> bytes:
         posts.append((path, INSTRUCTIONS in json.dumps(body)))
         if path.endswith("/messages"):
+            if route == "messages":
+                return _native_reply(route, lifecycle)
             return sse(
                 [
+                    # Opening an empty block publishes the receipt, but the
+                    # subsequent ID-only update must not prevent failover.
+                    _ANTHROPIC_CONTENT[0],
                     {"type": "message_start", "message": {"id": "failed-native"}},
                     {"type": "error", "error": {"type": "overloaded_error", "message": "Fixture"}},
                 ]
             )
         if path.endswith("/chat/completions"):
-            if lifecycle == "chat":
+            if route == "chat/completions":
                 return (
                     sse(
                         [
@@ -319,14 +351,16 @@ async def test_responses_acceptance_precedes_egress_even_without_created(
                 ]
             )
         assert path.endswith("/responses")
-        return _responses_reply(lifecycle)
+        return _native_reply(route, lifecycle)
 
     starts: list[tuple[str | None, int | None]] = []
     with_start: list[str | None] = []
     start_counts_at_updates: list[int] = []
     updates: list[dict[str, Any]] = []
+    endings: list[dict[str, Any]] = []
     markers: list[int | None] = []
     projector = InlineUiEvents(sidecars=True)
+    broker = EventBroker()
 
     async with _local_sse(post) as base, httpx.AsyncClient(trust_env=False, timeout=5) as http:
         native = OpenAICompatClient(base, openai_api="responses", http_client=http)
@@ -352,7 +386,11 @@ async def test_responses_acceptance_precedes_egress_even_without_created(
         auth = FakeAuth(
             {provider: ["synthetic-key"] for provider in ("openai", "openrouter", "anthropic")}
         )
-        fallback = "openrouter/openai/gpt-4o" if lifecycle == "chat" else "openai/gpt-6-astra"
+        fallback = {
+            "chat/completions": "openrouter/openai/gpt-4o",
+            "messages": "anthropic/claude-sonnet-4-6",
+            "responses": "openai/gpt-6-astra",
+        }[route]
         settings = {"retry": {"maxRetries": 0, "fallbackChains": {"default": [fallback]}}}
 
         async def stream(request: ChatRequest, signal: AbortSignal) -> AsyncIterator[StreamEvent]:
@@ -367,9 +405,12 @@ async def test_responses_acceptance_precedes_egress_even_without_created(
             if isinstance(event, ProviderTurnStartEvent):
                 with_start.append(event.response_id)
             elif isinstance(event, MessageUpdateEvent):
+                assert isinstance(event.message, Message)
                 start_counts_at_updates.append(len(with_start))
                 markers.append(event.message._inline_ui_source_version)
                 updates.append(projector.dump(event))
+            elif isinstance(event, (MessageEndEvent, AgentEndEvent)):
+                endings.append(projector.dump(event))
 
         session = make_session(
             tmp_path,
@@ -377,16 +418,23 @@ async def test_responses_acceptance_precedes_egress_even_without_created(
             model={
                 "anthropic": ModelSpec(provider="anthropic", model_id="claude-sonnet-4-6"),
                 "openrouter": ModelSpec(provider="openrouter", model_id="openai/gpt-4o"),
-                None: ModelSpec(provider="openai", model_id="gpt-4o", supports_responses_api=True),
+                None: (
+                    ModelSpec(provider="anthropic", model_id="claude-sonnet-4-6")
+                    if route == "messages"
+                    else ModelSpec(
+                        provider="openai", model_id="gpt-4o", supports_responses_api=True
+                    )
+                ),
             }[primary],
         )
         session.subscribe(on_event)
+        attach_broker(session, broker, "inline-ui")
         try:
             await session.prompt("Show June counts.", inline_ui=bool(primary) or hinted)
             durable_markers = [
                 message._inline_ui_source_version
                 for message in session._context.messages
-                if message.role == "assistant"
+                if isinstance(message, Message) and message.role == "assistant"
             ]
         finally:
             await session.dispose()
@@ -394,7 +442,7 @@ async def test_responses_acceptance_precedes_egress_even_without_created(
     # Inspect projection before asserting metadata: on the old code the
     # opener escaped unprojected, or inherited the failed attempt's marker.
     assert len(updates) >= 2
-    if lifecycle != "chat":
+    if route != "chat/completions":
         assert len(updates) == 2
     deltas = [update["delta"] for update in updates]
     widgets = [
@@ -412,20 +460,125 @@ async def test_responses_acceptance_precedes_egress_even_without_created(
     receipt = 1 if hinted else None
     assert markers == [receipt] * len(updates)
     assert durable_markers == [receipt]
-    assert posts[-1] == ("/chat/completions" if lifecycle == "chat" else "/responses", hinted)
+    [message_end] = [
+        frame
+        for frame in endings
+        if frame["type"] == "message_end" and frame["message"]["role"] == "assistant"
+    ]
+    [agent_end] = [frame for frame in endings if frame["type"] == "agent_end"]
+    [final_assistant] = [
+        message for message in agent_end["messages"] if message["role"] == "assistant"
+    ]
+    assert message_end["message"] == final_assistant
+    assert "".join(block["text"] for block in final_assistant["content"]) == "".join(deltas)
+    if hinted:
+        assert message_end["inline_ui"] == agent_end["inline_ui"] == updates[-1]["inline_ui"]
+    else:
+        assert "inline_ui" not in message_end and "inline_ui" not in agent_end
+    assert posts[-1] == ("/v1/messages" if route == "messages" else f"/{route}", hinted)
     assert len(posts) == len(starts)
     if primary == "anthropic":
-        assert starts[:-1] and all(start == ("failed-native", 1) for start in starts[:-1])
+        assert starts[:-1] and all(start == (None, 1) for start in starts[:-1])
     elif primary == "openrouter":
         assert starts[:-1] and all(start == ("failed-generic", None) for start in starts[:-1])
-    actual_id = {"early": "resp-actual", "duplicate": "resp-actual", "chat": "chat-actual"}
-    assert starts[-1] == (actual_id.get(lifecycle), receipt)
+    known_id = "chat-actual" if route == "chat/completions" else _NATIVE_IDS[route]
+    assert starts[-1] == (known_id if lifecycle in {"early", "duplicate"} else None, receipt)
     assert with_start == [response_id for response_id, _ in starts]
     assert start_counts_at_updates == [len(starts)] * len(updates)
-    print(
-        f"{primary or 'direct'} / {lifecycle}: POSTs={posts}; starts={starts}; "
-        f"egress={deltas!r}; widgets={widgets!r}"
+    publication = [
+        (event.name, event.data.get("response_id"), event.data.get("identity_only"))
+        for event in broker.retained(job_channel("inline-ui"))
+        if event.name in ("provider.start", "message.delta", "agent.end")
+    ]
+    expected: list[tuple[str, str | None, bool | None]] = []
+    for attempt, (response_id, _) in enumerate(starts):
+        expected.append(("provider.start", response_id, None))
+        if primary == "anthropic" and attempt < len(starts) - 1:
+            expected.append(("provider.start", "failed-native", True))
+    first_delta = len(expected)
+    expected += [("message.delta", None, None)] * len(updates)
+    if lifecycle in {"late", "tail"}:
+        position = first_delta + 1 if lifecycle == "late" else len(expected)
+        expected.insert(position, ("provider.start", known_id, True))
+    expected.append(("agent.end", None, None))
+    assert publication == expected
+    print(f"{primary or 'direct'} / {route} / {lifecycle}: {posts=}; {publication=}; {deltas=}")
+
+
+@pytest.mark.parametrize("route", ["responses", "messages"])
+async def test_native_late_identity_cannot_publish_a_one_turn_secret(
+    tmp_path: Path, route: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The native tool is real; the unrelated process-wide ledger writer is not
+    # part of this fixture's egress boundary and should not outlive it.
+    monkeypatch.setattr("local_operator.analytics.record_tool_call", lambda *_: None)
+    canary = "synthetic-one-turn-late-id-canary"
+    provider = "openai" if route == "responses" else "anthropic"
+    model = ModelSpec(
+        provider=provider,
+        model_id="gpt-4o" if route == "responses" else "claude-sonnet-4-6",
+        supports_responses_api=route == "responses",
     )
+    posts: list[dict[str, Any]] = []
+    attempts = 0
+
+    def post(_path: str, _headers: dict[str, str], body: dict[str, Any]) -> bytes:
+        posts.append(body)
+        return _native_reply(route, "late", native_id=canary)
+
+    broker = EventBroker()
+    scrubbed_ids: list[str | None] = []
+    public_identities: list[ProviderTurnIdentityEvent] = []
+    async with _local_sse(post) as base, httpx.AsyncClient(trust_env=False, timeout=5) as http:
+        client = (
+            OpenAICompatClient(base, openai_api="responses", http_client=http)
+            if route == "responses"
+            else AnthropicClient(base, http_client=http)
+        )
+
+        async def client_for(_spec: ModelSpec) -> Any:
+            return client
+
+        async def stream(request: ChatRequest, signal: AbortSignal) -> AsyncIterator[StreamEvent]:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                for event in _tool_delta("secret-id-call", "native-secret", "{}"):
+                    yield event
+                yield StreamEndEvent(stop_reason="toolUse")
+                return
+            assert attempts == 2 and request.has_one_turn_secrets
+            async for event in stream_with_failover(
+                request, FakeAuth({provider: ["synthetic-key"]}), None, client_for, signal=signal
+            ):
+                if isinstance(event, StreamResponseIdentityEvent):
+                    scrubbed_ids.append(event.response_id)
+                yield event
+
+        def on_event(event: Any) -> None:
+            if isinstance(event, ProviderTurnIdentityEvent):
+                public_identities.append(event)
+
+        session = make_session(
+            tmp_path,
+            stream,
+            tools=[_secret_tool("native-secret", canary)],
+            variables=VariableStore(),
+            model=model,
+        )
+        session.subscribe(on_event)
+        attach_broker(session, broker, "secret-late-id")
+        try:
+            await session.prompt("Use the native tool, then answer.")
+        finally:
+            await session.dispose()
+
+    assert len(posts) == 1 and json.dumps(posts[0]).count(canary) == 1
+    assert scrubbed_ids == [None] and public_identities == []
+    public = [event.data for event in broker.retained(job_channel("secret-late-id"))]
+    assert [frame["response_id"] for frame in public if frame["type"] == "provider.start"] == [None]
+    assert canary not in json.dumps(public)
+    print(f"{route}: armed POST reached loopback; late ID was withheld from the broker")
 
 
 @pytest.mark.parametrize("converse_first", [True, False])
@@ -459,7 +612,7 @@ async def test_failover_uses_the_serving_adapters_inline_ui_receipt(
                 ),
             )
         return httpx.Response(
-            200, content=wire(events()) if converse else _responses_reply("early")
+            200, content=wire(events()) if converse else _native_reply("responses", "early")
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(post)) as http:

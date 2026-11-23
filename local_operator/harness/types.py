@@ -3395,10 +3395,27 @@ class ProviderTurnStartEvent(AgentEvent[Literal["provider_turn_start"]]):
     while the last one names the turn actually being served. A consumer
     committing no-replay proof must therefore key on the most recent id rather
     than the first, or it will hold proof for an attempt that was abandoned.
+    A late native opener can fill an indeterminate id via
+    ``ProviderTurnIdentityEvent``, not a second acceptance for that attempt.
     """
 
     type: Literal["provider_turn_start"] = "provider_turn_start"
     response_id: str | None = None
+    provider: str | None = None
+    model_id: str | None = None
+
+
+class ProviderTurnIdentityEvent(AgentEvent[Literal["provider_turn_identity"]]):
+    """Supply no-replay proof for the latest, already-started attempt.
+
+    Keep this distinct from Start for lifecycle subscribers. The public broker
+    uses the established ``provider.start`` topic so ID consumers see the
+    update, and marks it as identity-only so it cannot be mistaken for a cut.
+    """
+
+    type: Literal["provider_turn_identity"] = "provider_turn_identity"
+    response_id: str
+    identity_only: Literal[True] = True
     provider: str | None = None
     model_id: str | None = None
 
@@ -5746,8 +5763,21 @@ class StreamModelEvent(BaseModel):
     model: ModelSpec
 
 
+class StreamResponseIdentityEvent(BaseModel):
+    """A native opener finally named the current, already-started response.
+
+    Wire clients send this once to fill a missing ID, never to replace a
+    known one. It carries neither the attempt's widget receipt nor any output.
+    A one-turn secret scrub may withhold the ID before it reaches subscribers.
+    """
+
+    type: Literal["response_identity"] = "response_identity"
+    response_id: str | None
+
+
 StreamEvent = (
     StreamStartEvent
+    | StreamResponseIdentityEvent
     | StreamTextDelta
     # Beside the text delta it is the sibling of: one channel carries the
     # answer, the other carries the work behind it, and a consumer that

@@ -50,6 +50,7 @@ from local_operator.harness.types import (
     StreamEvent,
     StreamModelEvent,
     StreamReasoningDelta,
+    StreamResponseIdentityEvent,
     StreamStartEvent,
     StreamUsageEvent,
     TextContent,
@@ -426,6 +427,8 @@ _AGGREGATOR_UPSTREAM_STREAM_FAILURE_MARKERS = (
 #:   chain. It would also misreport a pre-content transport death as a
 #:   MID-STREAM loss, which is what :func:`is_mid_stream_connectivity_loss`
 #:   infers from this very flag.
+#: * ``StreamResponseIdentityEvent`` only completes that proof. The adapter
+#:   can get it after an empty content frame but before any forwarded delta.
 #: * ``StreamReasoningDelta`` carries the model's private reasoning, which is
 #:   DISPLAY-ONLY all the way down: the loop republishes it as
 #:   ``ReasoningDeltaEvent``, no front end writes it into a message, the
@@ -455,6 +458,7 @@ _AGGREGATOR_UPSTREAM_STREAM_FAILURE_MARKERS = (
 #: another durable effect.
 _RETRY_SAFE_STREAM_EVENTS: tuple[type[StreamEvent], ...] = (
     StreamStartEvent,
+    StreamResponseIdentityEvent,
     StreamReasoningDelta,
     StreamUsageEvent,
 )
@@ -4237,7 +4241,7 @@ def _one_turn_scrub_stream_event(request: ChatRequest, event: StreamEvent) -> St
     This boundary covers every production provider and retry, so response ids,
     upstream hosts, usage stamps, and errors cannot bypass the final scrub.
     """
-    if isinstance(event, StreamStartEvent):
+    if isinstance(event, (StreamStartEvent, StreamResponseIdentityEvent)):
         return event.model_copy(
             update={"response_id": one_turn_public_text(request, event.response_id)}
         )

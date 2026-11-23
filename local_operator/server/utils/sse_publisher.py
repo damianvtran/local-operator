@@ -51,6 +51,7 @@ _AGENT_EVENT_NAMES: Dict[str, str] = {
     "agent_start": EventName.AGENT_START,
     "agent_end": EventName.AGENT_END,
     "provider_turn_start": EventName.PROVIDER_START,
+    "provider_turn_identity": EventName.PROVIDER_START,
     "turn_start": EventName.TURN_START,
     "turn_end": EventName.TURN_END,
     "message_update": EventName.MESSAGE_DELTA,

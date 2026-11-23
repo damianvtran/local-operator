@@ -150,8 +150,9 @@ class EventName:
     #: own iteration boundary and is emitted before any request exists, so a
     #: consumer keying "accepted" on it would mark a prompt un-retryable that
     #: DNS, auth or a rate limit could still reject. ``response_id`` is ``None``
-    #: on providers that expose none (Google); a consumer needing proof must
-    #: fail closed on that rather than substitute an id of its own.
+    #: when not yet known; a consumer needing proof must fail closed on that
+    #: rather than substitute an id of its own. An ``identity_only: true``
+    #: frame fills the latest attempt's missing ID without starting it again.
     #:
     #: Named ``provider.start`` and not ``provider.turn_start`` to hold the
     #: taxonomy's shape - every name here is ``<subject>.<single lifecycle
