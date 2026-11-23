@@ -201,6 +201,31 @@ def _session_preflight_args(tmp_path: Path, session_route: str, *, managed: bool
     return args
 
 
+def _budget_disclosure_line(args: Any) -> str:
+    """The Session budget disclosure ``run`` prints before any owner starts.
+
+    Why: every admitted Session run discloses its budget on stderr before the
+    owner launches (PR #4316), so the effort refusal -- which can only be decided
+    after owner admission, from scoped route metadata -- always follows that
+    line. The record comes from ``run_episode``'s own helper so a change to the
+    disclosed fields cannot silently drift from these exact-stderr pins; only
+    the one-line prefix is restated, as ``run`` writes it inline.
+    """
+    budget = run_episode._session_budget_disclosure(
+        args,
+        configured_usd_micros=run_episode._usd_micros(args.max_usd, flag="--max-usd"),
+        max_cycle_usd_micros=(
+            run_episode._usd_micros(args.max_cycle_usd, flag="--max-cycle-usd")
+            if args.max_cycle_usd is not None
+            else None
+        ),
+    )
+    return (
+        "session budget preflight (null limits are not enforced): "
+        f"session_budget={json.dumps(budget, sort_keys=True, allow_nan=False)}\n"
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("refusal", ["pin", "isolation", "owner"])
 async def test_session_gates_refuse_before_metadata_lookup(
@@ -308,7 +333,9 @@ async def test_admitted_session_effort_uses_scoped_route_before_allocation(
         assert (
             await run_episode.run(args, _test_owner_admission=admit) == run_episode.EXIT_PREFLIGHT
         )
-        refusal = capsys.readouterr().err
+        disclosure, refusal = capsys.readouterr().err.splitlines(keepends=True)
+        # Budget disclosure first (it precedes owner admission), then the refusal.
+        assert disclosure == _budget_disclosure_line(args)
         assert (
             "session route deepseek/fixture-dynamic does not accept reasoning effort 'max'"
             in refusal
@@ -390,13 +417,16 @@ async def test_frontend_checks_terminal_receipt_when_owner_disappears(
     monkeypatch.setattr(run_episode, "_owner_observation", observe)
     result = await run_episode.run(args)
     captured = capsys.readouterr()
+    # The frontend discloses the budget before launching the owner, so it is
+    # printed whatever the owner later reports; only the relayed refusal varies.
+    disclosure = _budget_disclosure_line(args)
     if receipt == "matching":
         assert result == run_episode.EXIT_PREFLIGHT
-        assert captured.err == refusal + "\n"
+        assert captured.err == disclosure + refusal + "\n"
         assert captured.out == ""
     else:
         assert result == run_episode.EXIT_EPISODE
-        assert captured.err == ""
+        assert captured.err == disclosure
         assert json.loads(captured.out)["status"] == "owner_lost_unverified"
 
 
