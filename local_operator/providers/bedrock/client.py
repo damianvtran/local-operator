@@ -33,9 +33,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from collections.abc import AsyncIterator, Mapping
-from typing import Any
-from urllib.parse import quote, unquote
+import re
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from functools import partial
+from typing import TYPE_CHECKING, Any
+from urllib.parse import quote, unquote, urlsplit
 
 import httpx
 
@@ -48,6 +52,129 @@ from local_operator.providers.clients import (
     AnthropicClient,
     _encode_json_body,
 )
+
+if TYPE_CHECKING:
+    from local_operator.harness.types import ChatRequest
+    from local_operator.session.warm_tool_prefix import _NativeDispatch, _WarmCall
+
+# Experimental SDK-only transport witness. It follows this owning request's
+# iterator, not a provider client shared by many sessions or the public ledger.
+_warm_call: ContextVar[_WarmCall | None] = ContextVar("bedrock_sdk_warm_call", default=None)
+
+
+@dataclass
+class _NativeAttempt:
+    request: ChatRequest
+    render: Callable[[ChatRequest], dict[str, Any]]
+    dispatch: _NativeDispatch | None = None
+
+
+@dataclass
+class _TerminalWrite:
+    """Strict side witness: never change the shared Messages stream result."""
+
+    model: str
+    phase: str = "start"
+    blocks: set[int] = field(default_factory=set)
+    write: int = 0
+    model_mismatch: bool = False
+
+    def agrees(self, usage: object) -> bool:
+        if not isinstance(usage, dict):
+            return True
+        if (
+            "cache_creation_input_tokens" in usage
+            and usage["cache_creation_input_tokens"] != self.write
+        ):
+            return False
+        if "cache_creation" not in usage:
+            return True
+        creation = usage["cache_creation"]
+        return (
+            isinstance(creation, dict)
+            and creation.get("ephemeral_5m_input_tokens") == self.write
+            and creation.get("ephemeral_1h_input_tokens", 0) == 0
+        )
+
+    def accept(self, event: dict[str, Any]) -> None:
+        kind = event.get("type")
+        if kind == "ping":
+            return
+        if self.phase == "start" and kind == "message_start":
+            from local_operator.model.registry import bedrock_anthropic_id
+
+            message = event.get("message")
+            expected = bedrock_anthropic_id(self.model)
+            if (
+                not isinstance(message, dict)
+                or expected is None
+                or message.get("model")
+                not in (
+                    expected,
+                    self.model,
+                )
+            ):
+                self.phase = "invalid"
+                self.model_mismatch = True
+                return
+            usage = message.get("usage")
+            creation = usage.get("cache_creation") if isinstance(usage, dict) else None
+            if isinstance(creation, dict) and isinstance(usage, dict):
+                five = creation.get("ephemeral_5m_input_tokens")
+                hour = creation.get("ephemeral_1h_input_tokens", 0)
+                total = usage.get("cache_creation_input_tokens")
+                if (
+                    type(five) is int
+                    and type(total) is int
+                    and type(hour) is int
+                    and 0 < five == total
+                    and hour == 0
+                ):
+                    self.write = five
+            self.phase = "blocks"
+            return
+        if self.phase == "blocks":
+            index = event.get("index")
+            if type(index) is int and index >= 0:
+                if kind == "content_block_start" and index not in self.blocks:
+                    self.blocks.add(index)
+                    return
+                if kind == "content_block_delta" and index in self.blocks:
+                    return
+                if kind == "content_block_stop" and index in self.blocks:
+                    self.blocks.remove(index)
+                    return
+            if kind == "message_delta" and not self.blocks:
+                delta = event.get("delta")
+                if (
+                    isinstance(delta, dict)
+                    and delta.get("stop_reason") in ("end_turn", "stop_sequence")
+                    and self.agrees(event.get("usage"))
+                ):
+                    self.phase = "terminal"
+                    return
+        if self.phase == "terminal" and kind == "message_stop":
+            self.phase = "done"
+            return
+        self.phase = "invalid"
+
+
+def _credential_namespace(auth: bauth.ResolvedAuth) -> str | None:
+    # The public SigV4 signing key ID names an AWS-issued permanent credential,
+    # not the access secret. Different IAM grants/roles on temporary credentials
+    # and opaque bearer/API keys cannot be cheaply attested here: do not hash
+    # the secret or infer identity from a descriptor, profile label, or row ID.
+    creds = auth.credentials
+    key_id = getattr(creds, "access_key", None)
+    if (
+        auth.bearer is None
+        and getattr(creds, "token", None) is None
+        and isinstance(key_id, str)
+        and re.fullmatch(r"AKIA[A-Z0-9]{16}", key_id)
+    ):
+        return f"aws-permanent-sigv4:{key_id}"
+    return None
+
 
 #: Bedrock's Messages API version string (body field, not a header).
 BEDROCK_ANTHROPIC_VERSION = "bedrock-2023-05-31"
@@ -154,9 +281,22 @@ async def iter_eventstream_events(
     from botocore.eventstream import EventStreamBuffer
 
     buffer = EventStreamBuffer()
+    call = _warm_call.get()
+    attempt = call.attempt if call is not None else None
+    dispatch = attempt.dispatch if attempt is not None else None
+    witness = _TerminalWrite(model) if dispatch is not None else None
+    undecoded = 0
     async for chunk in _guarded_bytes(response):
+        if witness is not None:
+            undecoded += len(chunk)
         buffer.add_data(chunk)
         for message in buffer:
+            if witness is not None:
+                prelude = message.prelude
+                if prelude is None:
+                    witness.phase = "invalid"
+                else:
+                    undecoded -= prelude.total_length
             headers = message.headers
             message_type = headers.get(":message-type")
             if message_type == "exception" or message_type == "error":
@@ -174,20 +314,47 @@ async def iter_eventstream_events(
                     str(error_type), text, None, model=model, region=region
                 )
             if message_type != "event" or headers.get(":event-type") != "chunk":
+                if witness is not None:
+                    witness.phase = "invalid"
                 continue
             try:
                 envelope = json.loads(message.payload)
                 event = json.loads(base64.b64decode(envelope["bytes"]))
             except (ValueError, KeyError, TypeError):
+                if witness is not None:
+                    witness.phase = "invalid"
                 continue
             if not isinstance(event, dict):
+                if witness is not None:
+                    witness.phase = "invalid"
                 continue
+            if witness is not None:
+                witness.accept(event)
+                if witness.model_mismatch and call is not None:
+                    # The reported identity arrives only after send. Do not
+                    # re-offer a speculative prefix after that contradiction.
+                    call.hint.candidate = None
             metrics = event.pop("amazon-bedrock-invocationMetrics", None)
+            if witness is not None and isinstance(metrics, Mapping):
+                write = metrics.get("cacheWriteInputTokenCount", witness.write)
+                if write != witness.write:
+                    witness.phase = "invalid"
             yield event
             if isinstance(metrics, Mapping):
                 fill = _metrics_usage(metrics)
                 if fill:
                     yield {"type": USAGE_FILL_EVENT, "usage": fill}
+    # EventStreamBuffer can stop on a partial final frame without an exception.
+    # Count complete CRC-checked frame lengths, without inspecting its internals.
+    if (
+        call is not None
+        and call.attempt is attempt
+        and witness is not None
+        and undecoded == 0
+        and witness.phase == "done"
+        and witness.write > 0
+    ):
+        call.proof = dispatch
 
 
 class BedrockAnthropicClient(AnthropicClient):
@@ -247,6 +414,27 @@ class BedrockAnthropicClient(AnthropicClient):
         async for event in super().stream(request, api_key, oauth_access):
             yield event
 
+    def _build_body(
+        self,
+        request: ChatRequest,
+        *,
+        oauth: bool = False,
+        account: str = "",
+        scope: str | None = None,
+    ) -> dict[str, Any]:
+        call = _warm_call.get()
+        if call is not None:
+            call.proof = None
+            call.attempt = None
+        if call is not None and request.purpose == "turn" and not request.isolated:
+            # Retain the existing renderer and replay policy for this attempt;
+            # the experiment neither derives nor persists a secret fingerprint.
+            call.attempt = _NativeAttempt(
+                request,
+                partial(super()._build_body, oauth=oauth, account=account, scope=scope),
+            )
+        return super()._build_body(request, oauth=oauth, account=account, scope=scope)
+
     def _cache_ttl_for(
         self,
         request: Any,
@@ -271,9 +459,36 @@ class BedrockAnthropicClient(AnthropicClient):
         self, body: dict[str, Any], headers: dict[str, str], api_key: str | None
     ) -> tuple[str, bytes, dict[str, str]]:
         assert self._region is not None  # only regional instances send
+        call = _warm_call.get()
+        attempt = call.attempt if call is not None else None
+        if call is not None and attempt is not None:
+            # Includes in-client resends as well as the outer retry wrapper.
+            call.proof = None
+            attempt.dispatch = None
         resolved = await self._resolve(api_key)
-        url = invoke_url(self._region, str(body.get("model") or ""))
-        content = _encode_json_body(transform_body(body, headers))
+        model = str(body.get("model") or "")
+        url = invoke_url(self._region, model)
+        prepared = body
+        if call is not None and attempt is not None:
+            # This is the last await before HTTPX builds the request and calls
+            # send. Only the standard HTTPS endpoint can attest this scope.
+            endpoint = urlsplit(url)
+            namespace = (
+                _credential_namespace(resolved)
+                if (
+                    endpoint.scheme == "https"
+                    and endpoint.netloc == f"bedrock-runtime.{self._region}.amazonaws.com"
+                    and model == attempt.request.model.model_id
+                    and bconn.endpoint_override() is None
+                )
+                else None
+            )
+            offered, attempt.dispatch = call.prepare(attempt.request, self._region, namespace)
+            if offered is not None:
+                # Render again as a full prefix: tools can affect TTL selection,
+                # so swapping just the serialized tools would desync the marks.
+                prepared = attempt.render(attempt.request.model_copy(update={"tools": offered}))
+        content = _encode_json_body(transform_body(prepared, headers))
         # Exactly the headers botocore's own client sends for
         # ``invoke_model_with_response_stream(contentType=..., accept=...)``:
         # ``accept`` is the MODEL body's MIME type and travels as
@@ -284,7 +499,15 @@ class BedrockAnthropicClient(AnthropicClient):
             "Content-Type": "application/json",
             "X-Amzn-Bedrock-Accept": "application/json",
         }
-        return url, content, bauth.sign_headers(resolved, "POST", url, content, base_headers)
+        sent_headers = bauth.sign_headers(resolved, "POST", url, content, base_headers)
+        if call is not None and attempt is not None and attempt.dispatch is not None:
+            if not call.ready(attempt.dispatch):
+                # Encoding/signing can spend the last of the lease even without
+                # yielding. The ordinary body was never mutated: downgrade it.
+                attempt.dispatch = None
+                content = _encode_json_body(transform_body(body, headers))
+                sent_headers = bauth.sign_headers(resolved, "POST", url, content, base_headers)
+        return url, content, sent_headers
 
     async def _resolve(self, api_key: str | None) -> bauth.ResolvedAuth:
         if not api_key:

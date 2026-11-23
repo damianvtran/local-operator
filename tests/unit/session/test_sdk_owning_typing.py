@@ -82,8 +82,8 @@ def test_open_session_overloads_are_the_typed_surface() -> None:
         "AbstractAsyncContextManager[ViewerSessionProtocol]",
         "AbstractAsyncContextManager[SessionProtocol]",
     ]
-    opts = {"allow_multi_root": False, "verbose": False, "warm_tool_prefix": False}
-    assert overloads[0].__kwdefaults__ == {"mode": "own", **opts}
+    opts = {"allow_multi_root": False, "verbose": False}
+    assert overloads[0].__kwdefaults__ == {"mode": "own", "warm_tool_prefix": False, **opts}
     assert overloads[1].__kwdefaults__ == opts
     assert overloads[2].__kwdefaults__ == opts
     # functools.wraps chain left by asynccontextmanager

@@ -72,18 +72,23 @@ async with open_session(spec, roots=roots, verbose=True) as session:
 A tool status of `returned` means the tool did not report a tool-level error;
 it does not imply that a subprocess it ran exited successfully.
 
-### Preserve a warm built-in tool prefix on owner reopen (opt-in)
+### Experimental: re-offer a warm built-in tool prefix on owner reopen
 
-Pass `warm_tool_prefix=True` to `open_session` on both the original owner and
-its reopen. The current implementation is intentionally limited to a confined
-`world_root`, the default `ApprovalPolicy.refuse()`, an undeclared tool inventory
-with no MCP servers configured, and Bedrock's native Claude Messages route.
-It can preserve only the shipped `library` schema after that schema reached a
-completed turn that reported a five-minute cache write. A live, unchanged
-inventory must reproduce the exact ordered tool array; otherwise the new owner
-publishes as usual. There is no extra readiness wait and no cached definition,
-execution permission, or approval is restored. Reopening alone does not extend
-the hint's lifetime, and a matching prefix does not guarantee a provider hit.
+Pass `warm_tool_prefix=True` to `open_session` in owner mode on the original
+owner and its reopen. It applies only with a confined `world_root`, default
+`ApprovalPolicy.refuse()`, an undeclared built-in inventory, no configured MCP
+servers, and native Claude Messages on the standard Bedrock regional endpoint.
+The request must use an identifiable permanent SigV4 signing key; bearer
+credentials, temporary credentials, and endpoint overrides stay cold.
+
+The hint is from the **last qualifying write**, not necessarily the last turn:
+the native response must complete and explicitly report a five-minute write
+for an offer that included the shipped `library` schema. Read-only, failed,
+and ordinary nonparticipating turns do not renew that write's deadline. For
+each eligible send the current region, signing identity, inventory, policy,
+and unexpired deadline must all still match. This re-offers a schema only:
+no sticky discovery state, execution permission, or approval is restored.
+There is no extra network work, and a matching prefix does not guarantee a hit.
 
 ## Entry points
 

@@ -2182,7 +2182,7 @@ class McpManager:
     def get_connected_servers(self) -> list[str]:
         return sorted(self._connections)
 
-    def empty_catalogue_epoch(self) -> int | None:
+    def _empty_catalogue_epoch(self) -> int | None:
         """Attest an empty, live manager for the SDK's builtin-only warm hint.
 
         No other origin qualifies yet. A missing tool array alone is not

@@ -962,7 +962,6 @@ def open_session(
     mode: Literal["attach"],
     allow_multi_root: bool = False,
     verbose: bool = False,
-    warm_tool_prefix: bool = False,
 ) -> AbstractAsyncContextManager[ViewerSessionProtocol]: ...
 
 
@@ -974,7 +973,6 @@ def open_session(
     mode: Literal["own", "attach"],
     allow_multi_root: bool = False,
     verbose: bool = False,
-    warm_tool_prefix: bool = False,
 ) -> AbstractAsyncContextManager[SessionProtocol]: ...
 
 
@@ -1005,13 +1003,11 @@ async def open_session(
     ``logging.basicConfig()`` in a standalone script), then enable INFO with
     ``logging.getLogger("local_operator.sdk").setLevel(logging.INFO)``.
 
-    ``warm_tool_prefix=True`` opts a confined, refusal-policy owner into a
-    best-effort Bedrock Messages cache hint. Only a previously published
-    built-in ``library`` schema can be reconstituted, from the current tool
-    inventory, before the first turn's publication latch. Declared tools,
-    multi-root/ambient sessions, and worlds with MCP configured are ineligible.
-    There is no connection wait, permission restore, or guaranteed provider cache hit. Viewers and
-    owners without the option do not read or write the hint.
+    Experimental (owner only): ``warm_tool_prefix=True`` may re-offer a
+    previously published built-in ``library`` schema at a matching native
+    Bedrock Messages dispatch. It is not discovery, permission restore, or a
+    guaranteed cache hit. Declared tools, multi-root/ambient sessions, worlds
+    with MCP configured, and opaque credential namespaces are ineligible.
 
     The environment is scoped to ``roots`` for the whole ``async with`` body:
     construction, the caller's turns, and every lazy resolver in between see
@@ -1034,7 +1030,7 @@ async def open_session(
             from local_operator.i18n.keys import wire_errors_sdk_spec
 
             raise SessionSpecError(spec_refusal_text(wire_errors_sdk_spec.attach_resume_required()))
-        _refuse_attach_extras(spec)
+        _refuse_attach_extras(spec, warm_tool_prefix=warm_tool_prefix)
     else:
         _guard_agent_shell()
 
@@ -1076,7 +1072,7 @@ async def open_session(
 _DEFAULT_MCP_READY_TIMEOUT_S = SessionSpec.__dataclass_fields__["mcp_ready_timeout_s"].default
 
 
-def _refuse_attach_extras(spec: SessionSpec) -> None:
+def _refuse_attach_extras(spec: SessionSpec, *, warm_tool_prefix: bool = False) -> None:
     """Attach opens a viewer; nothing but ``resume`` may be set on the spec.
 
     A viewer observes and steers a session someone else owns. Attaching a team,
@@ -1110,6 +1106,8 @@ def _refuse_attach_extras(spec: SessionSpec) -> None:
     # setting would never be consulted, so only the default passes.
     if spec.mcp_ready_timeout_s != _DEFAULT_MCP_READY_TIMEOUT_S:
         set_fields.append("mcp_ready_timeout_s")  # i18n: ignore spec field identifier
+    if warm_tool_prefix:
+        set_fields.append("warm_tool_prefix")  # i18n: ignore SDK keyword identifier
     occupancy = [
         name
         for name, value in (

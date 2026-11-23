@@ -53,6 +53,7 @@ import uuid
 import weakref
 from collections import deque
 from collections.abc import (
+    AsyncGenerator,
     AsyncIterator,
     Awaitable,
     Callable,
@@ -397,6 +398,7 @@ if TYPE_CHECKING:
     # fails if resolving ``--resume`` drags the engine in, and that guard runs
     # in the other direction too.
     from local_operator.resume import SessionAttachment
+    from local_operator.session.warm_tool_prefix import _WarmToolPrefix
 
     # Type-only: ``session_factory`` builds sessions, so a runtime import
     # here would be the wrong direction. Held so the ``tool`` kind's roster
@@ -4811,7 +4813,9 @@ class Session:
         #: callable, and the prompt's inventory block reports it through the
         #: usual ``[session-state]`` delta.
         self._published_tools: list[AgentTool] | None = None
-        self._on_first_tool_publication: Callable[[], tuple[AgentTool, ...] | None] | None = None
+        # Only SDK experimental owners install a native request witness. It
+        # never participates in this session's discovery or publication latch.
+        self._sdk_warm_prefix: _WarmToolPrefix | None = None
         #: DEFERRED SCHEMAS (``tools/deferral.py``). ``_deferral_pins`` are names
         #: a role's ``tools:`` list, a team manager's or a host declaration asked
         #: for, which stay published. ``_activated_tools`` is STICKY for the
@@ -16245,15 +16249,6 @@ class Session:
         latch decides.
         """
         if self._published_tools is None:
-            # SDK opt-in only. Side channels do not consume the warm hint,
-            # and a failed first-latch proof is never retried on a later turn.
-            before_publish = self._on_first_tool_publication
-            if before_publish is not None:
-                self._on_first_tool_publication = None
-                restored = before_publish()
-                if restored is not None:
-                    self._published_tools = list(restored)
-                    return self._published_tools
             self._published_tools = self._publishable(self._tools)
         return self._published_tools
 
@@ -23755,7 +23750,7 @@ class Session:
                     else set()
                 )
 
-                async def witness() -> AsyncIterator[StreamEvent]:
+                async def witness() -> AsyncGenerator[StreamEvent, None]:
                     # Lazy provider generators may start only after another
                     # await. Carry the same guard to that first I/O boundary.
                     if frame is not None and not frame.binding_intact():
@@ -23799,7 +23794,13 @@ class Session:
                     async for event in inner:
                         yield event
 
-                return witness()
+                stream = witness()
+                hint = self._sdk_warm_prefix
+                return (
+                    hint.stream(stream)
+                    if hint is not None and request.purpose == "turn"
+                    else stream
+                )
 
             if opened_body is None:
                 if not self._turn_is_user_directed():
