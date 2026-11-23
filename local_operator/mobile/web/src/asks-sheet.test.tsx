@@ -923,6 +923,9 @@ describe("the ask panel", () => {
 		await screen.findByTestId("ask-card");
 		const bar = screen.getByTestId("asks-bar");
 		const footer = bar.closest("[data-sheet-footer]") as HTMLElement;
+		// The hairline is the wrapper's (it does not scroll); the bar carries none.
+		expect(footer.className).toContain("border-t");
+		expect(bar.className).not.toContain("border-t");
 		expect(footer.className).toContain("overflow-y-auto");
 		expect(footer.className).toContain("min-h-0");
 	});

@@ -60,9 +60,9 @@ export function Sheet({
 	    sheet's content may not scroll away with it (the asks sheet's send and
 	    decline). It sits after the scroller inside the panel, so it clears the
 	    home indicator by the panel's own safe-area padding, and the sheet adds
-	    no chrome of its own around it (no border, no padding): the caller owns the
-	    bar's look, including collapsing it (`empty:hidden`) while it holds nothing,
-	    so an idle bar leaves no stripe. Absent on every other sheet, which render
+	    no padding around it: the caller owns the bar's look. The sheet draws the
+	    top hairline on its own non-scrolling wrapper and hides the wrapper while
+	    the caller's bar element is empty, so an idle bar leaves no stripe. Absent on every other sheet, which render
 	    as before. */
 	footer?: ReactNode;
 	/** The scrolling region, for a caller that has to move it (the asks sheet
@@ -251,8 +251,13 @@ export function Sheet({
 						   its content height while the panel's height is indefinite, so the
 						   overflow was shared by shrink factor x content size and a shrinkable
 						   footer lost height to the scroller even at default text. The cap
-						   below (`max-height`) and `overflow-y-auto` still bound it. */
-						className="min-h-0 shrink-0 overflow-y-auto overscroll-contain"
+						   below (`max-height`) and `overflow-y-auto` still bound it.
+
+						   THE RULE LIVES HERE, not on the bar inside (design D9): this box does
+						   not scroll, so its top edge stays put while the bar scrolls under
+						   it. A caller whose bar is empty collapses the whole footer
+						   (`has-[>:empty]`), so an idle bar leaves no stripe. */
+						className="min-h-0 shrink-0 overflow-y-auto overscroll-contain border-t border-hairline has-[>:empty]:hidden"
 						style={columnCap(SHEET_FOOTER_FRACTION)}
 					>
 						{footer}

@@ -521,7 +521,7 @@ export function AsksSheet({
 					<div
 						ref={setBarEl}
 						data-testid="asks-bar"
-						className="border-t border-hairline px-3 py-2 empty:hidden"
+						className="px-3 py-2 empty:hidden"
 					/>
 				) : undefined
 			}

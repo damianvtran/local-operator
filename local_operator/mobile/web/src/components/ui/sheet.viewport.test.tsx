@@ -152,6 +152,15 @@ describe("the sheet's pinned footer", () => {
 		expect(getComputedStyle(footer as HTMLElement).maxHeight).toContain("0.4");
 	});
 
+	it("draws the top rule on the non-scrolling wrapper, and hides the wrapper while the bar is empty", () => {
+		// On the wrapper, not the bar inside it: a rule on the scrolling content
+		// scrolled away with it (design D9).
+		const { footer } = mountWithFooter(568);
+		expect(footer?.className).toContain("border-t");
+		expect(footer?.className).toContain("border-hairline");
+		expect(footer?.className).toContain("has-[>:empty]:hidden");
+	});
+
 	it("gives the reading area a floor of 28% of the column, only when a footer is present", () => {
 		const { scroller } = mountWithFooter(568);
 		expect(getComputedStyle(scroller as HTMLElement).minHeight).toContain("568px");
