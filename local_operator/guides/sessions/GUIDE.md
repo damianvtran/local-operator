@@ -254,9 +254,9 @@ every list.
   question in brief, so a person can match the id to what was asked.
 - **If you must copy an ask into your own** — the operator is not looking at the
   origin — keep the copy attributable: its first line is `From <session title>
-  (<sid>), ask a-xxxx ("<few words>"):`, its questions copied verbatim, and one original per
-  copy, never mixed with your own items. Never copy a SECRET question: only its
-  own card can answer it, so point at the origin ask.
+  (<sid>), ask a-xxxx ("<few words>"):`, its questions copied verbatim, and one
+  original per copy, never mixed with your own items. Never copy a SECRET
+  question: only its own card can answer it, so point at the origin ask.
 - **Settle both ends.** Your copy answered: `send` the answer to the origin
   session — the operator answered it, words verbatim — asking it to settle with
   `ask_withdraw reason=answered_in_chat`, one of the tool's two reasons, which
