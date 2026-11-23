@@ -214,8 +214,115 @@ def test_a_dismissal_receipt_names_who_which_surface_and_why():
             "by": {"surface": "remote"},
         }
     )
-    assert text == "Dismissed by you (phone) — settled in chat (ask a-1)"
+    assert text == "a-1 — Dismissed by you (phone), settled in chat"
     assert kind == "info"
     assert "Answered" not in text
     bare, _ = ask_response_notice({"status": "dismissed", "ask_id": "a-1"})
-    assert bare == "Dismissed by you — no longer needed (ask a-1)"
+    assert bare == "a-1 — Dismissed by you, no longer needed"
+
+
+# -- naming an ask in words (Ben, 2026-11-23) --------------------------------
+
+
+def test_a_receipt_names_the_ask_in_words_and_puts_the_id_first():
+    """An id alone is hard to match to an ask in the UIs, so every receipt names
+    it in the ask's own few words — and the id still leads."""
+    from local_operator.harness.rows import ask_response_notice, ask_timeout_notice
+
+    questions = [{"question": "Settings layout: one column or two?"}]
+    answered, kind = ask_response_notice(
+        {"status": "answered", "ask_id": "a-745e", "questions": questions}
+    )
+    assert answered == 'a-745e · "Settings layout: one column or two?" — Answered, delivering'
+    assert kind == "info"
+    timed_out, severity = ask_timeout_notice(
+        {"ask_id": "a-745e", "questions": questions, "waited_s": 2520}
+    )
+    assert timed_out == (
+        'a-745e · "Settings layout: one column or two?" — Timed out after 42m, '
+        "the agent goes ahead without your answer"
+    )
+    assert severity == "warning"
+    # A row with nothing to name (an older timeout row) keeps the id, which is
+    # still the addressable token.
+    assert ask_timeout_notice({"ask_id": "a-745e"})[0] == (
+        "a-745e — Timed out after a while, the agent goes ahead without your answer"
+    )
+
+
+def test_a_secret_ask_is_named_by_a_label_and_never_by_its_question():
+    """Only the card that owns a secret ask may show its words: a receipt, a
+    phone frame and another session's relay all read this name."""
+    from local_operator.harness.rows import ask_name, ask_response_notice
+
+    text = ask_response_notice(
+        {
+            "status": "answered",
+            "ask_id": "a-9",
+            "questions": [
+                {"question": "Paste the production API key", "secret": True, "key": "PROD_KEY"}
+            ],
+        }
+    )[0]
+    assert text == 'a-9 · "secret question" — Answered, delivering'
+    assert "API" not in text and "PROD_KEY" not in text
+    # ONE secret question makes the WHOLE name generic: naming the first
+    # question of a mixed ask would leak the prompt beside it.
+    mixed = ask_name(
+        {
+            "questions": [
+                {"question": "Which region?"},
+                {"question": "Paste the key", "secret": True},
+            ]
+        }
+    )
+    assert mixed == "secret question +1"
+
+
+def test_ask_name_cuts_at_a_word_boundary_and_counts_the_rest():
+    from local_operator.harness.rows import ask_name
+
+    long_question = "Which database should the migration target, staging or prod?"
+    name = ask_name({"questions": [{"question": long_question}]})
+    assert name is not None
+    assert name.endswith("…")
+    assert len(name.rstrip("…")) <= 40
+    # The cut keeps whole words: the character before the ellipsis is a letter.
+    assert name[-2].isalpha()
+    assert long_question.startswith(name[:-1])
+    assert ask_name({"questions": [{"question": "A"}, {"question": "B"}, {"question": "C"}]}) == (
+        "A +2"
+    )
+    # Whitespace collapses, and nothing to name omits the name entirely.
+    assert ask_name({"questions": [{"question": "  one   line\n\ttwo  "}]}) == "one line two"
+    assert ask_name({"questions": []}) is None
+    assert ask_name({}) is None
+    assert ask_name({"questions": [{"question": "   "}]}) is None
+
+
+def test_the_parts_are_the_one_source_the_sentence_is_composed_from():
+    """A surface that lays the id out separately reads the same parts, so it
+    cannot word the state differently from the phone it sits beside."""
+    from local_operator.harness.rows import (
+        ask_response_notice,
+        ask_response_parts,
+        ask_timeout_parts,
+    )
+
+    details = {
+        "status": "late",
+        "ask_id": "a-745e",
+        "questions": [{"question": "Settings layout?"}],
+        "waited_s": 60,
+    }
+    ask_id, name, state, ink = ask_response_parts(details)
+    assert (ask_id, name, state, ink) == (
+        "a-745e",
+        "Settings layout?",
+        "Answered late, the agent was told",
+        "warning",
+    )
+    assert ask_response_notice(details) == (f'a-745e · "Settings layout?" — {state}', ink)
+    timeout_id, _, timeout_state, timeout_ink = ask_timeout_parts(details)
+    assert (timeout_id, timeout_ink) == ("a-745e", "warning")
+    assert timeout_state.startswith("Timed out after ")

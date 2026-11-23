@@ -1048,9 +1048,116 @@ def gate_timeout_subject(details: Mapping[str, Any] | None) -> str:
     return f"{tool} ({description})" if description else tool
 
 
-#: The surface words an ``ask_response`` dismissal receipt shows. ``remote`` is what
-#: the relay stamps for the phone's tap (an empty ``by`` on the wire).
-_DISMISS_SURFACE_WORDS = {"remote": "phone", "tui": "terminal"}
+#: How many characters of a question's text a receipt calls the ask by. The
+#: name is a HANDLE, not a summary: the measured first questions are long (966
+#: asks, median 177 chars, p90 394), the receipt is ONE line on the phone, and
+#: the id next to it is what makes two asks distinguishable — the name only has
+#: to be enough for a person to recognise which ask is meant.
+_ASK_NAME_CHARS = 40
+
+#: What a receipt calls a SECRET ask. Only the card that owns it can answer it,
+#: so neither its question text nor its key may reach a transcript line, a phone
+#: frame or another session's relay: the name is this word instead.
+_SECRET_ASK_NAME = "secret question"
+
+
+def ask_name(
+    details: Mapping[str, Any] | None, *, secret_label: str = _SECRET_ASK_NAME
+) -> str | None:
+    """The few words a receipt calls an ask by, or ``None`` when it has none.
+
+    Asks carry no title field, so the name is cut from the FIRST question's text
+    — the only words a person already knows the ask by. Ben, 2026-11-23: an id
+    alone is hard to match to an ask in the UIs, so every receipt now names the
+    ask in words and puts the id first.
+
+    Derived from the row's own ``questions``, never a store lookup: the response
+    row and the timeout row both carry them (``asks/queue.py``), and an older
+    timeout row that does not still renders with the id alone rather than
+    reaching into a queue the reader does not own.
+
+    A SECRET question replaces the whole name with ``secret_label``: quoting the
+    first question of a mixed ask would leak a prompt whose answer must stay in
+    its own card. ``secret_label`` is the caller's localized word; the default
+    is English because the tool receipt (``asks/render.py``) is model-facing.
+
+    One further question per ``+N`` suffix says the ask holds more than the one
+    named — the count is the only other matching handle a row has.
+    """
+    details = details or {}
+    questions = [q for q in (details.get("questions") or ()) if isinstance(q, Mapping)]
+    if not questions:
+        return None
+    further = f" +{len(questions) - 1}" if len(questions) > 1 else ""
+    if any(q.get("secret") for q in questions):
+        return f"{secret_label}{further}"
+    text = " ".join(str(questions[0].get("question") or "").split())
+    if not text:
+        return None
+    if len(text) <= _ASK_NAME_CHARS:
+        return f"{text}{further}"
+    head = text[:_ASK_NAME_CHARS]
+    cut = head.rfind(" ")
+    if cut > 0:
+        head = head[:cut]
+    return f"{head.rstrip(' ,;:.—–-')}…{further}"
+
+
+def _ask_receipt_line(ask_id: str, name: str | None, state: str) -> str:
+    """The one receipt line, ID FIRST: ``a-745e · "Settings layout" — Answered, delivering``.
+
+    The id leads because it is the ``addressable`` token — the thing an agent's
+    prose cites and the thing a surface can link — and because it sits at a
+    fixed offset no language's word order moves. The name is quoted so a
+    person can see where the question's own words stop, and the state is a
+    whole phrase from the catalogue rather than a concatenated sentence.
+    """
+    if name:
+        return f'{ask_id} · "{name}" — {state}'
+    return f"{ask_id} — {state}"
+
+
+def ask_response_parts(
+    details: Mapping[str, Any] | None,
+) -> tuple[str, str | None, str, NoticeSeverity]:
+    """The ``ask_response`` receipt as PARTS: ``(ask_id, name, state, ink)``.
+
+    WHY PARTS. The phone and the desktop print this line whole; a surface may
+    instead want the id in its own column, because a column of ids is what a
+    person scans when the agent's prose cites one. Splitting here keeps ONE
+    author of the words — :func:`_ask_receipt_line` is the only place they
+    become a sentence — so a surface that lays them out separately cannot
+    invent different words for the same state.
+
+    The three statuses are deliberately distinguishable to a HUMAN even though
+    they ride one message type for the model — a person reading back a
+    conversation needs to know whether their answer landed in time, landed late,
+    or was a decline. ``ink`` is: an answer is a receipt, a late answer is a
+    receipt the user should notice, and a decline is a plain state.
+    """
+    from local_operator.harness import ask_receipts_copy as _copy
+
+    details = details or {}
+    ask_id = str(details.get("ask_id") or "")
+    name = ask_name(details, secret_label=_copy.secret_ask_name())
+    status = str(details.get("status") or "answered")
+    if status == "declined":
+        return (ask_id, name, _copy.declined_text(), "info")
+    if status == "late":
+        return (ask_id, name, _copy.late_text(), "warning")
+    if status == "dismissed":
+        # The audit receipt of an operator dismissal (design §15): who, through
+        # which surface, and why. Without this branch the row would fall through
+        # to the answered words, which are false for a dismissal.
+        by = details.get("by")
+        surface = str(by.get("surface") or "") if isinstance(by, Mapping) else ""
+        return (
+            ask_id,
+            name,
+            _copy.dismissed_text(surface=surface, reason=str(details.get("reason") or "")),
+            "info",
+        )
+    return (ask_id, name, _copy.answered_text(), "info")
 
 
 def ask_response_notice(details: Mapping[str, Any] | None) -> tuple[str, NoticeSeverity]:
@@ -1061,50 +1168,42 @@ def ask_response_notice(details: Mapping[str, Any] | None) -> tuple[str, NoticeS
     and the other misses is how a row renders on one surface and nowhere on the
     other (docs/design/history-fold-convergence.md §3).
 
-    The three statuses are deliberately distinguishable to a HUMAN even though
-    they ride one message type for the model — a person reading back a
-    conversation needs to know whether their answer landed in time, landed late,
-    or was a decline. ``kind`` is the ink: an answer is a receipt, a late answer
-    is a receipt the user should notice, and a decline is a plain state.
+    A thin wrapper on :func:`ask_response_parts` so the callers that want the
+    whole sentence (both folds, today) keep their shape.
     """
-    details = details or {}
-    status = str(details.get("status") or "answered")
-    ask_id = str(details.get("ask_id") or "")
-    if status == "declined":
-        return (f"Ask {ask_id} declined — the agent was told", "info")
-    if status == "late":
-        return (f"Answered late — the agent was told (ask {ask_id})", "warning")
-    if status == "dismissed":
-        # The audit receipt of an operator dismissal (design §15): who, through
-        # which surface, and why. Without this branch the row would fall through
-        # to "Answered — delivering", which is false for a dismissal.
-        by = details.get("by")
-        surface = str(by.get("surface") or "") if isinstance(by, Mapping) else ""
-        surface = _DISMISS_SURFACE_WORDS.get(surface, surface)
-        # One source for the labels: the response text and this receipt must not drift.
-        from local_operator.asks.render import DISMISS_REASON_LABELS
+    ask_id, name, state, severity = ask_response_parts(details)
+    return (_ask_receipt_line(ask_id, name, state), severity)
 
-        reason = DISMISS_REASON_LABELS.get(str(details.get("reason") or ""), "no longer needed")
-        via = f" ({surface})" if surface else ""
-        return (f"Dismissed by you{via} — {reason} (ask {ask_id})", "info")
-    return (f"Answered — delivering (ask {ask_id})", "info")
+
+def ask_timeout_parts(
+    details: Mapping[str, Any] | None,
+) -> tuple[str, str | None, str, NoticeSeverity]:
+    """The ``ask_timeout`` receipt as PARTS: ``(ask_id, name, state, ink)``.
+
+    It says the agent went ahead WITHOUT the answer, in the phone's lapsed-card
+    words. It does not add "you can still answer": no surface offers a late
+    answer since decision D10, so that half would be untrue. ``warning`` ink:
+    this is the moment the user learns their silence had a cost.
+
+    An older timeout row carries no ``questions``; :func:`ask_name` then returns
+    ``None`` and the line is the id alone, which is still the addressable token.
+    """
+    from local_operator.harness import ask_receipts_copy as _copy
+
+    details = details or {}
+    ask_id = str(details.get("ask_id") or "")
+    name = ask_name(details, secret_label=_copy.secret_ask_name())
+    return (ask_id, name, _copy.timed_out_text(waited=gate_waited_text(details)), "warning")
 
 
 def ask_timeout_notice(details: Mapping[str, Any] | None) -> tuple[str, NoticeSeverity]:
     """The human one-liner for an ``ask_timeout`` row: ``(text, kind)``.
 
-    It says the agent went ahead WITHOUT the answer, in the phone's lapsed-card
-    words. It no longer adds "you can still answer": no surface offers a late
-    answer since decision D10, so that half became untrue. ``warning`` ink: this
-    is the moment the user learns their silence had a cost.
+    A thin wrapper on :func:`ask_timeout_parts`, for the same reason
+    :func:`ask_response_notice` is one.
     """
-    details = details or {}
-    ask_id = str(details.get("ask_id") or "")
-    waited = gate_waited_text(details)
-    return (
-        f"Timed out after {waited} — the agent goes ahead without your answer (ask {ask_id})",
-        "warning",
-    )
+    ask_id, name, state, severity = ask_timeout_parts(details)
+    return (_ask_receipt_line(ask_id, name, state), severity)
 
 
 def gate_timeout_notice(details: dict[str, Any]) -> str:

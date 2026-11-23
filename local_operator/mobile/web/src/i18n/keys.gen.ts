@@ -601,6 +601,12 @@ export type MessageParams = {
   "wire.agent_badges.packaged": undefined;
   "wire.aida_cadence.interval_hours.help": undefined;
   "wire.aida_cadence.interval_hours.label": undefined;
+  "wire.ask_receipts.name.secret_question": undefined;
+  "wire.ask_receipts.response.answered": undefined;
+  "wire.ask_receipts.response.declined": undefined;
+  "wire.ask_receipts.response.dismissed": { "surface": string; "reason": string };
+  "wire.ask_receipts.response.late": undefined;
+  "wire.ask_receipts.timeout.timed_out": { "waited": string };
   "wire.bridge_taint.ack_refused": undefined;
   "wire.bridge_taint.ack_refused_other_session": undefined;
   "wire.bridge_taint.card_notice": undefined;
