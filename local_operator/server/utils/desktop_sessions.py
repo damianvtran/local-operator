@@ -10159,7 +10159,9 @@ class DesktopSessions:
             if target:
                 # Shared with the relay's start route (``resume.bind_session_attachment``)
                 # so the two creators cannot disagree on what a bound session is.
-                if not bind_session_attachment(path, agent=binding["agent"], team=binding["team"]):
+                if not bind_session_attachment(
+                    path, agent=binding["agent"], team=binding["team"], root=self.root
+                ):
                     # Never publish desktop.json after a best-effort writer lost
                     # the attachment. No possibly admitted work is deleted.
                     raise ValueError(

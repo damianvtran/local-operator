@@ -1491,7 +1491,7 @@ TEAM_LAUNCH_PREFIX = "team:"
 TOP_SESSION_REPORTS_TO = "the operator's top session"
 
 
-def read_max_team_depth() -> int:
+def read_max_team_depth(root: "Path | None" = None) -> int:
     """``subagents.max_team_depth``, clamped to ``1..MAX_ORG_DEPTH``.
 
     Read at launch, like the tier selectors, so an edit applies live. Never
@@ -1502,7 +1502,8 @@ def read_max_team_depth() -> int:
     from local_operator.teams import MAX_ORG_DEPTH
 
     try:
-        raw = ConfigManager(config_dir()).get_config_value("subagents", None)
+        config = ConfigManager(root if root is not None else config_dir())
+        raw = config.get_config_value("subagents", None)
         value = raw.get("max_team_depth") if isinstance(raw, dict) else None
         if value is None or isinstance(value, bool):
             return DEFAULT_MAX_TEAM_DEPTH

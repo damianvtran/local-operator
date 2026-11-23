@@ -384,8 +384,10 @@ def fork_session(
     try:
         from local_operator.network.move_team import inherit_fork_binding
 
-        inherit_fork_binding(parent_dir, fork_dir)
         _copy_roles_tree(parent_dir, fork_dir)
+        # Commit the authority last. A hard interruption can leave attachment
+        # bytes behind, but restore refuses them without this local record.
+        inherit_fork_binding(parent_dir, fork_dir)
     except BaseException:
         # BaseException, not Exception: a cancelled or interrupted copy leaves
         # the same half-fork an I/O error does, and the discard cannot raise

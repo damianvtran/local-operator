@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.agent_profiles import AgentProfile, load_seed
+from local_operator.agent_profiles import load_seed
 from local_operator.harness import subagent as subagent_mod
 from local_operator.harness.comms import SubagentComms
 from local_operator.harness.subagent import (
@@ -29,7 +29,9 @@ from local_operator.harness.subagent import (
     read_max_team_depth,
     resolve_launch_target,
 )
+from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.harness.types import ModelSpec
+from local_operator.network.move_team import TeamIdentityRefused
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.teams import (
@@ -124,12 +126,19 @@ def make_root(tmp_path: Path, registry: TeamRegistry | None, team: str | None = 
         transcript=Transcript(tmp_path / "root"),
         system_blocks_provider=lambda: ["stable", "env"],
         team_registry=registry,
+        agent_registry=AgentRegistry(registry.config_dir) if registry is not None else None,
     )
     if team is not None and registry is not None:
         found = registry.get_team_by_name(team)
         assert found is not None
         session.attach_team(found)
     return session
+
+
+def add_agent_slots(teams: TeamRegistry, name: str, *roles: str) -> None:
+    team = teams.get_team_by_name(name)
+    assert team is not None
+    teams.update_team(team.id, TeamEditFields(members=[*team.members, *[TeamMember(role=role) for role in roles]]))
 
 
 async def build(parent: Session, agent: str, job_id: str, prompt: str = "work"):
@@ -170,6 +179,8 @@ def test_depth_one_member_bytes_are_frozen(tmp_path, teams):
     text, _ = _effective_prompt("implement the button", "task", root, target)
     assert text == FROZEN_ORG_TASK_BYTES
     # ...and identical to the legacy no-target path, for a role too.
+    add_agent_slots(teams, "org", "reviewer", "scout")
+    root.attach_team(teams.get_team_by_name("org"))
     for role in ("task", "coder", "reviewer", "scout"):
         with_target, _ = _effective_prompt(
             "implement the button", role, root, resolve_launch_target(role, root)
@@ -197,6 +208,7 @@ def test_a_plain_child_with_no_team_is_unchanged(tmp_path, config):
 
 @pytest.mark.asyncio
 async def test_depth_two_and_three_carry_the_member_preamble(tmp_path, teams):
+    add_agent_slots(teams, "org", "manager")
     root = make_root(tmp_path, teams)
     org = teams.get_team_by_name("org")
     assert org is not None
@@ -244,6 +256,7 @@ def test_a_bare_name_with_only_a_team_slot_is_a_team_launch(tmp_path, teams):
 
 
 def test_a_bare_name_with_an_agent_slot_too_stays_an_agent_launch(tmp_path, teams):
+    AgentRegistry(teams.config_dir).create_agent(AgentEditFields(name="pod", tags=["role"]))
     org = teams.get_team_by_name("org")
     assert org is not None
     teams.update_team(
@@ -337,17 +350,12 @@ def test_no_registry_is_an_unknown_team(tmp_path, config):
 
 
 @pytest.mark.parametrize("manager", ["scout", "quiet"])
-def test_a_manager_that_cannot_delegate_is_an_error(tmp_path, teams, manager, monkeypatch):
+def test_a_manager_that_cannot_delegate_is_an_error(tmp_path, teams, manager):
     pod = teams.get_team_by_name("pod")
     assert pod is not None
     teams.update_team(pod.id, TeamEditFields(manager=manager))
-    quiet = AgentProfile(name="quiet", description="d", may_delegate=False)
-    real = subagent_mod._resolve_role
-    monkeypatch.setattr(
-        subagent_mod,
-        "_resolve_role",
-        lambda agent, parent: quiet if agent == "quiet" else real(agent, parent),
-    )
+    if manager == "quiet":
+        AgentRegistry(teams.config_dir).create_agent(AgentEditFields(name="quiet", tags=["role"]))
     root = make_root(tmp_path, teams)
     with pytest.raises(TeamLaunchError, match="cannot delegate"):
         resolve_launch_target("team:pod", root)
@@ -356,27 +364,21 @@ def test_a_manager_that_cannot_delegate_is_an_error(tmp_path, teams, manager, mo
 # -- D3 / N3: cycles and the cap -----------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_a_cycle_is_an_error(tmp_path, teams):
+def test_a_cycle_is_refused_before_recording_authority(tmp_path, teams):
     pod = teams.get_team_by_name("pod")
     assert pod is not None
     teams.update_team(
         pod.id,
         TeamEditFields(members=[TeamMember(role="coder"), TeamMember(role="org", kind="team")]),
     )
-    root = make_root(tmp_path, teams)
-    with pytest.raises(TeamLaunchError, match=r"cycle: team 'org' is already above"):
-        resolve_launch_target("team:org", root)  # A -> A
-    lead, _, _ = await build(root, "team:pod", "job-lead")
-    with pytest.raises(TeamLaunchError, match=r"cycle: team 'org'.*\(org > pod\)"):
-        resolve_launch_target("team:org", lead)  # A -> B -> A
-    await lead.dispose()
-    await root.dispose()
+    with pytest.raises(TeamIdentityRefused, match="org: delegation cycle: org > pod > org"):
+        make_root(tmp_path, teams)
 
 
 @pytest.mark.asyncio
 async def test_a_launch_past_the_cap_is_an_error(tmp_path, teams, config):
     (config / "config.yml").write_text("values:\n  subagents:\n    max_team_depth: 2\n")
+    add_agent_slots(teams, "org", "manager")
     root = make_root(tmp_path, teams)
     child, _, _ = await build(root, "manager", "job-1")
     grand, target, _ = await build(child, "task", "job-2")
@@ -450,6 +452,8 @@ def test_the_escalation_text_is_frozen():
 
 @pytest.mark.asyncio
 async def test_non_delegating_roles_hold_no_task_at_any_depth_inside_a_sub_team(tmp_path, teams):
+    add_agent_slots(teams, "org", "scout")
+    add_agent_slots(teams, "pod", "manager", "scout")
     root = make_root(tmp_path, teams)
     lead, _, _ = await build(root, "team:pod", "job-lead")
     mgr2, _, _ = await build(lead, "manager", "job-m2")
@@ -609,3 +613,18 @@ def test_a_legacy_record_resumes_under_the_roots_team(tmp_path, teams):
     carried = comms._carried_launch(comms._records["job-1"])
     assert isinstance(carried, CarriedLaunch)
     assert (carried.team_name, carried.depth) == ("org", 1)
+
+
+def test_large_but_finite_fanout_refuses_with_a_named_bound(tmp_path, teams):
+    from local_operator.teams import HUB_TEAM_MEMBERS_MAX_ITEMS
+
+    names = [f"leaf{n}" for n in range(HUB_TEAM_MEMBERS_MAX_ITEMS)]
+    for name in names:
+        teams.create_team(TeamEditFields(name=name))
+    org = teams.get_team_by_name("org")
+    assert org is not None
+    # The hub accepts each individual roster, but the closure also includes
+    # the leaves' manager definition and exceeds its overall budget by one.
+    teams.update_team(org.id, TeamEditFields(members=[TeamMember(role=n, kind="team") for n in names]))
+    with pytest.raises(TeamIdentityRefused, match=rf"org: delegation exceeds the {len(names)}-slot bound"):
+        make_root(tmp_path, teams)

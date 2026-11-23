@@ -9053,34 +9053,30 @@ class Session:
         attached profile the user never asked to lose.
         """
         manager_name = getattr(team, "manager", "") or ""
-        kind, profile, specialist_prompt = None, None, ""
-        if _verified_bound:
-            from local_operator.network.move_team import restore_manager
+        from local_operator.network.move_team import bind_runtime_authority
+        from local_operator.teams import Team
 
-            # Verify before mutating ANY session state, and apply the exact
-            # resolved profile below rather than looking up its name again.
-            kind, profile, specialist_prompt = restore_manager(
-                self._transcript.directory, team, self.agent_registry
+        kind, profile, specialist_prompt = None, None, ""
+        authority = None
+        if isinstance(team, Team) or _verified_bound:
+            # Journal before exposing the attachment and use exactly the
+            # checked profiles and rosters, not another live registry lookup.
+            authority = bind_runtime_authority(
+                getattr(self._transcript, "directory", None), team, self.team_registry,
+                self.agent_registry, restoring=_verified_bound, readonly_shell=self._readonly_shell,
             )
+            team = authority.team
+            manager, profile, specialist_prompt = authority.manager
+            kind = manager["kind"]
+            if kind == "role" and profile is not None:
+                from local_operator.agent_profiles import with_delivery_pointer
+
+                profile = with_delivery_pointer(profile)
         elif manager_name and self.agent_registry is not None:
-            # Both paths share the registry resolution order with /agent.
+            # Reduced, non-Team hosts have no durable attachment authority.
             kind, profile, specialist_prompt, _ = self._resolve_profile_or_specialist(manager_name)
         manager_pins = tuple(profile.tools or ()) if profile is not None else ()
-        directory = getattr(self._transcript, "directory", None)
-        if team is not None and not _verified_bound and isinstance(directory, Path):
-            from local_operator.harness.subagent import is_readonly_shell_role
-            from local_operator.network.move_team import journal_local_authority
-
-            # Commit the effective ceiling before applying the attachment. A
-            # failed journal must not leave live authority the next hop cannot
-            # verify. Shell confinement, unlike the role name, can be sticky.
-            journal_local_authority(
-                directory,
-                str(getattr(team, "name", "")),
-                manager_name,
-                pins=manager_pins,
-                readonly_shell=self._readonly_shell or is_readonly_shell_role(manager_name),
-            )
+        self._team_authority = authority
         # Read BEFORE the assignment below: the detach branch needs to know
         # whether a team was in force, and this is the only place that is still
         # true. Review round 1 caught a bare ``/team clear`` (no team attached)
@@ -9129,7 +9125,10 @@ class Session:
         self._claim_agent_slot_for_team()
         # A team whose MANAGER is a read-only shell role makes this session
         # that role: the same confinement ``attach_agent_profile`` applies.
-        self._apply_readonly_shell_role(self._team_manager_name())
+        self._apply_readonly_shell_role(
+            self._team_manager_name(),
+            force=authority is not None and authority.manager[0]["readonly_shell"],
+        )
         # Journal the NAME so a resume can rebuild this tail. On change only:
         # the roster moves a handful of times per session, and the brief itself
         # is deliberately not stored (see ``SessionAttachment``).
@@ -9465,12 +9464,16 @@ class Session:
         live_goal = self._goal_state.text
         if stored.goal and (not live_goal or live_goal == stored.goal):
             self._goal_state.set(stored.goal)
-        if stored.team and needs_reauthorization(directory):
+        if (
+            stored.team and not self.active_agent and not self.active_team_name
+            and needs_reauthorization(directory)
+        ):
             # Recovery preserves the attachment bytes as a hint, not a grant.
             # Leave the journal intact so merely setting a goal cannot certify it.
             self._unresolved_team = stored.team
+            self._unresolved_agent = stored.agent
             self.attachment_restore_notice = str(
-                TeamIdentityRefused(stored.team, "reattach the team locally to authorize it")
+                TeamIdentityRefused(stored.team, "recorded authority is unavailable; re-attach via /team")
             )
             return
         if stored.agent or stored.team:
@@ -9542,35 +9545,22 @@ class Session:
         # the revert F1 forbids. "The live state wins" is per SESSION here, not
         # per slot, wherever the two slots are mutually exclusive.
         if stored.team and not live_agent and (not live_team or live_team == stored.team):
-            from local_operator.network.move_team import restore_bound
+            from local_operator.network.move_team import (
+                TeamIdentityRefused, restore_bound, was_authorized_locally,
+            )
 
-            registry = self.team_registry
-            # The verified object, not a second lookup by name, must be what
-            # can change the manager pins or shell confinement after migration.
-            # Unbound local attachments retain their legacy lookup behavior.
-            team = restore_bound(self._transcript.directory, stored.team, registry)
-            verified_bound = team is not None
-            if team is None:
-                if registry is None:
-                    looked_up_and_absent = False
-                else:
-                    try:
-                        team = registry.get_team_by_name(stored.team)
-                    except Exception:  # noqa: BLE001 — a bad registry row is not fatal
-                        team = None
-                        looked_up_and_absent = False
-            if team is None:
-                missing.append((f"team {stored.team!r}", "/team"))
-                # Carried so the next mutation cannot erase it (R1).
+            # No name-only recovery: an interrupted copy, old local journal
+            # or fork without a completed binding cannot grant authority.
+            directory = self._transcript.directory
+            try:
+                team = restore_bound(directory, stored.team, self.team_registry)
+                self.attach_team(team, _verified_bound=True)
+            except TeamIdentityRefused as refusal:
+                if not was_authorized_locally(directory):
+                    raise
                 self._unresolved_team = stored.team
-            else:
-                # Through ``attach_team`` rather than by setting the brief, so
-                # ``active_team`` (what subagents inherit) is restored too, not
-                # just the prompt text.
-                if verified_bound:
-                    self.attach_team(team, _verified_bound=True)
-                else:
-                    self.attach_team(team)
+                self.attachment_restore_notice = f"{refusal}; re-attach via /team"
+                return
         # A stored agent name is SUPERSEDED, not missing, when the same sidecar
         # named a team (issue #2014): the team owns the agent slot, so the
         # manager ``attach_team`` just claimed IS this session's speaker.
@@ -9932,7 +9922,7 @@ class Session:
             return self._stamp_agent_brief(body, display_name)
         return None
 
-    def _apply_readonly_shell_role(self, role: str) -> None:
+    def _apply_readonly_shell_role(self, role: str, *, force: bool = False) -> None:
         """Confine this session's shell when ``role`` is a read-only shell role.
 
         WHY HERE. ``harness.subagent`` confines a DELEGATED scout, but a scout
@@ -9970,7 +9960,7 @@ class Session:
             readonly_shell_write_root,
         )
 
-        if not is_readonly_shell_role(role):
+        if not force and not is_readonly_shell_role(role):
             return
         self._readonly_shell = True
         if self._shell_write_root is None:

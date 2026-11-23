@@ -1042,7 +1042,9 @@ def write_session_attachment(session_dir: Path, *, team: str, agent: str, goal: 
         return
 
 
-def bind_session_attachment(session_dir: Path, *, agent: str, team: str) -> bool:
+def bind_session_attachment(
+    session_dir: Path, *, agent: str, team: str, root: Path | None = None
+) -> bool:
     """Bind a NEW session to a profile or team before anything runs in it.
 
     ``write_session_attachment`` is best-effort by contract (an attach mid-session
@@ -1059,6 +1061,17 @@ def bind_session_attachment(session_dir: Path, *, agent: str, team: str) -> bool
     unconditionally, which is what binds the manager role, the briefs and the
     roster on the first turn rather than after it.
     """
+    if team:
+        from local_operator.network.move_team import TeamIdentityRefused, authorize_named_team
+        from local_operator.paths import config_dir
+
+        try:
+            session_dir.mkdir(parents=True, exist_ok=True)
+            # This is an explicit CREATE, not a file-copy or restore. Publish
+            # its authorization first so a warm runtime can safely adopt it.
+            team = authorize_named_team(root if root is not None else config_dir(), session_dir, team)
+        except (OSError, TeamIdentityRefused):
+            return False
     write_session_attachment(session_dir, agent=agent, team=team, goal="")
     stored = read_session_attachment(session_dir)
     return stored is not None and stored.agent == agent and stored.team == team
