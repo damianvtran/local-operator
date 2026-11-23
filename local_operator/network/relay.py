@@ -9026,11 +9026,11 @@ class RelayServer:
         # pair before this was fixed, and caught by the e2e test rather than by
         # review).
         if result is None:
-            reply: dict[str, Any] = {"op": "ack", "req": req, "detail": ""}
+            reply = wire.peer_ack(req, "")
         elif result.get("op") in ("ack", "error"):
             reply = result
         else:
-            reply = {"op": "ack", "req": req, "detail": result}
+            reply = wire.peer_ack(req, result)
         # EVERY REPLY LEAVES THROUGH ONE WRAP (agent review round 1, R1-2), the empty
         # ack above included. A reply carrying SECRET material — the broker's `copy`
         # value, the epoch-rotation answers, the reconcile catch-up — is an ack with

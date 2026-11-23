@@ -6,7 +6,7 @@
  * SSE discipline: fetch-streamed snapshots with invisible lease rotation,
  * a byte-silence watchdog, bounded retries and delayed outage reporting.
  */
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { handleUnauthorized } from "./api";
 import { SESSION_TEMPORARY_DELETED_CODE, temporaryChatsEnabled } from "./lib/temporary";
 import { supplementsFromWire } from "./lib/supplement";
@@ -998,6 +998,14 @@ export async function resolveInitialLocale(): Promise<void> {
 /* Per-session projection streams, refcounted                          */
 /* ------------------------------------------------------------------ */
 
+/* A connected boolean survives an invisible lease rotation, so it cannot
+   identify the boundary between live progress and a reconnect snapshot.
+   Tag accepted objects locally instead of adding a field to the wire. */
+const projectionEpochs = new WeakMap<SessionProjection, object>();
+export function projectionRevealEpoch(projection: SessionProjection | null, connected: boolean): object | undefined {
+	return projection && connected ? projectionEpochs.get(projection) : undefined;
+}
+
 const projectionStreams = new Map<
 	string,
 	{ close: () => void; refs: number; linger: ReturnType<typeof setTimeout> | null }
@@ -1012,6 +1020,7 @@ export function retainProjectionStream(sessionId: string): () => void {
 	} else {
 		projections.set(sessionId, { projection: null, connected: false });
 		let awaitingSnapshot = true;
+		let revealEpoch = {};
 		const close = openEventStream(
 			/* STEER JOURNAL ORDER (`capabilities.steer_journal_order`, docs/mobile.md):
 			   the relay moves a delivered phone steer from its send-time slot to
@@ -1041,7 +1050,12 @@ export function retainProjectionStream(sessionId: string): () => void {
 				) {
 					return false;
 				}
+				if (current?.projection?.pid !== incoming.pid) revealEpoch = {};
 				awaitingSnapshot = false;
+				// Tag the accepted recovery seed even while it is still hidden
+				// from motion. onRecovered reuses this snapshot as the baseline;
+				// lookup still requires a connected, authenticated projection.
+				if (incoming.pid > 0) projectionEpochs.set(incoming, revealEpoch);
 				projections.set(sessionId, { projection: incoming, connected });
 				emitStream();
 				return true;
@@ -1050,6 +1064,7 @@ export function retainProjectionStream(sessionId: string): () => void {
 				// Connection establishment alone does not validate the old rendered
 				// result. Only the new source's first snapshot makes it viewable.
 				awaitingSnapshot = true;
+				revealEpoch = {};
 			},
 			() => {
 				// Outage reporting can land during a new leg's stability window.
@@ -1236,15 +1251,37 @@ export interface AskDraft {
 
 const EMPTY_ASK_DRAFT: AskDraft = { answers: {}, skipped: [] };
 
-function readAskDraft(askId: string): AskDraft {
+/** The draft with every SECRET question's value removed.
+ *
+ *  A secret is a credential the agent asked for by name. The draft cell lives in
+ *  `localStorage` (plaintext, readable by anything on the origin, surviving a
+ *  reload), so it must never hold one: the value is kept in the component's
+ *  memory while the card is mounted and is gone with it, as on the native app
+ *  (ADR 0005). `skipped` carries no value and is kept. Returns the SAME object
+ *  when nothing was stripped, so a caller can tell. */
+function withoutSecrets(draft: AskDraft, secretIds: readonly string[]): AskDraft {
+	if (!secretIds.some((id) => Object.hasOwn(draft.answers, id))) return draft;
+	const answers = { ...draft.answers };
+	for (const id of secretIds) delete answers[id];
+	return { ...draft, answers };
+}
+
+function readAskDraft(askId: string, secretIds: readonly string[] = []): AskDraft {
 	const raw = localStorage.getItem(ASK_DRAFT_PREFIX + askId);
 	if (!raw) return EMPTY_ASK_DRAFT;
 	try {
 		const parsed = JSON.parse(raw) as Partial<AskDraft>;
-		return {
+		const read: AskDraft = {
 			answers: parsed.answers && typeof parsed.answers === "object" ? parsed.answers : {},
 			skipped: Array.isArray(parsed.skipped) ? parsed.skipped.map(String) : [],
 		};
+		/* A CELL WRITTEN BY AN OLDER BUILD MAY STILL HOLD A SECRET (this hook used to
+		   persist every answer). Strip it and REWRITE the cell, so reading it once is
+		   enough to take the credential off disk rather than leaving it there until
+		   the ask settles. */
+		const clean = withoutSecrets(read, secretIds);
+		if (clean !== read) persistAskDraft(askId, clean, secretIds);
+		return clean;
 	} catch {
 		/* Unreadable is the same as absent: a half-written value must not take
 		   the card down, and the user's next gesture overwrites it. */
@@ -1265,11 +1302,12 @@ export function clearAskDraft(askId: string): void {
 /** A value, or an updater over the current one — React's own two spellings. */
 export type AskDraftSetter = (next: AskDraft | ((current: AskDraft) => AskDraft)) => void;
 
-function persistAskDraft(askId: string, next: AskDraft): void {
-	if (Object.keys(next.answers).length === 0 && next.skipped.length === 0) {
+function persistAskDraft(askId: string, next: AskDraft, secretIds: readonly string[] = []): void {
+	const kept = withoutSecrets(next, secretIds);
+	if (Object.keys(kept.answers).length === 0 && kept.skipped.length === 0) {
 		clearAskDraft(askId);
 	} else {
-		localStorage.setItem(ASK_DRAFT_PREFIX + askId, JSON.stringify(next));
+		localStorage.setItem(ASK_DRAFT_PREFIX + askId, JSON.stringify(kept));
 	}
 }
 
@@ -1287,17 +1325,26 @@ function persistAskDraft(askId: string, next: AskDraft): void {
  * both of the head ask's options in one evaluate, and its log said "send
  * disabled — the form is incomplete" while the frame showed one option pressed.
  */
-export function useAskDraft(askId: string): [AskDraft, AskDraftSetter] {
-	const [draft, setDraftState] = useState<AskDraft>(() => readAskDraft(askId));
+export function useAskDraft(
+	askId: string,
+	secretIds: readonly string[] = [],
+): [AskDraft, AskDraftSetter] {
+	/* THE SECRET QUESTIONS' IDS ARE KEPT OUT OF STORAGE, never out of state: the
+	   card still holds what the reader typed while it is mounted (see
+	   `withoutSecrets`). Held in a ref so the setter below reads the latest list
+	   without becoming a new function (and re-running the read) per render. */
+	const secrets = useRef(secretIds);
+	secrets.current = secretIds;
+	const [draft, setDraftState] = useState<AskDraft>(() => readAskDraft(askId, secretIds));
 	useEffect(() => {
-		setDraftState(readAskDraft(askId));
+		setDraftState(readAskDraft(askId, secrets.current));
 	}, [askId]);
 	const setDraft: AskDraftSetter = (next) =>
 		setDraftState((current) => {
 			const value = typeof next === "function" ? next(current) : next;
 			/* Written from inside the updater so the stored copy cannot lag the
 			   rendered one. Idempotent, so a double-invoked updater is harmless. */
-			persistAskDraft(askId, value);
+			persistAskDraft(askId, value, secrets.current);
 			return value;
 		});
 	return [draft, setDraft];

@@ -185,6 +185,53 @@ def test_the_list_fold_splices_a_bar_and_folds_its_members() -> None:
     assert all(not member.display for member in run), "the mount paints them folded"
 
 
+# -- one visibility owner ----------------------------------------------------
+
+
+def test_a_row_paints_only_when_no_fold_vetoes_it() -> None:
+    """Dormancy OR a fold's veto, and nothing else, decides visibility.
+
+    Two folds can cover one row at once (a tool row inside an open receipt bar
+    inside a closed run), so the verdict is a SET: each fold withdraws only its
+    own name, and the row stays hidden while any other veto remains.
+    """
+    row = _peer("hidden")
+    assert row.display, "a row nobody covers paints"
+    row.fold_vetoes.add("quiet-group")
+    row.sync_display()
+    assert not row.display
+    row.fold_vetoes.add("tool-run")
+    row.sync_display()
+    assert not row.display
+    row.fold_vetoes.discard("quiet-group")
+    row.sync_display()
+    assert not row.display, "the tool fold still covers the row"
+    row.fold_vetoes.discard("tool-run")
+    row.sync_display()
+    assert row.display
+    row.work_dormant = True
+    row.sync_display()
+    assert not row.display, "dormancy is a verdict of its own"
+
+
+def test_the_bar_hands_rows_back_without_clearing_another_folds_veto() -> None:
+    """Handing a row back drops THIS bar's veto, not the row's visibility."""
+    run = [_peer("one"), _peer("two")]
+    folded = fold_quiet_group_list(run, fold_width=100)
+    (bar,) = [block for block in folded if isinstance(block, QuietGroupBlock)]
+    assert all(not member.display for member in run), "adoption folded them away"
+    run[0].fold_vetoes.add("tool-run")
+    bar.release_members(run)
+    assert not run[0].display, "the tool fold still covers the released row"
+    assert run[1].display
+    bar.release_members(run)  # idempotent: a second hand-back changes nothing
+    assert run[1].display
+    bar.toggle_expanded()
+    assert run[1].display and not run[0].display
+    bar.toggle_expanded()
+    assert not run[1].display, "collapsing covers the row again"
+
+
 def test_the_list_fold_refuses_a_fragment_and_touches_nothing() -> None:
     run = [_peer("one"), _peer("two")]
     folded = fold_quiet_group_list(run, prev_block=_tool("t0"))

@@ -87,7 +87,7 @@ async def test_mounted_cold_page_join_keeps_exact_payload_open_and_focused_sourc
     from local_operator.tui.app import OperatorApp
     from local_operator.tui.widgets.tool_card import ToolCard
     from local_operator.tui.widgets.transcript import TranscriptView
-    from tests.unit.tui.conftest import await_session_boot
+    from tests.unit.tui.conftest import await_session_boot, open_all_folds
     from tests.unit.tui.test_app_pilot import FakeSession, _factory
     from tests.unit.tui.test_owned_work_context import _capture_mounted_frame
 
@@ -141,6 +141,9 @@ async def test_mounted_cold_page_join_keeps_exact_payload_open_and_focused_sourc
             await pilot.pause()
             await pilot.pause()
             view = app.query_one(TranscriptView)
+            # Any run this page carries folds under a bar (slice 4); the frame
+            # assertions below are about the rows, so reveal them.
+            await open_all_folds(view, pilot)
             root = next(
                 block
                 for block in view.blocks()

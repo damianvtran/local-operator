@@ -51,6 +51,7 @@ from textual.app import App
 from local_operator.tui.widgets.tool_card import FALLBACK_WIDTH, ToolCard
 from local_operator.tui.widgets.transcript import (
     TOOL_NAME_COL,
+    NoticeBlock,
     PeerMessageBlock,
     TranscriptBlock,
     TranscriptView,
@@ -94,6 +95,17 @@ def _bash(call_id: str, summary: str) -> ToolCard:
     return ToolCard(call_id, "bash", {"command": summary}, "")
 
 
+def _boundary(view: TranscriptView) -> None:
+    """Keep the fixture's ledger rows ORDINARY: a visible one-row splitter.
+
+    The tool fold condenses three or more CONSECUTIVE calls into one bar (slice
+    4), and these tests read each card off the painted frame, which a closed
+    fold's members are not on. A notice splits the run without being a ledger
+    row, so the shared name column this file measures is untouched.
+    """
+    view.append_block(NoticeBlock("step", "info"))
+
+
 async def _settle(pilot) -> None:
     """Wait for the SETTLED frame, which is the one a reader is left with.
 
@@ -115,6 +127,7 @@ async def test_paging_an_older_row_in_repaints_the_rows_already_on_screen() -> N
         first = _bash("c1", "echo alpha")
         second = _bash("c2", "echo beta")
         view.append_block(first)
+        _boundary(view)
         view.append_block(second)
         await _settle(pilot)
         narrow = summary_col(app, first, "echo alpha")
@@ -148,6 +161,7 @@ async def test_appending_a_longer_name_repaints_the_rows_already_painted() -> No
         first = _bash("c1", "echo alpha")
         second = _bash("c2", "echo beta")
         view.append_block(first)
+        _boundary(view)
         view.append_block(second)
         await _settle(pilot)
         narrow = summary_col(app, first, "echo alpha")
@@ -279,6 +293,8 @@ async def test_a_sidebar_toggle_refits_every_row_the_frame_shows() -> None:
         seeded = []
         for index, name in enumerate(("bash", "list_variables", "read", "web_search")):
             card = ToolCard(f"c{index}", name, {"command": f"echo {index}"}, "")
+            if index:
+                _boundary(view)
             view.append_block(card)
             card.mark_done("done")
             seeded.append(card)
@@ -461,6 +477,7 @@ async def test_a_row_scrolled_out_of_view_is_repainted_too() -> None:
         view.append_block(first)
         rest = [_bash(f"c{index}", f"echo step{index}") for index in range(1, 14)]
         for card in rest:
+            _boundary(view)
             view.append_block(card)
         await _settle(pilot)
         assert not _on_frame(app, first), "the fixture has to push the row off the frame"
@@ -528,6 +545,7 @@ async def test_removing_the_widest_row_brings_the_spine_back_down() -> None:
         first = _bash("c1", "echo alpha")
         second = _bash("c2", "echo beta")
         view.append_block(first)
+        _boundary(view)
         view.append_block(second)
         await _settle(pilot)
         floor = summary_col(app, first, "echo alpha")
@@ -567,6 +585,7 @@ async def test_every_row_agrees_on_the_column_rung_at_narrow_widths() -> None:
         second = _bash("c2", "echo beta")
         wide = ToolCard("wide", WIDE_TOOL, {"command": "wide row"}, "")
         for card in (first, second, wide):
+            _boundary(view)
             view.append_block(card)
         await _settle(pilot)
 

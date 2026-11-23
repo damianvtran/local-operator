@@ -153,6 +153,7 @@ from local_operator.harness.render import (
     _is_todo_reminder,
 )
 from local_operator.harness.replay_bound import bound_replay_payloads
+from local_operator.harness.request_admission import RequestAdmission
 from local_operator.harness.rows import is_harness_injection
 from local_operator.harness.subagent import (
     TeamLaunchError,
@@ -875,6 +876,19 @@ _MAX_CONTINUATIONS = 8
 #: ``_pre_aborted_drops``) rather than once per drop, because N identical rows
 #: at sub-second cadence is the noise this replaced.
 _PRE_ABORT_DROP_NOTICE_AT = 3
+
+#: How a message sent to a busy session is delivered (``steer``/``queue``/
+#: ``both``). ``steer`` is urgent (today's behaviour); ``queue`` never cancels
+#: a running tool or skips a batch call; ``both`` is ``queue`` until it has been
+#: waiting this long, then counts as urgent. The value is an UNMEASURED DEFAULT
+#: (45 s, design D2/D3): chosen as a round number, not from observed stall
+#: durations, and it names age as the only stall signal because ``Session`` has
+#: no finer activity clock.
+BUSY_QUEUE_ESCALATE_AFTER_S = 45.0
+
+#: The ``delivery`` wire vocabulary. Absent/empty reads as ``steer``; any other
+#: non-empty value is refused at the wire, never coerced (design D5).
+BusyDelivery = Literal["steer", "queue", "both"]
 
 #: Arrivals that are the RESIDUE of work a stop was aimed at, not fresh intent.
 #:
@@ -5157,6 +5171,13 @@ class Session:
         # it beside queued messages so ordinary callers can still choose ids
         # without accidentally entering the mobile admission namespace.
         self._steering_producers: dict[int, str] = {}
+        # Busy-send delivery mode per queued steer, keyed by ``id(message)``
+        # like ``_steering_producers``. The value is the escalate-at monotonic
+        # instant (``None`` = queue only, never urgent). Entries are added in
+        # ``steer``/``steer_message`` and removed at drain/recall/dispose with
+        # the producers map, so a queued ``queue``/``both`` item is excluded
+        # from ``_has_urgent_steering`` until ``both`` escalates by age.
+        self._steer_delivery: dict[int, float | None] = {}
         # Hosts reserve producer identities before a steer reaches its durable
         # boundary. A failed append must hand that identity back explicitly;
         # otherwise one disk error consumes both the retry ID and a bounded
@@ -11297,6 +11318,7 @@ class Session:
         documents: Sequence[DocumentContent] | None = None,
         harness_injected: bool = False,
         owner_typed: bool = True,
+        delivery: BusyDelivery | str | None = None,
         mesh_origin: Mapping[str, Any] | None = None,
         _file_capture: Any = ...,
         input_surface: str = "tui",
@@ -11345,6 +11367,13 @@ class Session:
         while the turn lock is held, and without the carriage the replayed
         continuation would mint an UNSTAMPED user row that the marker-only
         surfaces paint. Defaults ``False`` so no existing caller changes.
+
+        ``delivery`` names how this busy send is delivered: ``steer`` (the
+        default — urgent, may cancel an interruptible tool), ``queue`` (never
+        cancels or skips, delivered at the next step boundary or its own turn),
+        ``both`` (``queue`` until it has waited ``BUSY_QUEUE_ESCALATE_AFTER_S``,
+        then urgent). Absent/empty reads as ``steer``. Ignored when the session
+        is idle. Refusal of an unknown value happens at the wire, never here.
 
         A steer admitted while NO turn is live opens a turn for itself (see
         ``_ensure_steering_wake``): the row is queued exactly as before — the
@@ -11395,6 +11424,7 @@ class Session:
         self._steering_queue.put_nowait(message)
         if producer_command_id is not None:
             self._steering_producers[id(message)] = producer_command_id
+        self._record_steer_delivery(message, delivery)
         self.refresh_frontend_state()
         self._ensure_steering_wake()
 
@@ -11425,7 +11455,7 @@ class Session:
             self._steering_queue.put_nowait(message)
         return snapshot
 
-    def steer_message(self, message: Message) -> None:
+    def steer_message(self, message: Message, delivery: BusyDelivery | str | None = None) -> None:
         """Queue a caller-built steering message, sharing the caller's object.
 
         The identity-preserving twin of :meth:`steer`: a host that keeps its
@@ -11438,8 +11468,27 @@ class Session:
         the composer's other spelling.
         """
         self._steering_queue.put_nowait(message)
+        self._record_steer_delivery(message, delivery)
         self.refresh_frontend_state()
         self._ensure_steering_wake()
+
+    def _record_steer_delivery(
+        self, message: AgentMessage, delivery: BusyDelivery | str | None
+    ) -> None:
+        """Record a queued steer's delivery mode, for the urgent test.
+
+        Only ``queue``/``both`` are recorded: ``steer`` (and absent/empty) is
+        today's urgent behaviour and needs no entry. ``both`` stores its
+        escalate-at instant — ``time.monotonic()`` plus
+        ``BUSY_QUEUE_ESCALATE_AFTER_S`` — and ``queue`` stores ``None``. An
+        unknown value records nothing and is refused at the wire, not coerced
+        here; the engine call is internal, so a bad value can only arrive from
+        a caller that bypassed the wire.
+        """
+        if delivery == "queue":
+            self._steer_delivery[id(message)] = None
+        elif delivery == "both":
+            self._steer_delivery[id(message)] = time.monotonic() + BUSY_QUEUE_ESCALATE_AFTER_S
 
     def _ensure_steering_wake(self) -> None:
         """Open a turn for queued steering when no live turn will drain it.
@@ -11700,6 +11749,7 @@ class Session:
             if item is message and not found:
                 found = True
                 self._steering_producers.pop(id(item), None)
+                self._steer_delivery.pop(id(item), None)
                 continue
             remaining.append(item)
         for item in remaining:
@@ -23755,8 +23805,13 @@ class Session:
             # the pump before it executes a single statement; a wrapper makes
             # "the stream was iterated" the observable, so the pre-aborted path
             # leaves the flag False while every dispatched round-trip sets it.
-            base_stream_fn = self._stream_fn
+            from local_operator.model.configure import SessionStreamFn
             from local_operator.providers.turn_state import CodexTurnState
+
+            base_stream_fn = self._stream_fn
+            admission_stream = (
+                base_stream_fn if isinstance(base_stream_fn, SessionStreamFn) else None
+            )
 
             # This wrapper belongs to one attention turn, including tool rounds
             # and provider retries. Helpers use the base stream directly and
@@ -23781,20 +23836,8 @@ class Session:
                     )
                     request.validate_required_images()
                 request._codex_turn_state = codex_turn_state
-                inner = base_stream_fn(request, stream_signal)
-                # The context this request was built from, taken before any
-                # later boundary can extend it.
-                carried = (
-                    {id(message) for message in self._context.messages}
-                    if self._bridge_cards_owed_wake
-                    else set()
-                )
 
-                async def witness() -> AsyncIterator[StreamEvent]:
-                    # Lazy provider generators may start only after another
-                    # await. Carry the same guard to that first I/O boundary.
-                    if frame is not None and not frame.binding_intact():
-                        raise RuntimeError("bridge body authority changed before dispatch")
+                def mark_dispatch() -> None:
                     self._attention_run_request_dispatched = True
                     from local_operator.team_bridge.card_projection import (
                         presented_bridge_ref,
@@ -23831,6 +23874,29 @@ class Session:
                         # Past the refusal checks, the request is going out:
                         # any owed card it carries has now been read.
                         self._settle_bridge_card_wakes(carried)
+
+                inner = (
+                    admission_stream(request, stream_signal, on_admitted=mark_dispatch)
+                    if admission_stream is not None
+                    else base_stream_fn(request, stream_signal)
+                )
+                # The context this request was built from, taken before any
+                # later boundary can extend it.
+                carried = (
+                    {id(message) for message in self._context.messages}
+                    if self._bridge_cards_owed_wake
+                    else set()
+                )
+
+                async def witness() -> AsyncIterator[StreamEvent]:
+                    # Lazy provider generators may start only after another
+                    # await. Keep authority validation ahead of dispatch.
+                    if frame is not None and not frame.binding_intact():
+                        raise RuntimeError("bridge body authority changed before dispatch")
+                    if admission_stream is None:
+                        # Injected streams keep the original first-iteration
+                        # witness and need not accept an extra argument.
+                        mark_dispatch()
                     async for event in inner:
                         yield event
 
@@ -28433,7 +28499,7 @@ class Session:
         Emits :class:`SteeringDeliveredEvent` when it actually takes something.
         This is the one place that knows a queued message stopped being queued:
         the loop calls it at the boundary where the messages join the context,
-        so a front end showing "queued — sends when this step finishes" can
+        so a front end showing "steering — may stop a running tool" can
         settle that row to a delivered one instead of leaving the promise up for
         the rest of the session. Silent when the queue is empty, which is the
         overwhelmingly common case — this is called at EVERY tool and message
@@ -28483,6 +28549,7 @@ class Session:
                 # replayed history. Constant-time check on the transcript's id
                 # set, so the ordinary steer pays effectively nothing.
                 self._steering_producers.pop(queued_id, None)
+                self._steer_delivery.pop(queued_id, None)
                 if producer_command_id is not None:
                     # Durable already, so any spooled copy is a duplicate — the
                     # same rule the append path below applies.
@@ -28502,6 +28569,7 @@ class Session:
                 continue
             finally:
                 self._steering_producers.pop(queued_id, None)
+                self._steer_delivery.pop(queued_id, None)
             if producer_command_id is not None:
                 # The row is durable, so the successor's copy is a duplicate now.
                 await self._forget_spooled_steer(producer_command_id)
@@ -28555,8 +28623,20 @@ class Session:
         courtesy (``_courtesy_wake_count``) and excluded — they wait for the
         next successful tool boundary, delivered by ``_drain_steering`` like
         any other steering. A queue holding nothing but courtesy wakes answers
-        False, so their timers can never kill an in-flight `bash`."""
-        return self._steering_queue.qsize() > self._courtesy_wake_count
+        False, so their timers can never kill an in-flight `bash`.
+
+        Busy-send delivery rides the same test: a ``queue`` item is excluded
+        exactly like a courtesy wake (``_steer_delivery``), and a ``both`` item
+        is excluded until its escalate-at instant passes — then it counts urgent
+        and, by D4's FIFO rule, makes the whole queue urgent. The poll re-reads
+        this every 0.25 s, so escalation needs no timer."""
+        if self._steering_queue.qsize() > self._courtesy_wake_count + len(self._steer_delivery):
+            return True
+        if self._steer_delivery:
+            now = time.monotonic()
+            if any(at is not None and at <= now for at in self._steer_delivery.values()):
+                return True
+        return False
 
     async def _drain_asides(self) -> list[Aside]:
         """Materialize durable asides and pending job results for safe injection.
@@ -39375,6 +39455,12 @@ class Session:
         except Exception:  # noqa: BLE001 — teardown must not fail over evidence
             logger.warning("could not roll back teardown attribution", exc_info=True)
 
+    def install_request_admission(self, policy: RequestAdmission) -> Callable[[], None]:
+        install = getattr(self._stream_fn, "install_request_admission", None)
+        if not callable(install):
+            raise RuntimeError("this session's stream does not support request admission")
+        return cast("Callable[[], None]", install(policy))
+
     def subscribe_requests(self, handler: RequestObserver) -> Callable[[], None]:
         """Observe this session tree's request-final records.
 
@@ -39713,6 +39799,7 @@ class Session:
         while not self._steering_queue.empty():
             message = self._steering_queue.get_nowait()
             command_id = self._steering_producers.pop(id(message), None)
+            self._steer_delivery.pop(id(message), None)
             if command_id is not None:
                 await self._reject_steering(command_id, "session closed before durable admission")
         # A courtesy wake still queued here was never delivered, so its count

@@ -525,6 +525,86 @@ async def test_active_bridge_is_never_evicted_or_duplicated(tmp_path, monkeypatc
         assert first not in pool.bridges
 
 
+def test_prompt_delivery_enum_validates_at_the_wire() -> None:
+    """``Prompt.delivery``: out-of-vocabulary is a 422-equivalent never-coerce."""
+    from pydantic import ValidationError
+
+    body = Prompt(request_id="12345678-1234-4678-9234-567812345678", text="hi", delivery="queue")
+    assert body.delivery == "queue"
+    assert Prompt(request_id="12345678-1234-4678-9234-567812345678", text="hi").delivery is None
+    with pytest.raises(ValidationError):
+        Prompt(
+            request_id="12345678-1234-4678-9234-567812345678",
+            text="hi",
+            delivery=cast(Any, "whenever"),
+        )
+    with pytest.raises(ValidationError):
+        Prompt(
+            request_id="12345678-1234-4678-9234-567812345678",
+            text="hi",
+            delivery=cast(Any, ""),
+        )
+
+
+def test_prompt_without_delivery_dumps_byte_identically_to_before() -> None:
+    """The receipt fingerprint must not move for a body without delivery.
+
+    ``desktop_receipts`` hashes ``body.model_dump()`` bytes, so a same-id
+    retry claimed before the field existed reads as "different input" the
+    moment the field starts dumping ``"delivery": None``. The wrap
+    serializer omits the key when it is ``None``; this pins it with a REAL
+    ``Prompt`` (not a hand-built dict), because the property is the model's
+    own dump, not the receipts layer's.
+    """
+    import json
+
+    body = Prompt(request_id="12345678-1234-4678-9234-567812345678", text="hi")
+    dump = body.model_dump()
+    assert "delivery" not in dump, dump
+    assert json.dumps(body.model_dump()) == json.dumps(
+        {
+            "request_id": "12345678-1234-4678-9234-567812345678",
+            "text": "hi",
+            "images": [],
+            "files": [],
+            "audio": [],
+            "mode": "prompt",
+            "input_mode": None,
+            "input_path": None,
+        }
+    )
+    # A pinned mode DOES ride, so the hash still distinguishes it.
+    pinned = Prompt(request_id="12345678-1234-4678-9234-567812345678", text="hi", delivery="queue")
+    assert pinned.model_dump()["delivery"] == "queue"
+    assert json.dumps(pinned.model_dump()) != json.dumps(dump)
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_delivery_is_part_of_receipt_identity(tmp_path):
+    """Same-id replay: the pinned delivery hashes; a changed delivery conflicts."""
+    calls: list[dict[str, Any]] = []
+
+    async def op():
+        calls.append({"delivery": "queue"})
+        return {"result": "queued"}
+
+    receipts = DesktopReceipts(tmp_path)
+    body = {"text": "held", "delivery": "queue"}
+    assert (await receipts.run("s:id", body, op))["result"] == "queued"
+    replay = await receipts.run("s:id", body, op)
+    assert replay["replayed"] is True, replay
+    with pytest.raises(ReceiptConflict, match="different input"):
+        await receipts.run("s:id", {"text": "held", "delivery": "both"}, op)
+    with pytest.raises(ReceiptConflict, match="different input"):
+        await receipts.run("s:id", {"text": "held"}, op)
+    assert len(calls) == 1
+    # And a legacy body hashes as legacy: no key added, receipt unchanged.
+    legacy = DesktopReceipts(tmp_path)
+    legacy_body: dict[str, Any] = {"text": "held"}
+    assert (await legacy.run("s:legacy", legacy_body, op))["result"] == "queued"
+    assert (await legacy.run("s:legacy", legacy_body, op))["replayed"] is True
+
+
 @pytest.mark.asyncio
 async def test_receipts_survive_adapter_restart_and_reject_changed_body(tmp_path):
     calls = []

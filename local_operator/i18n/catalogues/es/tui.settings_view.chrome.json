@@ -1,7 +1,9 @@
 {
+  "tui.settings_view.chrome.capture.chord_grammar": "alt+<letter> en toda terminal, ctrl+enter exige teclas mejoradas",
   "tui.settings_view.chrome.capture.contract_cancel": "{cancel_key} cancela",
   "tui.settings_view.chrome.capture.contract_confirm": "{save_key} confirma · {cancel_key} cancela",
   "tui.settings_view.chrome.capture.listening": "esperando una tecla",
+  "tui.settings_view.chrome.capture.needs_enhanced_keys": "necesita teclas mejoradas",
   "tui.settings_view.chrome.capture.press_another": "pulsa otra tecla",
   "tui.settings_view.chrome.capture.saved": "{shortcut} guardado",
   "tui.settings_view.chrome.capture.takes_from": "le quita {shortcut} a “{victim}”",

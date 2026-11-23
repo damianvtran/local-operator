@@ -1,0 +1,35 @@
+{
+  "wire.settings.transcript_display.choice.by_response.description": {
+    "role": "dropdown choice description",
+    "tone": "lowercase fragment, like its siblings",
+    "note": "The second of two layout modes for the transcript. The pair is 'one answer per turn' / 'every settled response'; keep them parallel and do not restate the help text."
+  },
+  "wire.settings.transcript_display.choice.by_response.label": {
+    "role": "dropdown choice label",
+    "tone": "title case, two words",
+    "maxCells": 14,
+    "note": "Names the layout where each settled agent response stays on screen. The description and the slash command's receipt reuse this label for the active mode, so it must read as a mode name on its own, in every language."
+  },
+  "wire.settings.transcript_display.choice.by_turn.description": {
+    "role": "dropdown choice description",
+    "tone": "lowercase fragment, like its siblings",
+    "note": "The default mode: a turn is condensed to its final answer, its tool work folded behind a bar. Pairs with 'every settled response'."
+  },
+  "wire.settings.transcript_display.choice.by_turn.label": {
+    "role": "dropdown choice label",
+    "tone": "title case, two words",
+    "maxCells": 14,
+    "note": "Names the default layout: one answer per turn. Reused by the slash command's receipt for the active mode; the two quoted mode names in the help text must match these labels exactly."
+  },
+  "wire.settings.transcript_display.help": {
+    "role": "help text",
+    "tone": "plain, precise",
+    "note": "Explains both modes in one paragraph: 'By turn' condenses each turn to its final answer, 'By response' keeps every settled response visible with the turn's final answer still marked. The two quoted names must match the two choice labels exactly. One sentence per mode; do not add a third."
+  },
+  "wire.settings.transcript_display.label": {
+    "role": "settings row label",
+    "tone": "plain",
+    "maxCells": 29,
+    "note": "The transcript is the conversation pane. Sits in the Appearance section beside the clock-format row; keep the noun consistent with the rest of the settings page."
+  }
+}

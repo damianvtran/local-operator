@@ -1,0 +1,3 @@
+{
+  "session.remote_peek.display_too_large": "Thử `head=20` để xem các bước đầu hoặc `digest` để xem bản tóm tắt.\nPhần lịch sử mới nhất đã vượt giới hạn của trang hiển thị hoặc socket của môi trường chạy.\nGiới hạn trang hiển thị: {bytes} byte hoặc {messages} tin nhắn.\nĐể xem nguyên văn lịch sử, hãy mở cuộc trò chuyện trên thiết bị đang chạy phiên này."
+}

@@ -177,9 +177,18 @@ from local_operator.supplements.contract import (
 )
 
 if TYPE_CHECKING:
+    from typing import TypedDict
+
     # Type-only: the ``cast`` on each ``diff_bindings`` unpack names it as a string, so
     # this route module keeps its lazy ``tools.diff_archive`` import at runtime.
     from local_operator.tools.diff_archive import DiffBindingReadOptions
+
+    class _AnswerSessionOptions(TypedDict, total=False):
+        control_only: bool
+
+    class _EventsSessionOptions(TypedDict, total=False):
+        ingress_trace: open_trace.DesktopEventsIngressTrace
+
 
 logger = logging.getLogger(__name__)
 
@@ -1422,10 +1431,35 @@ class Prompt(Input):
     # place the same rule lives, and a message the READER refuses is a dropped
     # row, not a refused request, so the refusal belongs at the door.
     input_mode: Literal["typed", "dictated", "mixed"] | None = None
+    # THE BUSY-SEND DELIVERY MODE: how a send to a busy session is delivered.
+    # ``steer`` is today's urgent behaviour; ``queue`` never cancels a running
+    # tool; ``both`` is ``queue`` until it has waited, then urgent. The enum is
+    # enforced HERE, at the wire, so a value outside the vocabulary gets a 422
+    # before anything is admitted — never coerced into a mode nobody sent.
+    # Absent/empty reads as ``steer``; ignored when the session is idle.
+    #
+    # RETRY CONTRACT: the receipt journal fingerprints the WHOLE request body
+    # (``server/utils/desktop_receipts.py``), so a retry under the same
+    # ``request_id`` must repeat these bytes BYTE-FOR-BYTE — a pinned delivery
+    # is part of the retry identity, like ``input_mode`` above.
+    delivery: Literal["steer", "queue", "both"] | None = None
     # An OPEN string on purpose (see ``Message.input_path``): the STT cascade
     # owns this vocabulary and the carriage must not fork it behind an enum.
     # Absent/null = the classic server-transcription path.
     input_path: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_delivery(self, handler: Any, info: Any) -> Any:
+        # The receipt journal fingerprints ``model_dump()`` bytes, so a
+        # same-id retry claimed BEFORE the delivery field existed must not
+        # read as a changed body after an upgrade. ``None`` is the absent
+        # reading, so it leaves the dump exactly as the pre-field build
+        # wrote it (the wrap-serializer pattern ``PromptImage.
+        # _omit_absent_origin`` already uses for the same reason).
+        data = handler(self)
+        if isinstance(data, dict) and data.get("delivery") is None:
+            data.pop("delivery", None)
+        return data
 
     @model_validator(mode="after")
     def nonempty(self):
@@ -2163,8 +2197,22 @@ async def _queue_or_refuse(
       delivery nothing is going to make;
     * the message carries attachments: an inbox row is text
       (``inbox.InboxLine``), and dropping the pictures or files to queue the
-      words would answer a question the user did not ask.
+      words would answer a question the user did not ask;
+    * the send pinned a delivery mode the spool cannot carry
+      (``body.delivery`` is ``queue``/``both``): the row below writes
+      ``InboxLine(mode='steer'|...)`` with NO delivery field, so the live
+      drain would deliver it as an URGENT steer (``process._run_owner_prompt``
+      joins it to the turn in flight) — a silent downgrade of the mode the
+      composer watched the user pick. The busy refusal is the honest answer
+      here: the renderer's resend applies, and a resend after the turn moves
+      admits normally.
     """
+    if body.delivery in ("queue", "both"):
+        # See the third arm above: the spool vehicle is text
+        # (``InboxLine.mode``) and carries no delivery mode, so accepting
+        # this send would answer "queued" for a message delivered urgently.
+        # Refuse, never downgrade.
+        raise error
     if body.images or body.files or body.audio:
         raise error
     from local_operator.session.runtime.inbox import (
@@ -4801,6 +4849,11 @@ async def prompt(session_id: str, body: Prompt, request: Request):
                             # owner from before the carriage never sees the keys.
                             input_mode=body.input_mode,
                             input_path=body.input_path,
+                            # Busy-send delivery mode, omitted from the attach frame
+                            # when absent/``steer`` (``admit_prompt`` drops it), so a
+                            # legacy-sender frame stays byte-identical and an owner
+                            # from before the modes never sees the key.
+                            delivery=body.delivery,
                         )
                         admitted = True
                         # Admission can bind a cold viewer while an event
@@ -5298,7 +5351,11 @@ async def answer(session_id: str, body: Answer, request: Request):
     # A queued ask is addressed by durable ID, not by the display epoch. Its
     # control transport must remain usable when an older owner's canonical
     # snapshot exceeds the line limit; the pool still owns lookup and retirement.
-    session_options = {"control_only": True} if body.ask_id is not None else {}
+    # Keep the key absent for gate answers, and don't infer that this bool can
+    # fill unrelated pool keywords (such as the events-only ingress trace).
+    session_options: _AnswerSessionOptions = (
+        {"control_only": True} if body.ask_id is not None else {}
+    )
     async with errors(request), host(request).session(session_id, **session_options) as bridge:
         assert bridge.remote is not None
         if body.ask_id is not None:
@@ -6789,6 +6846,14 @@ async def events(
     # write/edit binding rows sends 1; default 0 serves today's rows exactly.
     diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
 ):
+    scope = getattr(request, "scope", None)
+    ingress_trace = (
+        scope.get(early_paint_hold.TRACE_SCOPE_KEY)
+        if open_trace.enabled() and scope is not None and open_frame == 1
+        else None
+    )
+    if ingress_trace is not None:
+        ingress_trace.start()
     # Acquire BEFORE returning response headers: invalid identity/capacity must
     # return JSON status, not a misleading 200 followed by a broken SSE stream.
     # ``allow_draft``: the pane's subscription is the bridge user that holds a
@@ -6818,8 +6883,14 @@ async def events(
     # middleware stack (``server.early_paint_hold``). Dropped only AFTER the
     # route's hold is taken, so the count never reaches zero in between, and
     # from here on the snapshot-frame release above is the only one owed.
-    early_paint_hold.hand_off(getattr(request, "scope", None))
-    context = pool.session(session_id, read=True, allow_draft=True)
+    early_paint_hold.hand_off(scope)
+    # Keep one acquire for the OPEN handshake. Omit the trace keyword on the
+    # untraced path; otherwise carry this request's trace explicitly because the
+    # single-flight lookup and bridge are shared by concurrent streams.
+    session_options: _EventsSessionOptions = (
+        {} if ingress_trace is None else {"ingress_trace": ingress_trace}
+    )
+    context = pool.session(session_id, read=True, allow_draft=True, **session_options)
     try:
         async with errors(request):
             bridge: DesktopSessionBridge = await context.__aenter__()

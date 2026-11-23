@@ -2895,6 +2895,20 @@ async def _acquire_heavy_lease(
                 )
             )
         return None
+    if heavy.polls_lease:
+        # Leasing this line would hold the slot its own loop waits on (the
+        # 2026-11-22 self-wait: ~21 min, two other sessions timed out). Refuse
+        # before taking a slot; the remedy is to split the wait from the build.
+        return _error(
+            tool_call_id,
+            "bash",
+            "HEAVY JOB NOT STARTED: this command is heavy and also polls the heavy-job "
+            "lease in a loop (`lop services status`). A heavy command holds the slot for "
+            "its whole run, so the loop would wait for the slot it is holding and never "
+            "finish.\nRun the heavy command on its own, without the loop: the bash tool "
+            "queues it for the slot and runs it when free, so no polling is needed. "
+            "Or run only the heavy part as `lop services heavy run -- <heavy command>`.",
+        )
     session_id = (getattr(context, "session_id", None) if context else None) or os.environ.get(
         "LOCAL_OPERATOR_SESSION_ID", ""
     )
@@ -20770,6 +20784,7 @@ from local_operator.session.peek import (  # noqa: E402,F401 — see the comment
     _PeekDigest,
     _PeekWindow,
     _walk_steps,
+    digest_receipt,
 )
 
 
@@ -20878,18 +20893,17 @@ def _sessions_peek_mesh_journal(
     # S-60 stamp below keys on it, as the tail renderer keys on ``rows``.
     peeked: bool
     if mode == "digest":
-        raw_digest = payload.get("digest")
-        digest: dict[str, Any] = raw_digest if isinstance(raw_digest, dict) else {}
+        digest, text = digest_receipt(payload.get("digest"))
         details.update(
             steps_seen=digest.get("steps_seen"),
             tool_calls=digest.get("tool_calls"),
             has_older=digest.get("has_older"),
+            fold_version=digest["fold_version"],
         )
-        text = str(digest.get("text") or "")
         # Fail closed: only an owner's explicit "zero steps" counts as empty.
         peeked = digest.get("steps_seen") != 0
     else:
-        window = window_from_wire(payload.get("window") or {})
+        window = window_from_wire(payload.get("window") or {}, mode=mode)
         details.update(
             steps_shown=len(window.steps),
             has_older=window.has_older,
@@ -20899,6 +20913,10 @@ def _sessions_peek_mesh_journal(
             details["scanned_bytes"] = window.scanned_bytes
         if window.match_id:
             details["match_id"] = window.match_id
+        if mode == "search":
+            details.update(
+                match_count=window.match_count, match_count_complete=window.match_count_complete
+            )
         # A miss is this harness's own sentence about an empty window; any
         # step the owner returned is transcript content.
         peeked = bool(window.steps)
@@ -31034,10 +31052,63 @@ async def close_browser_surface(state: BrowserSurfaceProtocol) -> str:
         if problem is None or (problem.details or {}).get("error_code") == "tab_closed":
             state.surface_id = ""
             return ""
-        return f"{_host_label(host)} could not close the tab; ownership retained for retry"
+        # The host's OWN code and sentence, not a generic "could not close":
+        # the reason decides what unsticks the tab (a password-manager prompt
+        # the user must dismiss is not a wedged host), and the generic form hid
+        # it in every stranding incident of 2026-11-17. `problem` is already
+        # `format_error`'s rendering of the BridgeError, so its text carries
+        # the code; the code is appended only if that rendering ever omits it.
+        code = str((problem.details or {}).get("error_code") or "")
+        reason = " ".join(
+            str(getattr(part, "text", "")).strip() for part in problem.content
+        ).strip()
+        if code and code not in reason:
+            reason = f"{code}: {reason}" if reason else code
+        return (
+            f"{_host_label(host)} could not close the tab ({reason or 'no reason given'}); "
+            "ownership retained for retry"
+        )
     code, out = await _run_cmux(["close-surface", "--surface", surface])
     state.surface_id = ""
     return "" if code == 0 else out or f"cmux exited {code}"
+
+
+async def _close_stranded_quietly(resource: Any) -> list[str] | None:
+    """Retry the resource's stranded tabs; ``None`` when there were none.
+
+    Returns the host's per-tab failure reasons (empty when all closed). Never
+    raises: the caller is a user-facing action whose own outcome must not be
+    replaced by a fault in settling an OLDER tab — that tab stays owed in the
+    record for teardown and ``lop browser cleanup``.
+    """
+    from local_operator.browser_bridge.resources import STRANDED_FIELD
+
+    if not resource.record.get(STRANDED_FIELD):
+        return None
+    try:
+        return await resource.close_stranded()
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        logger.warning("browser: retrying stranded tabs failed", exc_info=True)
+        return [str(exc) or type(exc).__name__]
+
+
+def _with_stranded_note(result: ToolResult, failures: list[str] | None) -> ToolResult:
+    """Tell the model what happened to its stranded tabs, if it had any."""
+    if failures is None:
+        return result
+    if failures:
+        note = (
+            f"{len(failures)} earlier tab(s) this session still owns could not be closed "
+            f"({'; '.join(failures)}); they stay owed and are retried at session end."
+        )
+    else:
+        note = "Also closed earlier tab(s) this session had lost track of."
+    # Appended in place (the same idiom the access-prompt copy uses) so the
+    # result's error flag and details survive; a "No browser surface open."
+    # that now reports real work is no longer elidable.
+    result.content.append(TextContent(text=f" {note}"))
+    result.useless = False
+    return result
 
 
 async def _browser_close(tool_call_id: str, state: BrowserSurfaceProtocol) -> ToolResult:
@@ -31062,6 +31133,15 @@ async def _browser_close(tool_call_id: str, state: BrowserSurfaceProtocol) -> To
     surface = state.surface_id
     problem = await close_browser_surface(state)
     if problem:
+        # A host refusal already ends "ownership retained for retry"
+        # (`close_browser_surface`, whose text session teardown also shows);
+        # repeating the disposition here read as a stutter (QA Q1, PR #4189).
+        if state.surface_id and problem.endswith("ownership retained for retry"):
+            return _error(
+                tool_call_id,
+                "browser",
+                f"Browser surface {surface} could not be closed: {problem}.",
+            )
         disposition = "ownership retained" if state.surface_id else "dropped the handle"
         return _error(
             tool_call_id,
@@ -31498,11 +31578,22 @@ async def _execute_browser_owned(
         if resource.record.get("terminal"):
             return _error(tool_call_id, "browser", "Browser scope ended; resume before browsing.")
         if action == "open" and not state.surface_id:
+            # A fresh tab is about to take a host slot: first retry any older
+            # tab this session lost track of (see resources.STRANDED_FIELD), so
+            # a session cannot climb toward the host's tab cap one stranded tab
+            # at a time. Best-effort — the open must not fail because an OLD tab
+            # would not close; it stays owed for close/teardown/cleanup.
+            await _close_stranded_quietly(resource)
             resource.allocate()
         failed_close = False
         try:
             result = await _execute_browser(tool_call_id, args, signal, on_update, context)
             failed_close = action == "close" and result.is_error and bool(state.surface_id)
+            if action == "close":
+                # 'close' also settles tabs this session owns but no longer
+                # holds the live handle for; otherwise the model's explicit close
+                # (and its "No browser surface open.") would leave them behind.
+                result = _with_stranded_note(result, await _close_stranded_quietly(resource))
             if action in ("request_access", "await_access", "cancel_access"):
                 access_state = (result.details or {}).get("state")
                 if action == "cancel_access" and not result.is_error:

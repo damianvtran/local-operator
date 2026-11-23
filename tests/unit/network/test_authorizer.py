@@ -374,6 +374,21 @@ def test_a_stray_inner_frame_cannot_launder_the_outer_session_id(op: str) -> Non
     assert granted.session_id == "s_local"
 
 
+@pytest.mark.parametrize("shape", [{"head": 1}, {"query": "q", "regex": True}, {"digest": True}])
+def test_remote_peek_shapes_need_view_and_an_owned_session(shape: dict[str, Any]) -> None:
+    authorizer, _audit = make(state=FakeState(sessions={"s_local"}))
+    frame = {"op": "net_session_peek", "req": 1, "session_id": "s_local", **shape}
+    with pytest.raises(types.Refusal) as no_view:
+        authorizer.check(link(capabilities={"list"}), frame)
+    assert no_view.value.code == "not_authorised"
+
+    viewer = link(capabilities={"list", "view"})
+    with pytest.raises(types.Refusal) as wrong_owner:
+        authorizer.check(viewer, {**frame, "session_id": "s_elsewhere"})
+    assert wrong_owner.value.code == "not_authorised"
+    assert authorizer.check(viewer, frame).session_id == "s_local"
+
+
 def test_a_stream_send_is_still_scoped_by_the_frame_it_carries() -> None:
     """The other carrier keeps its inner read: a stream's ``send`` names no
     outer session, and the frame it forwards is what reaches the owner."""

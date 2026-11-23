@@ -21,6 +21,10 @@ vi.mock("./api", async (importOriginal) => {
 		getCommands: vi.fn(async () => ({ commands: [] })),
 		getSkills: vi.fn(async () => ({ skills: [] })),
 		getModels: vi.fn(async () => ({ models: [] })),
+		// The composer's working-directory chip asks for the home path on every
+		// mount. Unmocked, that was a real fetch to happy-dom's localhost:3000
+		// (the ECONNREFUSED noise in every run of this file).
+		getDirectories: vi.fn(async () => ({ home: "/home/test", recent: [] })),
 		sendCommand: vi.fn(async (_sessionId: string, _op: Record<string, unknown>) => ({
 			ok: true,
 			detail: "",
@@ -137,10 +141,19 @@ function availableCapability(): Capabilities {
 	return { stt: { available: true, path: "provider_stt_radient", reason: "" } };
 }
 
+/** React's scheduler runs passive effects from a setImmediate task queued at commit; a task queued now runs after it. */
+function flushPassiveEffects(): Promise<void> {
+	return new Promise((resolve) => setImmediate(resolve));
+}
+
 /** Click the mic and wait for the recording state; returns the live recorder. */
 async function startRecording(): Promise<FakeRecorder> {
 	fireEvent.click(screen.getByRole("button", { name: "start voice input" }));
 	await waitFor(() => expect(screen.getByRole("button", { name: "stop and transcribe" })).toBeTruthy());
+	// The button is in the DOM at COMMIT; the window-level Enter listener is a
+	// passive effect that runs a scheduler task later. A key sent in that gap is
+	// lost, so let React flush before the test acts.
+	await flushPassiveEffects();
 	return FakeRecorder.instances.at(-1)!;
 }
 
@@ -176,6 +189,12 @@ afterEach(() => {
 	cleanup();
 	localStorage.clear();
 	vi.clearAllMocks();
+	// clearAllMocks keeps the mockResolvedValueOnce queue, so a test that fails
+	// before consuming its queued reply would hand it to the NEXT test: one
+	// flake became eleven red tests (CI run 45130125496). Reset drops the
+	// queue and restores the factory reply.
+	mockedTranscribe.mockReset();
+	mockedSendCommand.mockReset();
 	vi.unstubAllGlobals();
 	Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: undefined });
 });
@@ -323,7 +342,7 @@ describe("cancel, refusal and failure", () => {
 		expect(screen.getByRole("button", { name: "start voice input" })).toBeTruthy();
 	});
 
-	it("shows the retry sentence for an upstream/transient failure", async () => {
+	it("offers Retry for an upstream/transient failure instead of a bare try-again line", async () => {
 		mockedTranscribe.mockRejectedValueOnce(
 			new (await import("./api")).HttpError(502, "Transcription failed upstream."),
 		);
@@ -332,7 +351,11 @@ describe("cancel, refusal and failure", () => {
 		recorder.emitChunk("audio-bytes");
 		fireEvent.click(screen.getByRole("button", { name: "stop and transcribe" }));
 
-		await waitFor(() => expect(screen.getByText("Couldn't transcribe that. Try again.")).toBeTruthy());
+		await waitFor(() => expect(screen.getByText("Transcription failed")).toBeTruthy());
+		expect(screen.getByRole("button", { name: "retry transcription" })).toBeTruthy();
+		expect(screen.getByRole("button", { name: "discard recording" })).toBeTruthy();
+		/* The server's upstream prose belongs in the daemon log, not on the phone. */
+		expect(screen.queryByText("Transcription failed upstream.")).toBeNull();
 	});
 });
 
@@ -487,7 +510,7 @@ describe("empty transcript, discards and cancels", () => {
 
 		const cancel = await screen.findByRole("button", { name: "cancel transcription" });
 		expect(screen.getByText("Transcribing…")).toBeTruthy();
-		const signal = mockedTranscribe.mock.calls[0]![1] as AbortSignal;
+		const signal = (mockedTranscribe.mock.calls[0]![1] as { signal: AbortSignal }).signal;
 		expect(signal.aborted).toBe(false);
 
 		fireEvent.click(cancel);
@@ -501,5 +524,234 @@ describe("empty transcript, discards and cancels", () => {
 		held!({ text: "too late", provider: "radient", model: null, path: "provider_stt_radient" });
 		await new Promise((r) => setTimeout(r, 0));
 		expect(field().value).toBe("");
+	});
+});
+
+/** One recording whose transcription fails with `error`. */
+async function failTake(error: unknown, chunk = "audio-bytes"): Promise<void> {
+	mockedTranscribe.mockRejectedValueOnce(error);
+	const recorder = await startRecording();
+	recorder.emitChunk(chunk);
+	fireEvent.click(screen.getByRole("button", { name: "stop and transcribe" }));
+	await screen.findByRole("alert");
+}
+
+const retryControl = () => screen.getByRole("button", { name: "retry transcription" });
+const discardControl = () => screen.getByRole("button", { name: "discard recording" });
+
+/* The failed take is KEPT in place (design: a refused recording is recoverable)
+   rather than dropped with the alert row's dismiss. These pin the four things
+   that must stay true of that state: the same bytes go back, a retry never
+   sends, the take outlives one failed retry, and every release path frees it. */
+describe("a failed take: Retry, Discard, and what cannot be retried", () => {
+	it("resends THE SAME blob through the success path on Retry, and never sends", async () => {
+		renderComposer();
+		await failTake(new api.HttpError(502, "Transcription failed upstream."));
+		expect(screen.getByText("Transcription failed")).toBeTruthy();
+
+		mockedTranscribe.mockResolvedValueOnce({
+			text: "hello",
+			provider: "radient",
+			model: null,
+			path: "provider_stt_radient",
+		});
+		fireEvent.click(retryControl());
+
+		await waitFor(() => expect(field().value).toBe("hello"));
+		expect(mockedTranscribe).toHaveBeenCalledTimes(2);
+		const first = mockedTranscribe.mock.calls[0]!;
+		const second = mockedTranscribe.mock.calls[1]!;
+		/* The take itself, not a re-recording; a FRESH controller for the retry. */
+		expect(second[0]).toBe(first[0]);
+		expect((second[1] as { signal: AbortSignal }).signal).not.toBe(
+			(first[1] as { signal: AbortSignal }).signal,
+		);
+		/* The success path ran — the completion line, no auto-send. */
+		expect(screen.getByText("Transcript added")).toBeTruthy();
+		expect(mockedSendCommand).not.toHaveBeenCalled();
+		expect(screen.queryByText("Transcription failed")).toBeNull();
+	});
+
+	it("keeps the take and still offers Retry when the retry fails too", async () => {
+		renderComposer();
+		await failTake(new api.HttpError(502, "Transcription failed upstream."));
+		mockedTranscribe.mockRejectedValueOnce(new api.HttpError(502, "Transcription failed upstream."));
+		fireEvent.click(retryControl());
+
+		await waitFor(() => expect(mockedTranscribe).toHaveBeenCalledTimes(2));
+		await waitFor(() => expect(screen.getByText("Transcription failed")).toBeTruthy());
+		expect(retryControl()).toBeTruthy();
+	});
+
+	it("offers Retry for a tunnel 5xx too: every 5xx is transient, as on the desktop", async () => {
+		renderComposer();
+		/* A tunnel's own 504 is the class the old [500, 502] pair dropped: it is
+		   an upstream wait, not an answer to the request, so the same bytes are
+		   worth sending again. */
+		await failTake(new api.HttpError(504, "gateway timeout"));
+
+		expect(screen.getByText("Transcription failed")).toBeTruthy();
+		expect(retryControl()).toBeTruthy();
+	});
+
+	it("an unknown non-5xx status keeps Discard alone and does not promise 'Try again'", async () => {
+		renderComposer();
+		await failTake(new api.HttpError(418, "I'm a teapot"));
+
+		expect(screen.getByText("Transcription failed")).toBeTruthy();
+		/* The row draws no Retry here, so its copy must not offer one. */
+		expect(screen.queryByText(/Try again/)).toBeNull();
+		expect(screen.queryByRole("button", { name: "retry transcription" })).toBeNull();
+		expect(discardControl()).toBeTruthy();
+	});
+
+	it("hands focus to the status row and the row STAYS focusable while it is rendered", async () => {
+		renderComposer();
+		await failTake(new api.HttpError(502, "Transcription failed upstream."));
+		const row = screen.getByRole("alert").parentElement as HTMLElement;
+		/* Script-focusable only, and already so while the failure is shown. */
+		expect(row.getAttribute("tabindex")).toBe("-1");
+		const retry = retryControl();
+		retry.focus();
+		/* Registered BEFORE the click: the Retry press calls the endpoint
+		   synchronously, so a later `mockResolvedValueOnce` would arrive after the
+		   retry already took the default (empty) answer. */
+		mockedTranscribe.mockResolvedValueOnce({
+			text: "hello",
+			provider: "radient",
+			model: null,
+			path: "provider_stt_radient",
+		});
+		fireEvent.click(retry);
+
+		await waitFor(() => expect(screen.getByText("Transcribing…")).toBeTruthy());
+		/* A real browser drops focus to <body> when the focused button unmounts;
+		   that strands a hardware keyboard's place in the form. */
+		expect(document.activeElement).not.toBe(document.body);
+		expect(document.activeElement).toBe(row);
+
+		/* THE HANDOFF TARGET MUST OUTLIVE THE FAILURE STATE. Retry clears
+		   `dictationFailure`, and Chrome resets activeElement to <body> the instant
+		   the focused element loses its tabIndex (Gecko keeps it, so this is
+		   invisible outside a real Chrome). happy-dom never moves focus for a
+		   removed tabIndex, so the attribute IS the check that discriminates:
+		   conditional tabIndex fails the two assertions below on the Retry render. */
+		expect(row.getAttribute("tabindex")).toBe("-1");
+
+		await waitFor(() => expect(field().value).toBe("hello"));
+		/* Past the transcribing state, the row is still the same element and still
+		   holds focus: the outcome notice keeps it mounted. */
+		expect(screen.getByText("Transcript added")).toBeTruthy();
+		expect(document.activeElement).toBe(row);
+		expect(row.getAttribute("tabindex")).toBe("-1");
+	});
+
+	it("rings both actions for a keyboard and keeps them 44 px apart", async () => {
+		renderComposer();
+		await failTake(new api.HttpError(502, "Transcription failed upstream."));
+
+		for (const control of [retryControl(), discardControl()]) {
+			expect(control.className).toContain("focus-visible:outline-2");
+			expect(control.className).toContain("min-h-11");
+		}
+		/* D1: Retry is a quiet bordered pill, Discard bare, and the pair reads as
+		   two targets rather than one run of text. */
+		expect(retryControl().className).toContain("rounded-full");
+		expect(retryControl().parentElement?.className).toContain("gap-4");
+	});
+
+	it("Discard frees the take: no request, no row, nothing left to retry", async () => {
+		renderComposer();
+		await failTake(new api.HttpError(502, "Transcription failed upstream."));
+		fireEvent.click(discardControl());
+
+		expect(screen.queryByText("Transcription failed")).toBeNull();
+		expect(screen.queryByRole("button", { name: "retry transcription" })).toBeNull();
+		expect(mockedTranscribe).toHaveBeenCalledOnce();
+	});
+
+	it("a 402 keeps the daemon's own sentence and offers Discard alone", async () => {
+		renderComposer();
+		const sentence =
+			"Transcription is unavailable: your Radient credit balance is too low. Add credits to continue.";
+		await failTake(new api.HttpError(402, sentence));
+
+		expect(screen.getByText(sentence)).toBeTruthy();
+		expect(screen.queryByRole("button", { name: "retry transcription" })).toBeNull();
+		expect(discardControl()).toBeTruthy();
+	});
+
+	it("a 503 (no executable path) offers Discard alone: a retry answers the same way", async () => {
+		renderComposer();
+		await failTake(new api.HttpError(503, "Voice input isn't available on this machine."));
+
+		expect(screen.getByText("Voice input isn't available on this machine.")).toBeTruthy();
+		expect(screen.queryByRole("button", { name: "retry transcription" })).toBeNull();
+	});
+
+	it("a 413 explains the tunnel's cap and refuses to retry", async () => {
+		renderComposer();
+		await failTake(new api.HttpError(413, "request exceeds 10 MiB"));
+
+		expect(
+			screen.getByText("That recording is too long to send. Discard it and record a shorter one."),
+		).toBeTruthy();
+		expect(screen.queryByRole("button", { name: "retry transcription" })).toBeNull();
+		expect(discardControl()).toBeTruthy();
+	});
+
+	it("a retained take over the tunnel's 10 MiB cap is not retried, whatever the refusal says", async () => {
+		renderComposer();
+		/* The daemon's own cap is 20 MiB, so this take passed the client's checks and
+		   the gateway's 413 is the only bound that can stop it — retrying would ask
+		   the user to wait for the same answer. */
+		await failTake(new api.HttpError(502, "Transcription failed upstream."), "x".repeat(10 * 1024 * 1024 + 1));
+
+		expect(
+			screen.getByText("That recording is too long to send. Discard it and record a shorter one."),
+		).toBeTruthy();
+		expect(screen.queryByRole("button", { name: "retry transcription" })).toBeNull();
+	});
+
+	it("a new take releases the failed one", async () => {
+		renderComposer();
+		await failTake(new api.HttpError(502, "Transcription failed upstream."));
+
+		fireEvent.click(screen.getByRole("button", { name: "start voice input" }));
+		await waitFor(() => expect(screen.getByRole("button", { name: "stop and transcribe" })).toBeTruthy());
+
+		expect(screen.queryByText("Transcription failed")).toBeNull();
+		expect(screen.queryByRole("button", { name: "retry transcription" })).toBeNull();
+	});
+
+	it("a route change (another conversation) releases the failed take", async () => {
+		const { rerender } = renderComposer();
+		await failTake(new api.HttpError(502, "Transcription failed upstream."));
+
+		rerender(
+			<Composer
+				ended={false}
+				pid="p2"
+				projection={projection()}
+				onOpenModels={() => {}}
+				onReturnToModels={() => {}}
+				onOpenEffort={() => {}}
+				effortOpen={false}
+				onCloseEffort={() => {}}
+			/>,
+		);
+
+		expect(screen.queryByText("Transcription failed")).toBeNull();
+		expect(screen.queryByRole("button", { name: "retry transcription" })).toBeNull();
+	});
+
+	it("announces the failure as an alert and keeps the controls path-sized", async () => {
+		renderComposer();
+		await failTake(new api.HttpError(502, "Transcription failed upstream."));
+
+		const alert = screen.getByRole("alert");
+		expect(alert.textContent).toContain("Transcription failed");
+		expect(retryControl().className).toContain("min-h-11");
+		expect(discardControl().className).toContain("min-h-11");
 	});
 });

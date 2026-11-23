@@ -1,7 +1,9 @@
 {
+  "tui.settings_view.chrome.capture.chord_grammar": "alt+<letter> ہر جگہ چلتی ہے، ctrl+enter کو بہتر کلیدیں چاہیے",
   "tui.settings_view.chrome.capture.contract_cancel": "{cancel_key} منسوخ",
   "tui.settings_view.chrome.capture.contract_confirm": "{save_key} تصدیق · {cancel_key} منسوخ",
   "tui.settings_view.chrome.capture.listening": "کلید کا انتظار ہے",
+  "tui.settings_view.chrome.capture.needs_enhanced_keys": "بہتر کلیدیں چاہیے",
   "tui.settings_view.chrome.capture.press_another": "کوئی اور کلید دبائیں",
   "tui.settings_view.chrome.capture.saved": "{shortcut} محفوظ ہو گئی",
   "tui.settings_view.chrome.capture.takes_from": "{shortcut} کو “{victim}” سے لے لے گی",
