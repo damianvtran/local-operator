@@ -8,8 +8,9 @@ runs several writers in one process (the ``library-thumbs`` indexer thread, the
 on-demand route, concurrent grid renders). With a shared name the second writer
 truncates and streams into a file the first has already renamed into place --
 publishing a torn file -- and its own ``os.replace`` then fails because the temp
-is gone. PR #4501 measured the torn case on main: 22 unreadable WebPs in a
-two-writer harness, 0/800 with per-write names.
+is gone. PR #4501's QA harness (8 caller threads plus the ``library-thumbs``
+worker, 50 iterations) measured the torn case on main: 22 callers handed a
+WebP PIL could not decode; with per-write names, 0 of 800 calls.
 
 The pid stays in the name so a crashed process's leftovers are attributable;
 the thread id and random suffix make concurrent writes in one process distinct.
