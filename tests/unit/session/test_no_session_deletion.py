@@ -3079,7 +3079,7 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/resume.py::write_session_attachment",
         "<path>.unlink",
         "Strict-write failure removes only the fixed attachment.transfer.tmp member; "
-        "unlink rejects directories and does not follow the leaf",
+        "unlink rejects real directories and does not follow the leaf",
     ),
     (
         "local_operator/resume.py::write_goal_record",
@@ -4075,7 +4075,7 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "After publication, removes two distinct fixed bookkeeping names: the existing "
         "ready.json boot marker and the separate .skill-pin-original backup. Unlink "
-        "rejects directories and does not follow the leaf",
+        "rejects real directories and does not follow the leaf",
         2,
     ),
     (
@@ -4091,14 +4091,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "marker exempts one, because those bytes may be the last copy alive); never "
         "a path under sessions/",
     ),
-    # Recovery clears the same two locally written bookkeeping files if publication
-    # landed but the original process did not get to remove them.
     (
         "local_operator/network/mobility.py::_reconcile_destination",
         "<path>.unlink",
-        "Clears two distinct fixed names after publication: the existing ready.json "
-        "boot marker and the separate .skill-pin-original backup. Unlink rejects "
-        "directories and does not follow the leaf",
+        "When the staged ready.json marker is missing, clears two distinct fixed names: "
+        "the destination's ready.json boot marker and .skill-pin-original backup. "
+        "Unlink rejects real directories and does not follow the leaf",
         2,
     ),
     (
@@ -4106,7 +4104,7 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Once the session has arrived with a transcript, clears two distinct fixed "
         "names: the existing ready.json boot marker and the separate .skill-pin-original "
-        "backup. Unlink rejects directories and does not follow the leaf",
+        "backup. Unlink rejects real directories and does not follow the leaf",
         2,
     ),
     # A replica lives at network/replicas/<id>/ — outside the session store, so it

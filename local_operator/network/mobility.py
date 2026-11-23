@@ -1701,6 +1701,35 @@ _UNSAFE_STAGING_REASON = (
 )
 
 
+def _plain_handoff_entry(path: Path, *, directory: bool) -> bool:
+    if os.name == "nt":
+        # A junction can be S_IFDIR: check the Windows reparse attribute, not
+        # the mode or a list of known tags. lstat preserves junctions but can
+        # resolve non-name-surrogate reparse points. Windows scandir's no-follow
+        # stat exposes the raw directory-entry attributes for both kinds.
+        folded_name = os.path.normcase(path.name)
+        found = False
+        with os.scandir(path.parent) as entries:
+            for entry in entries:
+                if os.path.normcase(entry.name) != folded_name:
+                    continue
+                info = entry.stat(follow_symlinks=False)
+                if info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                    return False
+                found = True
+                if entry.name == path.name:
+                    break
+        # Still use the named lookup for type/existence, including the caller's
+        # missing-entry handling. An existing alias we could not identify in the
+        # listing (e.g. an alternate short name) is not a verified plain entry.
+        info = path.lstat()
+        if not found or info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            return False
+    else:
+        info = path.lstat()
+    return (stat.S_ISDIR if directory else stat.S_ISREG)(info.st_mode)
+
+
 def _staging_for_verification(root: Path, session_id: str, staging: Path) -> Path | None:
     from local_operator.resume import ATTACHMENT_SIDECAR_NAME
 
@@ -1710,10 +1739,10 @@ def _staging_for_verification(root: Path, session_id: str, staging: Path) -> Pat
     if checked is None:
         return None
     # The restore touches these sidecars before _promote runs its own check.
-    # Carried symlinks elsewhere in the copy are content, not rollback paths.
+    # Other members of the copy are content, not rollback paths.
     for name in ("ready.json", _SKILL_PIN_ORIGINAL, ATTACHMENT_SIDECAR_NAME):
         try:
-            if not stat.S_ISREG((checked / name).lstat().st_mode):
+            if not _plain_handoff_entry(checked / name, directory=False):
                 return None
         except FileNotFoundError:
             continue

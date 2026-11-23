@@ -7,6 +7,8 @@ must not turn the later cleanup or promotion into an arbitrary filesystem action
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -259,6 +261,41 @@ def test_recovery_refuses_uncontained_stage_before_mutation(
     assert "symlink" in refusal["message"]
     assert attachment.read_text() == "untouched session attachment"
     assert backup.exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires native Windows junctions")
+@pytest.mark.parametrize("component", [0, 1, 2], ids=["network", "stage-parent", "stage"])
+def test_staging_refuses_windows_junctions(tmp_path: Path, component: int) -> None:
+    if sys.platform == "win32":
+        from _winapi import CreateJunction
+    else:
+        pytest.fail("the native Windows test ran despite its skip marker")
+
+    parts = ("network", "staging", "opaque-session")
+    root = tmp_path / "config"
+    staging = root.joinpath(*parts)
+    junction = root.joinpath(*parts[: component + 1])
+    junction.parent.mkdir(parents=True)
+    target = tmp_path / "target"
+    other_stage = target.joinpath(*parts[component + 1 :])
+    other_stage.mkdir(parents=True)
+    marker = other_stage / "ready.json"
+    marker.write_bytes(b"{}")
+
+    # A directory symlink would not cover junctions: verify the native fixture
+    # is a junction and then exercise each directory level of the write gate.
+    CreateJunction(str(target), str(junction))
+    try:
+        assert os.path.isjunction(junction)
+        assert mobility._staging_for_verification(root, parts[-1], staging) is None
+        assert os.path.isjunction(junction)
+        assert marker.read_bytes() == b"{}"
+    finally:
+        junction.rmdir()
+
+    staging.mkdir(parents=True)
+    (staging / "ready.json").write_bytes(b"{}")
+    assert mobility._staging_for_verification(root, parts[-1], staging) == staging.resolve()
 
 
 def test_recovery_leaves_failed_skill_pin_digest_untouched(tmp_path: Path) -> None:

@@ -201,6 +201,7 @@ WINDOWS_LOADED_PATHS = frozenset(
         "tests/unit/network/test_approvals_store.py",
         "tests/unit/network/test_credentials_real_link.py",
         "tests/unit/network/test_credentials_owner.py",
+        "tests/unit/network/test_mobility.py",
         "tests/unit/network/test_relay_e2e.py",
     }
 )
