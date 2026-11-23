@@ -34,7 +34,7 @@ import logging
 import os
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
@@ -46,6 +46,7 @@ except ImportError:  # pragma: no cover - Windows
 
 from local_operator import resume
 from local_operator.library import classify, identity
+from local_operator.library.atomic import unique_temp
 from local_operator.session_files import ledger, service
 from local_operator.session_files.scan import ORIGINS, FileRecord, resolve_path
 
@@ -486,14 +487,19 @@ def _persist(
 
 def _write(path: Path, payload: dict[str, Any]) -> None:
     """Atomic write; a torn cache costs a rebuild and must never half-replace one."""
+    # Per-write temp: concurrent builders in one process share a pid, and a
+    # shared temp let one publish the other's half-written JSON.
+    temporary = unique_temp(path, hidden=True)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
         with temporary.open("w", encoding="utf-8") as handle:
             json.dump(payload, handle, separators=(",", ":"))
         os.replace(temporary, path)
     except OSError:
         logger.debug("library index write failed", exc_info=True)
+        # Nothing reaps a stranded temp next to the index.
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
 
 
 def _signature(session_dir: Path) -> dict[str, int | float] | None:
