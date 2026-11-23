@@ -211,6 +211,144 @@ def test_unsupported_platform_refuses_before_lookup_or_effects(platform, tmp_pat
     assert not list(tmp_path.iterdir())
 
 
+@pytest.mark.parametrize(
+    "capability", ["getuid", "O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK", "dir_fd", "nofollow"]
+)
+def test_missing_capability_refuses_before_lookup_or_effects(capability, tmp_path, monkeypatch):
+    monkeypatch.setattr(module, "_owner_home", lambda uid: pytest.fail("unsupported lookup"))
+    # Restore process-wide OS attributes before pytest's own fixture cleanup.
+    with monkeypatch.context() as patch:
+        if capability == "dir_fd":
+            patch.setattr(os, "supports_dir_fd", os.supports_dir_fd - {os.stat})
+        elif capability == "nofollow":
+            patch.setattr(os, "supports_follow_symlinks", os.supports_follow_symlinks - {os.stat})
+        else:
+            patch.delattr(os, capability)
+        with pytest.raises(CoordinatorRefusal):
+            enabled().initialize()
+    assert not list(tmp_path.iterdir())
+
+
+def test_direct_read_unsupported_platform_refuses_before_open(tmp_path, monkeypatch):
+    with monkeypatch.context() as patch:
+        patch.setattr(module.sys, "platform", "win32")
+        patch.setattr(os, "open", lambda *a, **kw: pytest.fail("unsupported open"))
+        with pytest.raises(CoordinatorRefusal):
+            enabled()._read(-1, "state.json")
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize(
+    "name", ["../state.json", "absolute", "state.json/..", ".", ".mutation.lock", None]
+)
+def test_writer_rejects_nonstate_names_without_effects(owner, name):
+    if name == "absolute":
+        name = str(owner[0] / "absolute-state.json")
+    c = initialized(owner)
+    root = domain(c)
+    before = {p.name: p.read_bytes() for p in root.iterdir()}
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(CoordinatorRefusal):
+            c._write(fd, name, {})
+    finally:
+        os.close(fd)
+    assert {p.name: p.read_bytes() for p in root.iterdir()} == before
+
+
+def test_writer_rejects_foreign_directory_descriptor(owner):
+    c = initialized(owner)
+    foreign = owner[0] / "sessions" / "own-fixture"
+    foreign.mkdir(parents=True, mode=0o700)
+    sentinel = foreign / "state.json"
+    sentinel.write_bytes(b"preserve session file")
+    sentinel.chmod(0o600)
+    fd = os.open(foreign, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(CoordinatorRefusal):
+            c._write(fd, "state.json", {})
+    finally:
+        os.close(fd)
+    assert sentinel.read_bytes() == b"preserve session file"
+    assert set(foreign.iterdir()) == {sentinel}
+
+
+@pytest.mark.parametrize("kind", ["directory", "symlink", "hardlink"])
+def test_writer_preserves_substituted_target(owner, kind):
+    c = initialized(owner)
+    root = domain(c)
+    target = root / "state.json"
+    original = root / "preserved-state"
+    target.rename(original)
+    sentinel = target / "sentinel"
+    if kind == "directory":
+        target.mkdir(mode=0o700)
+        sentinel.write_bytes(b"preserve directory")
+    elif kind == "symlink":
+        target.symlink_to(original)
+    else:
+        os.link(original, target)
+    before = original.read_bytes()
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(CoordinatorRefusal):
+            c._write(fd, "state.json", {})
+    finally:
+        os.close(fd)
+    assert original.read_bytes() == before
+    assert not list(root.glob(".*.tmp"))
+    if kind == "directory":
+        assert sentinel.read_bytes() == b"preserve directory"
+    elif kind == "symlink":
+        assert target.is_symlink()
+    else:
+        assert target.stat().st_ino == original.stat().st_ino
+
+
+@pytest.mark.parametrize("substitute", ["parent", "destination-directory", "stage-directory"])
+def test_writer_directory_substitution_never_removes_directory(owner, monkeypatch, substitute):
+    c = initialized(owner)
+    root = domain(c)
+    before = (root / "state.json").read_bytes()
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if substitute == "parent":
+            renamed = root.with_name("old-domain")
+            root.rename(renamed)
+            root.mkdir(mode=0o700)
+            sentinel = renamed / "sentinel"
+            sentinel.write_bytes(b"preserve directory")
+            with pytest.raises(CoordinatorRefusal):
+                c._write(fd, "state.json", {})
+            assert not list(root.iterdir())
+            assert (renamed / "state.json").read_bytes() == before
+        else:
+            real_replace = os.replace
+
+            def replace(source, destination, **kwargs):
+                nonlocal sentinel
+                selected = root / (destination if substitute == "destination-directory" else source)
+                selected.rename(root / "preserved-file")
+                selected.mkdir(mode=0o700)
+                sentinel = selected / "sentinel"
+                sentinel.write_bytes(b"preserve directory")
+                return real_replace(source, destination, **kwargs)
+
+            sentinel = None
+            monkeypatch.setattr(os, "replace", replace)
+            with pytest.raises(IsADirectoryError):
+                c._write(fd, "state.json", {})
+            if substitute == "destination-directory":
+                assert (root / "preserved-file").read_bytes() == before
+            else:
+                assert (root / "state.json").read_bytes() == before
+                assert (root / "preserved-file").read_bytes() == b"{}"
+        assert sentinel is not None
+        assert sentinel.read_bytes() == b"preserve directory"
+    finally:
+        os.close(fd)
+
+
 @pytest.mark.parametrize("kind", ["relative", "root", "missing-account", "relative-anchor"])
 def test_unresolved_owner_never_falls_back_to_profile(kind, owner, tmp_path, monkeypatch):
     if kind == "missing-account":

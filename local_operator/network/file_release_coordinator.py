@@ -239,6 +239,16 @@ class FileReleaseCoordinator:
     def _location(self) -> tuple[int, Path, tuple[str, ...]]:
         if not self._enabled or sys.platform != "linux" or self._failed:
             raise CoordinatorRefusal("coordinator disabled or unavailable")
+        # Linux spelling alone is not a capability: refuse before any lookup or
+        # filesystem effect when the no-follow/dir-fd publication contract is absent.
+        if (
+            not all(
+                hasattr(os, name) for name in ("getuid", "O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK")
+            )
+            or not {os.open, os.mkdir, os.stat, os.unlink}.issubset(os.supports_dir_fd)
+            or os.stat not in os.supports_follow_symlinks
+        ):
+            raise CoordinatorRefusal("coordinator filesystem capabilities unavailable")
         try:
             uid = os.getuid()
             home = _owner_home(uid)
@@ -333,6 +343,10 @@ class FileReleaseCoordinator:
             raise CoordinatorRefusal("coordinator path identity changed")
 
     def _read(self, fd: int, name: str) -> dict[str, object]:
+        # Private helpers state their own platform boundary too: direct calls
+        # must refuse, not leak AttributeError on an unsupported interpreter.
+        if sys.platform != "linux" or not hasattr(os, "getuid"):
+            raise CoordinatorRefusal("coordinator unavailable")
         uid = os.getuid()
         source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
         try:
@@ -356,6 +370,25 @@ class FileReleaseCoordinator:
         # matches store's opt-in durable writer. dir_fd makes every operation
         # refer to our validated directory; unlike the legacy helper this never
         # mkdirs/chmods on a read and never accepts a substituted parent path.
+        # Do not let a future private caller turn this into a general writer.
+        # Re-open the canonical owner domain and match the supplied descriptor;
+        # a valid private directory elsewhere (including sessions/) is not enough.
+        if type(name) is not str or name not in {"state.json", "initialized.json"}:
+            raise CoordinatorRefusal("unknown coordinator publication name")
+        checked, _, _ = self._open_directory()
+        try:
+            info = os.fstat(fd)
+            self._check(info, os.getuid(), directory=True)
+            if self._node(info) != self._node(os.fstat(checked)):
+                raise CoordinatorRefusal("publication directory identity changed")
+        finally:
+            os.close(checked)
+        try:
+            existing = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            self._check(existing, os.getuid(), directory=False)
         raw = _encode(payload)
         temporary = f".{name}.{uuid4()}.tmp"
         target = os.open(
