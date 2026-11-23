@@ -66,6 +66,7 @@ from local_operator.i18n.messages import Msg, _namespace_for
 from local_operator.i18n.text import active_locale, register_refresh, tr, tr_record
 from local_operator.settings_io import Kind, Scope, Section, Setting
 from local_operator.team_bridge import availability as bridge_availability
+from local_operator.tui import hotkey_hints
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import score_command_text_match
 from local_operator.tui.error_text import error_text
@@ -2877,7 +2878,11 @@ class SettingsView(Vertical):
         normalized = (
             keymap_mod.normalize_desktop_key(key, action_id=capture.setting_key)
             if scope == "desktop"
-            else keymap_mod.normalize_key(key)
+            else (
+                keymap_mod.normalize_composer_key(key)
+                if scope == "composer"
+                else keymap_mod.normalize_key(key)
+            )
         )
         self._capture = capture._replace(key=normalized, refused="")
         self._repaint()
@@ -4622,13 +4627,19 @@ class SettingsView(Vertical):
                 else:
                     line.append(_t(_x.settings_view_press_key()), style=accent)
                 return line
-            # `display_key`, not `format_key_display`: a desktop value maps its
-            # platform tokens for display in its OWN scope (primary reads
-            # cmd/ctrl), where the app vocabulary would show it verbatim.
-            line.append(
-                keymap_mod.display_key(str(value), scope=setting.hotkey_scope or "app"),
-                style=value_style,
-            )
+            # An unbound hotkey (the composer-scope send rows ship unbound)
+            # has an empty value: paint the page's "nothing to show" glyph
+            # in dim ink rather than a blank cell, which reads as an unset
+            # row the user has broken or never opened (D4). The empty string
+            # is the omission encoding of unbound, so it is the only case
+            # that paints this.
+            if not str(value):
+                line.append("—", style=dim)
+            else:
+                line.append(
+                    keymap_mod.display_key(str(value), scope=setting.hotkey_scope or "app"),
+                    style=value_style,
+                )
             if selected:
                 # The same cursor-row-only affordance glyph the bool/enum rows
                 # carry, answering "what does `enter` do here?" before the
@@ -5161,6 +5172,9 @@ class SettingsView(Vertical):
             lead: str
             lead_style: Style
             reason: str
+            # Bound on every path so the style line below reads a definite
+            # value; only the pending arm ever sets it True.
+            enhanced_hint = False
             if capture.refused:
                 # A refusal is a report that the press did not land, so it
                 # takes the danger ink: the one thing here that must not read
@@ -5185,6 +5199,19 @@ class SettingsView(Vertical):
                 # something stopped working. So it is named, and the user
                 # presses enter having read it.
                 reason = self._capture_conflict()
+                # A kitty-only chord needs its terminal limit stated where
+                # it is bound, not only in row help the user may never open
+                # (UX round 1, U1): without it a legacy terminal silently
+                # receives plain Enter for the very press that was bound.
+                # Painted as a hint (dim), not a refusal: it warns and
+                # stores, so the error ink would read as a rejection the
+                # capture never made.
+                if keymap_mod.scope_of(capture.setting_key) == "composer" and (
+                    keymap_mod.composer_chord_needs_enhanced_keys(capture.key)
+                ):
+                    need = _t_chrome(_svc.capture_needs_enhanced_keys())
+                    reason = f"{need} — {reason}" if reason else need
+                    enhanced_hint = not self._capture_conflict()
                 contract_text = _t_chrome(
                     _svc.capture_contract_confirm(save_key=_KEY_SAVE, cancel_key=_KEY_CANCEL)
                 )
@@ -5193,18 +5220,22 @@ class SettingsView(Vertical):
                 # column's `press a key…`; carrying both phrasings made a user
                 # check whether the difference was meaningful (design round 1,
                 # D7). The value column keeps the prompt, this line explains
-                # the way out.
-                lead, lead_style, reason = (
-                    _t_chrome(_svc.capture_listening()),
-                    dim + Style(bold=True),
-                    "",
-                )
+                # the way out. On a composer-scope row the lead teaches the
+                # chord grammar instead: a send chord that only works in
+                # kitty terminals must say so where the user binds it, and a
+                # legacy terminal would otherwise receive plain Enter for
+                # the very press the user believed was bound (UX round 1, U1).
+                if keymap_mod.scope_of(capture.setting_key) == "composer":
+                    lead = _t_chrome(_svc.capture_chord_grammar())
+                else:
+                    lead = _t_chrome(_svc.capture_listening())
+                lead_style, reason = dim + Style(bold=True), ""
                 contract_text = _t_chrome(_svc.capture_contract_cancel(cancel_key=_KEY_CANCEL))
 
             width = self._detail_width()
             contract_part = (contract_text, dim, False)
             lead_part = (lead, lead_style, False)
-            reason_style = error if reason else dim
+            reason_style = error if reason and not enhanced_hint else dim
             capture_rungs: list[list[tuple[str, Style, bool]]] = []
             if reason:
                 capture_rungs.append([lead_part, (reason, reason_style, False), contract_part])
@@ -5365,7 +5396,7 @@ class SettingsView(Vertical):
                 # finding names.
                 clause_style = _bridge_ink()
             width = self._detail_width()
-            help_text = _paint(row.setting.help, source_locale="en")
+            help_text = hotkey_hints.live_copy(self, _paint(row.setting.help, source_locale="en"))
             if row.setting.key == "notifications.sound.id":
                 # The registry help is SHARED with the desktop and `lop config`,
                 # so it names `lop sound add` / `lop sound doctor`. Inside the

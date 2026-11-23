@@ -1,0 +1,3 @@
+{
+  "session.remote_peek.display_too_large": "试试用 `head=20` 查看开头几步，或用 `digest` 查看简短摘要。\n最新的历史记录超出了显示页或运行时套接字的限制。\n显示页上限：{bytes} 字节或 {messages} 条消息。\n如需查看原始历史记录，请在承载该对话的设备上打开它。"
+}

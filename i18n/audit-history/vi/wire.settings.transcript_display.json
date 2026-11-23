@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "wire.settings.transcript_display",
+  "history_sha256": "5aba8d430115f9c2654053ef59aa66789a5ab38fc88aff040dee47c314831fb0",
+  "entries": [
+    {
+      "locale": "vi",
+      "namespace": "wire.settings.transcript_display",
+      "source_sha256": "8156cef6f3c7a5ce43f9f27e131cb0e426a3c70827d8652189212ae8c5610ffe",
+      "context_sha256": "750876c2faf7974e85e2e92df724d3c0b3fc952034ff7701e0c16c4d312775a8",
+      "target_sha256": "6f89f1f345cc531c840b743d09783b301d83b4dbcfcda0860934ab9234dc27b0",
+      "translator": {
+        "agent": "i18n-translator (lopdev task subagent, session label i18n-translator-fold; lop job 02522f8c98ed)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-22",
+        "model_kind": "actual served model, as reported by the translator's own hand-off (no provider fallback)"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent lopdev task subagent, session label i18n-auditor-fold; resumed lop job 265a7273c213); distinct instance and model from the translator",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-22",
+        "result": "passed",
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "nit": 2
+        },
+        "independent_from_translator": true,
+        "model_kind": "actual served model, as reported by the auditor's own round-2 report (no provider fallback)"
+      },
+      "status": "passed",
+      "keys": [
+        "wire.settings.transcript_display.choice.by_response.description",
+        "wire.settings.transcript_display.choice.by_response.label",
+        "wire.settings.transcript_display.choice.by_turn.description",
+        "wire.settings.transcript_display.choice.by_turn.label",
+        "wire.settings.transcript_display.help",
+        "wire.settings.transcript_display.label"
+      ],
+      "note": "Independent audit round 2 at HEAD 3db30d25b over this locale's three new namespaces: all 21 (locale, namespace) pairs passed, 0 blocker / 0 major unresolved. MINOR A8 (ru tui.transcript_fold.failed, count-last under tail truncation) and NIT A13/R2-1 skipped by decision: recorded in the PR thread as deferred, never fixed. Provenance is as relayed in the integrating coder's brief and the auditor's own report (i18n-audit-fold.md round 2) and the translator's hand-off (i18n-translator-handoff.md); the coder inspected no harness route log and reports no provider fallback. The audited values are the committed values."
+    }
+  ]
+}

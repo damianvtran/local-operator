@@ -2976,19 +2976,8 @@ class ToolContext(BaseModel):
     integrations_client_factory: Callable[[], Any] | None = Field(
         default=None, exclude=True, repr=False
     )
-    #: THE ASK GATE'S DOOR (design docs/design/ask-gate.md §2.2). Async — the
-    #: tool awaits one forked clearance check BEFORE the unchanged enqueue.
-    #: Bound under the same two conditions as :attr:`enqueue_ask` and ``None``
-    #: wherever it is, so its presence IS the mode, one fact. TOTAL and
-    #: fail-open: it returns a diversion mapping (``{"text": …, "details": …}``
-    #: carrying the hidden marker) or ``None``, and NEVER raises for any
-    #: policy, provider, parse or timeout condition — ``None`` means "enqueue,
-    #: unchanged". The in-callable policy read owns the kill switch; the
-    #: tool-side guard around the await is the last line so even a contract
-    #: breach cannot lose the ask (design §2.2's failure-semantics table).
-    gate_ask: Callable[..., Awaitable[Mapping[str, Any] | None]] | None = None
-    #: THE QUIET-END DOOR (docs/design/quiet-turns.md §4). Async, mirroring
-    #: :attr:`gate_ask`: the ``no_reply`` tool awaits it for the run's refusal
+    #: THE QUIET-END DOOR (docs/design/quiet-turns.md §4). Async: the
+    #: ``no_reply`` tool awaits it for the run's refusal
     #: decision, and its presence IS the fact that this session may end a turn
     #: quietly — ``build_no_reply_tool`` returns ``None`` without it
     #: (footprint ladder rung 3: the tool is absent, not inert, where a quiet

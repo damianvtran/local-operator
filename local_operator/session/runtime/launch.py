@@ -415,6 +415,7 @@ def _runtime_env(
     warm: bool = False,
     initial_model: Any = None,
     model_selection_override: bool = False,
+    goal_wake_due: int | None = None,
 ) -> dict[str, str]:
     """The environment a newly engaged runtime is born with.
 
@@ -513,6 +514,9 @@ def _runtime_env(
             env["LOP_MOBILE_CHILD_FAST"] = "1"
     if model_selection_override:
         env["LOP_MODEL_SELECTION_OVERRIDE"] = "1"
+    env.pop("LOP_RUNTIME_GOAL_WAKE_DUE", None)
+    if goal_wake_due is not None:
+        env["LOP_RUNTIME_GOAL_WAKE_DUE"] = str(goal_wake_due)
     if defer_materialise:
         env["LOP_RUNTIME_DEFER_MATERIALISE"] = "1"
     else:
@@ -561,6 +565,7 @@ def _spawn_runtime(
     warm: bool = False,
     initial_model: Any = None,
     model_selection_override: bool = False,
+    goal_wake_due: int | None = None,
 ) -> "subprocess.Popen[bytes]":
     """The spawn seam: start one runtime candidate, WHO FORKS IT DECIDED HERE.
 
@@ -606,6 +611,7 @@ def _spawn_runtime(
             warm=warm,
             initial_model=initial_model,
             model_selection_override=model_selection_override,
+            goal_wake_due=goal_wake_due,
         )
     else:
         return _spawn_runtime_local(
@@ -615,6 +621,7 @@ def _spawn_runtime(
             warm=warm,
             initial_model=initial_model,
             model_selection_override=model_selection_override,
+            goal_wake_due=goal_wake_due,
         )
 
 
@@ -626,6 +633,7 @@ def _spawn_runtime_hosted(
     warm: bool = False,
     initial_model: Any = None,
     model_selection_override: bool = False,
+    goal_wake_due: int | None = None,
 ) -> "subprocess.Popen[bytes]":
     """Ask the session host to fork the runtime; this process forks NOTHING.
 
@@ -660,6 +668,7 @@ def _spawn_runtime_hosted(
         warm=warm,
         initial_model=initial_model,
         model_selection_override=model_selection_override,
+        goal_wake_due=goal_wake_due,
     )
     # A HOST-FORKED RUNTIME IS NOT THE WAKE SUPERVISOR'S CHILD. ``_runtime_env``
     # stamps the supervisor's ownership token when the supervisor itself engages,
@@ -770,6 +779,7 @@ def _spawn_runtime_local(
     warm: bool = False,
     initial_model: Any = None,
     model_selection_override: bool = False,
+    goal_wake_due: int | None = None,
 ) -> "subprocess.Popen[bytes]":
     """Start one detached runtime candidate for ``session_id``.
 
@@ -826,6 +836,7 @@ def _spawn_runtime_local(
         warm=warm,
         initial_model=initial_model,
         model_selection_override=model_selection_override,
+        goal_wake_due=goal_wake_due,
     )
     # 0600 at CREATION, via mkstemp. `Path.open("wb")` takes the process umask
     # (measured 0o644 here), leaving the child's entire stdout+stderr --
@@ -1530,6 +1541,11 @@ async def engage_runtime(
     # later caller that wants deferral for its own reason cannot buy a window
     # nobody engaged for (review round 1, M4).
     defer = isinstance(work, WarmErrand)
+    goal_wake_kwargs = (
+        {"goal_wake_due": work.occurrence_ms}
+        if isinstance(work, WakeErrand) and work.schedule_id == "goal"
+        else {}
+    )
 
     while time.monotonic() < _deadline():
         # Whether this pass may spend the CORPSE PROOF, or only the cheap probe.
@@ -1640,6 +1656,7 @@ async def engage_runtime(
                     model_selection_override=(
                         work.model_selection_override if isinstance(work, WarmErrand) else False
                     ),
+                    **goal_wake_kwargs,
                 )
                 capture = getattr(candidate, "lop_capture_path", None)
                 spawned = True
@@ -1683,6 +1700,13 @@ async def engage_runtime(
                     spawn_reason = reason or spawn_reason
                     spawn_actionable = actionable or spawn_actionable
                     capture.unlink(missing_ok=True)
+                if (goal_due := goal_wake_kwargs.get("goal_wake_due")) is not None:
+                    from local_operator.wakes.goals import permits_wake
+
+                    if not await asyncio.to_thread(
+                        permits_wake, config_dir / "sessions" / session_id, goal_due
+                    ):
+                        raise RuntimeStartupError("automatic goal wake is no longer eligible")
                 logger.info(
                     "engage: the candidate for %s died during construction (rc=%s): %s",
                     session_id,
@@ -1700,6 +1724,7 @@ async def engage_runtime(
                     model_selection_override=(
                         work.model_selection_override if isinstance(work, WarmErrand) else False
                     ),
+                    **goal_wake_kwargs,
                 )
                 capture = getattr(candidate, "lop_capture_path", None)
                 spawns += 1

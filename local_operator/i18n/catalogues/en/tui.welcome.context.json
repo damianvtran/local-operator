@@ -106,5 +106,11 @@
     "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
     "role": "splash tip",
     "tone": "plain, one clause"
+  },
+  "tui.welcome.tip.transcript_scroll": {
+    "role": "splash tip",
+    "tone": "plain, one clause",
+    "maxCells": 57,
+    "note": "EN-only context sidecar. Static on purpose: it names the row-step chord pair (option+k / option+j), and resolving both from the remappable keymap through the keyed-tip machinery would triple the template width budget behind TIP_MIN_WIDTH and drop every tip below ~90 cells. `option` is the macOS spelling /help uses for the same modifier; the chord is a technical token and stays Latin and untranslated in every locale. A remap makes this sentence stale — it names the SHIPPED default, and `/settings` → Hotkeys carries the live value (`/help` and the ? legend name the same default). No ICU arguments."
   }
 }

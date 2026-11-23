@@ -1,0 +1,6 @@
+{
+  "tui.busy_delivery.queue_notice": "queued — waits, tools keep running",
+  "tui.busy_delivery.both_notice": "queued — waits, then steers if slow",
+  "tui.busy_delivery.steer_notice": "steering — may stop a running tool",
+  "tui.busy_delivery.steer_joined_notice": "steering — goes out with your steer"
+}

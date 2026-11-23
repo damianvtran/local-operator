@@ -123,6 +123,7 @@ from local_operator.session.runtime.types import (
     ASK_ATTACHMENTS_UNSUPPORTED,
     ATTACH_ACTIVITY_CAPABILITY,
     ATTACH_MAX_CLIENTS,
+    BUSY_DELIVERY_CAPABILITY,
     DESKTOP_WATCH_CAPABILITY,
     DESKTOP_WATCH_LEASE_S,
     DOCUMENT_ATTACHMENTS_CAPABILITY,
@@ -2044,6 +2045,31 @@ def _takes_input_mode(handle: Any) -> bool:
     return True
 
 
+def _takes_delivery(handle: Any) -> bool:
+    """Whether ``handle``'s ``prompt`` AND ``steer`` take the ``delivery`` keyword.
+
+    Same literal-parameter rule as :func:`_takes_input_mode` and for the same
+    reason: the dispatch passes the keyword only when the literal parameter
+    name is present, so a ``**kwargs``-only method would silently DROP the
+    mode and must not be advertised. BOTH OPS ARE PROBED because the prompt
+    arm is the busy-session fallback that steers under the same command id:
+    a handle that took ``delivery`` on ``steer`` alone would advertise a
+    ``prompt`` that hands the mode to a fallback which ignores it. An
+    unreadable or missing method answers no, the conservative side.
+    """
+    for name in ("prompt", "steer"):
+        method = getattr(handle, name, None)
+        if method is None:
+            return False
+        try:
+            parameters = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            return False
+        if "delivery" not in parameters:
+            return False
+    return True
+
+
 def _takes_ask_attachments(handle: Any) -> bool:
     """Whether ``handle``'s ``ask_respond`` takes the ``attachments`` keyword.
 
@@ -3117,6 +3143,7 @@ class RuntimeServer:
                 logger.debug("could not install the interactivity probe", exc_info=True)
         seed = handle.session_projection_seed
         seed.kind = kind
+        self._goal_recovery_enabled = kind != "exec"
         # The projection fold is an OPTIONAL, injected collaborator. A caller
         # that already owns a fold may hand it in and the runtime uses it
         # as-is — only tests do today; every production constructor call
@@ -3307,6 +3334,13 @@ class RuntimeServer:
                 # asks both methods — see ``_takes_input_mode``, which mirrors
                 # the dispatch's own check exactly.
                 + ([INPUT_MODE_CAPABILITY] if _takes_input_mode(handle) else [])
+                # BUSY-SEND DELIVERY MODES, gated on the handle that would HONOUR
+                # the mode rather than advertised unconditionally: the reader of
+                # this string (the mobile stream, the desktop admit path) must
+                # never send `queue`/`both` to an owner whose prompt/steer would
+                # silently drop them — that is a silent downgrade to an urgent
+                # steer. See ``_takes_delivery``.
+                + ([BUSY_DELIVERY_CAPABILITY] if _takes_delivery(handle) else [])
                 # DOCUMENTS, on the same gated-on-the-handle rule: the string
                 # is the sender's licence to send ``Prompt.files``, and an
                 # owner whose dispatch would drop the key must not advertise
@@ -4509,7 +4543,7 @@ class RuntimeServer:
             # Probed, not required — a handle without the capability (a third-
             # party or reduced host) simply has no goal judge to re-arm.
             rearm_goal_judge = getattr(self._handle, "rearm_goal_judge", None)
-            if callable(rearm_goal_judge):
+            if self._goal_recovery_enabled and callable(rearm_goal_judge):
                 try:
                     await self._handle_call_on_session_loop(rearm_goal_judge)
                 except Exception:  # noqa: BLE001 — additive, never a boot gate
@@ -4890,6 +4924,9 @@ class RuntimeServer:
                     logger.debug("could not record the serving tick's death", exc_info=True)
                 continue
             try:
+                tick_goal_recovery = getattr(self._handle, "tick_goal_recovery", None)
+                if self._goal_recovery_enabled and callable(tick_goal_recovery):
+                    tick_goal_recovery()
                 # The FLOOR for the record's ``busy`` bit, not its fix: the
                 # handle republishes at every turn boundary (the session's
                 # ``on_turn_settled`` hook), and this only bounds how stale a
@@ -9391,6 +9428,13 @@ class RuntimeServer:
                 fields["input_mode"] = frame.get("input_mode")
             if "input_path" in parameters:
                 fields["input_path"] = frame.get("input_path")
+            # The busy-send delivery mode rides the same probe: absent is the
+            # legacy steer, and a handle that predates the keyword keeps its
+            # exact old call shape (the client that sent a mode has already
+            # refused against this owner on the capability, so nothing the
+            # dispatch drops can downgrade a queued send).
+            if "delivery" in parameters:
+                fields["delivery"] = frame.get("delivery")
             # The audio door rides the same probe. A frame that omits the key
             # answers ``None`` (no recording), so every legacy send stays
             # byte-identical, and a handle that predates this keyword never
@@ -9455,6 +9499,11 @@ class RuntimeServer:
                 fields["input_mode"] = frame.get("input_mode")
             if "input_path" in parameters:
                 fields["input_path"] = frame.get("input_path")
+            # The busy-send delivery mode rides the same probe: absent is the
+            # legacy steer, and a handle that predates the keyword keeps its
+            # exact old call shape.
+            if "delivery" in parameters:
+                fields["delivery"] = frame.get("delivery")
             # ...and the recording rides it like an image does: a mid-turn
             # audio send lands its blocks on the queued row rather than
             # dropping them at a handle that cannot take the keyword.

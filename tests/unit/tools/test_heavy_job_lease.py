@@ -94,6 +94,106 @@ HEAVY = [
     ("pytest -v -n 4", "pytest -n"),
 ]
 
+#: Native iOS builds (2026-11-22 incident: load 290-750 on 14 cores because the
+#: lease did not count them), including the wrappers they are run through.
+IOS_HEAVY = [
+    ("xcodebuild -workspace App.xcworkspace -scheme App build", "xcodebuild"),
+    (
+        "xcodebuild test -scheme App -destination 'platform=iOS Simulator,name=iPhone 15'",
+        "xcodebuild",
+    ),
+    ("xcodebuild archive -scheme App", "xcodebuild"),
+    ("xcodebuild", "xcodebuild"),
+    ("/usr/bin/xcodebuild -project A.xcodeproj", "xcodebuild"),
+    ("cd ios && xcodebuild -scheme App", "xcodebuild"),
+    ("timeout 3600 xcodebuild build-for-testing -scheme App", "xcodebuild"),
+    ("bash -c 'cd ios && xcodebuild -scheme App'", "xcodebuild"),
+    ("expo run:ios", "expo run:ios"),
+    ("expo run:ios --device --configuration Release", "expo run:ios"),
+    ("npx expo run:ios", "expo run:ios"),
+    ("pnpm exec expo run:ios", "expo run:ios"),
+    ("pnpm expo run:ios", "expo run:ios"),
+    ("yarn expo run:ios", "expo run:ios"),
+    ("npm exec -- expo run:ios", "expo run:ios"),
+    ("bunx expo run:ios --no-bundler", "expo run:ios"),
+    ("expo prebuild", "expo prebuild"),
+    ("npx expo prebuild --platform ios --clean", "expo prebuild"),
+    ("pnpm dlx expo prebuild", "expo prebuild"),
+    ("pod install", "pod install"),
+    ("pod install --repo-update", "pod install"),
+    ("cd ios && pod install", "pod install"),
+    ("bundle exec pod install", "pod install"),
+    ("arch -arm64 pod install", "pod install"),
+    ("arch -x86_64 bundle exec pod install", "pod install"),
+    ("npx pod-install", "pod install"),
+    ("eas build --local", "eas build --local"),
+    ("eas build --platform ios --local", "eas build --local"),
+    ("npx eas build --local", "eas build --local"),
+    ("npx eas-cli build --platform ios --local", "eas build --local"),
+    ("npx eas-cli@latest build --local", "eas build --local"),
+    ("pnpm exec eas build --local", "eas build --local"),
+    ("yarn eas build --local", "eas build --local"),
+    ("npm exec -- eas build --local", "eas build --local"),
+    ("nice -n 10 xcodebuild -scheme App", "xcodebuild"),
+    ("npx expo@latest run:ios", "expo run:ios"),
+    ("npx expo@~51.0.0 prebuild", "expo prebuild"),
+    ("npx @expo/cli run:ios", "expo run:ios"),
+    ("npx @expo/cli@latest prebuild", "expo prebuild"),
+    ("pnpm dlx @expo/cli prebuild", "expo prebuild"),
+    ("npx pod-install@latest", "pod install"),
+    ("npx expo --config app.json run:ios", "expo run:ios"),
+    ("pod --project-directory ios install", "pod install"),
+    ("pod _1.15.2_ install", "pod install"),
+    ("eas build --local=true", "eas build --local"),
+    ("xcodebuild -exportLocalizations -project App.xcodeproj", "xcodebuild"),
+    ("git status && pod install 2>&1 | tail -5", "pod install"),
+]
+
+#: Same tools, informational or light: no slot.
+IOS_NOT_HEAVY = [
+    "xcodebuild -version",
+    "xcodebuild -list",
+    "xcodebuild -list -workspace App.xcworkspace",
+    "xcodebuild -showsdks",
+    "xcodebuild -showBuildSettings -scheme App",
+    "xcodebuild -showdestinations -scheme App",
+    "xcodebuild -help",
+    "xcodebuild --help",
+    "pod install -h",
+    "expo prebuild -h",
+    "eas build --local -h",
+    "pod --version",
+    "pod --help",
+    "pod install --help",
+    "pod repo update",
+    "pod spec lint",
+    "pod outdated",
+    "bundle exec pod --version",
+    "bundle install",
+    "bundle exec rake",
+    "expo start",
+    "expo start --ios",
+    "npx expo start",
+    "pnpm expo start",
+    "expo run:android",
+    "expo --version",
+    "npx expo --version",
+    "expo run:ios --help",
+    "expo install react-native",
+    "expo export",
+    "eas build --platform ios",
+    "npx eas-cli build --platform ios",
+    "eas build:list",
+    "eas build --help",
+    "eas submit --platform ios",
+    "eas --version",
+    "arch",
+    "arch -arm64 ls",
+    "echo 'xcodebuild'",
+    "echo 'pod install'",
+    "grep -rn xcodebuild ios/",
+]
+
 #: Tonight's (2026-11-16) incident shapes, each pinned as its own row
 #: (manager addition (c) on PR #4104). `timeout 900 pnpm test` is how the mac
 #: proof runs were spelled: timeout -> node -> node-22.
@@ -194,6 +294,71 @@ def test_heavy_commands_are_classified(command: str, reason: str) -> None:
     assert heavy.reason == reason
 
 
+@pytest.mark.parametrize("command,reason", IOS_HEAVY)
+def test_native_ios_builds_are_heavy(command: str, reason: str) -> None:
+    heavy = heavy_lease.is_heavy(command)
+    assert heavy == heavy_lease.HeavyClass(reason), command
+
+
+@pytest.mark.parametrize("command", IOS_NOT_HEAVY)
+def test_informational_and_light_ios_tooling_is_not_heavy(command: str) -> None:
+    assert heavy_lease.is_heavy(command) is None, command
+
+
+def test_ios_build_scripts_resolve_through_package_json(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(
+        json.dumps(
+            {
+                "scripts": {
+                    "ios": "expo run:ios",
+                    "pods": "cd ios && pod install",
+                    "eas-local": "eas build --local",
+                    "start": "expo start",
+                    "doctor": "xcodebuild -version",
+                }
+            }
+        )
+    )
+    for script, reason in [
+        ("ios", "npm ios"),
+        ("pods", "npm pods"),
+        ("eas-local", "npm eas-local"),
+    ]:
+        heavy = heavy_lease.is_heavy(f"npm run {script}", cwd=str(tmp_path))
+        assert heavy == heavy_lease.HeavyClass(reason), script
+    assert heavy_lease.is_heavy("npm run doctor", cwd=str(tmp_path)) is None
+    assert heavy_lease.is_heavy("npm start", cwd=str(tmp_path)) is None
+
+
+def _nested(command: str) -> str:
+    for _ in range(heavy_lease._MAX_DEPTH + 2):
+        command = f"bash -c {shlex.quote(command)}"
+    return command
+
+
+@pytest.mark.parametrize(
+    "command,reason",
+    [
+        ("xcodebuild -scheme App", "xcodebuild"),
+        ("expo run:ios", "expo run:ios"),
+        ("cd ios && pod install", "pod install"),
+        ("npx eas-cli@latest build --local", "eas build --local"),
+        ("npx expo@latest run:ios", "expo run:ios"),
+        ("npx pod-install@latest", "pod install"),
+        ("npx @expo/cli prebuild", "expo prebuild"),
+    ],
+)
+def test_ios_builds_stay_heavy_past_the_depth_bound(command: str, reason: str) -> None:
+    assert heavy_lease.is_heavy(_nested(command)) == heavy_lease.HeavyClass(reason)
+
+
+@pytest.mark.parametrize(
+    "command", ["xcodebuild -version", "pod --version", "expo start", "eas build --platform ios"]
+)
+def test_light_ios_tooling_stays_light_past_the_depth_bound(command: str) -> None:
+    assert heavy_lease.is_heavy(_nested(command)) is None
+
+
 @pytest.mark.parametrize("command", NOT_HEAVY)
 def test_short_commands_are_not_heavy(command: str) -> None:
     assert heavy_lease.is_heavy(command) is None
@@ -203,6 +368,75 @@ def test_short_commands_are_not_heavy(command: str) -> None:
 def test_incident_shapes_are_heavy(command: str, reason: str) -> None:
     heavy = heavy_lease.is_heavy(command)
     assert heavy is not None and heavy.reason == reason, command
+
+
+# A newline ends a simple command in the shell. shlex swallowed it, so these were
+# one segment (`echo`, `cd`, `for`…) and the heavy command after it was never seen.
+MULTILINE_HEAVY = [
+    ("echo hi\npytest tests/unit", "pytest <directory>"),
+    ("cd x\npytest tests/unit", "pytest <directory>"),
+    ("echo hi\r\npytest tests/unit\r\n", "pytest <directory>"),
+    # Backslash-newline is a continuation, not a boundary: one pytest, one target.
+    ("pytest \\\n  tests/unit", "pytest <directory>"),
+    ("echo hi\nvitest run", "vitest"),
+    ("ls\nxcodebuild -scheme App\ncat log", "xcodebuild"),
+    ("for f in a b; do\n  pytest tests/unit\ndone", "pytest <directory>"),
+    ("if true; then pytest tests/unit; fi", "pytest <directory>"),
+    ("while false; do :; done; until true; do vitest run; done", "vitest"),
+    ("if pytest tests/unit; then echo ok; else echo bad; fi", "pytest <directory>"),
+    ("echo a # don't\nvitest run", "vitest"),
+    ("echo 'a\nb'\nvitest run", "vitest"),
+    # A heredoc body is read as command lines: it errs toward leasing.
+    ("cat <<EOF\nhello\nEOF\nvitest run", "vitest"),
+]
+
+MULTILINE_LIGHT = [
+    "ls\ngrep x y\ncat f",
+    # A newline inside quotes is part of the argument, not a command boundary.
+    "git commit -m 'a\npytest tests/unit'",
+    'echo "x\nvitest run"',
+    # A comment's apostrophe must not open a quote that swallows the next lines.
+    "# don't\nls",
+    "# run pytest later\nls",
+    "ls # run vitest run later",
+    "echo pytest",
+    "echo hi\npytest --collect-only",
+    "pytest --collect-only\n",
+    "echo hi \\\n  pytest",
+    "for f in a b; do\n  echo $f\ndone",
+]
+
+
+@pytest.mark.parametrize("command,reason", MULTILINE_HEAVY)
+def test_a_heavy_command_on_its_own_line_is_heavy(command: str, reason: str) -> None:
+    heavy = heavy_lease.is_heavy(command)
+    assert heavy is not None and heavy.reason == reason, command
+    assert not heavy.long_lived
+
+
+@pytest.mark.parametrize("command", MULTILINE_LIGHT)
+def test_multiline_commands_with_no_heavy_command_stay_light(command: str) -> None:
+    assert heavy_lease.is_heavy(command) is None, command
+
+
+def test_a_watcher_on_its_own_line_is_long_lived_not_leased() -> None:
+    assert heavy_lease.is_heavy("echo hi\nvitest --watch") is None
+    assert heavy_lease.is_heavy("echo hi\nvitest --watch\nvitest run") == heavy_lease.HeavyClass(
+        "vitest", long_lived=True
+    )
+
+
+def test_an_unbalanced_quote_still_splits_per_line() -> None:
+    # The fallback keeps newlines as boundaries, so the heavy line still queues.
+    assert heavy_lease.is_heavy("echo it's\nvitest run") == heavy_lease.HeavyClass("vitest")
+
+
+def test_segments_split_on_newlines_outside_quotes_only() -> None:
+    assert heavy_lease._segments("a b\nc 'd\ne' \\\nf # g'h\n\ni") == [
+        ["a", "b"],
+        ["c", "d\ne", "f"],
+        ["i"],
+    ]
 
 
 @pytest.mark.parametrize("command", LONG_LIVED)

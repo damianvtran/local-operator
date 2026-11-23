@@ -5201,6 +5201,21 @@ async def _prepare(
         acquire_session_lease(transcript_dir) if transcript_dir.parent.name == "sessions" else None
     )
 
+    goal_wake_due: int | None = getattr(args, "goal_wake_due", None)
+    if goal_wake_due is not None:
+        from local_operator.session.runtime.launch import RuntimeStartupError
+        from local_operator.wakes.goals import permits_wake
+
+        # The supervisor and launcher both yield before the owner holds the
+        # transcript lease. Refuse stale work before claiming or opening it.
+        try:
+            if session_lease is None or not permits_wake(transcript_dir, goal_wake_due):
+                raise RuntimeStartupError("automatic goal wake is no longer eligible")
+        except BaseException:
+            if session_lease is not None:
+                session_lease.release()
+            raise
+
     # CLAIM BEFORE creating the directory, and in that order. The claim marker
     # is what tells anything scanning the store (the user-enabled cleanup
     # policy, the picker, the mobile daemon) that this directory belongs to a
@@ -5725,6 +5740,7 @@ async def _prepare(
         skill_resolver=_make_knowledge_resolver(hooks),
         request_approval=request_approval,
         goal_state=goal_state,
+        goal_wake_due=goal_wake_due,
         variables=variable_store,
         agent_registry=agent_registry,
         team_registry=team_registry,

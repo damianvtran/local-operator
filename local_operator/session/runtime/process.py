@@ -6290,7 +6290,9 @@ async def amain(operator_cap: bytes | None = None) -> int:
         os.environ["LOP_RUNTIME_ADOPT_SESSION"] = "1"
 
     loop = asyncio.get_running_loop()
+    raw_goal_wake_due = os.environ.pop("LOP_RUNTIME_GOAL_WAKE_DUE", "")
     try:
+        goal_wake_kwargs = {"goal_wake_due": int(raw_goal_wake_due)} if raw_goal_wake_due else {}
         handle: ServingSessionHandle = await spawn_owned_session(
             loop,
             cwd=cwd,
@@ -6300,6 +6302,7 @@ async def amain(operator_cap: bytes | None = None) -> int:
             birth_fast=birth_fast,
             resume=resume,
             model_selection_override=os.environ.get("LOP_MODEL_SELECTION_OVERRIDE") == "1",
+            **goal_wake_kwargs,
         )
     except SessionLeaseHeldError as exc:
         # LOSING THE LEASE IS NOT AN ERROR. Under ``engage_runtime`` every

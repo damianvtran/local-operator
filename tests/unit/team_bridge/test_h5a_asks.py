@@ -1,8 +1,7 @@
 """H5a — bridge requests are human-required asks (contract §10.3, #125).
 
-The invariant under test: a bridge ask ALWAYS lands in the human queue —
-the gate's clearance fork is short-circuited for the class, the queue's own
-enqueue path is the one used, and the carriage that the decide receipt binds
+The invariant under test: a bridge ask uses the human queue, and the carriage
+that the decide receipt binds
 to (``question_id`` == the request's message id) survives the shape
 projection and the fold.
 """
@@ -10,14 +9,12 @@ projection and the fold.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import cast
 
 import pytest
 
-from local_operator.asks import policy
 from local_operator.asks import store as asks_store
 from local_operator.asks.queue import AskQueue, _question_shape
-from local_operator.session.session import Session, _question_marked_human_required
+from local_operator.session.session import _question_marked_human_required
 from local_operator.team_bridge.asks_bridge import (
     BRIDGE_ASK_OPTIONS,
     EXCERPT_MAX_CHARS,
@@ -119,39 +116,7 @@ def test_the_shape_projection_keeps_the_carriage() -> None:
     assert generic["human_required"] is False and generic["question_id"] == ""
 
 
-def test_the_gate_short_circuits_before_the_clearance_fork(monkeypatch) -> None:
-    """The load-bearing arm: with the gate ENABLED and a would-be clearance
-    verdict available, a human_required question must return None (the
-    UNCHANGED enqueue path) without the fork ever being consulted."""
-    calls: list[str] = []
-
-    monkeypatch.setattr(policy, "gate_enabled", lambda: True)
-
-    import local_operator.session.clearance as clearance_mod
-
-    def _boom(*args, **kwargs):  # pragma: no cover — the assert IS the point
-        calls.append("fingerprint")
-        raise AssertionError("clearance must never be consulted for a human_required ask")
-
-    monkeypatch.setattr(clearance_mod, "fingerprint", _boom)
-
-    stub = SimpleNamespace(
-        ask_queue=lambda: object(),
-        _ask_gate_diverts=set(),
-    )
-    import asyncio
-
-    outcome = asyncio.run(
-        # ``stub`` is a SimpleNamespace standing in for the session, and the
-        # door is a static method read through the class: the cast is the
-        # boundary that keeps the fixture honest without weakening the door's
-        # own signature.
-        Session._gate_ask(cast(Session, stub), [SimpleNamespace(secret=False, human_required=True)])
-    )
-    assert outcome is None
-    assert calls == []
-
-    # And the mark reads off the mapping shape too (the queue's storage form).
+def test_the_human_required_mark_reads_both_shapes() -> None:
     assert _question_marked_human_required({"human_required": True}) is True
     assert _question_marked_human_required(SimpleNamespace(human_required=True)) is True
     assert _question_marked_human_required({"id": "q0"}) is False

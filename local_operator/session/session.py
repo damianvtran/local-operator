@@ -51,7 +51,7 @@ import tempfile
 import time
 import uuid
 import weakref
-from collections import OrderedDict, deque
+from collections import deque
 from collections.abc import (
     AsyncIterator,
     Awaitable,
@@ -153,6 +153,7 @@ from local_operator.harness.render import (
     _is_todo_reminder,
 )
 from local_operator.harness.replay_bound import bound_replay_payloads
+from local_operator.harness.request_admission import RequestAdmission
 from local_operator.harness.rows import is_harness_injection
 from local_operator.harness.subagent import (
     is_inherit_tier_sentinel,
@@ -873,6 +874,19 @@ _MAX_CONTINUATIONS = 8
 #: ``_pre_aborted_drops``) rather than once per drop, because N identical rows
 #: at sub-second cadence is the noise this replaced.
 _PRE_ABORT_DROP_NOTICE_AT = 3
+
+#: How a message sent to a busy session is delivered (``steer``/``queue``/
+#: ``both``). ``steer`` is urgent (today's behaviour); ``queue`` never cancels
+#: a running tool or skips a batch call; ``both`` is ``queue`` until it has been
+#: waiting this long, then counts as urgent. The value is an UNMEASURED DEFAULT
+#: (45 s, design D2/D3): chosen as a round number, not from observed stall
+#: durations, and it names age as the only stall signal because ``Session`` has
+#: no finer activity clock.
+BUSY_QUEUE_ESCALATE_AFTER_S = 45.0
+
+#: The ``delivery`` wire vocabulary. Absent/empty reads as ``steer``; any other
+#: non-empty value is refused at the wire, never coerced (design D5).
+BusyDelivery = Literal["steer", "queue", "both"]
 
 #: Arrivals that are the RESIDUE of work a stop was aimed at, not fresh intent.
 #:
@@ -3921,6 +3935,7 @@ class Session:
         #: ``no_seam`` refusal byte for byte; the CLI headless path and the
         #: runtime that serves the TUI/desktop/phone turn it on.
         owner_prompt_consent: bool = False,
+        goal_wake_due: int | None = None,
         #: HOST-ONLY taint snapshot for a subagent: whether ANY ancestor run
         #: (parent, grandparent, ...) had read untrusted input when this child
         #: was spawned. A child's own inputs are its parent's text, so without
@@ -4528,6 +4543,9 @@ class Session:
         # The goal rides the prompt's volatile tail; the holder is shared with
         # the system-blocks provider so an edit applies from the next turn.
         self._goal_state = goal_state if goal_state is not None else GoalState()
+        self._goal_recovery_disabled = False
+        self._goal_recovery_prior_token = ""
+        self._goal_restored_token = ""
         self._variables = variables
         self._job_id = job_id
         saver_bridge = getattr(self._stream_fn, "bind_saver", None)
@@ -5151,6 +5169,13 @@ class Session:
         # it beside queued messages so ordinary callers can still choose ids
         # without accidentally entering the mobile admission namespace.
         self._steering_producers: dict[int, str] = {}
+        # Busy-send delivery mode per queued steer, keyed by ``id(message)``
+        # like ``_steering_producers``. The value is the escalate-at monotonic
+        # instant (``None`` = queue only, never urgent). Entries are added in
+        # ``steer``/``steer_message`` and removed at drain/recall/dispose with
+        # the producers map, so a queued ``queue``/``both`` item is excluded
+        # from ``_has_urgent_steering`` until ``both`` escalates by age.
+        self._steer_delivery: dict[int, float | None] = {}
         # Hosts reserve producer identities before a steer reaches its durable
         # boundary. A failed append must hand that identity back explicitly;
         # otherwise one disk error consumes both the retry ID and a bounded
@@ -5975,16 +6000,6 @@ class Session:
         # is what this lock is for (review round 1, MAJOR 4).
         self._ask_wake_lock = asyncio.Lock()
         self._ask_reach: Callable[[], Any] | None = None
-        #: THE ASK GATE'S HONOR RULE (design docs/design/ask-gate.md §2.5):
-        #: fingerprint -> epoch for asks this session has already DIVERTED
-        #: (verdict clear/resolve). A hit skips the second check and enqueues
-        #: unchanged — the model's second attempt is a decision the operator
-        #: can override. Bounded LRU: a hit or a record moves the entry to the
-        #: end, overflow drops the oldest (``GATE_FINGERPRINT_CAP``).
-        #: SESSION-lifetime, no TTL, and in-memory on purpose: the skip
-        #: direction is ENQUEUE (the safe one), so eviction costs one redundant
-        #: check and a restart costs one more — never a lost ask.
-        self._ask_gate_diverts: OrderedDict[str, float] = OrderedDict()
         #: The host's wire publisher for the ask fold (design §4, N2). A
         #: runtime/terminal host registers one so the queue's own change path
         #: (``AskQueue._refresh`` -> ``publish_ask_state``) can push the asks
@@ -6013,6 +6028,7 @@ class Session:
             deliver=self._deliver_monitor,
             persist=self._persist_monitor_schedules,
             on_change=self._on_monitor_change,
+            on_quiet_check=self._on_quiet_monitor_check,
             index_writable=lambda: not self._monitor_index_write_failed,
             classify=monitor_classify,
             announce=self._announce_monitor_notice,
@@ -6113,7 +6129,17 @@ class Session:
         # and an empty schedule list removes it. Runs before the catch-up
         # snapshot only because ``load()`` has already re-armed overdue rows,
         # so what lands on disk is the post-load truth.
-        self._rebuild_wake_index_entry()
+        if goal_wake_due is None:
+            self._rebuild_wake_index_entry()
+        else:
+            from local_operator.session.runtime.launch import RuntimeStartupError
+            from local_operator.wakes.goals import permits_wake
+
+            # Preparation can yield again after lease admission. More
+            # importantly, automation is not a manual reopen: do not rewrite
+            # the index at all, even if a stop lands just after this read.
+            if not permits_wake(self._transcript.directory, goal_wake_due):
+                raise RuntimeStartupError("automatic goal wake is no longer eligible")
         self._prepare_missed_wake_catchup()
         # Monitors load and rebuild their own derived index on EVERY open,
         # exactly like the wake pair above: the transcript is the source of
@@ -8916,6 +8942,12 @@ class Session:
         stored = self._goal_state.arm(text)
         self._persist_attachment()
         self._persist_goal_record()
+        if stored and not getattr(self, "_goal_recovery_disabled", False):
+            from local_operator.resume import USER_ORIGINS, session_origin
+
+            origin = session_origin(self._transcript.directory)
+            if not origin or origin in USER_ORIGINS:
+                self._ensure_wake_supervisor()
         self.refresh_frontend_state()
         return stored
 
@@ -9272,7 +9304,52 @@ class Session:
             directory = self._transcript.directory
         except Exception:  # noqa: BLE001 — a reduced host must not lose its turn
             return
-        write_goal_record(directory, self._goal_state.to_payload())
+        payload = self._goal_state.to_payload()
+        payload["recover"] = True
+        if getattr(self, "_goal_recovery_disabled", False):
+            # A one-shot run must not plant a new unattended obligation. If
+            # it was explicitly resumed against an already armed token, leave
+            # that token's original policy intact.
+            payload["recover"] = self._goal_state.token == getattr(
+                self, "_goal_recovery_prior_token", ""
+            )
+        payload["cwd"] = getattr(self, "_cwd", "")
+        write_goal_record(directory, payload)
+
+    def goal_recovery_due(self) -> bool:
+        """A retry is an owner-side trigger, never a durable prompt."""
+        from local_operator.wakes.goals import retry_at
+        from local_operator.wakes.store import is_held, read_entry
+
+        if (
+            self._disposed
+            or self._job_id is not None
+            or self._goal_state.status != "active"
+            or getattr(self, "_goal_recovery_disabled", False)
+        ):
+            return False
+        due = retry_at(self._transcript.directory)
+        return (
+            due is not None
+            and due <= int(time.time() * 1000)
+            and not is_held(read_entry(self._config_dir, self._session_id))
+        )
+
+    def disable_goal_recovery(self) -> None:
+        """Keep one-shot exec's verdict-only contract across its teardown."""
+        from local_operator.resume import read_goal_record
+
+        record = read_goal_record(self._transcript.directory) or {}
+        # Exec may be resuming an existing goal, or may just have armed a new
+        # one. Only the former is allowed to retain its cold-wake authority.
+        if (
+            self._goal_restored_token == self._goal_state.token
+            and record.get("recover") is not False
+        ):
+            self._goal_recovery_prior_token = self._goal_state.token
+        self._goal_recovery_disabled = True
+        if self._goal_state.status == "active":
+            self._persist_goal_record()
 
     def _restore_goal_record(self) -> None:
         """Rebuild the judged-goal record from ``goal.json``, if there is one.
@@ -9309,6 +9386,7 @@ class Session:
         holder.judge = record.judge
         holder.history = record.history
         holder.token = record.token
+        self._goal_restored_token = record.token
         holder.created_at = record.created_at
 
     def _clear_unresolved(self, slot: str) -> None:
@@ -11195,6 +11273,7 @@ class Session:
         documents: Sequence[DocumentContent] | None = None,
         harness_injected: bool = False,
         owner_typed: bool = True,
+        delivery: BusyDelivery | str | None = None,
         mesh_origin: Mapping[str, Any] | None = None,
         _file_capture: Any = ...,
         input_surface: str = "tui",
@@ -11243,6 +11322,13 @@ class Session:
         while the turn lock is held, and without the carriage the replayed
         continuation would mint an UNSTAMPED user row that the marker-only
         surfaces paint. Defaults ``False`` so no existing caller changes.
+
+        ``delivery`` names how this busy send is delivered: ``steer`` (the
+        default — urgent, may cancel an interruptible tool), ``queue`` (never
+        cancels or skips, delivered at the next step boundary or its own turn),
+        ``both`` (``queue`` until it has waited ``BUSY_QUEUE_ESCALATE_AFTER_S``,
+        then urgent). Absent/empty reads as ``steer``. Ignored when the session
+        is idle. Refusal of an unknown value happens at the wire, never here.
 
         A steer admitted while NO turn is live opens a turn for itself (see
         ``_ensure_steering_wake``): the row is queued exactly as before — the
@@ -11293,6 +11379,7 @@ class Session:
         self._steering_queue.put_nowait(message)
         if producer_command_id is not None:
             self._steering_producers[id(message)] = producer_command_id
+        self._record_steer_delivery(message, delivery)
         self.refresh_frontend_state()
         self._ensure_steering_wake()
 
@@ -11323,7 +11410,7 @@ class Session:
             self._steering_queue.put_nowait(message)
         return snapshot
 
-    def steer_message(self, message: Message) -> None:
+    def steer_message(self, message: Message, delivery: BusyDelivery | str | None = None) -> None:
         """Queue a caller-built steering message, sharing the caller's object.
 
         The identity-preserving twin of :meth:`steer`: a host that keeps its
@@ -11336,8 +11423,27 @@ class Session:
         the composer's other spelling.
         """
         self._steering_queue.put_nowait(message)
+        self._record_steer_delivery(message, delivery)
         self.refresh_frontend_state()
         self._ensure_steering_wake()
+
+    def _record_steer_delivery(
+        self, message: AgentMessage, delivery: BusyDelivery | str | None
+    ) -> None:
+        """Record a queued steer's delivery mode, for the urgent test.
+
+        Only ``queue``/``both`` are recorded: ``steer`` (and absent/empty) is
+        today's urgent behaviour and needs no entry. ``both`` stores its
+        escalate-at instant — ``time.monotonic()`` plus
+        ``BUSY_QUEUE_ESCALATE_AFTER_S`` — and ``queue`` stores ``None``. An
+        unknown value records nothing and is refused at the wire, not coerced
+        here; the engine call is internal, so a bad value can only arrive from
+        a caller that bypassed the wire.
+        """
+        if delivery == "queue":
+            self._steer_delivery[id(message)] = None
+        elif delivery == "both":
+            self._steer_delivery[id(message)] = time.monotonic() + BUSY_QUEUE_ESCALATE_AFTER_S
 
     def _ensure_steering_wake(self) -> None:
         """Open a turn for queued steering when no live turn will drain it.
@@ -11598,6 +11704,7 @@ class Session:
             if item is message and not found:
                 found = True
                 self._steering_producers.pop(id(item), None)
+                self._steer_delivery.pop(id(item), None)
                 continue
             remaining.append(item)
         for item in remaining:
@@ -14143,119 +14250,6 @@ class Session:
         if self.ask_queue() is None:
             return None
         return self.withdraw_ask
-
-    def _ask_gate_callable(self) -> Callable[..., Any] | None:
-        """The ask tool's gate door, or ``None`` wherever ``ask`` cannot queue (§2.2).
-
-        Bound per turn beside :meth:`_ask_enqueue_callable` and ``None`` under
-        exactly the same two conditions — the flag on AND a host that can show
-        an ask — because the gate exists only to decide the fate of an ask the
-        queued engine would otherwise take, and its presence IS that fact. The
-        kill switch (``LOP_ASK_GATE``) is deliberately NOT part of the binding:
-        it is read INSIDE :meth:`_gate_ask` as its step 1, the callable's own
-        policy, so gate-off is one flag check on a path the tool already walks.
-        """
-        if self.ask_queue() is None:
-            return None
-        return self._gate_ask
-
-    async def _gate_ask(
-        self,
-        questions: list[Any],
-        timeout_raw: Any = None,
-        *,
-        tool_call_id: str = "",
-    ) -> dict[str, Any] | None:
-        """Run the gate's clearance check; divert or enqueue, never fail the ask.
-
-        THE TOTALITY TABLE (design docs/design/ask-gate.md §2.2), in order —
-        every non-divert path returns ``None``, which the tool maps to the
-        UNCHANGED enqueue:
-
-        1. ``LOP_ASK_GATE`` off → ``None`` (the fork is never called);
-        2. no queue (defense; unreachable through the tool) → ``None``;
-        3. any ``secret=True`` question → ``None`` — a credential is the user's
-           to hand over, so the fork is NEVER called for it;
-        4. fingerprint hit → ``None`` — the honor rule, no second check (§2.5);
-        5. timeout/provider/parse failure → ``None`` — fail-open; a CANCELLED
-           turn re-raises instead, because an abort must abort (§2.2);
-        6. no verdict / ``raise`` → ``None`` (nothing recorded on raise — the
-           queue's own caps own the re-ask path);
-        7. ``clear``/``resolve`` → the diversion mapping, fingerprint recorded.
-
-        ``timeout_raw`` and ``tool_call_id`` are accepted for call-shape parity
-        with :meth:`_enqueue_ask` (the tool passes the same two arguments to
-        both doors) and are deliberately unused: the gate's bound is
-        ``policy.GATE_TIMEOUT_S``, not the ask's own timeout — the deadline the
-        model set belongs to the QUEUED question, not to the check about it.
-        """
-        from local_operator.asks import policy
-        from local_operator.session import clearance
-
-        if not policy.gate_enabled():
-            return None
-        if self.ask_queue() is None:  # pragma: no cover — the tool only calls this when set
-            return None
-        if any(_question_marked_human_required(question) for question in questions):
-            # H5a (contract §10.3, #125): a human_required ask — a bridge
-            # request — is NEVER eligible for clearance: the fork is not
-            # called, nothing can suppress it, bypass its enqueue, auto-resolve
-            # it or authorize a decide. Returning None sends it down the
-            # UNCHANGED enqueue path, which is the requirement class's whole
-            # meaning. The check sits FIRST, before the secret/fingerprint
-            # logic, so no path can reorder around it.
-            return None
-        if any(bool(getattr(question, "secret", False)) for question in questions):
-            # §2.2 step 3, and note the ORDER: this refusal runs before the
-            # fingerprint is even computed, so a secret ask is a zero-token,
-            # zero-check path by construction.
-            return None
-        digest = clearance.fingerprint(questions)
-        if digest in self._ask_gate_diverts:
-            # §2.5: recorded content queues with NO second check. A hit moves
-            # the entry to the LRU's end (recency), matching the record path.
-            self._ask_gate_diverts.move_to_end(digest)
-            return None
-        prompt = clearance.build_clearance_prompt(questions)
-        try:
-            async with asyncio.timeout(policy.GATE_TIMEOUT_S):
-                text = await self.complete_clearance([Message.user(prompt)])
-        except asyncio.CancelledError:
-            # Named explicitly rather than left to ``except Exception``: an
-            # aborted turn must keep aborting. (It would propagate anyway —
-            # CancelledError is a BaseException — but the intent is the
-            # contract here, not the class hierarchy.)
-            raise
-        except Exception:  # noqa: BLE001 — see the totality table; failure = enqueue
-            logger.debug("ask gate: clearance check failed; enqueueing", exc_info=True)
-            return None
-        verdict = clearance.parse_verdict(text)
-        if verdict is None or verdict == "raise":
-            # Unparseable is a provider quirk, ``raise`` is the user's — both
-            # mean the ask travels unchanged. Neither records a fingerprint.
-            return None
-        reason = clearance.parse_reason(text)
-        self._record_ask_gate_divert(digest)
-        return {
-            "verdict": verdict,
-            "text": clearance.clearance_note(verdict, reason),
-            "details": {"ask_gate": {"hidden": True, "verdict": verdict, "reason": reason}},
-        }
-
-    def _record_ask_gate_divert(self, digest: str) -> None:
-        """Record a diverted fingerprint in the bounded LRU (design §2.5).
-
-        A hit or a record moves the entry to the end; overflow drops the oldest
-        (``GATE_FINGERPRINT_CAP = 64``). The epoch value is diagnostic — the
-        window is session-lifetime and no reader ages entries out — so a clock
-        oddity cannot affect routing.
-        """
-        from local_operator.session.clearance import GATE_FINGERPRINT_CAP
-
-        self._ask_gate_diverts[digest] = time.time()
-        self._ask_gate_diverts.move_to_end(digest)
-        while len(self._ask_gate_diverts) > GATE_FINGERPRINT_CAP:
-            self._ask_gate_diverts.popitem(last=False)
 
     def _enqueue_ask(
         self,
@@ -20213,7 +20207,7 @@ class Session:
     def _quiet_end_callable(self) -> Callable[[], Awaitable[str | None]] | None:
         """The ``no_reply`` tool's quiet-end door, or ``None`` where silence is unavailable.
 
-        Bound per turn beside the ask doors (:meth:`_ask_gate_callable`); its
+        Bound per turn beside the ask doors; its
         presence IS the fact that this session may end a turn quietly, which is
         exactly what ``build_no_reply_tool``'s createIf gate reads — the tool is
         ABSENT, not inert, where a quiet end could not be honoured (footprint
@@ -23760,8 +23754,13 @@ class Session:
             # the pump before it executes a single statement; a wrapper makes
             # "the stream was iterated" the observable, so the pre-aborted path
             # leaves the flag False while every dispatched round-trip sets it.
-            base_stream_fn = self._stream_fn
+            from local_operator.model.configure import SessionStreamFn
             from local_operator.providers.turn_state import CodexTurnState
+
+            base_stream_fn = self._stream_fn
+            admission_stream = (
+                base_stream_fn if isinstance(base_stream_fn, SessionStreamFn) else None
+            )
 
             # This wrapper belongs to one attention turn, including tool rounds
             # and provider retries. Helpers use the base stream directly and
@@ -23786,20 +23785,8 @@ class Session:
                     )
                     request.validate_required_images()
                 request._codex_turn_state = codex_turn_state
-                inner = base_stream_fn(request, stream_signal)
-                # The context this request was built from, taken before any
-                # later boundary can extend it.
-                carried = (
-                    {id(message) for message in self._context.messages}
-                    if self._bridge_cards_owed_wake
-                    else set()
-                )
 
-                async def witness() -> AsyncIterator[StreamEvent]:
-                    # Lazy provider generators may start only after another
-                    # await. Carry the same guard to that first I/O boundary.
-                    if frame is not None and not frame.binding_intact():
-                        raise RuntimeError("bridge body authority changed before dispatch")
+                def mark_dispatch() -> None:
                     self._attention_run_request_dispatched = True
                     from local_operator.team_bridge.card_projection import (
                         presented_bridge_ref,
@@ -23836,6 +23823,29 @@ class Session:
                         # Past the refusal checks, the request is going out:
                         # any owed card it carries has now been read.
                         self._settle_bridge_card_wakes(carried)
+
+                inner = (
+                    admission_stream(request, stream_signal, on_admitted=mark_dispatch)
+                    if admission_stream is not None
+                    else base_stream_fn(request, stream_signal)
+                )
+                # The context this request was built from, taken before any
+                # later boundary can extend it.
+                carried = (
+                    {id(message) for message in self._context.messages}
+                    if self._bridge_cards_owed_wake
+                    else set()
+                )
+
+                async def witness() -> AsyncIterator[StreamEvent]:
+                    # Lazy provider generators may start only after another
+                    # await. Keep authority validation ahead of dispatch.
+                    if frame is not None and not frame.binding_intact():
+                        raise RuntimeError("bridge body authority changed before dispatch")
+                    if admission_stream is None:
+                        # Injected streams keep the original first-iteration
+                        # witness and need not accept an extra argument.
+                        mark_dispatch()
                     async for event in inner:
                         yield event
 
@@ -25399,11 +25409,6 @@ class Session:
             # Team Integrations: only a person's answer on a host-filed card
             # can publish an app or mint a credential (RFC §8.2).
             integration_consent=self._integration_consent_seam(),
-            # THE ASK GATE'S DOOR (design docs/design/ask-gate.md §2.2): the
-            # same two conditions as the two doors above, so its presence IS
-            # "this ask would queue" — which is exactly the population the
-            # gate exists for. ``None`` means the tool never awaits a check.
-            gate_ask=self._ask_gate_callable(),
             # THE QUIET-END DOOR (design docs/design/quiet-turns.md §4): the
             # whole availability fact of ``no_reply`` — ``None`` for subagent
             # children, one-shot hosts, output-contract sessions and under the
@@ -28438,7 +28443,7 @@ class Session:
         Emits :class:`SteeringDeliveredEvent` when it actually takes something.
         This is the one place that knows a queued message stopped being queued:
         the loop calls it at the boundary where the messages join the context,
-        so a front end showing "queued — sends when this step finishes" can
+        so a front end showing "steering — may stop a running tool" can
         settle that row to a delivered one instead of leaving the promise up for
         the rest of the session. Silent when the queue is empty, which is the
         overwhelmingly common case — this is called at EVERY tool and message
@@ -28488,6 +28493,7 @@ class Session:
                 # replayed history. Constant-time check on the transcript's id
                 # set, so the ordinary steer pays effectively nothing.
                 self._steering_producers.pop(queued_id, None)
+                self._steer_delivery.pop(queued_id, None)
                 if producer_command_id is not None:
                     # Durable already, so any spooled copy is a duplicate — the
                     # same rule the append path below applies.
@@ -28507,6 +28513,7 @@ class Session:
                 continue
             finally:
                 self._steering_producers.pop(queued_id, None)
+                self._steer_delivery.pop(queued_id, None)
             if producer_command_id is not None:
                 # The row is durable, so the successor's copy is a duplicate now.
                 await self._forget_spooled_steer(producer_command_id)
@@ -28560,8 +28567,20 @@ class Session:
         courtesy (``_courtesy_wake_count``) and excluded — they wait for the
         next successful tool boundary, delivered by ``_drain_steering`` like
         any other steering. A queue holding nothing but courtesy wakes answers
-        False, so their timers can never kill an in-flight `bash`."""
-        return self._steering_queue.qsize() > self._courtesy_wake_count
+        False, so their timers can never kill an in-flight `bash`.
+
+        Busy-send delivery rides the same test: a ``queue`` item is excluded
+        exactly like a courtesy wake (``_steer_delivery``), and a ``both`` item
+        is excluded until its escalate-at instant passes — then it counts urgent
+        and, by D4's FIFO rule, makes the whole queue urgent. The poll re-reads
+        this every 0.25 s, so escalation needs no timer."""
+        if self._steering_queue.qsize() > self._courtesy_wake_count + len(self._steer_delivery):
+            return True
+        if self._steer_delivery:
+            now = time.monotonic()
+            if any(at is not None and at <= now for at in self._steer_delivery.values()):
+                return True
+        return False
 
     async def _drain_asides(self) -> list[Aside]:
         """Materialize durable asides and pending job results for safe injection.
@@ -33776,16 +33795,16 @@ class Session:
     async def complete_clearance(self, turns: Sequence[AgentMessage]) -> str:
         """One off-the-record request that reads the live conversation and writes nothing.
 
-        The ask gate's fork (design docs/design/ask-gate.md §2.1), a sibling of
-        :meth:`complete_aside`: it READS exactly what an aside reads — the live
+        The former ask gate's fork (design docs/design/ask-gate.md §2.1), no
+        longer used for queued ask admission. Like :meth:`complete_aside`, it
+        READS the live
         system blocks (including the frozen-vs-desired epoch check and the
         system-state delta message), the wire-legal snapshot of the live
         history (:meth:`_wire_legal_snapshot` pairs pending ``tool_use``s with
         placeholders, so the call is legal mid-batch), the caller's appended
         gate message, and ``bound_replay_payloads`` over the result — and
         WRITES nothing: no transcript entry, no ``_context.messages`` append,
-        no event fan-out. A gated ask must leave the conversation exactly as it
-        found it, on every path including failure.
+        no event fan-out, on every path including failure.
 
         The request shape is the aside's, with the deltas the design tables:
 
@@ -33811,9 +33830,7 @@ class Session:
         Mechanics inherited from :meth:`complete_aside`, including the one
         bounded retry when the answer is a bare tool call (the rejected call is
         handed back, paired, with ``tools=[]`` for this request only). If the
-        retry still yields no text, this raises :class:`AsideUnanswered` — the
-        same class of failure — and ``Session._gate_ask`` maps that to
-        fail-open, so the gate never fails an ask.
+        retry still yields no text, this raises :class:`AsideUnanswered`.
 
         Deliberately NO ``on_delta``/``on_usage`` in v1: no surface watches the
         gate run, and cost accounting is the request ledger's, as for every
@@ -33887,9 +33904,7 @@ class Session:
         if parts:
             return "".join(parts)
         # A second bare call, or an empty answer AFTER being corrected: the
-        # model will not answer this in text. ``AsideUnanswered`` is the same
-        # class of failure the aside raises, and ``_gate_ask`` maps it to
-        # fail-open — the gate never fails an ask.
+        # model will not answer this in text. Use the same failure as the aside.
         from local_operator.session.errors import AsideUnanswered
 
         raise AsideUnanswered()
@@ -36377,6 +36392,13 @@ class Session:
                 self.refresh_frontend_state()
             except Exception:  # noqa: BLE001 — a paint must not break a tick
                 logger.debug("monitor frontend refresh failed", exc_info=True)
+
+    def _on_quiet_monitor_check(self) -> None:
+        # Keep a continuously attached Run details current without turning a
+        # quiet check into an index write or a full session-state refresh.
+        store = getattr(self, "_frontend_state_store", None)
+        if store is not None:
+            store.refresh_observed_monitors(self._monitors)
 
     def _ensure_wake_supervisor(self) -> None:
         """Install-on-demand chokepoint (design §4.2a). Best-effort; the hook
@@ -39377,6 +39399,12 @@ class Session:
         except Exception:  # noqa: BLE001 — teardown must not fail over evidence
             logger.warning("could not roll back teardown attribution", exc_info=True)
 
+    def install_request_admission(self, policy: RequestAdmission) -> Callable[[], None]:
+        install = getattr(self._stream_fn, "install_request_admission", None)
+        if not callable(install):
+            raise RuntimeError("this session's stream does not support request admission")
+        return cast("Callable[[], None]", install(policy))
+
     def subscribe_requests(self, handler: RequestObserver) -> Callable[[], None]:
         """Observe this session tree's request-final records.
 
@@ -39715,6 +39743,7 @@ class Session:
         while not self._steering_queue.empty():
             message = self._steering_queue.get_nowait()
             command_id = self._steering_producers.pop(id(message), None)
+            self._steer_delivery.pop(id(message), None)
             if command_id is not None:
                 await self._reject_steering(command_id, "session closed before durable admission")
         # A courtesy wake still queued here was never delivered, so its count

@@ -8931,7 +8931,12 @@ def refresh_service_daemons_after_upgrade(*, deadline: float | None = None) -> D
             # (``_linux_refresh_steps``). The A24 sentence above stays for
             # every host that still has nothing this child may refresh.
         elif not _secret_broker_socket_present():
-            return DaemonRefresh(name)
+            from local_operator.wakes.install import goal_recovery_needs_refresh
+
+            # A pre-index goal can be the only obligation on this machine.
+            # Let the new build decide whether to arm it, even on --no-services.
+            if not goal_recovery_needs_refresh():
+                return DaemonRefresh(name)
     import subprocess
 
     invocation = _daemon_refresh_invocation()

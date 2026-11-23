@@ -63,6 +63,7 @@ from textual.binding import Binding
 from textual.message import Message
 from textual.widget import Widget
 
+from local_operator import keymap as _keymap
 from local_operator.asks import store
 
 # i18n: the ask bar's and list header's counts are user-facing copy, extracted
@@ -71,6 +72,7 @@ from local_operator.asks import store
 from local_operator.i18n.keys import tui_asks as _asks
 from local_operator.i18n.keys import tui_small as _x
 from local_operator.i18n.text import tr
+from local_operator.tui import hotkey_hints
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.ask_picker import TAB_HINT_KEY
 
@@ -102,10 +104,29 @@ ASK_MARKER = "?"
 #: driving the key in a pilot, round 1 remediation). f8/f9/f10 are the app's.
 #: f5 is avoided too: ``editor.py``'s note claims TextArea binds f5 as a
 #: selection chord, and a dispute about one key is not worth winning.
-ASK_TOGGLE_KEY = "f4"
+#:
+#: Now the DEFAULT of ``keymap.toggle_asks``: the app's binding is derived from
+#: that row, so the key is remappable from /settings and this constant is read
+#: from the registry rather than respelled. The bar's own tail paints the LIVE
+#: value (:func:`ask_toggle_display`), so a remap cannot leave the copy naming
+#: a key that no longer opens it.
+ASK_TOGGLE_KEY = _keymap.BY_ID["keymap.toggle_asks"].default
 
 ASK_BAR_CHEVRON_COLLAPSED = "⌄"
 ASK_BAR_CHEVRON_EXPANDED = "⌃"
+
+
+def ask_toggle_display(widget: Widget) -> str:
+    """The key the ask bar's tail should NAME.
+
+    Read from the app's applied keymap (``App._keymap``) rather than the
+    constant, so the tail follows a live remap; a stripped harness with no app
+    keymap falls back to the shipped default.
+    """
+    # Via `hotkey_hints`: an UNMOUNTED bar raises NoActiveAppError on
+    # `widget.app`, and a hint must not be the thing that fails a paint (Q4).
+    return hotkey_hints.live_key(widget, "keymap.toggle_asks")
+
 
 #: The statuses a row can carry, re-exported from ``asks/store.py``'s fold rather
 #: than spelled here. The bar, the list and the transcript card used to keep
@@ -826,6 +847,14 @@ class AskBar(Widget):
         event.stop()
         self.post_message(self.Toggled())
 
+    def keymap_hints_changed(self) -> None:
+        """Re-measure the tail after a live remap (R1).
+
+        The tail embeds the toggle's chord and is BUDGETED by its width, so a
+        longer remap has to give way inside the same row rather than overflow.
+        """
+        self.refresh(layout=True)
+
     def render(self) -> Text:
         """The bar, laid out against the width it actually has.
 
@@ -886,7 +915,7 @@ class AskBar(Widget):
         # opens a list of read-only rows (D10), and the verb must not promise an
         # answer box the list will not offer.
         verb = "collapse" if self._expanded else ("answer" if self._count else "view")
-        tail = f" — {ASK_TOGGLE_KEY} or click to {verb}"
+        tail = f" — {ask_toggle_display(self)} or click to {verb}"
         head_part = f" · {self._head}" if self._head else ""
         used = cell_len(base)
         if head_part and used + cell_len(tail) + 8 <= avail:

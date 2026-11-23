@@ -71,6 +71,7 @@ from local_operator.harness.intent import (
 from local_operator.harness.provider_empty import is_provider_empty
 from local_operator.harness.redaction import PUBLIC_COPY_TOOLS, tool_source
 from local_operator.harness.replay_bound import bound_replay_payloads
+from local_operator.harness.request_admission import RequestAdmissionRefused
 from local_operator.harness.tool_names import (
     near_miss_tool,
     normalise_replay_tool_names,
@@ -5321,6 +5322,10 @@ class AgentLoop:
                     list(request._one_turn_secrets.values()),
                 )
             raise
+        except RequestAdmissionRefused:
+            # The policy declined before dispatch. Use the existing aborted
+            # terminal path without rendering or retrying a provider failure.
+            stop_reason = "aborted"
         except Exception as exc:
             # `error` below is handed straight to the UI, which prints it as a
             # single "× HTTP 400: ..." line. Re-emitting the same failure as a
