@@ -1385,13 +1385,18 @@ class TodoPanel(Container):
         return row
 
     def keymap_hints_changed(self) -> None:
-        """Repaint the footer's chord after a live remap (R1).
+        """Repaint the footer's chord after a live remap (R1, Q11).
 
         The collapsed affordance and the expanded footer are both composed from
         ``_affordance_row``, and neither is rewritten by a scroll or a store
-        sync — the panel only rebuilds when its own inputs move, and a remap is
-        not one of them.
+        sync — the panel only rebuilds when its own inputs move. A remap moves
+        none of them, and ``sync``'s equality guard (``_shown``) compares that
+        exact tuple, so it would return early and leave the COLLAPSED chip
+        naming the old key. Dropping the guard is what lets the band refresh
+        that follows this hook repaint both states from ``_build``; the
+        expanded footer's own repaint stays, because it is a scroll-path write.
         """
+        self._shown = None
         if self._expanded:
             self._repaint_expanded_footer()
         self.refresh(layout=True)

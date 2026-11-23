@@ -49560,6 +49560,12 @@ class OperatorApp(App[None]):
         # The dock panel's header is rebuilt by the band's own sync pass, so it
         # runs AFTER every cache was dropped rather than before.
         self._refresh_band()
+        # The `/` picker holds a COPY of the registry rows (`Editor.set_commands`
+        # is handed a plain list), and a row's description names a hotkey
+        # (`/effort … (shift+tab cycles)`). Without this, boot with a saved
+        # override and every live remap left the picker painting the SHIPPED
+        # chord while `_offered_commands()` returned the live one (Q10).
+        self._refresh_offered_commands()
 
     def action_toggle_todos(self) -> None:
         """``ctrl+t`` — flip the dock todo list between collapsed and expanded.

@@ -1285,6 +1285,16 @@ class AsidePanel(Static):
         self._can_fork = can_fork
         self._repaint()
 
+    def keymap_hints_changed(self) -> None:
+        """Recompose the footer after a live remap (Q12).
+
+        The fork hint embeds the live key, and the card repaints on stream
+        deltas and settles — none of which a remap triggers, so an open card
+        would keep teaching the key the user just replaced. ``_repaint`` is the
+        card's own composition path and a no-op while it is closed.
+        """
+        self._repaint()
+
     def _repaint(self) -> None:
         if not self.display or not self.is_mounted:
             return

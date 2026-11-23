@@ -3129,24 +3129,19 @@ class SessionSidebar(Widget, can_focus=True):
         # what gives way: the position is discoverable by scrolling (the
         # cursor row is painted) and the panel's own toggle is on the frame
         # that opens it.
-        # The LEAD is re-keyed HERE, at its definition, because every rung of the
-        # ladder below is built from it — including `head_plain`, which the
-        # paged branch composes as `f"{position} · {lead}"` with no separate
-        # substitution hook (Q1). Substituting the composed rungs instead left
-        # that one naming the shipped `f9` after a remap.
-        lead = hotkey_hints.live_copy(
-            self,
-            (
-                _t(_x.session_sidebar_lead_return())
-                if self.has_focus
-                else _t(_x.session_sidebar_lead_focus())
-            ),
-        )
-        base = (
-            lead
+        # The LEAD stays in its SHIPPED spelling here, and every candidate is
+        # re-keyed exactly ONCE after it is fully composed (M1, review round 2).
+        # Substituting `lead` at its definition was the round-1 fix for the
+        # `head_plain` rung, but every rung in this ladder is also built from
+        # `lead` — so `base`/`head_hide` then substituted it a SECOND time, and
+        # a swap (toggle_sidebar <-> focus_sidebar) or a chain (a live value
+        # that is another shipped chord) came back corrupted.
+        lead = (
+            _t(_x.session_sidebar_lead_return())
             if self.has_focus
-            else hotkey_hints.live_copy(self, f"{lead}{_t(_x.session_sidebar_hide_suffix())}")
+            else _t(_x.session_sidebar_lead_focus())
         )
+        base = lead if self.has_focus else f"{lead}{_t(_x.session_sidebar_hide_suffix())}"
         # The chip is a PARTICIPANT in the ladder above, never an append after
         # it: appending past a candidate that has already been fit-tested voids
         # that test and the final `truncate_cells` then crops mid-word (the
@@ -3323,9 +3318,7 @@ class SessionSidebar(Widget, can_focus=True):
                 # see the unpaged branch below for the rule; the same order is
                 # applied to this two-template rung (hide-dropped full variants
                 # before the hub-free ones).
-                head_hide = hotkey_hints.live_copy(
-                    self, f"{position} · {lead}{_t(_x.session_sidebar_hide_suffix())}"
-                )
+                head_hide = f"{position} · {lead}{_t(_x.session_sidebar_hide_suffix())}"
                 head_plain = f"{position} · {lead}"
                 # Every tail variant, widest first, each with and without the
                 # hide hint: the inbox note's yield-first rule (above) reaches
@@ -3355,13 +3348,17 @@ class SessionSidebar(Widget, can_focus=True):
                 candidates = [t + tail for tail in tail_variants for t in templates]
             if chip:
                 candidates.append(f"{lead} · {chip}")
+        # ONE substitution, over the fully composed candidates (M1): the lead,
+        # the hide suffix and the tails are all shipped copy here, so a single
+        # pass cannot rewrite its own output and a swap or a chain survives.
+        candidates = [hotkey_hints.live_copy(self, candidate) for candidate in candidates]
         hint = next(
             (
                 candidate
                 for candidate in candidates
                 if truncate_cells(candidate, width) == candidate
             ),
-            base,
+            hotkey_hints.live_copy(self, base),
         )
         footer = (
             _t_ss(_ss.footer_refresh_failed())

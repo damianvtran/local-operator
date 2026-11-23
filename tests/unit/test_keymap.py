@@ -939,7 +939,7 @@ def test_fixed_app_keys_are_the_app_bindings_that_are_not_rows() -> None:
         return char is not None and char.isprintable()
 
     row_keys = {action.default for action in keymap.KEY_ACTIONS if action.scope == "app"}
-    expected = set()
+    expected: dict[str, str] = {}
     for binding in OperatorApp.BINDINGS:
         raw = str(getattr(binding, "key", "") or "")
         for part in raw.split(","):
@@ -950,14 +950,17 @@ def test_fixed_app_keys_are_the_app_bindings_that_are_not_rows() -> None:
             # not a binding a remap can land on.
             if _is_printable(part) or part in {"question", "question_mark"}:
                 continue
-            expected.add(part)
-    assert keymap.FIXED_APP_KEYS == frozenset(expected)
+            # The DESCRIPTION travels with the key (M3): the warning names what
+            # the fixed binding does, and there is no other setting to point at.
+            expected[part] = str(getattr(binding, "description", ""))
+    assert dict(keymap.FIXED_APP_KEYS) == expected
 
 
 def test_conflict_note_warns_about_a_fixed_app_chord() -> None:
     """A remap onto a fixed app binding is warn-and-allow, like the composer set."""
     note = keymap.conflict_note("keymap.aside", "ctrl+home")
-    assert "already binds ctrl+home" in note
+    assert "ctrl+home is fixed for Transcript top" in note, note
+    assert "pick another key" in note
     assert keymap.conflict_note("keymap.aside", "f5") == ""
     # f6/f7 are still in the composer set: the one class QA asked to verify.
     assert "f6" in keymap.COMPOSER_KEYS and "f7" in keymap.COMPOSER_KEYS

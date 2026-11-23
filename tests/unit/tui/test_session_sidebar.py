@@ -6078,3 +6078,71 @@ async def test_the_paged_footer_head_names_the_live_focus_key() -> None:
         painted = sidebar.render().plain.splitlines()[-1]
         assert "f11 focus" in painted, painted
         assert "f9 focus" not in painted, painted
+
+
+def _swap_keymap() -> dict[str, str]:
+    return {"keymap.toggle_sidebar": "f9", "keymap.focus_sidebar": "ctrl+b"}
+
+
+@pytest.mark.asyncio
+async def test_the_footer_survives_swaps_chains_and_pins_in_one_pass() -> None:
+    """M1: the lead was live-substituted and then substituted AGAIN inside the
+    composed rungs, so a swap came back unchanged and a chain was rewritten
+    twice. These are the reviewer's three repros on one mounted footer, plus the
+    paged ladder and its chip variant — every rung the sidebar can pick.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)])
+        footer = sidebar.render().plain.splitlines()[-1]
+        assert "f9 focus" in footer and "ctrl+b hide" in footer, footer
+
+        # Swap: each key must follow its OWN action to the other's old spelling.
+        app._apply_keymap(_swap_keymap(), announce=False)
+        await pilot.pause()
+        swapped = sidebar.render().plain.splitlines()[-1]
+        assert "ctrl+b focus" in swapped and "f9 hide" in swapped, swapped
+
+        # Chain: a live value that is another shipped chord is not rewritten.
+        app._apply_keymap(
+            {"keymap.focus_sidebar": "ctrl+t", "keymap.toggle_todos": "f12"},
+            announce=False,
+        )
+        await pilot.pause()
+        chained = sidebar.render().plain.splitlines()[-1]
+        assert "ctrl+t focus" in chained, chained
+        assert "f12" not in chained, "the inserted chord was rewritten a second time"
+
+        # Pin: `pin` is built from `lead`, so it must not double-apply either.
+        app._apply_keymap(
+            {"keymap.toggle_pin": "ctrl+x", "keymap.focus_sidebar": "f10"},
+            announce=False,
+        )
+        await pilot.pause()
+        pinned = sidebar.render().plain.splitlines()[-1]
+        assert "f10 focus" in pinned, pinned
+        assert "ctrl+x" not in pinned, "this rung has no pin, so it must not appear"
+
+
+@pytest.mark.asyncio
+async def test_the_paged_footer_head_substitutes_the_lead_exactly_once() -> None:
+    """The paged ladder (120 rows) with the subagent chip on every rung.
+
+    `head_plain` and `head_hide` are composed AFTER the lead, so they were the
+    rungs the round-1 fix covered; this pins that the single pass over the final
+    candidates still reaches them once the chip and the position are in play.
+    """
+    entries = [_plain(str(index)) for index in range(120)]
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(110, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, entries, total=4)
+        footer = sidebar.render().plain.splitlines()[-1]
+        assert "f9 focus" in footer, footer
+
+        app._apply_keymap(_swap_keymap(), announce=False)
+        await pilot.pause()
+        swapped = sidebar.render().plain.splitlines()[-1]
+        assert "ctrl+b focus" in swapped, swapped
+        assert "f9 focus" not in swapped, swapped

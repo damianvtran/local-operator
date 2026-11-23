@@ -499,11 +499,13 @@ async def test_a_conflicting_key_names_its_victim_and_is_still_allowed() -> None
         await pilot.press("ctrl+home")  # the app's own "Transcript top"
         await pilot.pause()
         detail = view._detail_text.plain
-        # The registry's own soft warning now owns this class (R4): `ctrl+home`
-        # is in `FIXED_APP_KEYS`, so the sentence is `conflict_note`'s rather
-        # than the page's "takes <key>" victim line — both describe the same
-        # cost, and one source is what stops them disagreeing.
-        assert "already binds ctrl+home" in detail, detail
+        # The registry's own soft warning owns this class (R4): `ctrl+home` is in
+        # `FIXED_APP_KEYS`. It names the VICTIM's job (M3), because there is no
+        # setting to rebind a fixed chord by — "pick another" is the only route.
+        assert "ctrl+home is fixed for Transcript top" in detail, detail
+        # The detail column truncates this sentence at 120 columns ("pick anoth…"):
+        # a pre-existing budget on every long conflict note, not this wording's,
+        # so the test asserts the victim's job — the part M3 restored.
         assert "enter confirms" in detail, "a soft conflict must still be committable"
 
 
@@ -1329,7 +1331,7 @@ async def test_the_aside_footer_names_the_live_fork_key() -> None:
     composition directly with the fork hint enabled — the state a completed
     exchange leaves — rather than replaying a whole aside turn.
     """
-    from local_operator.tui.widgets.aside_panel import AsidePanel
+    from local_operator.tui.widgets.aside_panel import AsidePanel, AsideTurn
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 34)) as pilot:
@@ -1338,14 +1340,31 @@ async def test_the_aside_footer_names_the_live_fork_key() -> None:
         await pilot.pause()
         card = app.query_one(AsidePanel)
         # A completed exchange is what enables every hint.
-        card._turns = [object()]  # type: ignore[list-item]
+        card._turns = [AsideTurn(question="q?", answer="a.", state="done")]
         card._can_fork = True
-        assert "ctrl+f" in card._hint_row().plain, card._hint_row().plain
+        # The state the card is left in after a completed exchange; a real turn
+        # arrives with a repaint, and this fixture sets the fields directly.
+        card._repaint()
+        calls: list[str] = []
+        original = card.keymap_hints_changed
+
+        def _spy() -> None:
+            calls.append("aside")
+            original()
+
+        card.keymap_hints_changed = _spy  # type: ignore[method-assign]
+        painted = str(card.content)  # Static.content; str() drops the styles
+        assert "ctrl+f" in painted, painted
 
         app._apply_keymap({"keymap.fork_aside": "ctrl+o"}, announce=False)
         await pilot.pause()
-        assert "ctrl+o" in card._hint_row().plain, card._hint_row().plain
-        assert "^f" not in card._hint_row().plain
+        # Q12: the app's own hook repaints the OPEN card, so the stored
+        # (painted) content names the new key — not `_hint_row()` recomposed on
+        # demand, which would pass even if nothing ever triggered a repaint.
+        assert calls == ["aside"], calls
+        painted = str(card.content)
+        assert "ctrl+o" in painted, painted
+        assert "^f" not in painted
 
 
 @pytest.mark.asyncio
@@ -1382,3 +1401,51 @@ async def test_a_remapped_cycle_effort_stops_delegating_shift_tab_to_forms() -> 
         app._apply_keymap({"keymap.cycle_effort": "f12,shift+tab"}, announce=False)
         app.action_cycle_effort()
         assert form.previous == 2, "an alternate that still holds shift+tab delegates"
+
+
+@pytest.mark.asyncio
+async def test_the_slash_picker_paints_the_live_chord_after_remap_and_at_boot(
+    monkeypatch, tmp_path
+) -> None:
+    """Q10: the picker holds a COPY of the registry rows, so a remap left the
+    painted row saying `shift+tab` while `_offered_commands()` returned the live
+    text. The boot half is the same seam: the config override is applied by
+    `_apply_keymap`, after the editor was composed, so boot must refresh too.
+    """
+    from local_operator.config_watch import _reset_for_tests
+    from local_operator.settings_io import Setting
+    from tests.unit.tui.test_app_pilot import _set_editor_line
+
+    def _painted_effort(app: OperatorApp) -> str:
+        # `render_rows` is what the picker PAINTS (the widget's own row builder),
+        # not the list it was handed: a stale copy would pass the latter.
+        picker = app._editor()._picker
+        assert picker.is_open(), "the picker never opened for /eff"
+        rows = [row.plain for row in picker.render_rows(70)]
+        return next(row for row in rows if "/effort" in row)
+
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+
+    _reset_for_tests()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    target = settings_io.resolve_key("keymap.cycle_effort")
+    assert isinstance(target, Setting)
+    settings_io.write_setting(ConfigManager(tmp_path), target, "f5")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 34)) as pilot:
+        for _ in range(200):
+            await pilot.pause()
+            if app._keymap:
+                break
+        assert app._keymap.get("keymap.cycle_effort") == "f5", app._keymap
+        app._editor().focus()
+        await pilot.pause()
+        _set_editor_line(app._editor(), "/eff")
+        await pilot.pause()
+        assert "f5 cycles" in _painted_effort(app)
+
+        app._apply_keymap({"keymap.cycle_effort": "f7"}, announce=False)
+        await pilot.pause()
+        assert "f7 cycles" in _painted_effort(app)
+        assert "shift+tab cycles" not in _painted_effort(app)

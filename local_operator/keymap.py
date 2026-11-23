@@ -69,6 +69,7 @@ import dataclasses
 import re
 import sys
 from collections.abc import Callable, Mapping
+from types import MappingProxyType
 from typing import Any
 
 from local_operator.i18n.keys import tui_welcome
@@ -575,18 +576,22 @@ COMPOSER_KEYS: frozenset[str] = frozenset(
 #: Fixed by construction rather than derived: importing `OperatorApp` here is
 #: forbidden (module docstring), so `tests/unit/test_keymap.py` builds the set
 #: from the live `BINDINGS` and asserts this table matches it.
-FIXED_APP_KEYS: frozenset[str] = frozenset(
+FIXED_APP_KEYS: Mapping[str, str] = MappingProxyType(
     {
-        "ctrl+up",
-        "ctrl+down",
-        "ctrl+pageup",
-        "ctrl+pagedown",
-        "ctrl+r",
-        "ctrl+home",
-        "ctrl+end",
+        # key -> what the FIXED binding does, because a warning that names the
+        # chord but not its job tells the user nothing they can act on: there is
+        # no setting to rebind these by, so "pick another" needs to say what
+        # they would be giving up (M3, review round 2).
+        "ctrl+up": "Scroll todos up",
+        "ctrl+down": "Scroll todos down",
+        "ctrl+pageup": "Scroll aside back",
+        "ctrl+pagedown": "Scroll aside forward",
+        "ctrl+r": "Copy the aside",
+        "ctrl+home": "Transcript top",
+        "ctrl+end": "Transcript end",
         # The darwin-only alternate for `toggle_sidebar`; the registry stores one
         # value per action, so a remap onto it would fight a fixed binding.
-        "super+b",
+        "super+b": "Sessions",
     }
 )
 
@@ -1125,10 +1130,12 @@ def conflict_note(action_id: str, key: str) -> str:
             # Same warn-and-allow. Both bindings answer the key (they share one
             # map), so the cost is a second action firing that the user did not
             # press for — named here because `group_conflict` only knows rows.
-            return (
-                f"the app already binds {part} — both shortcuts would answer it,"
-                " so rebind that one first or pick another"
-            )
+            # No setting rebinds these, so "rebind that one first" (the first
+            # wording) pointed at a page that does not exist (M2); the job the
+            # chord does is the part the user can weigh.
+            # Short on purpose: the settings page truncates this detail line, and
+            # the one sentence that has to survive is the remedy (M2/M3).
+            return f"{part} is fixed for {FIXED_APP_KEYS[part]} — pick another key"
     return ""
 
 
