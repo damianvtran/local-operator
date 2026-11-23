@@ -188,3 +188,85 @@ def test_display_text_normalises_newlines_and_spacing() -> None:
 def test_display_text_is_uncapped() -> None:
     long = " ".join(f"Sentence {n}." for n in range(500))
     assert sp.display_text(long) == long
+
+
+@pytest.mark.parametrize("sentinel", ["\ue000999\ue001", "\ue0000\ue001", "\ue000", "\ue001"])
+def test_display_text_survives_the_private_use_sentinel_in_its_input(sentinel: str) -> None:
+    """A reply carrying the code points ``display_text`` parks spans behind must not
+    crash the route (IndexError) or restore someone else's span."""
+    out = sp.display_text(f"x {sentinel} y")
+    assert "\ue000" not in out and "\ue001" not in out and out.startswith("x ")
+    # After a URL, ``\ue0000\ue001`` used to restore as the URL a second time.
+    assert sp.display_text("https://a.com \ue0000\ue001 z") == "https://a.com 0 z"
+    assert sp.display_text("see `a_b` \ue0001\ue001 end") == "see a_b 1 end"
+    out = sp.display_text("```\ncode\n```\n\ue0000\ue001 https://a.com/x")
+    assert "\ue000" not in out and "\ue001" not in out
+
+
+def test_display_text_leaves_identifiers_intact() -> None:
+    raw = "Edit `my_var_name` and src/foo_bar_baz.py then a*b*c and __init__ and __name__.py."
+    assert sp.display_text(raw) == raw.replace("`", "")
+    assert sp.display_text("call my_func_name() in some_file.py") == (
+        "call my_func_name() in some_file.py"
+    )
+    # Code spans are untouched inside, backticks removed; emphasis inside is NOT unwrapped.
+    assert sp.display_text("`**not bold**` and `_x_`") == "**not bold** and _x_"
+    assert sp.display_text("foo*bar and *it*") == "foo*bar and it"
+    assert sp.display_text("2*3*4 = 24") == "2*3*4 = 24"
+
+
+def test_display_text_still_unwraps_real_emphasis() -> None:
+    assert sp.display_text("**bold** *it* _it_ ~~gone~~ __two words__") == (
+        "bold it it gone two words"
+    )
+    assert sp.display_text("(**x**), _y_. **Note**: ok") == "(x), y. Note: ok"
+    # CJK has no spaces around a bold run; it must still unwrap.
+    assert sp.display_text("你好**粗体**文字") == "你好粗体文字"
+
+
+def test_display_text_unwraps_nested_emphasis_in_both_passes() -> None:
+    """One sweep takes the outer pair; the inner pair needs the second pass."""
+    assert sp.display_text("**_x_**") == "x"
+    assert sp.display_text("_**x**_ and ~~**y**~~") == "x and y"
+
+
+def test_display_text_unwraps_emphasis_around_a_url_and_keeps_the_url() -> None:
+    assert sp.display_text("**https://a.com/x_y**") == "https://a.com/x_y"
+    assert sp.display_text("_https://a.com/x_ and (https://b.com/y).") == (
+        "https://a.com/x and (https://b.com/y)."
+    )
+    assert sp.display_text("a `https://a.com/x_y_z` b") == "a https://a.com/x_y_z b"
+
+
+def test_display_text_table_rule_takes_one_dash_and_escaped_pipes_stay_in_the_cell() -> None:
+    assert sp.display_text("|a|b|\n|-|-|\n|1|2|") == "a · b\n1 · 2"
+    assert sp.display_text("a | b\n--|--\n1 | 2") == "a · b\n1 · 2"
+    assert sp.display_text("|x \\| y|`c \\| d`|\n|--|--|") == "x | y · c | d"
+    # A lone dash is text, not a delimiter row (no header above it).
+    assert sp.display_text("-\n--\nfoo") == "-\n--\nfoo"
+    # ...and an empty header is not one either, so the row is kept rather than lost.
+    assert sp.display_text("|\n|-|") == "-"
+    # Empty cells are dropped, not placeholders.
+    assert sp.display_text("| a | b |\n|---|---|\n| 1 |  | 3 |") == "a · b\n1 · 3"
+
+
+def test_display_text_hides_a_tilde_fence_like_a_backtick_one() -> None:
+    assert sp.display_text("Before\n~~~py\nx_y = 1\n~~~\nAfter") == (
+        "Before\n(code block omitted)\nAfter"
+    )
+    assert sp.display_text("~~~\nunclosed") == "(code block omitted)"
+    # Not at the start of a line: ordinary text.
+    assert sp.display_text("a ~~~ b") == "a ~~~ b"
+
+
+def test_display_text_leaves_a_very_long_line_unemphasised_and_stays_fast() -> None:
+    import time
+
+    started = time.perf_counter()
+    out = sp.display_text("_a " * 20000)
+    assert out == ("_a " * 20000).strip()
+    # Under the line limit the markers still pair up.
+    assert sp.display_text("_it_ " * 100).strip() == " ".join(["it"] * 100)
+    many = "\n".join("_a " * 660 for _ in range(30))
+    sp.display_text(many)
+    assert time.perf_counter() - started < 2.0

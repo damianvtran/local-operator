@@ -3851,16 +3851,22 @@ client supplied: it re-resolves every source itself.
 - **`full_text`** is the reply cleaned for DISPLAY, never capped, for a screen that
   shows the whole reply (the desktop History panel) while the audio stays capped.
   It is NOT the flat spoken string: the line structure is kept (single newlines
-  stay, three or more become one blank line), a bullet keeps its `- `/`1. `
-  marker, a table row is one line with its cells joined by ` · ` (the `|---|`
-  rule row is dropped), and a web address stays as written. As in `text`, a fenced
-  code block is the spoken placeholder, links keep their text, and emphasis,
-  inline-code, heading and quote markers are removed. It never includes the spoken
-  closing sentence, and it generally differs from `text` even when `truncated`
-  is false (newlines, URLs). It is never empty: a reply with nothing to speak is still 404
-  `unknown_source`. Additive and optional for a client: an older server omits it,
-  so fall back to `text`. `text`, `spoken_chars`, `truncated`, `segments` and
-  `/voice/speech` are unchanged, and the `voice` capability stays `2`.
+  stay, three or more become one blank line); a bullet keeps its marker as written
+  (`-`, `*`, `+`, `1.`, `2)`); a table row is one line with its cells joined by
+  ` · ` (empty cells are dropped, the `|---|` rule row vanishes, and so does a
+  `---` rule line); an escaped `\|` stays a literal pipe in its cell; and a web
+  address stays as written. As in `text`, a fenced code block (backticks, or `~~~`
+  opening its own line) is the spoken placeholder, links keep their text, and
+  emphasis, inline-code, heading and quote markers are removed. Identifiers survive:
+  the text inside backticks is left exactly as written, and an `_` or `*` inside a
+  word (`my_var_name`, `a*b*c`, `__init__`) is not emphasis. A line over 2,000
+  characters is not emphasis-unwrapped. `full_text` never includes the spoken
+  closing sentence, and it generally differs from `text` even when `truncated` is
+  false (newlines, URLs). It is non-empty for any reply that has something to
+  speak: a reply with nothing to speak is 404 `unknown_source`, as before.
+  Additive and optional for a client: an older server omits it, so fall back to
+  `text`. `text`, `spoken_chars`, `truncated`, `segments` and `/voice/speech` are
+  unchanged, and the `voice` capability stays `2`.
 - **The feed frame.** `GET /v1/desktop/events` publishes `{"type": "voice",
   "payload": {"active": {session_id, enabled_at} | null}}` whenever the slot
   moves, as a level (the slot as it is now, not an edge). The open snapshot's

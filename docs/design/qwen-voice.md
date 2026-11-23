@@ -130,8 +130,9 @@ machine `code` in `detail.code` and a sentence in `detail.text`.
   resolves only the session's pending APPROVAL with that `request_id`. The text
   is then passed through `voice/speakable.py` (no code blocks, no URLs, capped at
   `voice.max_spoken_chars` on a sentence boundary).
-- `full_text` is the reply cleaned for display and never capped (lines kept, table
-  rows as `a · b · c`, URLs as written, no closing sentence): the History panel
+- `full_text` is the reply cleaned for display and never capped (lines kept, bullet
+  markers as written, table rows as `a · b · c` with empty cells dropped, URLs and
+  inline-code contents as written, no closing sentence): the History panel
   shows it while the audio stays capped. Additive, so a client falls back to `text`
   on an older server. See `docs/DESKTOP_API.md` for the contract row.
 - `truncated` on the answer is `speakable`'s own report: true only when the cap
