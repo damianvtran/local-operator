@@ -1850,6 +1850,12 @@ class HintButton(Static):
 class SubagentTranscriptView(TranscriptView):
     """Transcript body whose top-edge command belongs to its reader page."""
 
+    #: The page's own footer already carries `end` and the scroll hints, and
+    #: its body streams a CHILD's output under a reader who is deliberately
+    #: inspecting that run — a chip offering "the conversation" would be about
+    #: a transcript the page is not showing.
+    SHOWS_JUMP_CHIP = False
+
     BINDINGS = [
         Binding("home", "load_earlier", "Load earlier transcript", show=False, priority=True)
     ]
@@ -2104,6 +2110,15 @@ class SubagentView(Vertical):
     def job_id(self) -> str:
         """The task job this page is showing."""
         return self._job_id
+
+    @property
+    def transcript(self) -> SubagentTranscriptView:
+        """The child's scrolling transcript — the rows the reader is looking at.
+
+        Public so the app's scroll actions can target the visible page without
+        reaching into ``_body``; the page keeps ownership of its own body.
+        """
+        return self._body
 
     def diff_archive_directory(self) -> str | None:
         """The CHILD's session directory, where its write/edit rows are persisted.
@@ -2829,7 +2844,22 @@ class SubagentView(Vertical):
         # empty. This is the clear the note never had: the flag was written
         # only by the failure path and by a retarget, so a directory that
         # gained its transcript kept the stale note for the life of the page.
-        self._history_unavailable = False
+        #
+        # EXCEPT the first page of a transcript with no row in it yet. The
+        # writer creates ``transcript.jsonl`` before it writes its first row,
+        # so a refresh can land in that gap and read a file that exists and
+        # holds nothing. Concluding "empty, and nothing more" there would drop
+        # the note AND latch ``_history_exhausted`` below, and the row written
+        # a moment later would never be looked for. So that page is read as
+        # "nothing to show yet": the note is RAISED, not merely left alone (a
+        # page opened over a directory starts with the flag clear, and the
+        # change-driven re-look only runs while it is set), and the exhausted
+        # latch below stays open. The re-look fires only once the file exists,
+        # so it costs one read per refresh until the first row lands.
+        first_page_still_empty = (
+            not page.entries and not page.has_more and (self._history_cursor is None)
+        )
+        self._history_unavailable = first_page_still_empty
         rows = list(page.entries)
         if page.reconciled:
             # Replacement is a new canonical window, not an additive page.
@@ -2863,7 +2893,8 @@ class SubagentView(Vertical):
             ),
         )
         self._history_cursor = rows[0].id if rows else self._history_cursor
-        self._history_exhausted = not page.has_more
+        if not first_page_still_empty:
+            self._history_exhausted = not page.has_more
         self._paint_history_state()
         self._reconcile_current_body(
             anchor=anchor,

@@ -28,5 +28,6 @@
   "tui.welcome.tip.setup": "¿Nuevo por aquí? {login}: sesión web; sin clave que pegar",
   "tui.welcome.tip.shell": "! en un campo de texto vacío ejecuta un comando de shell",
   "tui.welcome.tip.subagents": "Pide trabajo en paralelo y el agente despliega subagentes",
-  "tui.welcome.tip.team": "/team <name> <message> envía trabajo al manager"
+  "tui.welcome.tip.team": "/team <name> <message> envía trabajo al manager",
+  "tui.welcome.tip.transcript_scroll": "option+k/j desplaza la conversación mientras escribes"
 }

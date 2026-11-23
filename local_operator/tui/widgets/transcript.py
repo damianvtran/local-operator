@@ -8270,6 +8270,109 @@ def needs_gap_above(
     return previous.spans_multiple_rows() or block.spans_multiple_rows()
 
 
+#: The arrow that leads every jump-chip label. Deliberately OUTSIDE the
+#: catalogue strings: a neutral leading glyph in an RTL paragraph resolves to
+#: the right edge, and the chip is a left-to-right affordance anchored to a
+#: fixed corner (docs/I18N.md, "A status glyph is prefixed OUTSIDE the
+#: projection"). The words around it are the translated part.
+JUMP_CHIP_GLYPH = "↓"
+
+#: Horizontal plate padding either side of the label (`padding: 0 1` in the
+#: sheet) — one cell so the label never abuts the text the plate covers. The
+#: offset arithmetic and the label rungs BOTH derive from this number, so the
+#: painted plate and the maths the view uses cannot drift.
+JUMP_CHIP_PAD_CELLS = 1
+
+#: Cells kept clear on the right, inside the content region, so the plate
+#: never touches the permanently reserved scrollbar column (D21).
+JUMP_CHIP_RIGHT_MARGIN = 1
+
+
+class JumpToLatestChip(Static):
+    """``↓ Jump to latest`` — the affordance for output that arrived unseen.
+
+    Mounted as a CHILD of the transcript, not of the screen, so it can dock to
+    the bottom of the conversation's own content region and disappear with the
+    view. A layer plus `dock: bottom` keeps it out of the scroll extent (the
+    probe behind this feature measured `max_scroll_y` and `virtual_size`
+    identical with the chip shown and hidden), and `width: auto` keeps it from
+    stealing clicks on the last row of content.
+
+    Its visibility is owned by ``TranscriptView._sync_jump_chip``: the chip
+    never decides on its own that there is unseen output, because only the
+    view knows whether the reader left the tail before the extent grew.
+
+    The click is the same request as ``ctrl+end``: take the tail and re-arm
+    following. `MouseDown` is stopped too, so the container's focus/selection
+    walk never starts on a chip press.
+    """
+
+    can_focus = False
+
+    def __init__(self) -> None:
+        super().__init__("", markup=False)
+        # Hidden from construction, and never re-hidden on mount: the view owns
+        # this bit (`_sync_jump_chip`) and mounts the chip on the first growth
+        # that has something to offer. An `on_mount` hide here ran AFTER the
+        # view's mount and erased the display it had just set (measured: the
+        # chip mounted, then read back False).
+        self.display = False
+        self._label = ""
+
+    def label_for_width(self, width: int) -> str:
+        """The widest label whose PLATE fits ``width`` cells, glyph included.
+
+        The rungs are derived from the labels' own cell widths, not from fixed
+        content-width constants: the full label is 16 cells in `en` but 22 in
+        `es`/`fr`, and the old 24/12 constants showed the full label only from
+        24 cells even where it fitted at 17 (design round 1, D4). ``width`` is
+        the transcript's content region; the plate spends two padding cells
+        and the right margin on top of the label.
+        """
+        available = width - (2 * JUMP_CHIP_PAD_CELLS) - JUMP_CHIP_RIGHT_MARGIN
+        full = f"{JUMP_CHIP_GLYPH} {_t(tui_transcript.jump_to_latest())}"
+        if cell_len(full) <= available:
+            return full
+        short = f"{JUMP_CHIP_GLYPH} {_t(tui_transcript.jump_to_latest_short())}"
+        if cell_len(short) <= available:
+            return short
+        return JUMP_CHIP_GLYPH
+
+    def apply_label(self, width: int) -> str:
+        """Set the fitting label and return it (the width the view offsets by).
+
+        Update only on change: this runs from every extent update while the
+        chip is up, and repainting an identical one-cell row every frame is
+        the kind of noise that turns a quiet affordance into a flicker.
+        """
+        label = self.label_for_width(width)
+        if label != self._label:
+            self._label = label
+            self.update(label)
+        # The accessible name, and the only words left when the label has
+        # shed to the glyph: a keyboard reader never sees a hover, but a
+        # pointer reader on a narrow frame gets the sentence here.
+        full = f"{JUMP_CHIP_GLYPH} {_t(tui_transcript.jump_to_latest())}"
+        if self.tooltip != full:
+            self.tooltip = full
+        return label
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        event.prevent_default()
+        parent = self.parent
+        if isinstance(parent, TranscriptView):
+            parent.action_scroll_end()
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        # A chip press is a scroll request, never a place-caret gesture: stop
+        # the event before the container's own click-to-focus handling sees
+        # it. The separate `Click` message still arrives, which is what fires
+        # the scroll; this only keeps the press from starting a selection.
+        event.stop()
+        event.prevent_default()
+
+
 class TranscriptView(ScrollableContainer):
     """The scrolling column every block appends into.
 
@@ -8297,6 +8400,12 @@ class TranscriptView(ScrollableContainer):
     """
 
     DEFAULT_CSS = ""
+
+    #: Whether this view owns the jump-to-latest chip. The main conversation
+    #: does; the subagent page's body sets it False because that page already
+    #: carries its own `end` key and scroll hints, and its body is a second
+    #: live transcript whose growth is not "the conversation moved on".
+    SHOWS_JUMP_CHIP = True
 
     #: FOCUSABLE, AND THAT IS LOAD-BEARING — do not "clean this up".
     #:
@@ -8568,6 +8677,18 @@ class TranscriptView(ScrollableContainer):
         from local_operator.tui.tool_fold import ToolFoldLayer
 
         self._tool_fold = ToolFoldLayer(self)
+        #: The "new output arrived below" affordance, or None on a view that
+        #: does not own one. Mounted in :meth:`on_mount`; its visibility is
+        #: derived from `_unseen_below` and the tail state, never set directly
+        #: by events.
+        self._jump_chip = JumpToLatestChip() if self.SHOWS_JUMP_CHIP else None
+        #: True once the reader has left the tail and the extent has GROWN
+        #: underneath them since. Cleared by every route back to the tail;
+        #: the chip's visibility is exactly `this and not following`.
+        self._unseen_below = False
+        #: Last horizontal offset written to the chip, so a resize that does
+        #: not move it does not rewrite styles every frame (-1 = never).
+        self._jump_chip_offset = -1
 
     def on_mount(self) -> None:
         """Give the system vertical scrollbar an open-hand hover cursor.
@@ -10041,7 +10162,16 @@ class TranscriptView(ScrollableContainer):
         if extras != self._empty_state_extras:
             self._empty_state_extras = extras
             self._empty_state = next(
-                (child for child in self.children if not isinstance(child, TranscriptBlock)),
+                (
+                    child
+                    for child in self.children
+                    if not isinstance(child, TranscriptBlock)
+                    # The jump chip is chrome, not the splash. Without this it
+                    # becomes the "empty state" the moment the welcome view is
+                    # gone, and the adaptive gap starts reserving a splash row
+                    # above the first block of a cleared conversation.
+                    and not isinstance(child, JumpToLatestChip)
+                ),
                 None,
             )
         return self._empty_state
@@ -10346,8 +10476,11 @@ class TranscriptView(ScrollableContainer):
         self._insert_anchor = None
         # A cleared transcript IS at its own end, so the anchor re-arms: the
         # next turn streams into a reader who is, by construction, at the
-        # bottom of an empty column.
+        # bottom of an empty column. Nothing is below an empty column, so the
+        # jump chip retires with the rows it was offering.
         self._tail_anchor.acquire()
+        self._unseen_below = False
+        self._sync_jump_chip()
         # IMMEDIATE and inside the programmatic guard. A bare
         # `scroll_home(animate=False)` is DEFERRED to after the next refresh, so
         # it lands outside any guard, and `watch_scroll_y` read it as the READER
@@ -10525,9 +10658,111 @@ class TranscriptView(ScrollableContainer):
         aside closing and handing the conversation back. They used to post a
         one-shot ``call_after_refresh(scroll_end)``, which pinned the frame it
         ran in and then drifted off the end of everything that arrived after.
+
+        Re-acquiring also retires the jump chip: the reader is being taken to
+        the newest row, so nothing below them can be "unseen".
         """
+        self._unseen_below = False
+        self._sync_jump_chip()
         self._tail_anchor.acquire()
-        self.call_after_refresh(self._scroll_to_tail)
+        # The deferred scroll carries the release revision it was asked under,
+        # like ``_land_on_tail``: a reader who scrolls away between this call
+        # and the refresh has made a newer choice, and landing the tail then
+        # would also hand the anchor back (the deferred resync reads "near the
+        # bottom" and re-acquires it), undoing their release for good.
+        self.call_after_refresh(
+            self._scroll_to_tail_unless_released, self._tail_anchor.release_revision
+        )
+
+    def _scroll_to_tail_unless_released(self, release_revision: int) -> None:
+        if release_revision != self._tail_anchor.release_revision:
+            return
+        self._scroll_to_tail()
+
+    def scroll_rows(self, delta: int) -> None:
+        """Move the viewport ``delta`` rows as an explicit READER gesture.
+
+        One upward step from the very end must MOVE. ``TAIL_TOLERANCE_ROWS``
+        exists so a reader who stops a row or two short of the end still counts
+        as at the bottom (no chip, growth still follows), which means a 2-row
+        step up from the tail lands inside the tolerance, the deferred resync
+        re-acquires the anchor, and the next layout pass pulls the frame home —
+        measured: the offset never left ``max_scroll_y``. So an upward gesture
+        that would land within the tolerance is carried one row clear of it,
+        the smallest landing that keeps the press visibly a scroll. Anywhere
+        farther up the target is used unchanged.
+        """
+        self.note_user_scroll(upward=delta < 0)
+        target = int(self.scroll_y) + delta
+        if delta < 0 and self.scroll_y > self.max_scroll_y - TAIL_TOLERANCE_ROWS:
+            target = min(target, max(0, self.max_scroll_y - TAIL_TOLERANCE_ROWS - 1))
+        self.scroll_to(y=max(0, min(target, self.max_scroll_y)), animate=False)
+
+    def _mount_jump_chip(self) -> None:
+        """Mount the chip on first use, already wearing the state it must show.
+
+        NOT at transcript mount: a child mounted from `on_mount` re-runs this
+        container's layout on the frame the sidebar switch gate captures its
+        evidence map from, and the gate then refuses that stale map until its
+        15 s timer (measured on #4440 — an inert hidden `Static` in this hook
+        reproduces it, and the same chip with no child at all does not). The
+        chip exists to answer output the reader has not seen; until there is
+        such output there is nothing to mount.
+
+        `mount` lands the child a pump turn later, so `is_mounted` is still
+        False when it returns and `_sync_jump_chip` would defer again. The
+        visibility and placement are therefore written here, before the tree
+        grows the child.
+        """
+        chip = self._jump_chip
+        if chip is None or chip.is_mounted or not self.is_mounted:
+            return
+        chip.display = bool(self._unseen_below and not self._tail_anchor.following)
+        self._jump_chip_offset = -1
+        if chip.display:
+            self._jump_chip_layout(chip)
+        self.mount(chip)
+
+    def _sync_jump_chip(self) -> None:
+        """Bring the chip's visibility, label and offset in line with the state.
+
+        THE one writer. `follow_tail`, `watch_scroll_y`'s re-decide, `clear_blocks`
+        and the extent watch all call it, so the three facts — whether it shows,
+        which label fits, and where it docks — cannot be updated by one route
+        and missed by another.
+
+        The offset is arithmetic on the label we just painted (`cell_len`)
+        rather than the chip's laid-out width: this runs inside `_size_updated`,
+        and reading a child's geometry there would answer about the PREVIOUS
+        frame — the class of stale measurement this transcript's own comments
+        warn about. `width: auto` on a borderless one-row Static is exactly its
+        label plus the declared padding, so the arithmetic is the same answer.
+        """
+        chip = self._jump_chip
+        if chip is None:
+            return
+        visible = self._unseen_below and not self._tail_anchor.following
+        if not chip.is_mounted:
+            # Mounted on FIRST USE, never at transcript mount — see
+            # `_mount_jump_chip` for the measured gate failure that motivated it.
+            if visible:
+                self.call_after_refresh(self._mount_jump_chip)
+            return
+        if chip.display != visible:
+            chip.display = visible
+        if not visible:
+            return
+        self._jump_chip_layout(chip)
+
+    def _jump_chip_layout(self, chip: JumpToLatestChip) -> None:
+        """Apply the fitting label and right margin; the one placement write."""
+        width = self.scrollable_content_region.width
+        label = chip.apply_label(width)
+        plate = cell_len(label) + 2 * JUMP_CHIP_PAD_CELLS
+        offset = max(0, width - plate - JUMP_CHIP_RIGHT_MARGIN)
+        if offset != self._jump_chip_offset:
+            self._jump_chip_offset = offset
+            chip.styles.offset = (offset, 0)
 
     def note_user_scroll(self, *, continuous: bool = False, upward: bool = True) -> None:
         """A person moved the viewport: release, then re-decide where they land.
@@ -10598,6 +10833,13 @@ class TranscriptView(ScrollableContainer):
                 # and never comes through this observation path.
                 self._insert_anchor = (block, gap - (new_value - old_value))
             self._tail_anchor.resync(at_end=self.is_near_bottom())
+            # Coming to rest at the end — by wheel, key, scrollbar drag or a
+            # caller's explicit follow — retires the chip, whatever brought
+            # them there. When the reader stops short, the chip stays up for
+            # output they have still not seen.
+            if self._tail_anchor.following:
+                self._unseen_below = False
+            self._sync_jump_chip()
             # The page-back trigger rides the same watch, scheduled for after
             # the refresh rather than answered here. `note_user_scroll` fires
             # at gesture START, before an animated scroll has moved anything,
@@ -10739,6 +10981,10 @@ class TranscriptView(ScrollableContainer):
         output, the aside reserving rows at the bottom, the composer taking a
         line as the user types, the terminal being resized.
         """
+        # Read BEFORE super: Widget._size_updated assigns the new extent in the
+        # call, so this is the previous frame's height by the time the anchor
+        # work below runs.
+        previous_extent = self.virtual_size.height
         changed = super()._size_updated(size, virtual_size, container_size, layout)
         if changed:
             # Before the anchor work below: a row re-fitted for a lane change can
@@ -10759,7 +11005,34 @@ class TranscriptView(ScrollableContainer):
             # not following — a reader at the tail wants the tail, and the
             # branch above already gave it to them.
             self._reanchor_insert()
+        if changed:
+            self._note_extent_growth(previous_extent)
         return changed
+
+    def _note_extent_growth(self, previous_extent: int) -> None:
+        """Flag output that arrived below a reader who is not at the tail.
+
+        THE chip's trigger. Growth of the scroll EXTENT while the tail anchor
+        is released covers every way new rows appear — an appended message, a
+        streaming message re-rendering in place, a tool card unfolding — without
+        listening to each one. `_insert_anchor` excludes the one growth that is
+        NOT new output below: a page of older history being mounted ABOVE the
+        reader.
+
+        A resize that reflows content taller while the reader is scrolled up
+        also lands here. That is accepted: the reader is not at the end and
+        there is content below, so the chip is still a truthful offer — and it
+        never moves them.
+        """
+        if self._jump_chip is None:
+            return
+        if (
+            self._insert_anchor is None
+            and not self._tail_anchor.following
+            and self.virtual_size.height > previous_extent
+        ):
+            self._unseen_below = True
+        self._sync_jump_chip()
 
     def _reanchor_insert(self) -> None:
         """Re-pin the reader to the block they were on, if an insert is settling.

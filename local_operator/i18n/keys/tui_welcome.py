@@ -127,3 +127,7 @@ def tip_subagents() -> Msg:
 
 def tip_team() -> Msg:
     return Msg("tui.welcome.tip.team", {})
+
+
+def tip_transcript_scroll() -> Msg:
+    return Msg("tui.welcome.tip.transcript_scroll", {})

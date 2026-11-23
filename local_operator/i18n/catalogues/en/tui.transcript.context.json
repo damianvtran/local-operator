@@ -83,5 +83,17 @@
     "note": "Header of an internal hub receipt; authored body and sender identity are not translated. ",
     "role": "hub receipt header",
     "tone": "terse advisory"
+  },
+  "tui.transcript.jump_to_latest": {
+    "role": "The jump-to-latest chip in the transcript, when new output arrived below a reader who scrolled up",
+    "tone": "imperative noun phrase; a down arrow is prefixed by the widget, not stored here",
+    "maxCells": 20,
+    "note": "EN-only context sidecar. The arrow glyph is prefixed OUTSIDE this string by the widget (a neutral leading glyph would resolve to the right edge in an RTL paragraph). Shown when the conversation viewport has room for at least 12 cells of label; no ICU arguments."
+  },
+  "tui.transcript.jump_to_latest.short": {
+    "role": "The narrow-frame form of the jump-to-latest chip label",
+    "tone": "noun phrase, one word",
+    "maxCells": 10,
+    "note": "EN-only context sidecar. Replaces the full sentence when the transcript's content width is under 24 cells; the down arrow is still prefixed outside this string. No ICU arguments."
   }
 }

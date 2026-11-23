@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "hi",
   "namespace": "wire.settings.keymap",
-  "history_sha256": "c8dc279de94c39b26efcf75027e13676f6019dd0432f328e57f4716298b70509",
+  "history_sha256": "01eee17bf3e640a1db7491aafa2c999d2be60980c5d2feb8d8a0ccce5b47cbf0",
   "entries": [
     {
       "locale": "hi",
@@ -75,6 +75,132 @@
       },
       "status": "passed",
       "note": "Suffix receipt for 26 new keys. Round 1 (auditor job 4e20751d261a) FAILED with 1 major (aside rendered 'साइड सवाल' vs the existing product noun 'नोट') plus 4 minors; the manager applied the auditor's replacements verbatim, then a fresh independent auditor (job fb732633e5e1) re-audited all 26 keys: PASS. No dedicated i18n-translator/i18n-auditor profile was available in this session; general task and reviewer subagents were used with the repo's glossary/style-guide brief. target_sha256 is the namespace file SHA-256 at recording time. Dates are the day recorded."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings.keymap",
+      "source_sha256": "3736fadd1232b8ef4615e497d2149400f679f2dcbe4a9bf6da9542cb075ef088",
+      "context_sha256": "44a7abc7b091cc5a5ce6809d85d3574093df155cefde6d9a7f91a24e4bc04486",
+      "target_sha256": "912760cc5327d37d67dcf307d3a4cf41fa1d199aa4a382642e40914da75cb46d",
+      "changed_keys": [
+        "wire.settings.keymap.transcript_up.label",
+        "wire.settings.keymap.transcript_up.help",
+        "wire.settings.keymap.transcript_down.label",
+        "wire.settings.keymap.transcript_down.help",
+        "wire.settings.keymap.transcript_half_up.label",
+        "wire.settings.keymap.transcript_half_up.help",
+        "wire.settings.keymap.transcript_half_down.label",
+        "wire.settings.keymap.transcript_half_down.help"
+      ],
+      "translator": {
+        "agent": "coder/tui-scroll-keys — self-translated per manager instruction (2026-11-22)",
+        "session": "ed5662a9280c",
+        "session_kind": "lop session id",
+        "model": "radient/auto",
+        "model_kind": "configured session model; concrete upstream provider not exposed to this session",
+        "underlying_model": "unknown (not exposed)",
+        "date": "2026-11-22",
+        "fallback": "not exposed to this session; no provider switch was requested"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "86c5cf020f85",
+        "session_kind": "lop session id (delta re-audit under team lopdev)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model reported in this session's system header",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-22",
+        "fallback": "none observed; no provider switch during this audit",
+        "result": "passed",
+        "findings": 0,
+        "findings_by_severity": {
+          "BLOCKER": 0,
+          "MAJOR": 0,
+          "MINOR": 0,
+          "NIT": 0
+        },
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Independent delta re-audit at worktree HEAD 8704efd8e (round 2; round-1 audit was a different run at 94ecb8983). Whole namespace read at the new bytes against en source; source/context/target sha256 re-derived from disk and match the translator draft. Checked: meaning, native idiom, glossary + style-guide terms vs the locale's shipped catalogue usage, display-cell widths (rich cell_len, CJK double-width) vs sidecar maxCells (chip 20/10, hotkey label 24, help 72, legend 44, tip 57) and vs the namespace's widest existing row (no layout widening), literal keys (⌥J/K, alt+g/G), placeholder/ICU parity, key-set parity, NFC/controls/stray spaces, fr U+202F before ';', ur no manual bidi controls. R1 MINOR fixed: 'पृष्ठ'->'पेज' in half-page labels (9/8 cells), helps 'आधी स्क्रीन' (49-50/72), matching source 'half a screen' and shipped 'पेज' usage (40 vs 1). No findings.  Note: en/tui.chrome.bindings.json was re-formatted (minified->pretty-printed, JSON-equal to the audited content) between rounds, so its source_sha256 moved dfe44861…->3189693e…; no wording change."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings.keymap",
+      "source_sha256": "c49dee930248dc8f76f3239e42314bf865a0c0410a71cd31a21700b8e724a14b",
+      "context_sha256": "3f13a192ffd7da08bc3c502717d064f28d7da8365c860a6f3927622826eed3d4",
+      "target_sha256": "b9586c03851603aceb33f683246535b1e0cff7d4fdc9529fb9f207235b8ab353",
+      "changed_keys": [
+        "wire.settings.keymap.aside.help",
+        "wire.settings.keymap.aside.label",
+        "wire.settings.keymap.clear_transcript.help",
+        "wire.settings.keymap.clear_transcript.label",
+        "wire.settings.keymap.command_palette.help",
+        "wire.settings.keymap.command_palette.label",
+        "wire.settings.keymap.cycle_effort.help",
+        "wire.settings.keymap.cycle_effort.label",
+        "wire.settings.keymap.focus_sidebar.help",
+        "wire.settings.keymap.focus_sidebar.label",
+        "wire.settings.keymap.fork_aside.help",
+        "wire.settings.keymap.fork_aside.label",
+        "wire.settings.keymap.next_session.help",
+        "wire.settings.keymap.next_session.label",
+        "wire.settings.keymap.prev_session.help",
+        "wire.settings.keymap.prev_session.label",
+        "wire.settings.keymap.toggle_asks.help",
+        "wire.settings.keymap.toggle_asks.label",
+        "wire.settings.keymap.toggle_pin.help",
+        "wire.settings.keymap.toggle_pin.label",
+        "wire.settings.keymap.toggle_sidebar.help",
+        "wire.settings.keymap.toggle_sidebar.label",
+        "wire.settings.keymap.toggle_subagents.help",
+        "wire.settings.keymap.toggle_subagents.label",
+        "wire.settings.keymap.toggle_todos.help",
+        "wire.settings.keymap.toggle_todos.label",
+        "wire.settings.keymap.transcript_down.help",
+        "wire.settings.keymap.transcript_down.label",
+        "wire.settings.keymap.transcript_half_down.help",
+        "wire.settings.keymap.transcript_half_down.label",
+        "wire.settings.keymap.transcript_half_up.help",
+        "wire.settings.keymap.transcript_half_up.label",
+        "wire.settings.keymap.transcript_up.help",
+        "wire.settings.keymap.transcript_up.label"
+      ],
+      "translator": {
+        "agent": "union of two audited translations, no new translation: 26 keys by a task-subagent translator for feat/tui-configurable-keybinds (session 47ab69ad2d9c); 8 transcript keys by coder/tui-scroll-keys (session ed5662a9280c)",
+        "session": "47ab69ad2d9c + ed5662a9280c",
+        "session_kind": "lop task subagent JOB id and lop session id, respectively",
+        "model": "anthropic/claude-sonnet-5-5 + radient/auto",
+        "model_kind": "served models as self-reported by each translating session",
+        "underlying_model": "anthropic/claude-sonnet-5-5 / unknown (radient/auto route not exposed)",
+        "date": "2026-11-22",
+        "fallback": "none reported by either translating session"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "c5195593cf0d",
+        "session_kind": "lop session id (union whole-namespace audit under team lopdev, task from manager)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model reported in this session's system header",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-23",
+        "fallback": "none observed; no provider switch during this audit",
+        "result": "passed",
+        "findings": 1,
+        "findings_by_severity": {
+          "BLOCKER": 0,
+          "MAJOR": 0,
+          "MINOR": 0,
+          "NIT": 1
+        },
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true,
+        "translator_session": "47ab69ad2d9c + ed5662a9280c",
+        "scope": "whole namespace (44 keys) at the union bytes, cross-set consistency of the 26-key #4469 delta and the 8-key transcript delta plus 10 base keys"
+      },
+      "status": "passed",
+      "note": "Independent whole-namespace audit of the merge union at worktree HEAD 290a76c8c (parents c44fdf1ea tui-scroll-keys side, ce57801168 origin/main side). Purely additive: every one of the 44 keys is byte-equal to its text in a parent (10 base in both, 26 in origin/main 4e32078b2, 8 transcript in 8704efd8e); no key changed, none new. source/context/target sha256 re-derived with shasum -a 256 from disk and match the draft. Checked: meaning vs en, terminology identical across the two halves and vs shipped catalogue usage (transcript, composer, sidebar, aside, fork, pin, asks, dock, todo, effort, subagent, session, row/cursor), glossary + style guide, label/help register, display-cell widths (rich cell_len, CJK double-width) vs declared maxCells (24 label / 72 help on the 8 transcript rows, all within), literal tokens (/new /resume /sidebar /effort esc), NFC, controls, spacing, punctuation, key order parity. Findings (0 BLOCKER, 0 MAJOR, 0 MINOR, 1 NIT): NIT B help rows drop 'in the composer' ('कर्सर अपनी जगह रहता है'; large headroom, e.g. '...कर्सर कंपोज़र में ही रहता है।' 50 cells). Otherwise consistent: सत्र/साइडबार/कंपोज़र/डॉक/उप-एजेंट/पंक्ति/कर्सर identical in both halves and the corpus."
     },
     {
       "locale": "hi",
@@ -175,6 +301,31 @@
       },
       "status": "passed",
       "note": "MERGE-UNION receipt (NOT a new translation audit and NOT a new semantic audit): third fold of feat/tui-send-chords onto origin/main 404a21382a30; both sides added keys to wire.settings.keymap (origin/main: 26 keys added since the merge-base; branch: 6 keys added or changed). Reconciled 2026-11-23 by lopdev lane session 8cca634d2d29 with scripts/i18n/ledger.py append — origin/main's receipts first, then the branch's, in their own order; no row was hand-written or forged. Proof (scripted in that session): merged catalogue == origin/main's file + exactly the branch's 6 added/changed keys; origin/main's 36 key values byte-identical to origin/main, the branch's values byte-identical to the committed 421bdf986 catalogue; 0 removed, 0 changed. This receipt attests byte-identity only and re-stamps the merged source/context/target hashes so the freshness gate can evaluate the union. No second independent audit: merge reconciliation; no value changed."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings.keymap",
+      "source_sha256": "e69e379d7291829626192446d396e1955863d973654795ae7af1058436f1ce22",
+      "context_sha256": "bfa3bb6a27443a38a4297aaca09021c9ee1917efe9d78954d06d3c933543ff64",
+      "target_sha256": "b0de2a9966427dc64b4d3615026e2ad49810a316261804df179a990a2f819e6f",
+      "keys_audited": 6,
+      "round": "r5",
+      "translator": {
+        "agent": "upstream (origin/main's rows above) and this branch's per-locale translators (rows above); not re-translated here",
+        "model": "see the rows above",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "no new audit: union of independent audits already recorded above (origin/main's receipts, and this branch's receipts audited by the codex MCP server, gpt-5.6-sol requested)",
+        "model": "see the rows above",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "MERGE-UNION receipt (NOT a new translation audit and NOT a new semantic audit): fourth fold of feat/tui-send-chords onto origin/main 5ba8f49cd84f; both sides added keys to wire.settings.keymap (origin/main: 8 keys added since the merge-base; branch: 6 keys added or changed). Reconciled 2026-11-23 (second fold of the day, after #4469's transcript-scroll rows landed) by lopdev lane session 8cca634d2d29 with scripts/i18n/ledger.py append — origin/main's receipts first, then the branch's, in their own order; no row was hand-written or forged. Proof (scripted in that session): merged catalogue == origin/main's file + exactly the branch's 6 added/changed keys; origin/main's 44 key values byte-identical to origin/main, the branch's values byte-identical to the committed 6173ab789 catalogue; 0 removed, 0 changed. This receipt attests byte-identity only and re-stamps the merged source/context/target hashes so the freshness gate can evaluate the union. No second independent audit: merge reconciliation; no value changed."
     }
   ]
 }

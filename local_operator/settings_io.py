@@ -247,6 +247,13 @@ _KEYMAP_COPY = {
     "keymap.next_session": (_wk.next_session_label, _wk.next_session_help),
     "keymap.cycle_effort": (_wk.cycle_effort_label, _wk.cycle_effort_help),
     "keymap.clear_transcript": (_wk.clear_transcript_label, _wk.clear_transcript_help),
+    "keymap.transcript_up": (_wk.transcript_up_label, _wk.transcript_up_help),
+    "keymap.transcript_down": (_wk.transcript_down_label, _wk.transcript_down_help),
+    "keymap.transcript_half_up": (_wk.transcript_half_up_label, _wk.transcript_half_up_help),
+    "keymap.transcript_half_down": (
+        _wk.transcript_half_down_label,
+        _wk.transcript_half_down_help,
+    ),
     "keymap.send_steer": (_wk.send_steer_label, _wk.send_steer_help),
     "keymap.send_queue": (_wk.send_queue_label, _wk.send_queue_help),
     "keymap.send_both": (_wk.send_both_label, _wk.send_both_help),

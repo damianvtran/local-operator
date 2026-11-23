@@ -312,7 +312,7 @@
       ],
       "references": {
         "keymap.py": 8,
-        "settings_io.py": 44
+        "settings_io.py": 52
       }
     },
     "wire.settings.transcript_display": {

@@ -175,3 +175,35 @@ def toggle_todos_help() -> Msg:
 
 def toggle_todos_label() -> Msg:
     return Msg("wire.settings.keymap.toggle_todos.label", {})
+
+
+def transcript_down_help() -> Msg:
+    return Msg("wire.settings.keymap.transcript_down.help", {})
+
+
+def transcript_down_label() -> Msg:
+    return Msg("wire.settings.keymap.transcript_down.label", {})
+
+
+def transcript_half_down_help() -> Msg:
+    return Msg("wire.settings.keymap.transcript_half_down.help", {})
+
+
+def transcript_half_down_label() -> Msg:
+    return Msg("wire.settings.keymap.transcript_half_down.label", {})
+
+
+def transcript_half_up_help() -> Msg:
+    return Msg("wire.settings.keymap.transcript_half_up.help", {})
+
+
+def transcript_half_up_label() -> Msg:
+    return Msg("wire.settings.keymap.transcript_half_up.label", {})
+
+
+def transcript_up_help() -> Msg:
+    return Msg("wire.settings.keymap.transcript_up.help", {})
+
+
+def transcript_up_label() -> Msg:
+    return Msg("wire.settings.keymap.transcript_up.label", {})

@@ -36,12 +36,18 @@ def _en(key: str, **params: object) -> str:
     return runtime.render_message(GOLDEN[key], params, "en")
 
 
-#: The seven keys the group/hub slice ADDED after the pre-slice snapshot was
-#: taken. The golden stays the extraction-time record; this map is its
-#: successor half, so the test pins BOTH sides exactly — the old ten bytes and
-#: the new seven — instead of a superset check that would let any later draft
-#: through (review round 4, R4-3; QA Q-R5-3).
+#: The keys ADDED after the pre-slice snapshot was taken: the seven the
+#: group/hub slice added, and the two the transcript-scroll feature added. The
+#: golden stays the extraction-time record; this map is its successor half, so
+#: the test pins BOTH sides exactly — the old ten bytes and the new nine —
+#: instead of a superset check that would let any later draft through (review
+#: round 4, R4-3; QA Q-R5-3).
 GROUP_SLICE_KEYS: dict[str, str] = {
+    # Jump-to-latest chip (transcript scrolling): the glyph is prefixed OUTSIDE
+    # the catalogue string (docs/I18N.md, "A status glyph is prefixed OUTSIDE
+    # the projection"), so the words are the translated part.
+    "tui.transcript.jump_to_latest": "Jump to latest",
+    "tui.transcript.jump_to_latest.short": "Latest",
     # Intentional reviewed copy delta: only the ICU singular noun changed.
     # Preserve count/label parameters and the immutable pre-slice golden.
     "tui.transcript.group.actions": (
