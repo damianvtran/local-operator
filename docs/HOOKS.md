@@ -30,6 +30,13 @@ hooks.native true`). The switch is read on every tool call, so a change applies
 from the next call. An absent file runs nothing, a malformed one is logged and
 runs nothing, and `disableAllHooks: true` in the file switches its hooks off.
 
+Because a hook command runs as a shell command outside the guardrail checkpoint,
+an agent's `write`/`edit` onto `hooks.json` or `config.yml`, or a `setting` change
+to `hooks.*`, is reviewed by the guard's judge against the operator's own words
+(see `guide://guardrails`, "Edits to the guard's own policy"), and refused without
+a model call in a session that has none. Hook files forwarded from Claude Code or
+Codex are not covered by that review.
+
 ## Forwarded hooks (Claude Code and Codex)
 
 The hooks you already configured for either tool run under lop unchanged:
