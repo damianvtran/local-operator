@@ -650,14 +650,15 @@ def test_holder_label_names_the_heavy_segment_not_the_first_word() -> None:
     line = "cd /x && rm -rf tmp/probe && SP=1 && go test -race ./... ; go test ./..."
     heavy = heavy_lease.is_heavy(line)
     assert heavy is not None
-    assert heavy_audit.command_label(line) == "rm"  # what the 2026-11-20 record said
+    # The 2026-11-20 record said `rm` (the first command); the line's own label
+    # now names the heavy segment too, for callers that have no HeavyClass.
+    assert heavy_audit.command_label(line) == "go test"
     assert heavy.label(line) == "go test"
     # PR #4351 N1: the line's own label wins when it refines the classifier's
-    # normalised reason (`make test-all` is reasoned as `make test`), and only
-    # then: a different first command still yields the heavy segment.
+    # normalised reason (`make test-all` is reasoned as `make test`).
     for line, label in (
         ("timeout 600 make test-all", "make test-all"),
-        ("make lint && make test-all", "make test"),
+        ("make lint && make test-all", "make test-all"),
     ):
         heavy = heavy_lease.is_heavy(line)
         assert heavy is not None and heavy.reason == "make test", line
