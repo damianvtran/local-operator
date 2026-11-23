@@ -422,7 +422,6 @@ from local_operator.tui.widgets.ask_picker import (
     AskPickerScreen,
 )
 from local_operator.tui.widgets.ask_queue import (
-    ASK_TOGGLE_KEY,
     SCOPE_FLEET,
     SCOPE_SESSION,
     STATUS_OPEN,
@@ -4954,7 +4953,6 @@ class OperatorApp(App[None]):
 
     BINDINGS = [
         Binding("ctrl+c", "interrupt", "Interrupt", show=False),
-        Binding("ctrl+l", "clear_transcript", "Clear transcript", show=False),
         # The two REMAPPABLE bindings. Their `id` is deliberately the same
         # string as the config key and the tip lookup — see
         # `local_operator.keymap`, which owns that vocabulary and from which
@@ -4981,7 +4979,14 @@ class OperatorApp(App[None]):
         # rather than destructive — and the settings page warns about that
         # class of key at the moment of the decision.
         *(
-            Binding(action.default, action.action, action.label, show=False, id=action.id)
+            Binding(
+                action.default,
+                action.action,
+                action.label,
+                show=False,
+                priority=action.priority,
+                id=action.id,
+            )
             for action in _keymap.KEY_ACTIONS
             # `scope == "app"` ONLY. A desktop-scoped action is not a Textual
             # binding — it has no `action_*` method and its key is an Electron
@@ -4990,42 +4995,27 @@ class OperatorApp(App[None]):
             # break the anti-drift test's "desktop ids are not bindings" half
             # (`test_keymap.py`). The registry is generic over scope; THIS is
             # the one place the app says which half it drives.
+            #
+            # `priority` comes from the ROW, not from a literal here: a remap
+            # re-keys the Binding but must not change its precedence, and the
+            # registry is the only place both halves survive a `set_keymap`.
             if action.scope == "app"
         ),
-        # Open the aside WITHOUT spending the composer's contents, which is the
-        # gesture `/btw <question>` cannot offer: submitting a slash command
-        # consumes the whole line, so a user who is half way through a prompt
-        # when the side question occurs to them would have to delete their
-        # draft to ask it. The draft is stashed and Esc puts it back.
+        # `keymap.command_palette` above is deliberately PRIORITY and the only
+        # declaration of that action, which is what makes ctrl+p remappable:
+        # Textual injects its own `Binding(COMMAND_PALETTE_BINDING, ...,
+        # priority=True)` at App construction only while NO binding carries
+        # the action (textual 8.2.8 `App.__init__`, measured). Declaring ours
+        # suppresses the injection, and `action_command_palette` overrides the
+        # framework action with the keyed palette screen. Before this, the
+        # comment here said an app binding on ctrl+p could never fire; that
+        # was true only of a binding that did NOT name this action.
         #
-        # Ctrl+B is navigation across platforms; F8 keeps Aside independent of
-        # terminal modifier encoding and leaves every TextArea editing key alone.
-        # Queued asks, on a FUNCTION key for the same reason as f8/f9/f10
-        # below: every `ctrl+<letter>` is spoken for. The bar's own Enter
-        # binding cannot be the only route, because nothing focuses a bar the
-        # user cannot see is focusable — measured in round 1, tab six times and
-        # shift+tab all stayed in the Editor, so a keyboard-only user could not
-        # answer a queued ask at all (UX U5). Non-priority, so a live picker
-        # keeps first refusal on the key.
-        #
-        # The key is NOT f7, which is the neighbour this row would suggest:
-        # TextArea binds f6/f7 itself (measured in Textual 8.2.8), so the one
-        # surface that most needs the route — the focused composer — swallowed
-        # it. `ASK_TOGGLE_KEY` is the single spelling, shared with the bar's own
-        # copy so the two cannot drift onto different keys.
-        Binding(ASK_TOGGLE_KEY, "toggle_asks", "Queued asks", show=False),
-        Binding("f8", "aside", "Aside", show=False),
-        Binding("ctrl+b", "toggle_sidebar", "Sessions", show=False),
-        Binding("f9", "focus_sidebar", "Focus sessions", show=False),
-        # Pin/unpin the session under the pointer (else under the sidebar's
-        # cursor). A FUNCTION key, continuing f8/f9: `ctrl+p` is NOT free —
-        # Textual's App injects `Binding(COMMAND_PALETTE_BINDING, ...,
-        # priority=True)` and that constant is `ctrl+p` on textual 8.2.8, so an
-        # app binding there never fires and the palette opens instead (measured
-        # in a pilot; see docs/design/keymap.md §E.4 clause 5). Every
-        # `ctrl+<letter>` is claimed. Non-priority, so a focused picker keeps
-        # first refusal.
-        Binding("f10", "toggle_pin", "Pin session", show=False),
+        # The remaining app-scope chords (f8 aside, ctrl+b sidebar, f9 focus,
+        # f10 pin, f4 queued asks, ctrl+t todos, ctrl+g subagents, ctrl+f fork)
+        # are registry rows now too; their audits — why a FUNCTION key, why
+        # every `ctrl+<letter>` was spoken for, why f4 is not f7 — live on the
+        # rows in `local_operator/keymap.py`.
         # The `? Keys` legend (issue #1944). NON-PRIORITY, and that is the
         # design: a focused typist keeps first refusal on the character — the
         # composer's TextArea stops every printable before any non-priority
@@ -5052,13 +5042,12 @@ class OperatorApp(App[None]):
         # leaves `ctrl+shift+up`/`ctrl+shift+down`, which nothing in
         # `local_operator/` binds and `TextArea` does not claim. `priority`
         # because the composer holds focus in the common case and must not
-        # swallow them.
-        Binding(
-            "ctrl+shift+up", "switch_session(-1)", "Previous session", show=False, priority=True
-        ),
-        Binding("ctrl+shift+down", "switch_session(1)", "Next session", show=False, priority=True),
+        # swallow them. The pair and their `priority` are `keymap.prev_session`
+        # / `keymap.next_session` rows now.
         # Textual decodes Kitty's Super modifier. Terminals that intercept Cmd+B
         # never deliver it, so Ctrl+B and /sidebar remain unconditional routes.
+        # This extra is DELIBERATELY not remappable: it is an alternate for the
+        # same action, and the registry stores one value per action.
         *(
             [Binding("super+b", "toggle_sidebar", "Sessions", show=False)]
             if sys.platform == "darwin"
@@ -5067,8 +5056,9 @@ class OperatorApp(App[None]):
         # Promote the aside exchange into the conversation. Only meaningful
         # while the card is open, and the action says so rather than the
         # binding: a key that silently does nothing elsewhere is worse than one
-        # that explains itself.
-        Binding("ctrl+f", "fork_aside", "Fork aside into the chat", show=False),
+        # that explains itself. `keymap.fork_aside` (ctrl+f) is a registry row;
+        # its old soft warning against ctrl+f is gone because TextArea binds no
+        # ctrl+f (measured, textual 8.2.8).
         # Esc is the key a user reaches for to make the agent stop, so it is the
         # same stop as Ctrl+C rather than a second, weaker notion of "pause" the
         # engine has no concept of.
@@ -5096,7 +5086,10 @@ class OperatorApp(App[None]):
         # moves by Tab, by click, and by the `ToolCard` actions that call
         # `screen.focus_next`/`focus_previous` directly rather than through the
         # key.
-        Binding("shift+tab", "cycle_effort", "Cycle reasoning effort", show=False, priority=True),
+        #
+        # `priority` and the key itself are the `keymap.cycle_effort` row's;
+        # the delegation to `_team_form`/`_agent_form` is dispatch INSIDE the
+        # action, unchanged by whichever key the user picks.
         # Expand/collapse the dock's todo list between the current-work preview
         # (active phase + a few following, settled phases auto-hidden) and every
         # phase and item. `ctrl+t` mnemonic: todos.
@@ -5107,11 +5100,11 @@ class OperatorApp(App[None]):
         # in `local_operator/tui/`, and Textual's `TextArea` binds
         # ctrl+a/e/w/d/x/k/f/u but not ctrl+t, so the composer keeps every
         # editing key it had.
-        Binding("ctrl+t", "toggle_todos", "Expand/collapse todos", show=False),
-        # The subagent dock's density cycle (full → summary → hidden, with the
-        # overflow roster as a stop inside full). `ctrl+g` is free in the app
-        # and TextArea, and bubbles so an active picker keeps first refusal.
-        Binding("ctrl+g", "toggle_subagents", "Cycle the subagent panel", show=False),
+        #
+        # Both chords below are registry rows now (`keymap.toggle_todos`,
+        # `keymap.toggle_subagents`); the audits above still describe the
+        # shipped defaults, and `priority=False` on those rows keeps the
+        # bubbling behaviour the paragraphs argue for.
         Binding("p", "subagent_parent", "Parent subagent", show=False),
         Binding("left_square_bracket", "subagent_peer(-1)", "Previous peer", show=False),
         Binding("right_square_bracket", "subagent_peer(1)", "Next peer", show=False),
@@ -20309,7 +20302,20 @@ class OperatorApp(App[None]):
         """
         session_id = self._resumable_session_id()
         archived = session_id in self._archived_ids() if session_id else False
-        return [entry for entry in SLASH_COMMANDS if entry.name != "unarchive" or archived]
+        offered = [entry for entry in SLASH_COMMANDS if entry.name != "unarchive" or archived]
+        # The registry's descriptions are rendered ONCE (at import, or on a
+        # locale move) and some name a hotkey — `/effort` says "shift+tab
+        # cycles". The picker must not keep naming a key the user remapped, so
+        # the rows handed to the composer carry the live spelling; a row whose
+        # text does not change is returned as the SAME object, because the
+        # frozen dataclass is compared by value in several tests (R2).
+        live: list[SlashCommand] = []
+        for entry in offered:
+            text = _keymap.substitute_keys(entry.description, self._keymap)
+            live.append(
+                entry if text == entry.description else dataclasses.replace(entry, description=text)
+            )
+        return live
 
     def _refresh_offered_commands(self) -> None:
         """Re-hand the composer the filtered list. Silent when there is no editor."""
@@ -29902,7 +29908,11 @@ class OperatorApp(App[None]):
             return ASK_SECRET_REFUSAL_OPEN_CARD
         if self._ask_list is not None:
             return ASK_SECRET_REFUSAL_OPEN_LIST
-        return ASK_SECRET_REFUSAL_CLOSED
+        # The closed surface advertises the toggle's key; the two open-surface
+        # sentences name no chord. Substituted HERE rather than templated so the
+        # shipped sentence is byte-identical at the default (the test that pins
+        # "f4" keeps passing) and only a remap changes it (R2).
+        return _keymap.substitute_keys(ASK_SECRET_REFUSAL_CLOSED, self._keymap)
 
     def _say_ask_secret_refusal(self) -> None:
         """Say where a credential goes — ONE row, restated while the state lasts."""
@@ -41213,7 +41223,7 @@ class OperatorApp(App[None]):
         self._open_settings_view()
 
     def action_command_palette(self) -> None:
-        """Open the app's command palette (``ctrl+p``).
+        """Open the app's command palette (``ctrl+p`` by default).
 
         Overrides Textual's action of the same name for one reason: the
         framework pushes a bare ``CommandPalette``, whose placeholder and
@@ -41222,9 +41232,11 @@ class OperatorApp(App[None]):
         catalogue; every other behaviour (keys, list, selection, dismissal) is
         inherited unchanged.
 
-        The binding itself is Textual's ``COMMAND_PALETTE_BINDING`` (``ctrl+p``
-        on 8.2.8), injected at runtime — see ``docs/design/keymap.md`` §E.4
-        clause 5 for why an app binding cannot claim that key.
+        The binding is the app's OWN `keymap.command_palette` row (`ctrl+p`
+        shipped). Declaring that action in ``BINDINGS`` is what suppresses
+        Textual's injected `COMMAND_PALETTE_BINDING` binding — the injection
+        runs only while no binding carries the action — so the key is now
+        remappable; see ``docs/design/keymap.md`` §L.
         """
         if self.use_command_palette and not palette_is_open(self):
             self.push_screen(OperatorCommandPalette(id="--command-palette"))
@@ -48515,7 +48527,8 @@ class OperatorApp(App[None]):
         rendered = " ".join(
             f"{self.EFFORT_MARK}{name}" if name == marked else name for name in rungs
         )
-        return f"reasoning effort: {rendered} — shift+tab cycles, this conversation"
+        cycle_key = _keymap.painted_key("keymap.cycle_effort", self._keymap)
+        return f"reasoning effort: {rendered} — {cycle_key} cycles, this conversation"
 
     def _cmd_effort(self, arg: str, notice: NoticeFn) -> None:
         """``/effort`` — list this model's levels; ``/effort <level>`` — set one.
@@ -49657,6 +49670,50 @@ class OperatorApp(App[None]):
                 "using the default key",
                 "warning",
             )
+        # Widgets that cache paint-once text keep an equality guard, so a
+        # `set_keymap` alone leaves the OLD chord on screen until an unrelated
+        # event repaints them (R1: measured on the dock header, the todo footer
+        # and the ask bar). Each widget owns the cheapest way to forget.
+        self._refresh_keymap_hints()
+
+    def _refresh_keymap_hints(self) -> None:
+        """Repaint every hint that NAMES a hotkey, after a live remap (R1).
+
+        Called from `_apply_keymap` only. The widgets listed here paint text
+        that embeds a chord and some of them guard it with an equality cache
+        (`SubagentPanel._paint_header` keeps `(shown, compact, hint, scope)`;
+        `_paint_summary` a summary key; the todo footer lives in a `Static` and
+        only moves on a rebuild; the ask bar budgets its tail by key width; the
+        sidebar composes its chip per render), so moving the bindings without
+        this is a frame that keeps naming the key the user just replaced.
+
+        Duck-typed on `keymap_hints_changed` rather than a type list: a widget
+        that starts painting a chord opts in by defining the method, and this
+        stays correct as panels come and go. Safe before mount — the band
+        refresh tolerates a session-less app and the query is guarded.
+        """
+        from textual.css.query import NoMatches
+
+        try:
+            widgets = list(self.query("*"))
+        except Exception:  # noqa: BLE001 — not mounted yet (boot, teardown)
+            return
+        for widget in widgets:
+            hook = getattr(widget, "keymap_hints_changed", None)
+            if callable(hook):
+                try:
+                    hook()
+                except NoMatches:
+                    continue
+        # The dock panel's header is rebuilt by the band's own sync pass, so it
+        # runs AFTER every cache was dropped rather than before.
+        self._refresh_band()
+        # The `/` picker holds a COPY of the registry rows (`Editor.set_commands`
+        # is handed a plain list), and a row's description names a hotkey
+        # (`/effort … (shift+tab cycles)`). Without this, boot with a saved
+        # override and every live remap left the picker painting the SHIPPED
+        # chord while `_offered_commands()` returned the live one (Q10).
+        self._refresh_offered_commands()
 
     def action_toggle_todos(self) -> None:
         """``ctrl+t`` — flip the dock todo list between collapsed and expanded.
@@ -49846,24 +49903,37 @@ class OperatorApp(App[None]):
         # projects create form could therefore never see the chord. Delegating
         # the ONE key to the page keeps every other binding — including ctrl+c
         # — exactly where disarming the app's hotkeys would have moved them.
-        if self._team_form is not None:
-            self._team_form.action_previous_field()
-            return
-        if self._agent_form is not None:
-            self._agent_form.action_previous_field()
-            return
-        page = self._projects_view
-        if page is not None and getattr(page, "wants_field_tab", False):
-            page.form_focus_previous()
-            return
-        # The schedule form is the second page that owns a shift+tab meaning.
-        # Without this delegation the app-wide priority handler ran BEFORE the
-        # focused field and changed the conversation's reasoning effort (and its
-        # billable setting) while navigating the form (round-1 UX U1).
-        schedule = self._schedule_view
-        if schedule is not None and getattr(schedule, "wants_field_tab", False):
-            schedule.form_focus_previous()
-            return
+        #
+        # ONLY WHILE THE SHIPPED CHORD IS STILL ONE OF THIS ACTION'S KEYS (R5).
+        # Once `keymap.cycle_effort` is remapped to, say, `f12`, the app no
+        # longer holds `shift+tab` as a priority binding and the forms' own
+        # non-priority `shift+tab` bindings work again — so delegating would
+        # steal the chord the form just regained (and cycle a billable setting
+        # from `f12` while a form is open, which is exactly what the remap
+        # asked for). Alternates count: `f12,shift+tab` keeps the delegation.
+        live_keys = {
+            part.strip()
+            for part in _keymap.painted_key("keymap.cycle_effort", self._keymap).split(",")
+        }
+        if "shift+tab" in live_keys:
+            if self._team_form is not None:
+                self._team_form.action_previous_field()
+                return
+            if self._agent_form is not None:
+                self._agent_form.action_previous_field()
+                return
+            page = self._projects_view
+            if page is not None and getattr(page, "wants_field_tab", False):
+                page.form_focus_previous()
+                return
+            # The schedule form is the second page that owns a shift+tab meaning.
+            # Without this delegation the app-wide priority handler ran BEFORE the
+            # focused field and changed the conversation's reasoning effort (and its
+            # billable setting) while navigating the form (round-1 UX U1).
+            schedule = self._schedule_view
+            if schedule is not None and getattr(schedule, "wants_field_tab", False):
+                schedule.form_focus_previous()
+                return
         if self._session is None:
             # Not "this model has no levels": there is no model yet, and naming
             # the wrong reason is worse than naming none.
@@ -52484,7 +52554,9 @@ class OperatorApp(App[None]):
         # the listing's bound. Computed once, because both forms paint through it.
         budget = NoticeBlock.body_budget(max(0, self._transcript_view().size.width - 1))
         if not clear:
-            self._append_block(NoticeBlock(_notifications_listing(unread, budget), "note"))
+            self._append_block(
+                NoticeBlock(_notifications_listing(unread, budget, keymap=self._keymap), "note")
+            )
             return
         items = [
             (
@@ -52508,7 +52580,10 @@ class OperatorApp(App[None]):
         # command that is already running, and no pointer to rows that are about
         # to stop being unread (UX round 2, U7 / agent review F4).
         self._append_block(
-            NoticeBlock(_notifications_listing(unread, budget, clearing=True), "note")
+            NoticeBlock(
+                _notifications_listing(unread, budget, clearing=True, keymap=self._keymap),
+                "note",
+            )
         )
         try:
             results = await asyncio.to_thread(
@@ -54168,8 +54243,10 @@ class OperatorApp(App[None]):
             # in the same verb they just learned, for the operation this is not
             # — left them with no route to the thing they actually wanted.
             self._system_notice(
-                "ctrl+f folds an open aside into the chat (F8 opens one) — "
-                "to branch this conversation, use /fork",
+                f"{_keymap.painted_key('keymap.fork_aside', self._keymap)} folds an"
+                " open aside into the chat"
+                f" ({_keymap.painted_key('keymap.aside', self._keymap)} opens one)"
+                " — to branch this conversation, use /fork",
                 "warning",
             )
             return
@@ -58995,7 +59072,7 @@ class OperatorApp(App[None]):
         for names, command in named_commands:
             command_rows.add_row(
                 Text(names, style=muted),
-                Text(command.description, style=dim),
+                Text(_keymap.substitute_keys(command.description, self._keymap), style=dim),
             )
         # Rows and notes share one Group, so the list holds renderables rather
         # than only Texts (the command table is the one non-Text entry).
@@ -59203,6 +59280,22 @@ class OperatorApp(App[None]):
             row.append(description, style=dim)
             return row
 
+        # Every app-scope chord below that the keymap registry owns is painted
+        # from the LIVE remap rather than its shipped literal. `literal` is the
+        # spelling this frame already used (uppercase `F8`, arrow glyphs); it
+        # stays when the action is at its default so the default frame is
+        # byte-identical, and only a remap changes the row. Width budget: the
+        # 74-cell ceiling this block documents assumes those literals, so a
+        # deliberately long remap can wrap the row — the same trade the legend
+        # card makes, and a wrapped hint beats one naming a dead key.
+        keymap_snapshot = getattr(self, "_keymap", None)
+        if not isinstance(keymap_snapshot, dict):
+            keymap_snapshot = {}
+
+        def _live(action_id: str, literal: str) -> str:
+            live = keymap_snapshot.get(action_id)
+            return _keymap.display_key(live) if live else literal
+
         # Bang-mode's marker is named here because the glyph is the
         # colour-independent signal (#385) and a user who cannot see the
         # hue still needs to know what `$` on the composer means. The
@@ -59212,8 +59305,13 @@ class OperatorApp(App[None]):
         lines.append(_key_row("option+left/right", "move by word; +shift selects"))
         lines.append(_key_more("ctrl+left/right is the same on Linux/Windows"))
         lines.append(_key_row("option+up/down", "same as up/down (history, lists)"))
-        lines.append(_key_row("shift+tab", "cycle reasoning effort"))
-        lines.append(_key_row("ctrl+l", "clear the transcript (history stays)"))
+        lines.append(_key_row(_live("keymap.cycle_effort", "shift+tab"), "cycle reasoning effort"))
+        lines.append(
+            _key_row(
+                _live("keymap.clear_transcript", "ctrl+l"),
+                "clear the transcript (history stays)",
+            )
+        )
         # The transcript-navigation pair was bound `show=False` and listed
         # nowhere, so the ONLY place the product mentioned `ctrl+home` was a
         # resume notice that appears when the reader is already stuck. One row
@@ -59234,12 +59332,24 @@ class OperatorApp(App[None]):
         # only documented effect was "jump", in a state where jumping does
         # nothing visible (ux review round 2, U6). 71 composed cells.
         lines.append(_key_more("loads older history when there is no more to scroll"))
-        lines.append(_key_row("ctrl+t", "expand or collapse the todo panel"))
+        lines.append(
+            _key_row(
+                _live("keymap.toggle_todos", "ctrl+t"),
+                "expand or collapse the todo panel",
+            )
+        )
         # 67 composed cells against the 74-cell ceiling: names the three
         # stops so a user who only ever saw "expand/collapse" learns the panel
         # can now shrink to a row or go away (#525).
-        lines.append(_key_row("ctrl+g", "cycle the subagent panel: full, summary, hidden"))
-        lines.append(_key_row("ctrl+b", "show or hide the session sidebar"))
+        lines.append(
+            _key_row(
+                _live("keymap.toggle_subagents", "ctrl+g"),
+                "cycle the subagent panel: full, summary, hidden",
+            )
+        )
+        lines.append(
+            _key_row(_live("keymap.toggle_sidebar", "ctrl+b"), "show or hide the session sidebar")
+        )
         # Directly under it, because it is the same surface, and it is now the
         # ONLY way into that panel's keyboard mode: a pointer press on the list
         # no longer takes the keyboard (design round D1), so the route in has to
@@ -59264,11 +59374,34 @@ class OperatorApp(App[None]):
         # MEASURED: 54 description cells (74 composed) — EXACTLY at the
         # 74-cell ceiling this block documents, the same zero-headroom class
         # as the `cmd+v` row below; one more character wraps it.
-        lines.append(_key_row("f9", "keys the sessions list; ctrl+k or f10 pin; esc returns"))
+        lines.append(
+            _key_row(
+                _live("keymap.focus_sidebar", "f9"),
+                "keys the sessions list; ctrl+k or "
+                f"{_live('keymap.toggle_pin', 'f10')} pin; esc returns",
+            )
+        )
         # Beside ctrl+b, because it is the same surface: the list is where the
         # user learns what "next" means, and the one-press switch is otherwise
-        # undiscoverable (UX round 3, U5).
-        lines.append(_key_row("ctrl+shift+↑/↓", "switch to the previous/next conversation"))
+        # undiscoverable (UX round 3, U5). One arrow row while both ends sit at
+        # their defaults (the spelling this frame shipped); two live chords
+        # once either end is remapped, because one arrow cannot describe two
+        # different keys.
+        prev_session_key = keymap_snapshot.get("keymap.prev_session")
+        next_session_key = keymap_snapshot.get("keymap.next_session")
+        session_switch = (
+            "ctrl+shift+↑/↓"
+            if not prev_session_key and not next_session_key
+            else _keymap.display_key(_keymap.painted_key("keymap.prev_session", keymap_snapshot))
+            + "/"
+            + _keymap.display_key(_keymap.painted_key("keymap.next_session", keymap_snapshot))
+        )
+        lines.append(
+            _key_row(
+                session_switch,
+                "switch to the previous/next conversation",
+            )
+        )
         # NAMES BOTH MEANINGS OF `ctrl+f`, because until now this row named the
         # one that is NOT what the key does where the fleet door lives (round 2:
         # U13). The f9 row above is exactly at the 74-cell ceiling and carries
@@ -59276,7 +59409,14 @@ class OperatorApp(App[None]):
         # it had 21 cells of headroom, so the collision is stated here rather
         # than by spending a second row this frame does not have. MEASURED: 50
         # description cells (70 composed) against the 74-cell ceiling.
-        lines.append(_key_row("F8", "open an aside; ctrl+f forks or folds it (f9: asks)"))
+        lines.append(
+            _key_row(
+                _live("keymap.aside", "F8"),
+                "open an aside; "
+                f"{_live('keymap.fork_aside', 'ctrl+f')} forks or folds it "
+                f"({_live('keymap.toggle_asks', 'f4')}: asks)",
+            )
+        )
         # Directly under `F8`, because it is only meaningful once an aside
         # is open. ONE row for the pair rather than two: the partner chord fits
         # inside the description, which keeps the gutter reading as one gesture
@@ -59287,7 +59427,13 @@ class OperatorApp(App[None]):
         # keys both get the text out of a card that says nothing here joins the
         # conversation, and which one keeps that promise is the whole reason a
         # user picks between them. 67 composed cells against the 74 ceiling.
-        lines.append(_key_row("ctrl+r", "copy the open aside; ctrl+f folds it in instead"))
+        lines.append(
+            _key_row(
+                "ctrl+r",
+                "copy the open aside; "
+                f"{_live('keymap.fork_aside', 'ctrl+f')} folds it in instead",
+            )
+        )
         lines.append(_key_row("esc", "stop the agent; leave a mode"))
         lines.append(_key_row("ctrl/cmd+d", "empty: quit; draft: delete forward"))
         # Where the logs went. Console logging is off while the TUI owns the
@@ -67048,7 +67194,11 @@ def notification_kind_word(kind: str) -> str:
 
 
 def _notifications_listing(
-    entries: Sequence[CatalogEntry], budget: int, *, clearing: bool = False
+    entries: Sequence[CatalogEntry],
+    budget: int,
+    *,
+    clearing: bool = False,
+    keymap: Mapping[str, str] | None = None,
 ) -> str:
     """The unread-completion receipt ``/notifications`` prints.
 
@@ -67118,7 +67268,11 @@ def _notifications_listing(
         # The count of what is hidden, in BOTH forms: it is what lets the reader
         # reconcile the rows above with the number the receipt will name.
         bound = _t(_x.notifications_more(shown=str(total - NOTIFICATIONS_LISTING_ROWS)))
-        lines.append(bound if clearing else _t(_x.notifications_sidebar_hint(bound=bound)))
+        lines.append(
+            bound
+            if clearing
+            else _keymap.substitute_keys(_t(_x.notifications_sidebar_hint(bound=bound)), keymap)
+        )
     if not clearing:
         # "all N" once the bound bites, "these" only when every row is on screen:
         # at 38 unread the short form named the ten rows above it while the write

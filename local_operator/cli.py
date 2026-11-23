@@ -3302,6 +3302,20 @@ def config_edit_command(args: argparse.Namespace) -> int:
         stored = settings_io.read_setting(config_manager, setting)
         echoed = matched_choice.label if matched_choice is not None else stored
         print(_cct(_cc.updated(key=args.key, value=str(echoed))))
+        # The settings PAGE warns when a hotkey lands on a chord the composer or
+        # a fixed app binding already owns (Q8). This command has no UI, and
+        # silently accepting a key the page would have flagged left the two
+        # writers disagreeing about what the user should know. The sentence is
+        # `keymap.conflict_note`'s own registry English — the same words the
+        # page paints, not new catalogue copy — printed AFTER the receipt and
+        # still accepting the write, which is the warn-and-allow contract.
+        if setting.kind is settings_io.Kind.HOTKEY:
+            from local_operator import keymap as keymap_mod
+            from local_operator.cli_style import WARNING
+
+            note = keymap_mod.conflict_note(setting.key, str(stored))
+            if note:
+                print(paint(f"Warning: {note}", WARNING, stream=sys.stderr), file=sys.stderr)
         if setting.key == "tool_approval_mode" and str(stored).strip().lower() == "auto":
             # Qualified on purpose (UX round 1, U4). "Successfully updated
             # tool_approval_mode to auto" reads as "my running agents are not
