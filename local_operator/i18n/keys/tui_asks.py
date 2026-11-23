@@ -59,3 +59,11 @@ def list_copied_id(*, ask_id: str) -> Msg:
 
 def list_copy_id_hint() -> Msg:
     return Msg("tui.asks.list.copy_id_hint", {})
+
+
+def list_no_such_ask(*, ask_id: str) -> Msg:
+    return Msg("tui.asks.list.no_such_ask", {"ask_id": ask_id})
+
+
+def list_showing_all_settled(*, ask_id: str) -> Msg:
+    return Msg("tui.asks.list.showing_all_settled", {"ask_id": ask_id})

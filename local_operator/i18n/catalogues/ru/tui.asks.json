@@ -11,5 +11,7 @@
   "tui.asks.dismiss.notice_no_reply": "Убрано — ответ не отправлен",
   "tui.asks.dismiss.title": "Убрать этот вопрос",
   "tui.asks.list.copied_id": "{ask_id} скопирован",
-  "tui.asks.list.copy_id_hint": "y копировать id"
+  "tui.asks.list.copy_id_hint": "y копировать id",
+  "tui.asks.list.no_such_ask": "В этом разговоре нет вопроса {ask_id}.",
+  "tui.asks.list.showing_all_settled": "Показаны все вопросы: {ask_id} завершён."
 }

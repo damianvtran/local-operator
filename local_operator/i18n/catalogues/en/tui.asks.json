@@ -11,5 +11,7 @@
   "tui.asks.dismiss.notice_no_reply": "Dismissed — no reply sent",
   "tui.asks.dismiss.title": "Dismiss this ask",
   "tui.asks.list.copied_id": "Copied {ask_id}",
-  "tui.asks.list.copy_id_hint": "y copy id"
+  "tui.asks.list.copy_id_hint": "y copy id",
+  "tui.asks.list.no_such_ask": "No ask {ask_id} in this conversation.",
+  "tui.asks.list.showing_all_settled": "Showing all asks: {ask_id} is settled."
 }

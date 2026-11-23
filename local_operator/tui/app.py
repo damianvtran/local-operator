@@ -6414,6 +6414,13 @@ class OperatorApp(App[None]):
         #: sidebar mark (`_fleet_marks`) count ANSWERABLE rows only, so neither a
         #: settled nor a timed-out row inflates a count of what is still owed.
         self._ask_rows: list[AskRow] = []
+        #: ``{ask_id: status}`` of THIS conversation's asks, handed to every
+        #: assistant block so a cited id in the agent's prose can be painted as a
+        #: link with its state (``tui/ask_ink.py``). A copy of the statuses rather
+        #: than the block reading `_ask_rows` itself: a widget reaching into the
+        #: app's fold is the second reader that drifts, and the map is also what
+        #: an equal-check compares to decide whether a repaint is owed.
+        self._ask_mark_states: dict[str, str] = {}
         #: Which queue the ONE expanded list is reading: this conversation's, or
         #: every conversation's. Set by the DOOR the user came through — the bar
         #: (session) or the sidebar's fleet note (fleet) — and never by the list
@@ -29158,6 +29165,9 @@ class OperatorApp(App[None]):
             # cleared HERE rather than left to go stale on a switch flipped
             # mid-session.
             self._ask_rows = []
+            # No asks, no citations to decorate: the prose goes plain again (the
+            # defined empty state — never a stale mark over a queue that is gone).
+            self._sync_ask_prose_marks()
             # A session `x` mark rides only on `_ask_rows`; with the rows gone no
             # snapshot would ever sweep it (#2481 review round 3, m2).
             for ask_id in list(self._ask_dismiss_in_flight):
@@ -29174,6 +29184,11 @@ class OperatorApp(App[None]):
             self._paint_sidebar_asks()
             return
         self._ask_rows = list(rows)
+        # The prose marks are a PAINT-TIME reading of this same frame (§3): hand
+        # the transcript the statuses before anything else reads them, so the
+        # message under the reader's eyes turns its `●` into `✓` in the frame the
+        # answer arrives rather than on the next unrelated repaint.
+        self._sync_ask_prose_marks()
         # A session-scope `x` holds its row in flight until the row stops being a
         # thing the gesture can act on: ABSENT from this frame (the old sweep —
         # the row left the queue), or PRESENT, SETTLED and NOT LAPSED (SA-D8) —
@@ -31068,6 +31083,63 @@ class OperatorApp(App[None]):
         if self._ask_scope != SCOPE_FLEET:
             return None
         return next((item for item in self._ask_fleet_rows if item.ask_id == ask_id), None)
+
+    def _reveal_ask(self, ask_id: str) -> None:
+        """Open the ask list with the cursor on ``ask_id`` — the ONE reveal.
+
+        ``/ask <id>`` and a click on a cited id in prose are the same gesture:
+        bring the list up on that row (design §5.2/§5.4). The lookup is THIS
+        conversation's rows only, and that is a decision rather than an
+        omission: ids are unique per conversation, the same ``a-745e`` names a
+        different ask in another log, and a route that searched the fleet would
+        open a stranger's question from a cited id (Q1, decided).
+
+        A SETTLED row lands on the All half with a sentence saying so: the list
+        opens on All, but a reader arriving from prose has no reason to know the
+        row they asked for is a finished one, and a bare highlight on a chip row
+        reads as "still open" unless it says otherwise.
+        """
+        row = next((item for item in self._ask_rows if item.ask_id == ask_id), None)
+        if row is None:
+            self._notice(_t_asks(_ask_keys.list_no_such_ask(ask_id=ask_id)), "warning")
+            return
+        self._mount_ask_list(highlight=ask_id)
+        listing = self._ask_list
+        if row.settled and listing is not None:
+            listing.action_filter_all()
+            self._notice(_t_asks(_ask_keys.list_showing_all_settled(ask_id=ask_id)))
+
+    def action_open_ask_id(self, ask_id: str) -> None:
+        """A clicked cited id in agent prose opens its ask (design §5.4).
+
+        The target rides as Textual action meta on the painted span, so this is
+        reached by the app's own click broker — no rich ``link=`` and no OSC-8
+        URL ever leaves the frame for a terminal to offer to a desktop.
+        """
+        self._reveal_ask(ask_id)
+
+    def _sync_ask_prose_marks(self) -> None:
+        """Hand every assistant block the asks its prose may cite (§3).
+
+        The mark beside a cited id is STATE AT PAINT TIME, so the decision lives
+        here, at the one seam that already holds this conversation's asks, and
+        never inside a block — a block cannot know a queue, and two readers of
+        the same fold is how a prose mark and the list row come to disagree.
+
+        A status map rather than the rows: the blocks need nothing else, and the
+        map's equality is what makes a repaint a real change instead of one per
+        snapshot.
+        """
+        states = {row.ask_id: row.status for row in self._ask_rows}
+        if states == self._ask_mark_states:
+            return
+        self._ask_mark_states = states
+        try:
+            view = self.query_one(TranscriptView)
+        except Exception:  # noqa: BLE001 — a snapshot can land before the transcript mounts
+            return
+        for block in view.query(AssistantBlock):
+            block.set_ask_states(states)
 
     def on_ask_queue_list_picked(self, message: AskQueueList.Picked) -> None:
         """Enter on a list row: mount that ask's card, which takes the keyboard."""

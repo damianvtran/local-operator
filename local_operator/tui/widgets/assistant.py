@@ -502,6 +502,13 @@ class AssistantBlock(TranscriptBlock):
         #: block with no rows has no frame to be faithful to, and answering
         #: from the setting is the only defined answer there.
         self._painted_rail_cols: int = -1
+        #: ``{ask_id: queue status}`` for the asks of the conversation this block
+        #: belongs to, as the APP knows them (``_sync_ask_surface`` is the one
+        #: writer). Read when the markdown source is decorated: an id cited in
+        #: prose becomes a link + a one-cell state mark only when it resolves
+        #: here (``tui/ask_ink.py``). Empty until the first ask sync — a block
+        #: painted before then is plain, which is the defined loading state.
+        self._ask_states: dict[str, str] = {}
         #: Is this block MID-TURN NARRATION — prose a model call streamed before
         #: it finalized into tool calls — rather than the answer that ends the
         #: turn? Set by the two surfaces that make that classification
@@ -857,13 +864,14 @@ class AssistantBlock(TranscriptBlock):
             return self._flat_whole(width)
         console = self._flat_console()
         if self._frozen_flat is None or self._frozen_width != width:
-            self._frozen_rendered = _markdown(self._frozen_text)
+            self._frozen_rendered = self._rendered(self._frozen_text)
             self._frozen_flat = flatten(self._frozen_rendered, width, console)
             self._frozen_width = width
         tail = self._full_text[len(self._frozen_text) :]
         rows = self._frozen_flat.copy()
         rows.append("\n")
-        rows.append_text(flatten(_markdown(tail), width, console))
+        rows.append_text(flatten(self._rendered(tail), width, console))
+        self._paint_ask_marks(rows)
         return rows
 
     def on_resize(self, event: object) -> None:
@@ -1050,7 +1058,85 @@ class AssistantBlock(TranscriptBlock):
         if not self._full_text:
             return Text("")
         lane = width if width is not None else self._flat_width()
-        return flatten(_markdown(self._full_text), lane, self._flat_console())
+        rows = flatten(self._rendered(self._full_text), lane, self._flat_console())
+        self._paint_ask_marks(rows)
+        return rows
+
+    def _rendered(self, source: str) -> Markdown:
+        """``source`` as markdown, with the render-time promotions applied.
+
+        ONE place, so the prefix and the live tail cannot be decorated
+        differently — the failure would be a cited id that turns into a link
+        only after the block settles.
+        """
+        from local_operator.tui.ask_ink import decorate_source
+
+        return _markdown(decorate_source(source, self._ask_states))
+
+    def _paint_ask_marks(self, rows: Text) -> None:
+        """Paint every decorated id in the link style and wire its click.
+
+        Runs on the FLATTENED rows rather than the source because the link ink
+        and the click target are paint, not markdown: the source only carries
+        the ``NBSP + mark`` the decoration inserted (§3).
+        """
+        from local_operator.tui.ask_ink import style_marks
+
+        style_marks(rows, action=self._ask_action)
+
+    @staticmethod
+    def _ask_action(ask_id: str) -> str | None:
+        """The Textual action that opens ``ask_id`` in the list, as click meta.
+
+        A plain string action, never a rich ``link=``: Textual would hand the
+        terminal an OSC-8 URL for any link style, and a ``lop-ask:`` scheme is
+        exactly what design §5.4 forbids offering to the desktop.
+
+        ``app.``-namespaced, MEASURED rather than assumed: an unnamespaced
+        action resolves against the clicked widget's own namespace chain, and
+        the app's handler is not on it — ``open_ask_id(...)`` from a transcript
+        block returns False and opens nothing (probed against textual 8.2.8).
+        """
+        return f"app.open_ask_id({ask_id!r})"
+
+    def set_ask_states(self, states: dict[str, str]) -> None:
+        """Take the app's ``{ask_id: status}`` map and repaint if it moved.
+
+        The mark is STATE AT PAINT TIME (§3): the same paragraph read before and
+        after an answer must show ``●`` turn into ``✓`` without the message
+        changing. The marks are baked into the flattened rows, so the caches
+        that hold them go — the same invalidation :meth:`retheme` performs —
+        and the message re-renders from source.
+        """
+        states = dict(states)
+        if states == self._ask_states:
+            return
+        self._ask_states = states
+        if not self._full_text:
+            return
+        self._frozen_rendered = None
+        self._frozen_flat = None
+        was_finalized = self._finalized
+        self._finalized = False
+        try:
+            rows = self._flat_whole() if was_finalized else self._flat_rows(self._flat_width())
+            self._apply_rows(rows)
+        finally:
+            self._finalized = was_finalized
+
+    def on_mount(self) -> None:
+        """Adopt the app's ask map as the block appears in a transcript.
+
+        A block built for a REPLAY is mounted after the last snapshot, so
+        waiting for the next one would leave every cited id in a resumed
+        conversation plain until an ask happened to change state.
+        """
+        super_on_mount = getattr(super(), "on_mount", None)
+        if super_on_mount is not None:
+            super_on_mount()
+        states = getattr(self.app, "_ask_mark_states", None)
+        if states:
+            self.set_ask_states(dict(states))
 
     def set_fold_muted(self, muted: bool) -> None:
         """Draw this message in the step's secondary ink (By response).
