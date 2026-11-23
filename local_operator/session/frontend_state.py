@@ -84,6 +84,7 @@ from local_operator.session.channel_spend import (
     combine,
 )
 from local_operator.session.history_window import DisplayHistoryWindow
+from local_operator.session.runtime.inline_ui_egress import InlineUiEvents
 from local_operator.session.runtime.types import RUNNING_SUBAGENT_STATUSES
 from local_operator.session.spend import (
     SessionSpend,
@@ -3775,6 +3776,9 @@ class FrontendSessionState(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
+    # Owned by the same immutable cut as live_events; never in a generic dump.
+    _live_inline_ui: dict[str, Any] | None = PrivateAttr(default=None)
+
     state_version: int = FRONTEND_STATE_VERSION
     session_id: str
     epoch: str
@@ -4608,7 +4612,7 @@ def job_trajectory_wire_value(rows: Any) -> list[dict[str, Any]]:
     return [_wire_value(row) for row in (rows or ())]
 
 
-def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
+def sync_wire_payload(sync: FrontendSync, *, inline_ui_capable: bool = False) -> dict[str, Any]:
     """Serialize one attach snapshot with job trajectories left OUT.
 
     The runtime's socket refuses a line over ``server._MAX_LINE_BYTES`` (1 MiB),
@@ -4717,6 +4721,20 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
         _yield_spend_channels_when_the_frame_has_no_room(payload, snapshot)
         _yield_asks_when_the_frame_has_no_room(snapshot, payload)
         _bound_usage_diagnostics_in_place(payload, snapshot)
+        sidecar = sync.snapshot._live_inline_ui if inline_ui_capable else None
+        if sidecar:
+            for event in snapshot.get("live_events", []):
+                if (
+                    isinstance(event, dict)
+                    and event.get("type") == "message_update"
+                    and isinstance(message := event.get("message"), dict)
+                    and isinstance(message_id := message.get("id"), str)
+                    and message_id in sidecar["messages"]
+                ):
+                    event["inline_ui"] = copy.deepcopy(sidecar)
+                    if _frame_line_bytes(payload) > _MODEL_CATALOGUE_LINE_LIMIT:
+                        event.pop("inline_ui")
+                    break
     return payload
 
 
@@ -6906,6 +6924,7 @@ class FrontendStateStore:
         # of a large session, where this copy-and-freeze of a 2,000-job roster
         # was ~0.5 s held on the serving loop (PR #4012, QA round 1, Q1).
         self._state = frozen if frozen is not None else freeze_new_store_state(state)
+        self._inline_ui_seed = InlineUiEvents(sidecars=True)
         self._peer_display_fold: Any = None
         self._peer_display_pending: list[dict[str, Any]] = []
         self._subscribers: list[Callable[[FrontendUpdate], None]] = []
@@ -9545,7 +9564,8 @@ class FrontendStateStore:
         the accumulated assistant/tool state without flooding every peer with a
         second frame for every token.
         """
-        data = event.model_dump(mode="json")
+        data = self._inline_ui_seed.dump(event, reconnect_seed=True)
+        sidecar = data.pop("inline_ui", None)
         kind = str(data.get("type", ""))
         live = list(self._state.live_events)
         if kind in {"agent_start", "agent_end"}:
@@ -9646,7 +9666,10 @@ class FrontendStateStore:
         #
         # Silent replacement: no delta and no sequence move, so only the pointer
         # needs installing against a reader.
-        self._install(self._state.model_copy(update={"live_events": live}))
+        state = self._state.model_copy(update={"live_events": live})
+        if kind in {"agent_start", "agent_end", "message_start", "message_update", "message_end"}:
+            state._live_inline_ui = sidecar if kind == "message_update" else None
+        self._install(state)
 
     def _refuse_peer_cycle_display(
         self, error: Exception, stage: str, event_type: str = ""

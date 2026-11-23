@@ -63579,6 +63579,12 @@ class OperatorApp(App[None]):
         # path that retires a reasoning phase for a turn that reasoned and then
         # called a tool. Idempotent: a `reasoning_end` already retired it.
         self._retire_reasoning_block()
+        if message.retract_inline_ui and not message.text.strip():
+            block, self._streaming_block = self._streaming_block, None
+            if block is not None:
+                self._transcript_view().remove_block(block)
+            self._refresh_working_activity()
+            return
         # An empty authoritative text is not an instruction to erase what
         # streamed. Adopting it unconditionally destroyed the prose the deltas
         # had already painted and left an empty block mounted in its place; the

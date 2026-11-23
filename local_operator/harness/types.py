@@ -1198,6 +1198,12 @@ class Message(BaseModel):
     # Stable id for transcript entries and cache memoization.
     id: str = Field(default_factory=lambda: uuid.uuid4().hex)
 
+    # Admitted input intent only; replay must not reauthorize a future run.
+    _inline_ui_viewer_capable: bool = PrivateAttr(default=False)
+    # Journal-envelope presentation provenance; never serialized as a Message field.
+    _inline_ui_source_version: int | None = PrivateAttr(default=None)
+    _inline_ui_overlay: dict[str, Any] | None = PrivateAttr(default=None)
+
     # Set only on the ephemeral raw copies returned by ChatRequest.wire_messages.
     # Explicit provider encoders may read the content; generic serialization may
     # not silently turn this raw-bearing row into apparently safe public JSON.
@@ -5426,6 +5432,9 @@ class ChatRequest(BaseModel):
     # Shared only by the main turn's request clones; never serialized to a
     # transcript, telemetry row, helper call or independent conversation.
     _codex_turn_state: Any = PrivateAttr(default=None)
+
+    # Runtime dispatch stamps the exact request that received the catalog.
+    _inline_ui_source_version: int | None = PrivateAttr(default=None)
 
     _one_turn_secrets: dict[str, SecretStr] = PrivateAttr(default_factory=dict)
 

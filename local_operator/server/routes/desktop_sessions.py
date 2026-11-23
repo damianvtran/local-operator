@@ -164,6 +164,7 @@ from local_operator.session.row_clip import (
     RowRangeUnsatisfiable,
     wire_json,
 )
+from local_operator.session.runtime.inline_ui_egress import without_desktop_inline_ui
 from local_operator.session.runtime.presence import PRESENCE_TTL_S
 from local_operator.slash_commands import (
     SESSION_COPY_FLAG,
@@ -1392,6 +1393,7 @@ class FileRef(Input):
 
 class Prompt(Input):
     request_id: RequestID
+    inline_ui: Annotated[bool, Field(strict=True)] = False
     text: str = Field(max_length=200_000)
     images: list[PromptImage] = Field(default_factory=list, max_length=8)
     # Documents ride as REFERENCES: the upload route stored the bytes, and the
@@ -3769,6 +3771,7 @@ async def snapshot(
     ] = None,
     peer_journal_source: Annotated[int, Query(ge=0, le=1)] = 0,
     supplements: int = Query(default=0, ge=0),
+    inline_ui: Annotated[int, Query(ge=0, le=1)] = 0,
     # Viewer-declared (QA F5 on #3762): a client that can paint nested
     # write/edit binding rows sends 1; default 0 serves today's rows exactly.
     diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
@@ -3821,6 +3824,7 @@ async def snapshot(
         host(request).session(session_id, read=True, allow_draft=True) as bridge,
     ):
         frame = await bridge.snapshot(
+            **({"inline_ui": True} if inline_ui else {}),
             entry_times=bool(entry_ts),
             open_frame=bool(open_frame),
             **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
@@ -3899,6 +3903,7 @@ async def history(
     source_read: Annotated[str | None, Query(max_length=32)] = None,
     expected_journal_generation: Annotated[str | None, Query(max_length=128)] = None,
     supplements: int = Query(default=0, ge=0),
+    inline_ui: Annotated[int, Query(ge=0, le=1)] = 0,
     # Viewer-declared (QA F5 on #3762): a client that can paint nested
     # write/edit binding rows sends 1; default 0 serves today's rows exactly.
     diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
@@ -3947,6 +3952,7 @@ async def history(
     ):
         return reply(
             await bridge.history(
+                **({"inline_ui": True} if inline_ui else {}),
                 before_id=before_id,
                 around_id=around_id,
                 before=before,
@@ -4801,6 +4807,7 @@ async def prompt(session_id: str, body: Prompt, request: Request):
                             # owner from before the carriage never sees the keys.
                             input_mode=body.input_mode,
                             input_path=body.input_path,
+                            **({"inline_ui": True} if body.inline_ui else {}),
                         )
                         admitted = True
                         # Admission can bind a cold viewer while an event
@@ -6785,6 +6792,7 @@ async def events(
     ] = None,
     peer_journal_source: Annotated[int, Query(ge=0, le=1)] = 0,
     supplements: int = Query(default=0, ge=0),
+    inline_ui: Annotated[int, Query(ge=0, le=1)] = 0,
     # Viewer-declared (QA F5 on #3762): a client that can paint nested
     # write/edit binding rows sends 1; default 0 serves today's rows exactly.
     diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
@@ -6907,11 +6915,14 @@ async def events(
                     entry_times=bool(entry_ts),
                     open_frame=bool(open_frame),
                     **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                    **({"inline_ui": True} if inline_ui else {}),
                     peer_journal_source=bool(peer_journal_source),
                 )
             ) as frames:
                 try:
                     async for frame in frames:
+                        if not inline_ui:
+                            frame = without_desktop_inline_ui(frame)
                         ser_at = time.monotonic() if open_trace.enabled() else 0.0
                         if isinstance(frame, dict) and frame.get("type") == "snapshot":
                             # The one frame proportional to the session (bounded

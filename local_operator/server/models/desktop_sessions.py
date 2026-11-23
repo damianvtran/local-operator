@@ -895,6 +895,9 @@ class HistoryPage(BaseModel):
     journal_missing_ids: list[str] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    # Absent for legacy viewers, never a condition of serving a prose page.
+    inline_ui: dict[str, Any] | None = Field(default=None, exclude_if=lambda value: value is None)
+
     entries: list[HistoryEntry]
     has_more: bool
     cursor_missing: bool

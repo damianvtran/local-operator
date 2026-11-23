@@ -690,6 +690,8 @@ def static_feature_flags() -> dict[str, Any]:
         "entry_ts": 1,
         # Viewer opt-in: journal-index ordinals/domain, not publication seq.
         "journal_order": 1,
+        # Same v1 envelope on negotiated history, snapshots and live SSE.
+        "inline_ui": 1,
         # THE COMPLETE PEER-SOURCE CONTRACT, and a NEW key rather than a bump of
         # `journal_order` for the rule this whole map is written to: a renderer
         # that only knows the LOCAL journal-order negotiation must keep working

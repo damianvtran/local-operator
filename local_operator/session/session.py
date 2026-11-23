@@ -290,6 +290,7 @@ from local_operator.session.credential_binding import (
     CredentialBinding,
 )
 from local_operator.session.goal import GoalHistoryEntry, GoalJudgeState, GoalState
+from local_operator.session.inline_ui import instructions_for as inline_ui_instructions
 from local_operator.session.mcp_status import MCP_DISCOVERY_KEY, McpStartupOutcome
 
 # ONE implementation of "what dial does this row state", shared with the
@@ -4343,6 +4344,7 @@ class Session:
         #: approval or picker answer), or ``None`` for a run with none so far.
         #: Reset at every pipeline head beside ``_run_started_at``.
         self._run_input_surface: str | None = None
+        self._run_inline_ui_viewer_capable = False
         #: The conversation's LAST DRIVER, which a run with no human input (a
         #: wake, a job result, a peer or channel message) inherits. ``None`` means
         #: "not rebuilt yet"; the first run end rebuilds it from the transcript
@@ -10891,6 +10893,7 @@ class Session:
         mesh_origin: Mapping[str, Any] | None = None,
         _file_capture: Any = ...,
         input_surface: str = "tui",
+        inline_ui: bool = False,
     ) -> None:
         """Run one user turn to completion (awaitable) or raise.
 
@@ -11134,6 +11137,8 @@ class Session:
             # the run inherits the conversation's last driver.
             if not harness_injected:
                 _stamp_input_surface(user, input_surface)
+                if input_surface in {"desktop", "mobile"} and inline_ui is True:
+                    user._inline_ui_viewer_capable = True
             if harness_injected:
                 # The stamp goes on the row THIS call mints, at the one place
                 # the row is born, so no caller can mint a chrome row without
@@ -11255,6 +11260,7 @@ class Session:
         mesh_origin: Mapping[str, Any] | None = None,
         _file_capture: Any = ...,
         input_surface: str = "tui",
+        inline_ui: bool = False,
     ) -> None:
         """Inject an identified steering message into the running turn.
 
@@ -11336,6 +11342,8 @@ class Session:
         # phone steer into a desk-started run makes that run mobile-origin).
         if not harness_injected:
             _stamp_input_surface(message, input_surface)
+            if input_surface in {"desktop", "mobile"} and inline_ui is True:
+                message._inline_ui_viewer_capable = True
         if harness_injected:
             # The stamp goes on the row THIS call mints, at the one place the
             # row is born — the same contract ``prompt`` documents one method
@@ -12282,6 +12290,10 @@ class Session:
         stamped = _input_surface_of(message)
         if stamped is not None and getattr(message, "role", None) == "user":
             self._run_input_surface = stamped
+            self._run_inline_ui_viewer_capable = (
+                stamped in {"desktop", "mobile"}
+                and getattr(message, "_inline_ui_viewer_capable", False) is True
+            )
             return
         if ask_answer_is_person(message):
             details = getattr(message, "details", None) or {}
@@ -12289,6 +12301,7 @@ class Session:
             surface = self._ask_answer_surfaces.pop(ask_id, None) if ask_id else None
             if surface is not None:
                 self._run_input_surface = surface
+                self._run_inline_ui_viewer_capable = False
 
     def note_answer_surface(self, ask_id: str | None, surface: str) -> Callable[[], None]:
         """The control server's record of WHO answered (ADR 0009, R10).
@@ -12321,11 +12334,14 @@ class Session:
             return undo_queued
         if self._is_streaming:
             previous_run = self._run_input_surface
+            previous_inline_ui = self._run_inline_ui_viewer_capable
             self._run_input_surface = clamped
+            self._run_inline_ui_viewer_capable = False
 
             def undo_live() -> None:
-                if self._run_input_surface == clamped:
+                if self._run_input_surface == clamped and not self._run_inline_ui_viewer_capable:
                     self._run_input_surface = previous_run
+                    self._run_inline_ui_viewer_capable = previous_inline_ui
 
             return undo_live
         return _noop_answer_surface_undo
@@ -21460,7 +21476,9 @@ class Session:
         """
         return self._frontend_state_store.read_field("epoch")
 
-    def subscribe_frontend(self, handler, *, display_window=False):  # type: ignore[no-untyped-def]
+    def subscribe_frontend(  # type: ignore[no-untyped-def]
+        self, handler, *, display_window=False, inline_ui_sidecars: bool = False
+    ):
         """Atomically refresh, snapshot and subscribe on the session loop.
 
         The refresh must go through the PUBLISHING path: silently replacing
@@ -21482,6 +21500,7 @@ class Session:
                     "conversation_id": sync.snapshot.session_id,
                     "owner_epoch": sync.epoch,
                     "through_id": sync.live_cursor,
+                    "inline_ui_sidecars": inline_ui_sidecars,
                     "durable_seed_tools": frozenset(
                         str(event.get("tool_call_id", ""))
                         for event in sync.snapshot.live_events
@@ -21496,6 +21515,7 @@ class Session:
                     and self._transcript.has_entry(str(event["message"].get("id", "")))
                 ]
                 window.durable_seed_ids = durable_seed_ids
+                window._sync_inline_ui, window.inline_ui = window.inline_ui, None
                 sync.display_history = window
                 if window.status == "full_required":
                     # THE PEER VIEWER'S PAGE FOR THE SAME CUT, captured here on
@@ -21508,6 +21528,7 @@ class Session:
                         self._transcript, **capture_args, bound_oversized=True
                     ).model_copy(update={"durable_seed_ids": list(durable_seed_ids)})
                     if bounded.status == "ok":
+                        bounded._sync_inline_ui, bounded.inline_ui = bounded.inline_ui, None
                         sync._peer_display_history = bounded
             except BaseException:
                 subscription.unsubscribe()
@@ -21515,7 +21536,12 @@ class Session:
         return subscription
 
     def history_page(  # type: ignore[no-untyped-def]
-        self, before: str, anchor: str = "", *, bound_oversized: bool = False
+        self,
+        before: str,
+        anchor: str = "",
+        *,
+        bound_oversized: bool = False,
+        inline_ui_sidecars: bool = False,
     ):
         """Authenticated reads reuse the resident replay at the signed sync cut.
 
@@ -21534,6 +21560,7 @@ class Session:
             before=before,
             anchor=anchor,
             bound_oversized=bound_oversized,
+            inline_ui_sidecars=inline_ui_sidecars,
         ).model_dump(mode="json")
 
     def refresh_frontend_state(self) -> None:
@@ -22559,6 +22586,7 @@ class Session:
         # ADR 0009: origin is per run, so the previous run's human input never
         # labels this one (a wake after a phone prompt inherits it instead).
         self._run_input_surface = None
+        self._run_inline_ui_viewer_capable = False
         self._turn_items = []
         self._prepared_writes = {}
         self._turn_text_budget = TURN_TEXT_BUDGET
@@ -23721,7 +23749,17 @@ class Session:
                     # frame. Refuse dispatch, rather than just stopping future
                     # transforms after these bytes have crossed the boundary.
                     raise RuntimeError("bridge body authority changed before dispatch")
+                # Keep this capability out of frozen system state and off helper
+                # and background calls. Never inherit the previous turn's viewer.
+                inline_ui = inline_ui_instructions(
+                    self._run_input_surface, viewer_capable=self._run_inline_ui_viewer_capable
+                )
+                request._inline_ui_source_version = (
+                    1 if inline_ui is not None and self._output_contract is None else None
+                )
                 request = request.model_copy()
+                if inline_ui is not None and request._inline_ui_source_version == 1:
+                    request.system_blocks = [*request.system_blocks, inline_ui]
                 if getattr(self, "_required_image_evidence", False):
                     request.required_image_count = sum(
                         isinstance(block, ImageContent)

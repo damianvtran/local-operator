@@ -23,13 +23,14 @@ from typing import Any
 
 import pytest
 
-from local_operator.harness.types import Message
+from local_operator.harness.types import Message, TextContent
 from local_operator.session.history_window import (
     AUDIT_WIRE_FIELDS,
     DISPLAY_HISTORY_AUDIT_CAPABILITY,
     DisplayHistoryWindow,
     display_window,
 )
+from local_operator.session.runtime import server as runtime_server
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.transcript import Transcript
@@ -224,51 +225,146 @@ async def test_frontend_sync_rpc_keeps_the_keys_for_a_new_viewer(tmp_path) -> No
 
 
 @pytest.mark.asyncio
-async def test_a_history_page_rpc_strips_the_keys_for_an_old_viewer(tmp_path) -> None:
-    """The second emission point. Stripping only the sync frame would produce a
-    viewer that attaches cleanly and then fails on its first scroll up."""
+async def test_display_history_routes_negotiate_inline_ui_without_changing_prose(tmp_path) -> None:
+    """Attach, refresh and scroll must agree on the negotiated page shape."""
+    widget = '```lop-ui\n{"type":"bar","title":"Counts","data":[["One",1]]}\n```'
+    source = f"Before 🌱.\n\n{widget}\n\nAfter."
+    prose = "Before 🌱.\n\n\n\nAfter."
+    legacy_exclusions = {"input_mode", "input_path"}
     rows = [Message.user(f"row {index}") for index in range(300)]
+    for index in (100, 298):
+        rows[index] = Message.assistant(source)
+        rows[index]._inline_ui_source_version = 1
+        rows[index + 1] = Message.assistant(source)
     server = await _server(tmp_path, rows)
     try:
         record = server._record
-        reader, writer = await asyncio.open_connection("127.0.0.1", record.control_port)
-        writer.write(
-            json.dumps(
-                {
-                    "key": record.control_key,
-                    "client": "attach",
-                    "locality": "local",
-                    "frontend_state": True,
-                    "display_window": True,
-                }
-            ).encode()
-            + b"\n"
-        )
-        await writer.drain()
-        sync = None
-        while sync is None:
-            line = await asyncio.wait_for(reader.readline(), timeout=10)
-            frame = json.loads(line)
-            if frame.get("op") == "frontend_sync":
-                sync = frame["data"]
-        token = sync["display_history"]["before_token"]
-        assert token, "the fixture must be long enough to page"
-        writer.write(
-            json.dumps({"op": "history_page", "req": "r1", "before": token}).encode() + b"\n"
-        )
-        await writer.drain()
-        page = None
-        while page is None:
-            line = await asyncio.wait_for(reader.readline(), timeout=10)
-            frame = json.loads(line)
-            if frame.get("req") == "r1":
-                assert frame.get("op") == "result", frame
-                page = frame["data"]
-        for name in AUDIT_WIRE_FIELDS:
-            assert name not in page
-        writer.close()
+        assert "inline-ui-v1" in record.capabilities
+        pages = []
+        pushed = []
+        refreshed = []
+        # The strict bool from hello, not a per-request field, grants sidecars.
+        for hello in ({}, {"inline_ui": True}, {"inline_ui": "true"}):
+            reader, writer = await asyncio.open_connection("127.0.0.1", record.control_port)
+            try:
+                writer.write(
+                    json.dumps(
+                        {
+                            "key": record.control_key,
+                            "client": "attach",
+                            "locality": "local",
+                            "frontend_state": True,
+                            "display_window": True,
+                            **hello,
+                        }
+                    ).encode()
+                    + b"\n"
+                )
+                await writer.drain()
+                while True:
+                    line = await asyncio.wait_for(reader.readline(), timeout=10)
+                    frame = json.loads(line)
+                    if frame.get("op") == "frontend_sync":
+                        break
+                head = frame["data"]["display_history"]
+                expected = rows[298].model_copy(update={"content": [TextContent(text=prose)]})
+                assert head["messages"][-2] == expected.model_dump(
+                    mode="json", exclude=legacy_exclusions
+                )
+                assert head["messages"][-1] == rows[299].model_dump(
+                    mode="json", exclude=legacy_exclusions
+                )
+                pushed.append(head)
+                writer.write(
+                    json.dumps({"op": "frontend_sync", "req": "sync", "inline_ui": True}).encode()
+                    + b"\n"
+                )
+                await writer.drain()
+                while True:
+                    line = await asyncio.wait_for(reader.readline(), timeout=10)
+                    frame = json.loads(line)
+                    if frame.get("req") == "sync":
+                        assert frame.get("op") == "result", frame
+                        refreshed.append(frame["data"]["display_history"])
+                        break
+                token = head["before_token"]
+                assert token, "the fixture must be long enough to page"
+                writer.write(
+                    json.dumps(
+                        {"op": "history_page", "req": "r1", "before": token, "inline_ui": True}
+                    ).encode()
+                    + b"\n"
+                )
+                await writer.drain()
+                while True:
+                    line = await asyncio.wait_for(reader.readline(), timeout=10)
+                    frame = json.loads(line)
+                    if frame.get("req") == "r1":
+                        assert frame.get("op") == "result", frame
+                        pages.append(frame["data"])
+                        break
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        for route, (legacy, modern, malformed), marked_index in (
+            ("frontend_sync push", pushed, 298),
+            ("frontend_sync RPC", refreshed, 298),
+            ("history_page RPC", pages, 100),
+        ):
+            for name in (*AUDIT_WIRE_FIELDS, "inline_ui"):
+                assert name not in legacy
+            assert malformed == legacy
+            assert "inline_ui" in modern, f"{route}: negotiated widget sidecar missing"
+            assert modern.pop("inline_ui") == {
+                "version": 1,
+                "messages": {
+                    rows[marked_index].id: {
+                        "version": 1,
+                        "text": prose,
+                        "widgets": [
+                            {
+                                "offset": len("Before 🌱.\n\n".encode("utf-16-le")) // 2,
+                                "payload": {"type": "bar", "title": "Counts", "data": [["One", 1]]},
+                            }
+                        ],
+                    }
+                },
+            }
+            assert modern == legacy
+            print(f"{route}: exact matching page/cursors; widget only for boolean-true hello")
+
+        carried = {message["id"]: message for message in pages[0]["messages"]}
+        expected = rows[100].model_copy(update={"content": [TextContent(text=prose)]})
+        assert carried[rows[100].id] == expected.model_dump(mode="json", exclude=legacy_exclusions)
+        assert carried[rows[101].id] == rows[101].model_dump(mode="json", exclude=legacy_exclusions)
     finally:
         server.close()
+
+
+@pytest.mark.parametrize("envelope", [{"op": "frontend_sync"}, {"op": "result", "req": "sync"}])
+def test_sync_history_sidecar_yields_before_the_page(envelope, monkeypatch) -> None:
+    window = DisplayHistoryWindow(
+        status="ok",
+        conversation_id="session",
+        owner_epoch="epoch",
+        history_generation=0,
+        through_id=None,
+    )
+    window._sync_inline_ui = {"version": 1, "messages": {"message": {"widgets": ["🌱"]}}}
+    page = window.model_dump(mode="json")
+    assert "inline_ui" not in page
+    frame = {**envelope, "data": {"display_history": page.copy()}}
+    rich = {**envelope, "data": {"display_history": {**page, "inline_ui": window._sync_inline_ui}}}
+    cap = len(json.dumps(rich).encode()) + 1
+
+    monkeypatch.setattr(runtime_server, "_MAX_LINE_BYTES", cap)
+    runtime_server._fit_sync_history_inline_ui(frame, window)
+    assert frame == rich
+
+    monkeypatch.setattr(runtime_server, "_MAX_LINE_BYTES", cap - 1)
+    runtime_server._fit_sync_history_inline_ui(frame, window)
+    assert frame["data"]["display_history"] == page
 
 
 @pytest.mark.asyncio

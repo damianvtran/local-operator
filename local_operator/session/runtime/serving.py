@@ -80,6 +80,7 @@ from local_operator.harness.types import (
 )
 from local_operator.harness.wire import bound_agent_end_for_wire
 from local_operator.profile_actions import ProfileActionReply
+from local_operator.session.runtime.inline_ui_egress import InlineUiEvents
 from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
 
 if TYPE_CHECKING:
@@ -793,6 +794,8 @@ class _PromptCommand:
     #: ADR 0009: the connection's surface, decided by the control server, or
     #: ``None`` for an in-process caller (``Session.prompt`` then stamps ``tui``).
     input_surface: str | None = None
+    # Only the in-memory warm prompt carries this negotiation, not the spool.
+    inline_ui: bool = False
 
     def __iter__(self):  # type: ignore[no-untyped-def]
         # Tuple compatibility for older diagnostics that inspect the queue.
@@ -4088,7 +4091,11 @@ class ServingSessionHandle(SessionHandle):
 
     @_on_session_loop
     async def subscribe_frontend(
-        self, on_update: Callable[[Any], None], *, display_window: bool = False
+        self,
+        on_update: Callable[[Any], None],
+        *,
+        display_window: bool = False,
+        inline_ui_sidecars: bool = False,
     ) -> Any:
         """Snapshot and subscribe atomically, on the loop that publishes.
 
@@ -4097,7 +4104,11 @@ class ServingSessionHandle(SessionHandle):
         every client's exact-``+1`` gap check detect transport loss. Awaited
         rather than wrapped because the caller is already on this loop.
         """
-        return self._session.subscribe_frontend(on_update, display_window=display_window)
+        capture = self._session.subscribe_frontend
+        options = {"display_window": display_window}
+        if inline_ui_sidecars and _accepts_keyword(capture, "inline_ui_sidecars"):
+            options["inline_ui_sidecars"] = True
+        return capture(on_update, **options)
 
     def subscribe_frontend_nowait(self, on_update: Callable[[Any], None]) -> Any:
         """Bind a viewer from THIS thread when the session loop cannot answer.
@@ -4155,13 +4166,20 @@ class ServingSessionHandle(SessionHandle):
 
     @_on_session_loop
     async def history_page(
-        self, before: str, anchor: str = "", *, bound_oversized: bool = False
+        self,
+        before: str,
+        anchor: str = "",
+        *,
+        bound_oversized: bool = False,
+        inline_ui_sidecars: bool = False,
     ) -> dict[str, Any]:
         # Only a non-local viewer asks for the bounded form; a session class
         # that predates the keyword is called exactly as before.
-        if bound_oversized:
-            return self._session.history_page(before, anchor, bound_oversized=True)
-        return self._session.history_page(before, anchor)
+        fetch = self._session.history_page
+        options = {"bound_oversized": True} if bound_oversized else {}
+        if inline_ui_sidecars and _accepts_keyword(fetch, "inline_ui_sidecars"):
+            options["inline_ui_sidecars"] = True
+        return fetch(before, anchor, **options)
 
     @property
     def journal_order_supported(self) -> bool:
@@ -4185,7 +4203,12 @@ class ServingSessionHandle(SessionHandle):
         """
         return self.journal_order_supported
 
-    def subscribe_events(self, on_event: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
+    def subscribe_events(
+        self,
+        on_event: Callable[[dict[str, Any]], None],
+        *,
+        inline_ui_sidecars: bool = False,
+    ) -> Callable[[], None]:
         """Feed serialized AgentEvents to the runtime's v4 relay.
 
         Serialization happens here, on the loop that emits the event, so no
@@ -4198,6 +4221,9 @@ class ServingSessionHandle(SessionHandle):
         feature, which is why they are re-homed together.
         """
 
+        # Only the socket owner requests sidecars; it filters per connection.
+        inline_ui = InlineUiEvents(sidecars=inline_ui_sidecars)
+
         def handler(event: AgentEvent) -> None:
             try:
                 # Bounded here rather than in the relay: this is where the
@@ -4208,7 +4234,7 @@ class ServingSessionHandle(SessionHandle):
                 # fixture measures a 531,082-byte payload, and
                 # ``fit_frame_for_wire`` returns it byte-identical.
                 payload = bound_agent_end_for_wire(
-                    _notice_text_for_viewer(event.model_dump(mode="json")),
+                    _notice_text_for_viewer(inline_ui.dump(event)),
                     session_id=getattr(self._session, "session_id", None),
                 )
                 on_event(payload)
@@ -4465,6 +4491,7 @@ class ServingSessionHandle(SessionHandle):
         _goal_context: tuple[str, int] | None = None,
         _file_admission: Any = None,
         input_surface: str | None = None,
+        inline_ui: bool = False,
     ) -> str:
         """Admit one ordinary prompt; the receipt is its durable append.
 
@@ -4808,6 +4835,7 @@ class ServingSessionHandle(SessionHandle):
             mesh_origin=dict(mesh_origin) if mesh_origin is not None else None,
             _file_capture=file_capture,
             input_surface=input_surface,
+            inline_ui=inline_ui,
         )
         position = len(self._prompt_queue) + 1
         legacy_prompt = "message_id" not in inspect.signature(self._session.prompt).parameters
@@ -5778,6 +5806,8 @@ class ServingSessionHandle(SessionHandle):
                         fields["mesh_origin"] = command.mesh_origin
                     if "input_surface" in parameters and command.input_surface is not None:
                         fields["input_surface"] = command.input_surface
+                    if command.inline_ui and "inline_ui" in parameters:
+                        fields["inline_ui"] = True
                     if "input_mode" in parameters:
                         fields["input_mode"] = command.input_mode
                     if "input_path" in parameters:
@@ -5886,6 +5916,7 @@ class ServingSessionHandle(SessionHandle):
         mesh_origin: Mapping[str, Any] | None = None,
         _file_admission: Any = None,
         input_surface: str | None = None,
+        inline_ui: bool = False,
     ) -> str:
         # ``owner_typed``: see ``prompt`` — False for a remote connection's steer.
         # ``mesh_origin``: see ``prompt`` — the receiver-minted stamp, carried to
@@ -5957,6 +5988,7 @@ class ServingSessionHandle(SessionHandle):
                     mesh_origin=mesh_origin,
                     _file_admission=_file_admission,
                     input_surface=input_surface,
+                    inline_ui=inline_ui,
                 )
             )
             receipt, raise_successor = await self._await_steer_admission(admission)
@@ -6038,6 +6070,7 @@ class ServingSessionHandle(SessionHandle):
         mesh_origin: Mapping[str, Any] | None = None,
         _file_admission: Any = None,
         input_surface: str | None = None,
+        inline_ui: bool = False,
     ) -> tuple[str, bool]:
         """The admission half of :meth:`steer`, once its blocks are decoded.
 
@@ -6180,6 +6213,8 @@ class ServingSessionHandle(SessionHandle):
         if "input_surface" in parameters and input_surface is not None:
             fields["input_surface"] = input_surface
         try:
+            if inline_ui and "inline_ui" in parameters:
+                fields["inline_ui"] = True
             self._session.steer(text, blocks, **fields)
         except Exception:
             # No queue insertion means no durable acceptance exists; the same

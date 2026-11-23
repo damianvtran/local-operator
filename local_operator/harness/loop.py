@@ -4924,7 +4924,9 @@ class AgentLoop:
             # call's spend as an ESTIMATE rather than as unknown (review m3; see
             # ``ChatRequest._consumer_cut``).
             cut_receipt = request.arm_consumer_cut()
-            stream = _abortable_stream(config.stream_fn(request, signal), signal, degeneration_cut)
+            provider_stream = config.stream_fn(request, signal)
+            assistant._inline_ui_source_version = request._inline_ui_source_version
+            stream = _abortable_stream(provider_stream, signal, degeneration_cut)
             from local_operator.providers.failover import _one_turn_scrub_stream_event
 
             async for event in stream:

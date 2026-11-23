@@ -156,6 +156,9 @@ class PromptErrand:
     #: as a local terminal, and the completion of a conversation woken from the
     #: phone must route back to the phone. Empty keeps every other producer.
     origin: str = ""
+    # Preserve viewer intent until the authenticated winner is known; its
+    # advertised capability controls whether the client can send the field.
+    inline_ui: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +174,7 @@ class SteerErrand:
     command_id: str = ""
     input_mode: str = ""
     input_path: str = ""
+    inline_ui: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1262,6 +1266,7 @@ async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, boo
         lambda _reason: None,
         # ADR 0009: the cold-wake prompt keeps the phone's origin.
         origin=work.origin if isinstance(work, PromptErrand) else "",
+        **({"inline_ui": True} if work.inline_ui else {}),
     )
     try:
         await client.connect(record, session_id)
@@ -1295,6 +1300,7 @@ async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, boo
             images=work.images,
             command_id=work.command_id,
             **annotation,
+            **({"inline_ui": True} if work.inline_ui else {}),
         )
     finally:
         client.close()

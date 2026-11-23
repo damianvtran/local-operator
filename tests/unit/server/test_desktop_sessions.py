@@ -11498,3 +11498,82 @@ def test_validate_target_names_the_unresolved_member(tmp_path) -> None:
         "slot": "team",
         "member": "nope",
     }
+
+
+@pytest.mark.asyncio
+async def test_inline_widget_history_and_stream_negotiate_on_desktop_http(move_api, monkeypatch):
+    """The same journal prose serves both viewers; only the opting reader gets placements."""
+    from local_operator.harness.types import Message
+
+    client, app, root = move_api
+    work = root / "inline-work"
+    work.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(work))
+    journal = Transcript(root / "sessions" / sid)
+    await journal.append_message(Message.user("Summarize January."))
+    answer = Message.assistant(
+        'Revenue 📈\n\n```lop-ui\n{"type":"bar","title":"Revenue","data":[["Jan",6]]}\n```\n\nEnd.'
+    )
+    answer._inline_ui_source_version = 1
+    await journal.append_message(answer)
+
+    url = f"/v1/desktop/sessions/{sid}"
+    capability = await client.get("/v1/capabilities")
+    assert capability.json()["result"]["features"]["inline_ui"] == 1
+    old = await client.get(f"{url}/history")
+    modern = await client.get(f"{url}/history", params={"inline_ui": 1})
+    assert old.status_code == modern.status_code == 200
+    plain = old.json()["result"]
+    rich = modern.json()["result"]
+    sidecar = rich.pop("inline_ui")
+    assert rich == plain and "lop-ui" not in old.text
+    row = sidecar["messages"][answer.id]
+    assert row == {
+        "version": 1,
+        "text": "Revenue 📈\n\n\n\nEnd.",
+        "widgets": [
+            {
+                "offset": len("Revenue 📈\n\n".encode("utf-16-le")) // 2,
+                "payload": {"type": "bar", "title": "Revenue", "data": [["Jan", 6]]},
+            }
+        ],
+    }
+    snapshot = await client.get(url, params={"open_frame": 1, "inline_ui": 1})
+    assert snapshot.status_code == 200
+    assert snapshot.json()["result"]["payload"]["history"]["inline_ui"] == sidecar
+    invalid = await client.get(f"{url}/history", params={"inline_ui": 2})
+    invalid_send = await client.post(
+        f"{url}/messages",
+        json={
+            "text": "invalid",
+            "request_id": str(uuid.uuid4()),
+            "inline_ui": "true",
+        },
+    )
+    assert invalid.status_code == invalid_send.status_code == 422
+
+    # ASGITransport buffers until the generator ends; terminate after real
+    # SSE serialization of one already-fanned-out event and replacement seed.
+    live = {"type": "message_update", "delta": "", "inline_ui": sidecar}
+    replace = {
+        "type": "frontend.replace",
+        "payload": {"frontend": {"snapshot": {"live_events": [live]}}},
+    }
+
+    async def finite_frames(self, sub, **options):
+        yield {"type": "event", "payload": live}
+        yield replace
+
+    monkeypatch.setattr(DesktopSessionBridge, "events", finite_frames)
+    old_stream = await client.get(f"{url}/events")
+    rich_stream = await client.get(f"{url}/events", params={"inline_ui": 1})
+    assert old_stream.status_code == rich_stream.status_code == 200
+    assert "inline_ui" not in old_stream.text
+    frames = [
+        json.loads(line.removeprefix("data: "))
+        for line in rich_stream.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert frames[0]["payload"] == live
+    assert frames[1] == replace

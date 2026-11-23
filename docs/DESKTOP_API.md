@@ -3200,6 +3200,26 @@ Feed: the `approvals` frame ORs open pairing cards into `pending` and adds
 `pairing_id` (the oldest card's `id`, or `null`); the `open` frame adds
 `approvals_pairing_id`.
 
+## Inline charts and tables
+
+When `GET /v1/capabilities` reports `features.inline_ui: 1`, a capable client may
+send the exact JSON boolean `inline_ui: true` on `/messages` (including steer)
+and query `inline_ui=1` on `/sessions/{id}`, `/history`, and `/events`. These
+fields negotiate presentation; they do not grant permission to read or send.
+
+Ordinary text is the same for both readers. A capable viewer may also receive
+`inline_ui: {version: 1, messages: {<message id>: <row>}}`. Each row is
+`{version: 1, text, widgets: [{offset, payload}]}`: `offset` is a UTF-16 offset
+into that exact `text`, not into a delta. SSE carries the envelope in an
+ordinary event's `payload.inline_ui`; live seed events are at
+`payload.frontend.snapshot.live_events` in snapshot/replace frames. History
+carries the same envelope at `result.inline_ui` (or `payload.history.inline_ui`
+inside a snapshot). An update can carry a widget with an empty text delta; a
+`null` row in an authoritative final event retracts an earlier placement.
+Unknown versions, absent overlays, and peers opened through the separate mesh
+owner proxy are prose-only. Do not parse or expect widget source fences in any
+wire text.
+
 ## The machine-wide event feed
 
 `GET /v1/desktop/events` — authenticated SSE, the same bearer/Origin boundary as
