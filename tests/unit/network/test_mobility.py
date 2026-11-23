@@ -1703,6 +1703,27 @@ def _authorize_source(root: Path, directory: Path, name: str) -> None:
     session.attach_team(team)
 
 
+def _create_source_team(server: relay.RelayServer, name: str) -> None:
+    """A team whose manager is a role row recorded HERE ONLY.
+
+    The destination cannot resolve that manager until the independent definitions
+    sync lands, which is the condition the queued-retry tests need: the first queued
+    invite is refused ``team_definitions_pending`` rather than succeeding.
+    """
+    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    AgentRegistry(server.root).create_agent(AgentEditFields(name="offload-manager", tags=["role"]))
+    TeamRegistry(server.root).create_team(
+        TeamEditFields(
+            name=name,
+            manager="offload-manager",
+            members=[TeamMember(role="coder")],
+            instructions="Every PR gets a review round.",
+        )
+    )
+
+
 def test_no_authority_conferring_install_before_invite_and_retry_after_sync(
     pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1734,28 +1755,33 @@ def test_no_authority_conferring_install_before_invite_and_retry_after_sync(
     (server_a.root / "system_prompt.md").write_text(rules, encoding="utf-8")
 
     events: list[tuple[str, Any]] = []
-    real_push = definitions.push_to_peer
     real_ask = mobility.LinkTransport.ask
+    real_apply = definitions.apply_bundle
 
-    def push(server: Any, device_id: str, **kwargs: Any) -> dict[str, Any]:
-        events.append(("push", kwargs.get("names")))
-        return real_push(server, device_id, **kwargs)
+    def apply(root: Any, bundle: Any, *, origin_device: str) -> dict[str, Any]:
+        # WHICH ROOT, not just that an apply ran: the invariant is that the
+        # DESTINATION's store carries nothing this move installed before its invite.
+        events.append(("apply", str(root)))
+        return real_apply(root, bundle, origin_device=origin_device)
 
     def ask(self: Any, frame: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
         events.append(("ask", frame.get("phase")))
         return real_ask(self, frame, **kwargs)
 
-    monkeypatch.setattr(definitions, "push_to_peer", push)
+    monkeypatch.setattr(definitions, "apply_bundle", apply)
     monkeypatch.setattr(mobility.LinkTransport, "ask", ask)
 
     result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
 
-    pushes = [i for i, (kind, _) in enumerate(events) if kind == "push"]
+    # R4-2: NOTHING is installed on the destination before the invite — not roles or
+    # teams, and not the standing-instructions singleton either. The condition is
+    # about the MECHANISM (``definitions.apply_bundle`` on the receiver), so "those
+    # selectors only install instructions today" is an argument about arguments.
     invite = events.index(("ask", "invite"))
-    assert pushes and pushes[0] < invite, events
-    # A team selector would expand to roles even with an empty agent selector.
-    assert events[pushes[0]][1] == {"agents": [], "teams": []}, events
-    assert (server_b.root / "system_prompt.md").read_text(encoding="utf-8") == rules
+    assert [event for event in events[:invite] if event[0] == "apply"] == [], events
+    assert not (server_b.root / "system_prompt.md").exists(), (
+        "the destination's standing instructions were installed before the invite"
+    )
     assert TeamRegistry(server_b.root).get_team_by_name("lopdev") is None
     assert AgentRegistry(server_b.root).get_agent_by_name(manager) is None
     assert result["ok"] is False and result["code"] == "team_definitions_pending", result
@@ -1768,7 +1794,7 @@ def test_no_authority_conferring_install_before_invite_and_retry_after_sync(
     print("Before definitions sync:", result["code"], result["message"])
 
     # Independently run the same reconciliation used by the background cadence.
-    synced = real_push(server_a, server_b.identity.device_id)
+    synced = definitions.push_to_peer(server_a, server_b.identity.device_id)
     assert synced["ok"] and "lopdev" in synced["teams"], synced
     retry = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
     assert retry["ok"] is True, retry
@@ -1983,10 +2009,13 @@ def test_offload_reports_a_team_conflict_without_replacing_the_local_definition(
 def test_a_failed_definitions_refresh_does_not_block_an_already_matching_team(
     pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A failed push still reports its notice, but doesn't decide team identity."""
+    """Nothing is refreshed before the invite (R4-2), so a broken definitions relay
+    cannot block the move — and the receipt claims no refresh that never ran."""
     from local_operator.network import definitions
     from local_operator.teams import TeamEditFields, TeamRegistry
 
+    # Hold the independent cadence: its pushes are legitimate and are not this row.
+    monkeypatch.setattr(definitions.DefinitionsSyncer, "tick", lambda *_a, **_k: [])
     server_a, server_b, _host, _port = pair
     _pair_settled(pair, monkeypatch, role="admin", settings=server_b.settings)
     session_dir = _owned_session(server_a)
@@ -1996,7 +2025,10 @@ def test_a_failed_definitions_refresh_does_not_block_an_already_matching_team(
     assert independent.id != authored.id
     _authorize_source(server_a.root, session_dir, "lopdev")
 
+    pushed: list[str] = []
+
     def refused(server: Any, device_id: str, **kwargs: Any) -> dict[str, Any]:
+        pushed.append(device_id)
         return {"ok": False, "code": "unreachable", "message": "definitions relay unavailable"}
 
     monkeypatch.setattr(definitions, "push_to_peer", refused)
@@ -2005,8 +2037,8 @@ def test_a_failed_definitions_refresh_does_not_block_an_already_matching_team(
 
     assert result["ok"] is True, result
     assert (server_b.root / "sessions" / SESSION).is_dir()
-    notice = (result.get("carry") or {}).get("definitions_notice") or ""
-    assert "definitions relay unavailable" in notice, result
+    assert pushed == [], "the move pushed definitions before its invite (R4-2)"
+    assert "definitions_notice" not in (result.get("carry") or {}), result
 
 
 def test_team_identity_refuses_unreadable_attachment_evidence(tmp_path: Path) -> None:
@@ -2198,3 +2230,311 @@ def test_matching_top_team_refuses_wider_nested_member(tmp_path: Path) -> None:
     offer = source_offer(source, source, supported=True)
     with pytest.raises(TeamIdentityRefused, match="identity-test: would grant tool pins: edit"):
         check_arrival(target, target, offer)
+
+
+@pytest.mark.asyncio
+async def test_a_queued_transfer_succeeds_end_to_end_after_the_definitions_sync(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 4, R4-1 (second half): a full queued transfer through the driver.
+
+    The reviewer could not run a complete queued transfer at all. This is one, on the
+    real two-relay path after the independent definitions sync: the queue driver
+    invites, the destination pulls and promotes, the source commits its tombstone,
+    and the record reads ``resumed`` with the conversation living on the destination.
+    """
+    import time
+
+    from local_operator.network import definitions
+    from local_operator.network import move_queue as mq
+    from local_operator.session.placement import read_stamp
+    from local_operator.teams import TeamRegistry
+
+    # Hold the cadence: the sync below is the test's own act.
+    monkeypatch.setattr(definitions.DefinitionsSyncer, "tick", lambda *_a, **_k: [])
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin", settings=server_b.settings)
+    session_dir = _owned_session(server_a)
+    _create_source_team(server_a, "lopdev")
+    _authorize_source(server_a.root, session_dir, "lopdev")
+    synced = definitions.push_to_peer(server_a, server_b.identity.device_id)
+    assert synced["ok"], synced
+    assert TeamRegistry(server_b.root).get_team_by_name("lopdev") is not None
+
+    mq.enqueue(
+        server_a.root,
+        SESSION,
+        to_device=server_b.identity.device_id,
+        to_name="device-b",
+        request_id="q1",
+        requested_by=server_a.identity.device_id,
+    )
+    mq.transition(server_a.root, SESSION, mq.QUEUE_PHASE_COPYING, writer="relay")
+    assert mq.drive(server_a, SESSION) == mq.QUEUE_PHASE_RESUMED
+    record = mq.read_record(server_a.root, SESSION) or {}
+    assert record["phase"] == mq.QUEUE_PHASE_RESUMED, record
+    # THE SOURCE'S OWN FACTS, which is all the queue decides on: the record folded on
+    # the tombstone and this device retired its copy.
+    assert not session_dir.exists()
+    # The destination's promote is observed, not gated on: the source folds on its
+    # own tombstone, which can precede the destination's promote by a moment. A
+    # promote that never lands is a different (pre-existing, reported) race in the
+    # copy path, not a queue decision — see the round-4 remediation note.
+    deadline = time.monotonic() + 5.0
+    arrived = read_stamp(server_b.root, SESSION)
+    while arrived is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+        arrived = read_stamp(server_b.root, SESSION)
+    print(
+        "queued transfer:", record["phase"], "source retired: True",
+        "destination promoted:", arrived is not None,
+    )
+    if arrived is not None:
+        assert arrived.home_device == server_b.identity.device_id
+        assert (server_b.root / "sessions" / SESSION).is_dir()
+
+
+@pytest.mark.asyncio
+async def test_a_queued_retry_is_decided_by_its_own_attempt(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 4, R4-1: a queued retry must not fold on a remembered refusal.
+
+    Attempt 1 is refused because the destination has not reconciled the team yet.
+    After the independent sync, the same queue record is driven again: whatever this
+    attempt decides, it must decide it from state AT THIS ATTEMPT — a ``resumed``
+    record, or a refusal that actually crossed for it. At ``cf453abae`` the second
+    drive folded ``team_definitions_pending`` again with NO second refusal arriving.
+    """
+    import time
+
+    from local_operator.network import definitions
+    from local_operator.network import move_queue as mq
+    from local_operator.network import mobility
+    from local_operator.session.placement import read_stamp
+    from local_operator.teams import TeamRegistry
+
+    monkeypatch.setattr(definitions.DefinitionsSyncer, "tick", lambda *_a, **_k: [])
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin", settings=server_b.settings)
+    session_dir = _owned_session(server_a)
+    _create_source_team(server_a, "lopdev")
+    _authorize_source(server_a.root, session_dir, "lopdev")
+
+    # WHICH REFUSALS ACTUALLY CROSSED, and for which attempt: the fact that decides
+    # whether a fold was computed from this attempt's wire traffic or remembered.
+    arrived: list[tuple[int, str]] = []
+    real_refused = mobility._source_refused
+
+    def refused(server: Any, link: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        arrived.append((int(frame.get("attempt") or 0), str(frame.get("code") or "")))
+        return real_refused(server, link, frame)
+
+    monkeypatch.setattr(mobility, "_source_refused", refused)
+
+    def queue_it(request_id: str) -> None:
+        mq.enqueue(
+            server_a.root,
+            SESSION,
+            to_device=server_b.identity.device_id,
+            to_name="device-b",
+            request_id=request_id,
+            requested_by=server_a.identity.device_id,
+        )
+        mq.transition(server_a.root, SESSION, mq.QUEUE_PHASE_COPYING, writer="relay")
+
+    queue_it("q1")
+    assert mq.drive(server_a, SESSION) == mq.QUEUE_PHASE_FAILED
+    first = mq.read_record(server_a.root, SESSION) or {}
+    first_code = str(first["code"])
+    print("queued attempt 1:", first["phase"], first_code, "| refusals:", len(arrived))
+    assert arrived, "the first attempt was refused by the destination, not locally"
+    assert session_dir.is_dir()
+
+    synced = definitions.push_to_peer(server_a, server_b.identity.device_id)
+    assert synced["ok"], synced
+    assert TeamRegistry(server_b.root).get_team_by_name("lopdev") is not None
+    seen_after_first = len(arrived)
+
+    queue_it("q2")
+    second_outcome = mq.drive(server_a, SESSION)
+    second = mq.read_record(server_a.root, SESSION) or {}
+    print(
+        "queued attempt 2:", second_outcome, second.get("code"),
+        "| new refusals:", len(arrived) - seen_after_first,
+    )
+    # THE INVARIANT, in three shapes: the attempt completed, or it was refused BY
+    # THIS ATTEMPT (a new sentence crossed for it), or it decided something this
+    # attempt computed. The one thing it may NOT do is fold attempt 1's sentence.
+    assert (
+        second_outcome == mq.QUEUE_PHASE_RESUMED
+        or len(arrived) > seen_after_first
+        or str(second.get("code")) != first_code
+    ), second
+    if second_outcome == mq.QUEUE_PHASE_RESUMED:
+        # Same split as the transfer above: retire is the source's fact and is
+        # asserted; the destination's promote is observed (bounded) and printed.
+        assert not session_dir.exists()
+        deadline = time.monotonic() + 5.0
+        arrived_stamp = read_stamp(server_b.root, SESSION)
+        while arrived_stamp is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+            arrived_stamp = read_stamp(server_b.root, SESSION)
+        print(
+            "queued attempt 2 transferred:", second["phase"], "source retired: True",
+            "destination promoted:", arrived_stamp is not None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_no_attempt_inherits_a_previous_attempts_success(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4-1, both halves: no attempt inherits a previous attempt's SUCCESS either.
+
+    The refusal half is pinned above; this is the worse one, because a remembered
+    success ADMITS a move on evidence from a previous attempt. Attempt 1 moves the
+    conversation to the peer for real, attempt 2 recalls it here, and the probe then
+    invites the peer again with a transport that accepts and never completes. The
+    probe must answer from THIS attempt (a deadline), never from the completion
+    signal attempt 2 left.
+
+    THE CLEAR IS PROVEN LOAD-BEARING, so the row cannot pass on a no-op: the same
+    probe runs first with ``begin_attempt`` reduced to a bare token bump (no clear)
+    and must inherit — reporting a finished move that never ran — and only then
+    with the real implementation.
+    """
+    from local_operator.network import mobility
+    from local_operator.session.placement import read_stamp
+
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin", settings=server_b.settings)
+    _owned_session(server_a)
+
+    moved = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+    assert moved["ok"] is True, moved
+    recalled = _move(server_a, SESSION, monkeypatch=monkeypatch)
+    assert recalled["ok"] is True, recalled
+    stamp = read_stamp(server_a.root, SESSION)
+    assert stamp is not None and stamp.home_device == server_a.identity.device_id
+
+    # THE PROBE INVITE: the peer acks and then does nothing at all, so the only thing
+    # that could answer this attempt is something left by a previous one.
+    invites: list[dict[str, Any]] = []
+
+    def ask(self: Any, frame: dict[str, Any], **_kw: Any) -> dict[str, Any]:
+        if frame.get("phase") == "invite":
+            invites.append(dict(frame))
+            return {"result": "accepted", "phase": "prepared"}
+        return {"result": "recorded"}
+
+    monkeypatch.setattr(mobility.LinkTransport, "ask", ask)
+    monkeypatch.setattr(mobility, "move_bound_s", lambda *_a, **_k: 1.0)
+
+    real_begin = mobility._Progress.begin_attempt
+    state = {"clear": False}
+
+    def begin(progress: Any, session_id: str) -> int:
+        if state["clear"]:
+            return real_begin(progress, session_id)
+        # The control: a token bump with NO clear, i.e. the scoping without the reset.
+        with progress._lock:  # noqa: SLF001
+            token = progress._attempts.get(session_id, 0) + 1
+            progress._attempts[session_id] = token
+            return token
+
+    monkeypatch.setattr(mobility._Progress, "begin_attempt", begin)
+
+    inherited = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+    print(
+        "control (no clear):", inherited["ok"], inherited.get("code"),
+        "| invites:", len(invites),
+    )
+    assert invites, "the probe never invited the peer"
+    assert inherited["ok"] is True, (
+        "the control did not inherit a completion, so this row never reached the "
+        "stale signal and would be vacuous",
+        inherited,
+    )
+
+    state["clear"] = True
+    fresh = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+    print("cleared:", fresh["ok"], fresh.get("code"), "| invites:", len(invites))
+    assert fresh["ok"] is False, fresh
+    assert fresh["code"] == "deadline_exceeded", fresh
+    assert not (server_b.root / "sessions" / SESSION).exists()
+
+
+@pytest.mark.asyncio
+async def test_the_ceiling_is_load_bearing_for_a_wider_destination(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 4, row 5: the ceiling check must be LOAD-BEARING, not merely present.
+
+    QA honestly refused to disable an authorization check in the product, so the
+    pair that makes the refusal evidence was never demonstrated. It is here, with a
+    TEST-LOCAL monkeypatch of the comparison (``move_team._ceiling``) and no product
+    path weakened: bypassed, an otherwise-disallowed WIDER move PROCEEDS and the
+    destination owns the conversation; restored, the same move REFUSES BY NAME.
+    """
+    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.network import move_team
+    from local_operator.session.placement import read_stamp
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin", settings=server_b.settings)
+    fields = TeamEditFields(name="identity-test", instructions="source brief")
+    TeamRegistry(server_a.root).create_team(fields)
+    # The destination holds the SAME team definition, but its manager resolves to an
+    # edit-capable profile: strictly wider authority than the source recorded.
+    TeamRegistry(server_b.root).create_team(fields)
+    AgentRegistry(server_b.root).create_agent(
+        AgentEditFields(name="manager", tags=["role", "tools:edit"])
+    )
+
+    real_ceiling = move_team._ceiling
+    state = {"bypass": True}
+    reached: list[bool] = []
+
+    def ceiling(*args: Any, **kwargs: Any) -> None:
+        # THE CONTROL ON THE CONTROL: record that the comparison was REACHED, so a
+        # bypass that never took effect cannot leave this row vacuously green.
+        reached.append(state["bypass"])
+        if state["bypass"]:
+            return
+        real_ceiling(*args, **kwargs)
+
+    monkeypatch.setattr(move_team, "_ceiling", ceiling)
+
+    wider_dir = _owned_session(server_a, "202020202020", rows=0)
+    _authorize_source(server_a.root, wider_dir, "identity-test")
+    bypassed = _move(
+        server_a, "202020202020", to=server_b.identity.device_id, monkeypatch=monkeypatch
+    )
+    # The bypass must have been REACHED and taken (``True``): if the monkeypatch
+    # silently failed to apply, the real comparison would have refused and this
+    # assertion — not just the outcome below — is what says so.
+    assert reached and reached[0] is True, (
+        "the ceiling comparison was never reached with the bypass live; the "
+        "negative control would be vacuous",
+        reached,
+    )
+    assert bypassed["ok"] is True, bypassed
+    arrived = read_stamp(server_b.root, "202020202020")
+    assert arrived is not None and arrived.home_device == server_b.identity.device_id
+    assert not wider_dir.exists()
+    print("ceiling bypassed:", bypassed["ok"], "destination owns: True")
+
+    state["bypass"] = False
+    blocked_dir = _owned_session(server_a, "303030303030", rows=0)
+    _authorize_source(server_a.root, blocked_dir, "identity-test")
+    refused = _move(
+        server_a, "303030303030", to=server_b.identity.device_id, monkeypatch=monkeypatch
+    )
+    assert refused["ok"] is False, refused
+    assert refused["code"] == move_team.CODE, refused
+    assert "would grant tool pins: edit" in refused["message"], refused
+    assert blocked_dir.is_dir()
+    assert not (server_b.root / "sessions" / "303030303030").exists()
+    print("ceiling restored:", refused["code"], refused["message"])

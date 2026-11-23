@@ -327,10 +327,17 @@ class TestTeamResolution:
     def test_no_attachment_reports_nothing(self, tmp_path: Path) -> None:
         assert carry.attachment_resolution(tmp_path, tmp_path) == {}
 
-    def test_the_queued_copy_pushes_definitions_before_the_invite(
+    def test_the_queued_copy_applies_nothing_before_its_invite(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from local_operator.network import mobility
+        """R4-2: nothing is applied on the destination before the invite.
+
+        The queued path used to call the general push with empty agent/team
+        selectors. Those selectors filter DECLARATION rows, and the receiver still
+        dispatches the bundle to ``definitions.apply_bundle`` — the mechanism the
+        condition is about — so the assertion is that no push happens at all.
+        """
+        from local_operator.network import definitions, mobility
 
         mq.enqueue(
             tmp_path,
@@ -345,9 +352,7 @@ class TestTeamResolution:
         monkeypatch.setattr(mobility, "_resolve_typed_peer", lambda server, name: ("d_b", "node-2"))
         monkeypatch.setattr(mobility, "_link_for_move", lambda server, dev, name: object())
         monkeypatch.setattr(
-            mobility,
-            "_push_move_definitions",
-            lambda server, sid, dev, label: order.append(f"push:{sid}:{dev}") or "",
+            definitions, "push_to_peer", lambda *a, **k: order.append("push") or {"ok": True}
         )
 
         class _Transport:
@@ -365,7 +370,7 @@ class TestTeamResolution:
 
         # Only ``root`` is read before the stubbed transport stops the drive.
         mq._drive_copy(cast(Any, _Server()), SID)  # noqa: SLF001
-        assert order[:2] == [f"push:{SID}:d_b", "invite:invite"]
+        assert order == ["invite:invite"], order
 
 
 # -- (d) the queued move of an idle session ----------------------------------

@@ -375,3 +375,96 @@ def test_the_drop_roles_flag_is_durable_on_the_record(tmp_path: Path) -> None:
         other, SID, to_device="d_b", to_name="dev-b", request_id="rq", requested_by="d_a"
     )
     assert plain["drop_session_roles"] is False
+
+
+def test_a_queued_retry_decides_from_its_own_attempt_not_a_remembered_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 4, R4-1: a fresh queued request computes its own outcome.
+
+    The queue watch used to read the session's recorded refusal without asking
+    WHICH attempt recorded it, so a second request inherited the first attempt's
+    ``team_definitions_pending`` — a failure nobody computed for it — and folded a
+    terminal ``failed`` even while its own copy was going to commit. The decision
+    must be per attempt, from the state at that attempt.
+
+    Attempt 1 is genuinely refused by the destination, through the real
+    ``_source_refused`` handler (so the sentence crosses as it does on the wire).
+    The team is then reconciled on the destination and attempt 2 receives NO
+    refusal; its copy commits a beat later (the tombstone is written from a timer,
+    because the refusal used to answer before any commit could land). Before the
+    fix the second record reads ``failed``/``team_definitions_pending``; after it
+    reads ``resumed``.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.network import mobility, projection
+
+    server = SimpleNamespace(root=tmp_path)
+    monkeypatch.setattr(mobility, "_resolve_typed_peer", lambda *_a: ("d_b", "dev-b"))
+    monkeypatch.setattr(mobility, "_link_for_move", lambda *_a: SimpleNamespace(device_id="d_b"))
+    monkeypatch.setattr(mobility, "reconcile", lambda *_a, **_k: [])
+
+    invites: list[dict[str, Any]] = []
+    refuse = {"on": True}
+    timers: list[threading.Timer] = []
+
+    def ask(self: Any, frame: dict[str, Any], **_kw: Any) -> dict[str, Any]:
+        if frame.get("phase") != "invite":
+            return {"result": "recorded"}
+        invites.append(dict(frame))
+        if refuse["on"]:
+            # The destination's refusal, over the REAL handler: it echoes the
+            # invite's attempt back, which is what scopes the sentence.
+            mobility._source_refused(  # noqa: SLF001
+                server,
+                SimpleNamespace(device_id="d_b"),
+                {
+                    "session_id": SID,
+                    "code": "team_definitions_pending",
+                    "message": "lopdev: team definition is not available yet",
+                    "attempt": frame.get("attempt"),
+                },
+            )
+        else:
+            # The commit lands AFTER the invite, as it does on a real move: the
+            # refusal this test is about used to answer inside that window.
+            timer = threading.Timer(
+                0.6, projection.write_tombstone, args=(SID,),
+                kwargs={"device_id": "d_b", "config_dir": tmp_path},
+            )
+            timers.append(timer)
+            timer.start()
+        return {"result": "accepted", "phase": "prepared"}
+
+    monkeypatch.setattr(mobility.LinkTransport, "ask", ask)
+
+    try:
+        record, _created = mq.enqueue(
+            tmp_path, SID, to_device="d_b", to_name="dev-b", request_id="rq1", requested_by="d_a"
+        )
+        assert record["phase"] == mq.QUEUE_PHASE_QUEUED
+        mq.transition(tmp_path, SID, mq.QUEUE_PHASE_COPYING, writer="relay")
+        assert mq.drive(server, SID) == mq.QUEUE_PHASE_FAILED
+        failed = mq.read_record(tmp_path, SID) or {}
+        assert failed["phase"] == mq.QUEUE_PHASE_FAILED, failed
+        assert failed["code"] == "team_definitions_pending", failed
+        print("queued attempt 1:", failed["phase"], failed["code"])
+
+        # The reconciliation lands on the DESTINATION; this device records nothing.
+        refuse["on"] = False
+        mq.enqueue(
+            tmp_path, SID, to_device="d_b", to_name="dev-b", request_id="rq2", requested_by="d_a"
+        )
+        mq.transition(tmp_path, SID, mq.QUEUE_PHASE_COPYING, writer="relay")
+        assert mq.drive(server, SID) == mq.QUEUE_PHASE_RESUMED
+        resumed = mq.read_record(tmp_path, SID) or {}
+        assert resumed["phase"] == mq.QUEUE_PHASE_RESUMED, resumed
+        print("queued attempt 2:", resumed["phase"], "invites:", len(invites))
+        # Two attempts, two DISTINCT tokens: the second invite is its own attempt,
+        # which is what makes the refusal it did not receive unreadable to it.
+        assert len(invites) == 2, invites
+        assert invites[0]["attempt"] != invites[1]["attempt"], invites
+    finally:
+        for timer in timers:
+            timer.cancel()
