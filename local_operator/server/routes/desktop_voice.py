@@ -1041,8 +1041,9 @@ async def voice_text(
         raw = await _gate_text(request, body.session_id, source.request_id, locale)
     if raw is None:
         raise _refuse(404, "unknown_source", _wv.unknown_source())
+    words = _spoken_words(locale)
     spoken = voice_segments.speak_segments(
-        raw, max_chars=_max_spoken_chars(config_manager), **_spoken_words(locale)
+        raw, max_chars=_max_spoken_chars(config_manager), **words
     )
     if not spoken.text:
         raise _refuse(404, "unknown_source", _wv.unknown_source())
@@ -1052,6 +1053,7 @@ async def voice_text(
             spoken_chars=len(spoken.text),
             truncated=spoken.truncated,
             segments=list(spoken.segments),
+            full_text=voice_speakable.display_text(raw, code_omitted=words["code_omitted"]),
         )
     )
 

@@ -3821,7 +3821,7 @@ client supplied: it re-resolves every source itself.
 | `GET /v1/desktop/voice` | | `{active: {session_id, enabled_at} \| null, settings: {max_spoken_chars}, provider, providers: {radient, elevenlabs: {ready, reason}}, byok}` | |
 | `POST /v1/desktop/voice` | `{op: "enable" \| "disable", session_id}` | `{active, replaced}`; a `disable` for a session that does not hold the slot changes nothing | 404 `unknown_session`; 409 `voice_store_busy` |
 | `POST /v1/desktop/voice/utterance` | form: `session_id`, `request_id` (dashed UUID), EXACTLY ONE of `file` (a recording) or `text`; `text_origin?` (`qwen_s2s`, text door only) | `{text, path, admission}`; the words are admitted as a `dictated` prompt, or a steer while the turn is streaming | 402 `stt_unavailable` (an out-of-credit provider); 409 `voice_not_enabled`, `voice_provider_unset`, `approval_pending`, `session_syncing`, `stt_unavailable`; 413 `voice_upload_too_large`; 422 `invalid_voice_request`, `empty_transcript`; 429 `voice_rate_limited`; 502 `stt_unavailable` (every rung failed) |
-| `POST /v1/desktop/voice/text` | `{session_id, source}` where `source` is `{kind: "message", message_id}` or `{kind: "gate", request_id}` | `{text, spoken_chars, truncated, segments}` | 404 `unknown_source`; 409 `voice_not_enabled` |
+| `POST /v1/desktop/voice/text` | `{session_id, source}` where `source` is `{kind: "message", message_id}` or `{kind: "gate", request_id}` | `{text, spoken_chars, truncated, segments, full_text}` | 404 `unknown_source`; 409 `voice_not_enabled` |
 | `POST /v1/desktop/voice/speech` | `{session_id, source, segment}`; `source` adds `{kind: "phrase", key}` (one fixed phrase, `segment` 0) | `audio/mpeg` or `audio/wav`; headers `X-Voice-Path`, `X-Voice-Spoken-Chars`, and `X-Voice-Cache: hit` for a cached phrase | 404 `unknown_source`, `unknown_segment`; 409 `voice_not_enabled`, `voice_provider_unset`, `voice_unavailable`; 402 `voice_credit_low`; 429 `voice_rate_limited`; 502 `voice_provider_rejected`, `voice_upstream_failed`; 503 `voice_temporarily_unavailable` |
 
 - **The provider is the user's choice.** `speech.provider` is `radient` or
@@ -3848,6 +3848,19 @@ client supplied: it re-resolves every source itself.
 - **`segments`** are what `/voice/speech` addresses: each is one paid synthesis,
   capped at `settings.max_spoken_chars` (the cap includes the closing sentence
   when a reply is cut, `truncated: true`). Code blocks and links are never spoken.
+- **`full_text`** is the reply cleaned for DISPLAY, never capped, for a screen that
+  shows the whole reply (the desktop History panel) while the audio stays capped.
+  It is NOT the flat spoken string: the line structure is kept (single newlines
+  stay, three or more become one blank line), a bullet keeps its `- `/`1. `
+  marker, a table row is one line with its cells joined by ` · ` (the `|---|`
+  rule row is dropped), and a web address stays as written. As in `text`, a fenced
+  code block is the spoken placeholder, links keep their text, and emphasis,
+  inline-code, heading and quote markers are removed. It never includes the spoken
+  closing sentence, and it generally differs from `text` even when `truncated`
+  is false (newlines, URLs). It is never empty: a reply with nothing to speak is still 404
+  `unknown_source`. Additive and optional for a client: an older server omits it,
+  so fall back to `text`. `text`, `spoken_chars`, `truncated`, `segments` and
+  `/voice/speech` are unchanged, and the `voice` capability stays `2`.
 - **The feed frame.** `GET /v1/desktop/events` publishes `{"type": "voice",
   "payload": {"active": {session_id, enabled_at} | null}}` whenever the slot
   moves, as a level (the slot as it is now, not an edge). The open snapshot's

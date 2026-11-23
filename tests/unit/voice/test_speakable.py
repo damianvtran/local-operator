@@ -137,3 +137,54 @@ def test_a_caller_supplied_tail_replaces_the_english_one_inside_the_cap() -> Non
     assert result.text.endswith(tail) and sp.TRUNCATION_TAIL not in result.text
     assert len(result.text) <= sp.MIN_MAX_SPOKEN_CHARS
     assert sp.speakable(text, max_chars=200).text.endswith(sp.TRUNCATION_TAIL)
+
+
+def test_display_text_keeps_a_table_as_one_line_per_row() -> None:
+    raw = (
+        "| Hook | Fires | Fixes today? |\n|---|:---:|---:|\n"
+        "| **Pre** | yes | no |\n| Post | no | yes |"
+    )
+    assert sp.display_text(raw) == "Hook · Fires · Fixes today?\nPre · yes · no\nPost · no · yes"
+    # The spoken string is still flat: that is the contract the audio depends on.
+    assert "\n" not in sp.clean(raw) and "·" not in sp.clean(raw)
+
+
+def test_display_text_handles_a_table_without_outer_pipes() -> None:
+    raw = "Name | Value\n---|---\nfoo | 1\nbar | 2\nAfter the table."
+    assert sp.display_text(raw) == "Name · Value\nfoo · 1\nbar · 2\nAfter the table."
+
+
+def test_display_text_keeps_bullet_markers_and_nesting() -> None:
+    raw = "- one\n  * **two** and `code`\n1. first\n2) second\n+ plus"
+    assert sp.display_text(raw) == "- one\n  * two and code\n1. first\n2) second\n+ plus"
+
+
+def test_display_text_drops_heading_and_quote_markers_and_unwraps_emphasis() -> None:
+    raw = "## Title\n> quoted _text_\nplain ~~gone~~ **bold**"
+    assert sp.display_text(raw) == "Title\nquoted text\nplain gone bold"
+
+
+def test_display_text_fence_is_the_placeholder_on_its_own_line() -> None:
+    assert (
+        sp.display_text("Before.\n```py\nx = 1\n```\nAfter.")
+        == "Before.\n(code block omitted)\nAfter."
+    )
+    assert sp.display_text("Here. ```\nls\n``` Done.") == "Here.\n(code block omitted)\nDone."
+    assert sp.display_text("```\nls", code_omitted="sin código") == "sin código"
+
+
+def test_display_text_links_keep_text_and_bare_urls_stay_whole() -> None:
+    raw = "See [the docs](https://a.com/x_y_z) or https://b.com/a_b_c_d/*star* now."
+    assert sp.display_text(raw) == "See the docs or https://b.com/a_b_c_d/*star* now."
+    assert sp.display_text("[[open file]](x) done") == "done"
+
+
+def test_display_text_normalises_newlines_and_spacing() -> None:
+    raw = "one  \t two\r\n\r\n\r\n\r\nthree\rfour   \n\n"
+    assert sp.display_text(raw) == "one two\n\nthree\nfour"
+    assert sp.display_text("") == "" and sp.display_text(" \n ") == ""
+
+
+def test_display_text_is_uncapped() -> None:
+    long = " ".join(f"Sentence {n}." for n in range(500))
+    assert sp.display_text(long) == long

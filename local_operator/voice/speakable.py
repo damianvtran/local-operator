@@ -66,6 +66,15 @@ _TABLE_RULE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$",
 _EMPHASIS = re.compile(r"(\*\*|__|\*|_|~~)(?=\S)(.+?)(?<=\S)\1")
 _INLINE_CODE = re.compile(r"`([^`]*)`")
 _WHITESPACE = re.compile(r"\s+")
+# Display cleaning (``display_text``): the same markup removal, but lines survive.
+_BULLET_LINE = re.compile(r"^(\s*)([-*+]|\d+[.)])\s+(.*)$")
+_HEADING_LINE = re.compile(r"^\s{0,3}#{1,6}\s*")
+_QUOTE_LINE = re.compile(r"^\s*>\s?")
+_INLINE_SPACE = re.compile(r"[ \t]+")
+_BLANK_RUNS = re.compile(r"\n{3,}")
+#: A URL is parked behind this sentinel (private-use code points) while emphasis
+#: is unwrapped, so an underscore or asterisk inside an address is never eaten.
+_URL_HOLD = re.compile("\ue000(\\d+)\ue001")
 _SENTENCE_END = re.compile(r"[.!?](?=\s|$)")
 
 
@@ -117,6 +126,80 @@ def clean(text: str, *, code_omitted: str = CODE_PLACEHOLDER, link: str = LINK_W
     text = _EMPHASIS.sub(r"\2", text)
     text = text.replace("|", " ")
     return _WHITESPACE.sub(" ", text).strip()
+
+
+def _is_table_rule(line: str) -> bool:
+    return bool(_TABLE_RULE.fullmatch(line.strip())) and "-" in line
+
+
+def _inline(text: str) -> str:
+    """Unwrap inline code and emphasis (twice, so ``**_x_**`` loses both layers)."""
+    text = _INLINE_CODE.sub(r"\1", text)
+    text = _EMPHASIS.sub(r"\2", text)
+    return _EMPHASIS.sub(r"\2", text)
+
+
+def display_text(text: str, *, code_omitted: str = CODE_PLACEHOLDER) -> str:
+    """The reply cleaned for a SCREEN: ``clean``'s markup removal, lines kept.
+
+    ``clean`` folds every run of whitespace and drops pipes because a speaker has
+    no lines; shown flat, a markdown table reads as run-on words. This keeps the
+    line structure instead: single newlines stay, three or more become one blank
+    line, a bullet keeps its marker, a table row is one line with its cells joined
+    by `` · `` (the ``|---|`` rule row goes), and a web address stays as written
+    (it is on screen anyway, unlike in ``clean``). Fenced code is still
+    ``code_omitted``, links keep their text, emphasis, inline code, heading and
+    quote markers are removed. Pure and uncapped: the audio cap never applies.
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # The placeholder takes its own line, without adding a blank one when the
+    # fence already started or ended a line.
+    text = _FENCE.sub(
+        lambda match: (
+            ("" if match.start() == 0 or text[match.start() - 1] == "\n" else "\n")
+            + code_omitted
+            + ("" if text[match.end() : match.end() + 1] == "\n" else "\n")
+        ),
+        text,
+    )
+    text = _EMBEDDED_COMMAND.sub(" ", text)
+    text = _MD_LINK.sub(r"\1", text)
+    held: list[str] = []
+
+    def _hold(match: re.Match[str]) -> str:
+        held.append(match.group(0))
+        return f"\ue000{len(held) - 1}\ue001"
+
+    text = _URL.sub(_hold, text)
+    lines = text.split("\n")
+    rules = {index for index, line in enumerate(lines) if _is_table_rule(line)}
+    # A table is the run of pipe lines touching a rule row (header above, body
+    # below); a line that merely STARTS with a pipe is a row on its own.
+    rows: set[int] = set()
+    for index in rules:
+        for step in (-1, 1):
+            at = index + step
+            while 0 <= at < len(lines) and "|" in lines[at] and at not in rules:
+                rows.add(at)
+                at += step
+    out: list[str] = []
+    for index, line in enumerate(lines):
+        if index in rules:
+            continue
+        if index in rows or line.lstrip().startswith("|"):
+            cells = [_INLINE_SPACE.sub(" ", _inline(cell)).strip() for cell in line.split("|")]
+            out.append(" · ".join(cell for cell in cells if cell))
+            continue
+        line = _QUOTE_LINE.sub("", _HEADING_LINE.sub("", line))
+        bullet = _BULLET_LINE.match(line)
+        if bullet:
+            indent, marker, rest = bullet.groups()
+            body = _INLINE_SPACE.sub(" ", _inline(rest)).strip()
+            out.append(f"{indent.expandtabs(4)}{marker} {body}")
+            continue
+        out.append(_INLINE_SPACE.sub(" ", _inline(line)).strip())
+    joined = _BLANK_RUNS.sub("\n\n", "\n".join(out)).strip()
+    return _URL_HOLD.sub(lambda match: held[int(match.group(1))], joined)
 
 
 def cap(text: str, max_chars: int, *, tail: str = TRUNCATION_TAIL) -> Speakable:

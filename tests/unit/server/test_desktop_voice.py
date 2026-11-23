@@ -493,8 +493,10 @@ async def test_text_reads_the_agents_message_through_speakable(rig: Any) -> None
     response = await _text(rig, SESSION_A, {"kind": "message", "message_id": ASSISTANT_ID})
     assert response.status_code == 200, response.text
     result = response.json()["result"]
-    assert set(result) == {"text", "spoken_chars", "truncated", "segments"}
+    assert set(result) == {"text", "spoken_chars", "truncated", "segments", "full_text"}
     assert "".join(result["segments"]) == result["text"]
+    assert result["full_text"] == speakable.display_text("Here are the files. ```\nls\n``` Done.")
+    assert "(code block omitted)" in result["full_text"] and "```" not in result["full_text"]
     expected = speakable.speakable("Here are the files. ```\nls\n``` Done.").text
     assert result["text"] == expected
     assert "ls" not in result["text"].split() and "```" not in result["text"]
@@ -530,6 +532,41 @@ async def test_text_honours_the_configured_cap_read_from_disk(rig: Any) -> None:
     assert result["text"].endswith(speakable.TRUNCATION_TAIL)
     assert result["truncated"] is True
     assert result["text"] == speakable.speakable(long_reply, max_chars=100).text
+    # The audio stays capped; the screen text is the whole display-cleaned reply.
+    assert result["full_text"] == speakable.display_text(long_reply)
+    assert len(result["full_text"]) > 100
+    assert speakable.TRUNCATION_TAIL not in result["full_text"]
+    assert result["spoken_chars"] == len(result["text"])
+
+
+@pytest.mark.asyncio
+async def test_text_full_text_keeps_a_table_as_lines_while_text_stays_flat(rig: Any) -> None:
+    from local_operator.voice import speakable
+
+    table = (
+        "Status:\r\n\r\n| Hook | Fires | Fixes today? |\r\n|---|---|---|\r\n"
+        "| **Pre** | yes | no |\r\n| Post | no | yes |\r\n\r\n- one\r\n- two"
+    )
+    rows = rig.pool.bridge.history
+
+    async def history(*, around_id: str, **kwargs: Any) -> dict[str, Any]:
+        page = await rows(around_id=around_id, **kwargs)
+        for entry in page["entries"]:
+            entry["payload"]["content"] = [{"type": "text", "text": table}]
+        return page
+
+    rig.pool.bridge.history = history
+    await _enable(rig, SESSION_A)
+    result = (await _text(rig, SESSION_A, {"kind": "message", "message_id": ASSISTANT_ID})).json()[
+        "result"
+    ]
+    assert result["full_text"] == (
+        "Status:\n\nHook · Fires · Fixes today?\nPre · yes · no\nPost · no · yes\n\n- one\n- two"
+    )
+    # The spoken fields are the flat string they always were.
+    assert result["text"] == speakable.speakable(table).text
+    assert "\n" not in result["text"] and "|" not in result["text"]
+    assert result["truncated"] is False
 
 
 @pytest.mark.asyncio
