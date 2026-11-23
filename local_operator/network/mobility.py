@@ -796,7 +796,11 @@ class _Progress:
         #: has been started here. A refusal carries the token of the invite it
         #: answers, so it can only end the wait it belongs to.
         self._attempts: dict[str, int] = {}
-        self._refusals: dict[str, tuple[str, str, str, int]] = {}
+        self._refusals: dict[str, tuple[str, str, str, int | None]] = {}
+        #: Completions, ATTRIBUTED to the attempt whose invite they answer (R5-1).
+        #: A tokenless completion is kept apart, never folded into a tokenized one.
+        self._done_attempt: dict[str, int] = {}
+        self._done_untagged: set[str] = set()
         self._carry: dict[str, dict[str, Any]] = {}
         self._arrival_active: dict[str, bool] = {}
         self._workset: dict[str, tuple[dict[str, Any], str]] = {}
@@ -836,6 +840,46 @@ class _Progress:
             event = self._events.setdefault(self._event_key(session_id, marker), threading.Event())
         event.set()
 
+    def signal_done(self, session_id: str, attempt: int | None) -> None:
+        """Signal this move's completion, ATTRIBUTED to the attempt it answers.
+
+        WHY (review r5 R5-1). Clearing the previous completion at ``begin_attempt``
+        forgets a PAST answer; it does not identify the next one, so a ``done`` that
+        crossed a retry late could still end the wait of an attempt that never
+        produced it. The destination echoes the invite's token on the completion
+        frame, so the signal now carries its own attribution. A frame from a peer
+        too old to echo one is recorded as UNTAGGED: it is a real completion of
+        *some* attempt, and it is never credited to a tokenized wait, which then
+        falls through to the durable tombstone.
+        """
+        with self._lock:
+            if attempt is None:
+                self._done_untagged.add(session_id)
+            else:
+                self._done_attempt[session_id] = attempt
+            event = self._events.setdefault(self._event_key(session_id, "done"), threading.Event())
+        event.set()
+
+    def wait_done(self, session_id: str, attempt: int | None, timeout: float) -> bool:
+        """Whether ``attempt`` has completed here, waiting up to ``timeout``.
+
+        Polls rather than waiting on the level-triggered event: that event is set by
+        ANY completion, including one this attempt must not inherit, so waiting on it
+        would return instantly and spin. ``attempt=None`` (a caller holding no token)
+        keeps the pre-token reading: any completion at all counts.
+        """
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            with self._lock:
+                if attempt is None:
+                    done = session_id in self._done_untagged or session_id in self._done_attempt
+                else:
+                    done = self._done_attempt.get(session_id) == attempt
+            remaining = deadline - time.monotonic()
+            if done or remaining <= 0:
+                return done
+            time.sleep(min(remaining, 0.02))
+
     def note_refusal(
         self,
         session_id: str,
@@ -859,15 +903,13 @@ class _Progress:
         of this move cannot shorten it.
         """
         with self._lock:
-            # THE TOKEN IS WHAT MAKES THIS RECORD PER-ATTEMPT. ``attempt`` is the
-            # token the refused invite carried, echoed back on the ``refused``
-            # frame, so the sentence answers exactly the attempt that produced it
-            # and can never end a later one. A peer too old to echo sends none:
-            # the sentence is then stamped against whatever attempt is in progress
-            # here, which is the pre-token behaviour and is scoped no further
-            # (a documented limit, not a second contract).
-            token = attempt if attempt is not None else self._attempts.get(session_id, 0)
-            self._refusals[session_id] = (code, message, from_device, token)
+            # THE TOKEN IS WHAT MAKES THIS RECORD PER-ATTEMPT, so an ABSENT one is
+            # stored as absent and never stamped with the attempt in progress
+            # (review r5 R5-1). A sentence that cannot name the attempt it answered
+            # is that attempt's answer only, and crediting it to whichever attempt
+            # happens to be running is how an old refusal ended a newer wait: the
+            # retry then inherited an outcome it never produced.
+            self._refusals[session_id] = (code, message, from_device, attempt)
 
     def refusal(
         self, session_id: str, *, from_device: str = "", attempt: int | None = None
@@ -891,6 +933,10 @@ class _Progress:
             return None
         code, message, device, token = found
         if attempt is not None and token != attempt:
+            # UNCORRELATED (a peer from before the token echoed one, or another
+            # attempt's answer) — so it cannot end a tokenized wait (R5-1). The
+            # wait falls through to the durable tombstone instead of reporting a
+            # sentence about a different attempt.
             return None
         if from_device and device != from_device:
             return None
@@ -992,6 +1038,8 @@ class _Progress:
         """
         self._phases.pop(session_id, None)
         self._refusals.pop(session_id, None)
+        self._done_attempt.pop(session_id, None)
+        self._done_untagged.discard(session_id)
         # A carry block is about ONE move for the same reason the events are:
         # it describes the supervisor state AFTER one promote, and answering a
         # later move with it would be a claim about a stale adoption.
@@ -1923,6 +1971,7 @@ def _destination_move(
     resume_queued: bool = False,
     drop_session_roles: bool = False,
     working_set: dict[str, Any] | None = None,
+    invite_attempt: int | None = None,
 ) -> tuple[SessionMoveResult | None, SessionMoveRefusal | None, str]:
     """Pull ``session_id`` from its owner and adopt it here. THE destination path.
 
@@ -2666,6 +2715,12 @@ def _destination_move(
             "session_id": session_id,
             "new_session_id": target_id,
         }
+        if invite_attempt is not None:
+            # WHICH ATTEMPT THIS COMPLETES (review r5 R5-1). The inviter waits per
+            # attempt, and a completion that crossed a retry late must not end the
+            # wait of the attempt that did not produce it. Absent for a peer from
+            # before the token existed, which reads as unattributed over there.
+            done_frame["attempt"] = invite_attempt
         if carry_block is not None:
             # THE §5.3 ``ensure`` OUTCOME RIDES THE COMPLETION FRAME. It is knowable
             # HERE, as part of the promote itself — unlike the engage, which runs
@@ -6734,7 +6789,7 @@ def _source_done(server: "RelayServer", link: "PeerLink", frame: dict[str, Any])
             session_id, copy.deepcopy(ws_outcome), from_device=link.device_id
         )
     progress_for(server).note(session_id, "done")
-    progress_for(server).signal(session_id, "done")
+    progress_for(server).signal_done(session_id, _attempt_token(frame.get("attempt")))
     _audit(server, AUDIT_DONE, session_id, link.device_id)
     # The served artifacts are no longer needed once the destination says done AND no
     # handoff of this id is in flight here (a stale ``done`` must not strand a live
@@ -6867,6 +6922,7 @@ def _destination_invite(
                 resume_queued=resume_queued,
                 drop_session_roles=drop_session_roles,
                 working_set=invite_consent,
+                invite_attempt=invite_attempt,
             )
         except Exception:  # noqa: BLE001 — the inviter polls durable state, not this
             logger.debug("mobility: invited pull of %s failed", session_id, exc_info=True)
@@ -8611,7 +8667,7 @@ def _await_own_progress(
             # ``_source_prepare`` in this same process before the pull's answer
             # was written, so there is no race to lose.
             return "queued", None
-        if progress.wait_for(session_id, "done", 0.05 if committed_at else 0.2):
+        if progress.wait_done(session_id, attempt, 0.05 if committed_at else 0.2):
             return "done", None
         now = time.monotonic()
         if committed_at is None:

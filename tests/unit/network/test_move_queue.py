@@ -468,3 +468,63 @@ def test_a_queued_retry_decides_from_its_own_attempt_not_a_remembered_refusal(
     finally:
         for timer in timers:
             timer.cancel()
+
+
+class TestAttemptAttribution:
+    """R5-1: no attempt inherits another attempt's outcome.
+
+    The move decision is computed PER ATTEMPT, so both things that can end a wait
+    must name the attempt they answer: a refusal echoes the invite's token, and the
+    destination's completion echoes it too. An answer that cannot name an attempt (a
+    peer from before the token existed) is recorded honestly but never credited to a
+    tokenized wait — that wait then falls through to the durable tombstone instead of
+    reporting somebody else's outcome.
+    """
+
+    def test_a_refusal_that_cannot_name_its_attempt_never_ends_a_later_wait(self) -> None:
+        from local_operator.network import mobility
+
+        progress = mobility._Progress()
+        first = progress.begin_attempt(SID)
+        # Uncorrelated: no token came back with it, and it must not be stamped with
+        # the attempt that happens to be running.
+        progress.note_refusal(SID, code="busy", message="one at a time", from_device="dev-b")
+        assert progress.refusal(SID, from_device="dev-b", attempt=first) is None
+        # A surface holding no attempt still reads the sentence that arrived.
+        assert progress.refusal(SID, from_device="dev-b") == ("busy", "one at a time")
+
+        second = progress.begin_attempt(SID)
+        progress.note_refusal(SID, code="busy", message="still busy", from_device="dev-b")
+        assert progress.refusal(SID, from_device="dev-b", attempt=second) is None
+
+        # Attributed: it answers exactly the attempt whose token it echoes ...
+        progress.note_refusal(
+            SID, code="busy", message="still busy", from_device="dev-b", attempt=second
+        )
+        assert progress.refusal(SID, from_device="dev-b", attempt=second) == (
+            "busy",
+            "still busy",
+        )
+        # ... and never a later one.
+        third = progress.begin_attempt(SID)
+        assert progress.refusal(SID, from_device="dev-b", attempt=third) is None
+
+    def test_a_completion_answers_only_the_attempt_it_reports(self) -> None:
+        from local_operator.network import mobility
+
+        progress = mobility._Progress()
+        first = progress.begin_attempt(SID)
+        second = progress.begin_attempt(SID)
+        # A completion belonging to the FIRST attempt crosses the retry late.
+        progress.signal_done(SID, first)
+        assert progress.wait_done(SID, second, 0.05) is False, "the retry inherited a completion"
+
+        progress.signal_done(SID, second)
+        assert progress.wait_done(SID, second, 0.05) is True
+
+        # Unattributed (a destination from before the token): recorded, never
+        # credited to a tokenized wait, still readable by a caller holding no token.
+        third = progress.begin_attempt(SID)
+        progress.signal_done(SID, None)
+        assert progress.wait_done(SID, third, 0.05) is False
+        assert progress.wait_done(SID, None, 0.0) is True

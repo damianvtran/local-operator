@@ -2407,10 +2407,12 @@ async def test_no_attempt_inherits_a_previous_attempts_success(
     probe must answer from THIS attempt (a deadline), never from the completion
     signal attempt 2 left.
 
-    THE CLEAR IS PROVEN LOAD-BEARING, so the row cannot pass on a no-op: the same
-    probe runs first with ``begin_attempt`` reduced to a bare token bump (no clear)
-    and must inherit — reporting a finished move that never ran — and only then
-    with the real implementation.
+    WHAT IS PROVEN LOAD-BEARING IS THE ATTRIBUTION, NOT THE CLEAR (review r5 R5-1).
+    Clearing at ``begin_attempt`` forgets a PAST answer; it says nothing about a
+    completion that crosses a retry LATE. So the same probe runs first with the
+    PRE-ATTRIBUTION reading (any completion for this session ends the wait) and must
+    inherit — reporting a finished move that never ran — and only then with the real
+    per-attempt wait, which is what keeps this row from being vacuous.
     """
     from local_operator.network import mobility
     from local_operator.session.placement import read_stamp
@@ -2430,32 +2432,39 @@ async def test_no_attempt_inherits_a_previous_attempts_success(
     # that could answer this attempt is something left by a previous one.
     invites: list[dict[str, Any]] = []
 
+    progress = mobility.progress_for(server_a)
+    delivered = {"token": 0}
+
     def ask(self: Any, frame: dict[str, Any], **_kw: Any) -> dict[str, Any]:
         if frame.get("phase") == "invite":
             invites.append(dict(frame))
+            # A completion belonging to the attempt that ALREADY ran, crossing the
+            # retry LATE. Nothing in this probe moved anything, so only attribution
+            # decides whether it answers the attempt now waiting.
+            progress.signal_done(SESSION, delivered["token"])
             return {"result": "accepted", "phase": "prepared"}
         return {"result": "recorded"}
 
     monkeypatch.setattr(mobility.LinkTransport, "ask", ask)
     monkeypatch.setattr(mobility, "move_bound_s", lambda *_a, **_k: 1.0)
 
-    real_begin = mobility._Progress.begin_attempt
-    state = {"clear": False}
+    real_wait_done = mobility._Progress.wait_done
+    state = {"attribute": False}
 
-    def begin(progress: Any, session_id: str) -> int:
-        if state["clear"]:
-            return real_begin(progress, session_id)
-        # The control: a token bump with NO clear, i.e. the scoping without the reset.
-        with progress._lock:  # noqa: SLF001
-            token = progress._attempts.get(session_id, 0) + 1
-            progress._attempts[session_id] = token
-            return token
+    def wait_done(progress: Any, session_id: str, attempt: int | None, timeout: float) -> bool:
+        if state["attribute"]:
+            return real_wait_done(progress, session_id, attempt, timeout)
+        # The control: the PRE-ATTRIBUTION reading — any completion for this session
+        # ends the wait, whichever attempt it answered.
+        return progress.wait_for(session_id, "done", timeout)
 
-    monkeypatch.setattr(mobility._Progress, "begin_attempt", begin)
+    monkeypatch.setattr(mobility._Progress, "wait_done", wait_done)
 
+    delivered["token"] = progress.attempt(SESSION)
+    assert delivered["token"] > 0, "no earlier attempt to inherit from"
     inherited = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
     print(
-        "control (no clear):", inherited["ok"], inherited.get("code"),
+        "control (unattributed):", inherited["ok"], inherited.get("code"),
         "| invites:", len(invites),
     )
     assert invites, "the probe never invited the peer"
@@ -2465,9 +2474,10 @@ async def test_no_attempt_inherits_a_previous_attempts_success(
         inherited,
     )
 
-    state["clear"] = True
+    state["attribute"] = True
+
+    delivered["token"] = progress.attempt(SESSION)
     fresh = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
-    print("cleared:", fresh["ok"], fresh.get("code"), "| invites:", len(invites))
     assert fresh["ok"] is False, fresh
     assert fresh["code"] == "deadline_exceeded", fresh
     assert not (server_b.root / "sessions" / SESSION).exists()
