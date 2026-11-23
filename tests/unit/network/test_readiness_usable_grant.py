@@ -830,11 +830,17 @@ def test_stale_or_undated_owner_refusal_is_not_presented_as_live(
     assert "synced" not in json.dumps(row)
     assert "sign in again —" not in row["detail"]
     assert "last borrow of the login for linear" in row["detail"]
-    assert "re-check before signing in" in row["detail"]
+    # Design D2: one ask, no "re-check" (re-running `ready` returns this row).
+    assert "which may be out of date; try the borrow again before anyone signs in on macbook" in (
+        row["detail"]
+    ), row["detail"]
+    assert "re-check" not in row["detail"]
     assert row["observed"]["auth_evidence_fresh"] is False
     if at is None:
         assert "at a time that was not recorded" in row["detail"]
-        assert row["observed"]["auth_evidence_at"] == ""
+        # Design D6: unknown reads one way in --json, null for both fields.
+        assert row["observed"]["auth_evidence_at"] is None
+        assert row["observed"]["auth_evidence_age_s"] is None
     else:
         clock = _time.strftime("%H:%M UTC", _time.gmtime(at))
         assert f"was refused at {clock}" in row["detail"], row["detail"]
@@ -850,6 +856,42 @@ def test_freshness_boundary_is_inclusive() -> None:
     # Peer clock ahead of ours: skew, not a future observation.
     assert readiness.auth_evidence_observed(now + 30, now=now)["age_s"] == 0
     assert readiness.auth_evidence_observed(now - 3 * 86400, now=now)["phrase"].endswith("3 d ago")
+
+
+_UNDATED = {"at_utc": None, "age_s": None, "fresh": False, "phrase": ""}
+
+
+def test_a_stamp_far_in_the_future_is_undated_not_fresh_forever() -> None:
+    """Review R1-2: clamping every negative age to zero let a peer clock running
+    days fast keep a refusal "under a minute ago" indefinitely."""
+    now = 1_795_000_000.0
+    # Ordinary skew (up to the bound) is still the fresh, clamped reading.
+    for ahead in (30.0, 299.0, 300.0):
+        seen = readiness.auth_evidence_observed(now + ahead, now=now)
+        assert seen["fresh"] is True and seen["age_s"] == 0, (ahead, seen)
+    # Past the bound: the same reading as no stamp at all.
+    assert readiness.auth_evidence_observed(now + 301, now=now) == _UNDATED
+    assert readiness.auth_evidence_observed(now + 3 * 86400, now=now) == _UNDATED
+    assert readiness.auth_evidence_observed(float(2**53), now=now) == _UNDATED
+    assert readiness.auth_evidence_observed(None, now=now) == _UNDATED
+
+
+def test_a_future_dated_refusal_renders_the_undated_wording() -> None:
+    import time as _time
+
+    row = _evidence_row(_expired_evidence(_time.time() + 3 * 86400))
+    assert row["ok"] is False and row["code"] == readiness.CODE_OBSERVED_FAILURE
+    assert "at a time that was not recorded" in row["detail"], row["detail"]
+    assert "sign in again —" not in row["detail"]
+    assert row["observed"]["auth_evidence_fresh"] is False
+
+
+def test_fresh_window_is_derived_from_the_interactive_grant_timeout() -> None:
+    """Review R1-4: the mirror cannot drift from ``mcp.auth``'s constant."""
+    from local_operator.mcp.auth import INTERACTIVE_GRANT_TIMEOUT_S
+
+    assert readiness._INTERACTIVE_GRANT_TIMEOUT_S == INTERACTIVE_GRANT_TIMEOUT_S  # noqa: SLF001
+    assert readiness.AUTH_EVIDENCE_FRESH_S == INTERACTIVE_GRANT_TIMEOUT_S + 300.0
 
 
 def test_revoked_owner_evidence_is_untouched_by_the_age_rule() -> None:

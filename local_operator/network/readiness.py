@@ -3950,6 +3950,24 @@ def _github_observed(fact: Any) -> dict[str, Any]:
     return {"source": fact.get("source")}
 
 
+def _viewer_github_source(viewer: Any) -> tuple[Mapping[str, Any] | None, str]:
+    """THIS device's GitHub ladder: ``(fact, source)``, read once per question.
+
+    Shared by the git row (:func:`_github_push_clause`) and the tooling row
+    (:func:`_github_push_covered`) so the two cannot disagree about whether this
+    device can fund a share it is named the source of (PR #4497 review R1-1: the
+    tooling row skipped this read and went green on a share the git row, in the
+    same report, said would be refused). ``source`` is a ladder arm, ``""`` when
+    the ladder is empty, or :data:`SOURCE_UNKNOWN` when there is no root to read
+    (a viewer double, an offline reader) — never a guess.
+    """
+    own_root = getattr(viewer, "root", None) if viewer is not None else None
+    local = github_fact(own_root) if own_root is not None else None
+    if not isinstance(local, Mapping):
+        return None, SOURCE_UNKNOWN
+    return local, str(local.get("source") or "")
+
+
 def _github_push_clause(
     facts: Mapping[str, Any], *, member: Any, viewer: Any, peer_label: str
 ) -> str:
@@ -4042,11 +4060,7 @@ def _github_push_clause(
             # at ``no_source`` when ``github.source_present`` is False, so claiming
             # a grant here without checking the ladder was the same lie the MCP
             # branch had — with a sentence that read MORE confident than before.
-            own_root = getattr(viewer, "root", None)
-            local = github_fact(own_root) if own_root is not None else None
-            source_here = (
-                str(local.get("source") or "") if isinstance(local, Mapping) else SOURCE_UNKNOWN
-            )
+            local, source_here = _viewer_github_source(viewer)
             if source_here in (SOURCE_UNKNOWN, github_mod.SOURCE_UNREADABLE):
                 return (
                     f"the share for github names this device as {peer_label}'s source, "
@@ -4523,31 +4537,78 @@ def _tooling_install_remedy(
     return sentence + ", then re-check"
 
 
-def _github_push_covered(facts: Mapping[str, Any], *, member: Any, viewer: Any) -> bool | None:
+def _github_push_covered(
+    facts: Mapping[str, Any], *, member: Any, viewer: Any
+) -> tuple[bool | None, str, str]:
     """Would a push on this peer get a GitHub credential WITHOUT a gh login there?
 
-    The same two facts :func:`_github_push_clause` reads for the git row — the
-    peer's own ladder source and the github placement's holders — so the tooling
-    row cannot advise a share the git row already reports as standing. ``None``
-    when either fact is unreadable (no viewer, an older peer, an unreadable store):
-    the caller then names the share without asserting it is missing.
+    Returns ``(covered, how, owner)``. ``covered`` is ``True`` only for a credential
+    this report can stand behind, ``False`` for a known gap, ``None`` when a fact it
+    needs cannot be read (no viewer, an older peer, an unreadable store). ``how``
+    picks the sentence, because the states are different facts: ``"app"``/
+    ``"token"`` (the peer's own ladder arm — the git row calls that "not a brokered
+    grant", so this row must not call it "granted"), ``"share_here"`` (this device
+    is the share's source AND its ladder can fund it), ``"share_elsewhere"``
+    (another device is the source; this report cannot read that device's store, so
+    it states the share, not that pushes work), ``"unfunded_here"`` /
+    ``"unreadable_here"`` (this device is the source but has nothing to lend / its
+    ladder cannot be read), or ``""`` (no share for this peer).
+
+    Reads the same facts as :func:`_github_push_clause` — the peer's own ladder,
+    the github placement's holders, and (owner = this device) this device's ladder
+    via :func:`_viewer_github_source` — so the tooling and git rows of one report
+    cannot disagree (PR #4497 review R1-1 / QA Q1).
     """
     from local_operator.network.credentials import github as github_mod
 
     fact = facts.get("github")
     source = str(fact.get("source") or "") if isinstance(fact, Mapping) else SOURCE_UNKNOWN
     if source in (github_mod.SOURCE_APP, github_mod.SOURCE_TOKEN):
-        return True
+        return True, source, ""
     if viewer is not None:
         placement = viewer.placement(provider=github_mod.GITHUB_KEY)
         placement = placement if isinstance(placement, Mapping) else {}
-        if placement.get("owner_device") and str(getattr(member, "device_id", "")) in (
-            _holder_names(placement)
-        ):
-            return True
+        placement_owner = str(placement.get("owner_device") or "")
+        if placement_owner and str(getattr(member, "device_id", "")) in (_holder_names(placement)):
+            owner = _owner_label(placement, fallback=placement_owner) or placement_owner
+            if placement_owner != str(getattr(viewer, "device_id", "")):
+                return True, "share_elsewhere", owner
+            # THE OWNER MUST BE ABLE TO LEND: a share whose source is an empty
+            # ladder is refused at ``no_source`` on every borrow, so a holder entry
+            # alone is not a credential the peer can use.
+            _, source_here = _viewer_github_source(viewer)
+            if source_here in (
+                github_mod.SOURCE_APP,
+                github_mod.SOURCE_TOKEN,
+                github_mod.SOURCE_GH,
+            ):
+                return True, "share_here", owner
+            if not source_here:
+                return False, "unfunded_here", owner
+            return None, "unreadable_here", owner
     if viewer is None or source in (SOURCE_UNKNOWN, github_mod.SOURCE_UNREADABLE):
-        return None
-    return False
+        return None, "", ""
+    return False, "", ""
+
+
+def _github_share_remedy(viewer: Any, peer_label: str) -> str:
+    """The share verb, addressed to a device the reader can find (design D5).
+
+    "the device that holds a GitHub login" did not say which device; when this
+    device's own ladder can lend, the answer is "this device".
+    """
+    from local_operator.network.credentials import github as github_mod
+
+    _, source_here = _viewer_github_source(viewer)
+    where = (
+        "on this device"
+        if source_here in (github_mod.SOURCE_APP, github_mod.SOURCE_TOKEN, github_mod.SOURCE_GH)
+        else "on a device signed in to GitHub"
+    )
+    return (
+        f"{where}, run `lop network credential share github --with {peer_label}` so "
+        "pushes and PR writes there get a granted credential"
+    )
 
 
 def tooling_row(
@@ -4644,17 +4705,64 @@ def tooling_row(
     # sentence, separate from the tools tail (which is about missing binaries), and
     # it states only facts: the peer has no CLI login of its own, and whether a
     # GitHub credential is shared with it.
+    #
+    # PR #4497 round 1 (review R1-1/R1-3, QA Q1/Q2, design D3/D4): green only for a
+    # credential this report can stand behind, and each green states WHICH one (a
+    # share funded here, a share from another device, the peer's own arm) without
+    # opening on the missing login as a caveat; a red leads with the real gap.
+    from local_operator.network.credentials import github as github_mod
+
     push_covered: bool | None = None
-    login_note = ""
+    push_how = ""
+    login_sentence = ""  # standalone sentence (lowercase start unless a label)
+    green_clause = ""  # what follows "has the lane toolchain (...); " on a green row
     if login == "absent":
-        push_covered = _github_push_covered(facts, member=member, viewer=viewer)
-        login_note = "has no stored GitHub CLI login of its own, which is optional"
-        if push_covered is True:
-            login_note += ": pushes and PR writes there use the GitHub credential it is granted"
+        push_covered, push_how, owner = _github_push_covered(facts, member=member, viewer=viewer)
+        no_login = "(its own GitHub CLI login is optional and not set up)"
+        if push_how in (github_mod.SOURCE_APP, github_mod.SOURCE_TOKEN):
+            arm = "GitHub App credential" if push_how == github_mod.SOURCE_APP else "GITHUB_TOKEN"
+            green_clause = (
+                f"pushes and PR writes there use the {arm} it holds (no GitHub CLI login "
+                "is needed)"
+            )
+        elif push_how == "share_here":
+            green_clause = (
+                "pushes and PR writes there use the GitHub credential this device shares "
+                "with it (no GitHub CLI login of its own is needed)"
+            )
+        elif push_how == "share_elsewhere":
+            # This device cannot read the owner's store: state the share, not that a
+            # push will work (the git row says the same: "decided on <owner>").
+            green_clause = (
+                f"a GitHub credential is shared with it from {owner} for pushes and PR "
+                f"writes (no GitHub CLI login of its own is needed); whether {owner} can "
+                "serve it is decided there"
+            )
+        elif push_how == "unfunded_here":
+            login_sentence = (
+                f"the share for github names this device as {peer_label}'s source, but "
+                "this device holds no GitHub credential to lend, so pushes and PR writes "
+                f"there have none to use {no_login}"
+            )
+        elif push_how == "unreadable_here":
+            login_sentence = (
+                f"the share for github names this device as {peer_label}'s source, but "
+                "this device's GitHub source could not be resolved, so whether pushes and "
+                f"PR writes there would get a credential is not known {no_login}"
+            )
         elif push_covered is False:
-            login_note += ", and no GitHub credential is shared with it"
+            login_sentence = (
+                f"no GitHub credential is shared with {peer_label}, so pushes and PR "
+                f"writes there have none to use {no_login}"
+            )
         else:
-            login_note += "; whether a GitHub credential is shared with it is not known here"
+            login_sentence = (
+                f"{peer_label} has no GitHub CLI login of its own (optional); this device "
+                "cannot tell whether a GitHub credential is shared with it"
+            )
+        if green_clause and push_covered is True:
+            # Follows a sentence about this peer, so "there"/"it" resolve to it.
+            login_sentence = green_clause
     if absent or off_path:
         tail = ": offloaded work that needs them will fail there"
     elif unknown or login == "unknown":
@@ -4663,21 +4771,24 @@ def tooling_row(
         tail = ""
     if clauses:
         detail = f"{peer_label} " + "; ".join(clauses) + tail
-        if login_note:
-            detail += f". {peer_label} {login_note}"
+        if login_sentence:
+            # A label keeps its own case; a fixed opening word starts the sentence.
+            opener = login_sentence
+            if not opener.startswith(peer_label):
+                opener = opener[:1].upper() + opener[1:]
+            detail += f". {opener}"
     else:
-        detail = f"{peer_label} {login_note}"
+        detail = login_sentence
     if not clauses and push_covered is True:
-        # Only the optional login is missing and a grant funds push/PR-write: the
-        # row must not read as the peer lacking something the work needs.
+        # Only the optional login is missing and a credential this report can stand
+        # behind funds push/PR-write: a clean bill of health, no caveat first.
         return _capability_row(
             device_id=member.device_id,
             device_name=peer_label,
             capability=CAPABILITY_TOOLING,
             ok=True,
             detail=(
-                f"{peer_label} has the lane toolchain ({', '.join(TOOLING_TOOLS)}); it "
-                + login_note
+                f"{peer_label} has the lane toolchain ({', '.join(TOOLING_TOOLS)}); " + green_clause
             ),
             source=SOURCE_PEER,
             observed={"absent": [], "off_path": [], "unknown": [], "gh_login": login},
@@ -4711,15 +4822,22 @@ def tooling_row(
         remedy += " (work can use that path directly meanwhile)"
         remedies.append(remedy)
     if login == "absent":
-        if push_covered is not True:
-            # FIRST: the share is what makes push/PR-write work there; the peer's own
-            # login below is optional and serves only its local ``gh`` use.
-            remedies.insert(
-                0,
-                f"from the device that holds a GitHub login, run `lop network credential "
-                f"share github --with {peer_label}` so pushes and PR writes there get a "
-                "granted credential",
+        # AFTER the install and PATH fixes (design D1 / QA Q3): a row red for a
+        # missing binary leads with the fix for that binary. When the login is the
+        # only gap these are the first remedies, so the credential fix leads there.
+        if push_how == "unfunded_here":
+            # The share already stands; what is missing is something for it to lend.
+            remedies.append(
+                f"on this device, set up a GitHub credential to lend to {peer_label}: "
+                + github_mod.no_source_arms()
             )
+        elif push_how == "unreadable_here":
+            remedies.append(
+                "check that this device's secret store can be read (its GitHub source "
+                "could not be resolved), then re-check"
+            )
+        elif push_covered is not True:
+            remedies.append(_github_share_remedy(viewer, peer_label))
         remedies.append(
             f"optional: on {peer_label}, `gh auth login` gives that device its own GitHub "
             "CLI login; it is not what makes pushes or PR writes work there"
@@ -5582,27 +5700,46 @@ def _mcp_ref_row(
 #: same ``observed_failure`` code (a failed validation NEVER reads as ``synced``),
 #: but the sentence says when the last attempt was refused and sends the operator to
 #: re-try the borrow before signing in again.
-AUTH_EVIDENCE_FRESH_S = 900.0
+#: Mirror of ``mcp.auth.INTERACTIVE_GRANT_TIMEOUT_S`` (review R1-4), pinned equal by
+#: ``test_fresh_window_is_derived_from_the_interactive_grant_timeout``. Not imported:
+#: ``mcp.auth`` pulls ~160 modules (measured 0.16 s) that every readiness import
+#: would then pay, and this file imports ``mcp.auth`` lazily everywhere else.
+_INTERACTIVE_GRANT_TIMEOUT_S = 600.0
+AUTH_EVIDENCE_FRESH_S = _INTERACTIVE_GRANT_TIMEOUT_S + 300.0
+
+#: How far AHEAD of this device's clock a peer's stamp may sit and still be read as
+#: skew (PR #4497 review R1-2). ``at`` is written with the PEER's clock; clamping
+#: any negative age to zero let a peer running days fast keep a refusal "fresh"
+#: ("under a minute ago") indefinitely — the stale-refusal bug again. Five minutes
+#: covers ordinary NTP drift; anything further ahead is not a time this report can
+#: date, so it takes the same UNDATED path as a missing stamp.
+AUTH_EVIDENCE_FUTURE_SKEW_S = 300.0
 
 
 def auth_evidence_observed(at: Any, *, now: float | None = None) -> dict[str, Any]:
     """When an evidence row was observed: one reading for the sentence AND ``--json``.
 
-    Returns ``at_utc`` (ISO-8601 UTC, ``""`` when unrecorded), ``age_s`` (whole
+    Returns ``at_utc`` (ISO-8601 UTC, ``None`` when unrecorded), ``age_s`` (whole
     seconds, ``None`` when unrecorded), ``fresh`` (inside
     :data:`AUTH_EVIDENCE_FRESH_S`) and ``phrase`` ("16:45 UTC, 54 min ago"). The
     CLI renders ``detail`` and ``--json`` carries the same ``detail`` plus these
     fields, so both readers get one computation and cannot disagree.
 
     ``at`` is the PEER's clock and ``now`` this device's: a small negative age is
-    skew, clamped to zero rather than reported as a future observation.
+    skew, clamped to zero rather than reported as a future observation. A stamp more
+    than :data:`AUTH_EVIDENCE_FUTURE_SKEW_S` ahead is undated: ``None``/``None``/
+    ``False``/``""``, the same reading as no stamp at all (and ``null`` for both
+    JSON fields, design D6, so a reader checks for "unknown" one way).
     """
     from local_operator.network.credentials.types import peer_number
 
+    undated: dict[str, Any] = {"at_utc": None, "age_s": None, "fresh": False, "phrase": ""}
     stamp = peer_number(at, default=0)
     if stamp <= 0:
-        return {"at_utc": "", "age_s": None, "fresh": False, "phrase": ""}
+        return undated
     current = time.time() if now is None else now
+    if stamp - current > AUTH_EVIDENCE_FUTURE_SKEW_S:
+        return undated
     age = max(0, int(current - stamp))
     if age < 60:
         ago = "under a minute ago"
@@ -5725,10 +5862,13 @@ def _mcp_credential_row(
             # new borrow rewrites the row, so the remedy is the member-side repair
             # that makes one (``--repair`` borrows once and records its answer).
             when = f"at {seen['phrase']}" if seen["phrase"] else "at a time that was not recorded"
+            # ONE ask (design D2): "re-check" read as re-running `ready`, which
+            # returns this same row; only a new borrow (the remedy's --repair)
+            # rewrites it.
             detail = (
                 f"{peer_label}'s last borrow of the login for {name} ({url}) from "
-                f"{owner_label} was refused {when}; whether {owner_label} still needs to "
-                "sign in again is not known from that record — re-check before signing in"
+                f"{owner_label} was refused {when}, which may be out of date; try the "
+                f"borrow again before anyone signs in on {owner_label}"
             )
             remedies = (
                 f"on {peer_label}, run `lop network mcp credentials --repair` to try the "
