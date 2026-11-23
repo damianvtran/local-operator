@@ -264,6 +264,10 @@ def supported() -> bool:
 #: harmless because ``2>`` stays with its command and ``1`` names no tool.
 _SEPARATORS = {"&&", "||", ";", "|", "&", "\n", "(", ")", ";;", "|&"}
 _ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+#: Shell reserved words that open a command in a loop or branch body
+#: (``do pytest x``, ``then pytest x``, ``if pytest x``); the command is what
+#: follows. ``time`` is not here: it is a wrapper in :data:`_PREFIX_WRAPPERS`.
+_RESERVED_WORDS = frozenset({"do", "then", "else", "elif", "if", "while", "until", "!", "{"})
 
 #: Wrappers that run "the rest of the line" as the real command: name ->
 #: (positional arguments eaten before the wrapped command, options that take a
@@ -480,17 +484,87 @@ def _shallow_guess(command: str) -> str | None:
     return None
 
 
+def _logical_lines(command: str) -> list[str] | None:
+    """Split ``command`` at unquoted newlines; None when a quote never closes.
+
+    A newline ends a simple command in the shell, but shlex reads it as plain
+    whitespace, so ``echo hi\\npytest tests/unit`` lexed as ONE command (``echo``)
+    and the pytest was never classified. This pre-pass restores the boundary:
+    a newline inside single or double quotes stays in its token, a backslash-
+    newline is a line continuation (removed, as the shell does), and a ``#`` at
+    the start of a word is a comment to the end of its line, dropped so an
+    apostrophe in it (``# don't``) cannot flip the quote state. ``\\r\\n`` is
+    one newline. Heredoc bodies are NOT special-cased: they are classified as
+    command lines, which errs toward leasing. Linear, no subprocess.
+    """
+    lines: list[str] = []
+    buf: list[str] = []
+    in_single = in_double = False
+    i, n = 0, len(command)
+    while i < n:
+        char = command[i]
+        if char == "\\" and not in_single:
+            following = command[i + 1 : i + 3]
+            if following.startswith("\n") or following == "\r\n":
+                i += 2 if following.startswith("\n") else 3  # continuation: joins the lines
+                continue
+            buf.append(command[i : i + 2])
+            i += 2
+            continue
+        if in_single or in_double:
+            if char == "'" and in_single:
+                in_single = False
+            elif char == '"' and in_double:
+                in_double = False
+            buf.append(char)
+        elif char == "'":
+            in_single = True
+            buf.append(char)
+        elif char == '"':
+            in_double = True
+            buf.append(char)
+        elif char == "#" and (not buf or buf[-1] in " \t\r;&|()"):
+            while i < n and command[i] != "\n":
+                i += 1
+            continue
+        elif char == "\n" or (char == "\r" and command[i + 1 : i + 2] == "\n"):
+            lines.append("".join(buf))
+            buf = []
+            i += 1 if char == "\n" else 2
+            continue
+        else:
+            buf.append(char)
+        i += 1
+    if in_single or in_double:
+        return None
+    lines.append("".join(buf))
+    return lines
+
+
 def _segments(command: str) -> list[list[str]]:
-    """Split ``command`` into simple-command token lists; [] when unparseable."""
+    """Split ``command`` into simple-command token lists; [] when unparseable.
+
+    Simple commands end at ``; & | ( )``, ``&&``/``||`` AND an unquoted newline
+    (see :func:`_logical_lines`).
+    """
+    lines = _logical_lines(command)
+    tokens: list[str] = []
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
-        lexer.whitespace_split = True
-        lexer.commenters = "#"
-        tokens = list(lexer)
+        if lines is None:
+            raise ValueError("unbalanced quote")
+        for line in lines:
+            lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|()")
+            lexer.whitespace_split = True
+            lexer.commenters = ""  # comments were dropped, quote-aware, above
+            tokens.extend(lexer)
+            tokens.append("\n")
     except ValueError:
-        # An unbalanced quote: fall back to a plain whitespace split rather
-        # than give up, so a heavy build with a stray quote still queues.
-        tokens = command.split()
+        # An unbalanced quote: fall back to a plain whitespace split per line
+        # rather than give up, so a heavy build with a stray quote still queues.
+        tokens = []
+        for line in command.splitlines():
+            tokens.extend(line.split())
+            tokens.append("\n")
     segments: list[list[str]] = [[]]
     for token in tokens:
         if token in _SEPARATORS:
@@ -501,12 +575,12 @@ def _segments(command: str) -> list[list[str]]:
 
 
 def _strip_wrappers(tokens: list[str]) -> list[str]:
-    """Drop env assignments and runner prefixes to reach the real program."""
+    """Drop env assignments, reserved words and runner prefixes to reach the real program."""
     i = 0
     while i < len(tokens):
         token = tokens[i]
         base = os.path.basename(token)
-        if _ENV_ASSIGNMENT.match(token):
+        if _ENV_ASSIGNMENT.match(token) or token in _RESERVED_WORDS:
             i += 1
             continue
         if base == "systemd-run":
@@ -1130,6 +1204,10 @@ def is_heavy(
     ``expo run:ios`` stays attached to Metro unless ``--no-bundler`` is given, so
     it holds its slot until stopped or timed out. ``$(…)``/backtick bodies are classified too,
     and never hide the command around them.
+
+    The line is split into simple commands at ``; & | ( )``, ``&&``/``||`` and
+    unquoted newlines, and a loop/branch body (``do``/``then``/``else``/``if``
+    …) is classified by the command after its reserved word.
 
     Classified by what actually runs: wrappers (``cd x &&``, env assignments,
     ``timeout N``, ``nice``, ``taskset``, ``chrt``, ``prlimit``, ``xvfb-run``,
