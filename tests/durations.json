@@ -3673,6 +3673,7 @@
   "tests/unit/network/test_join_park.py": 9.283,
   "tests/unit/network/test_leave_forget_owner.py": 1.0,
   "tests/unit/network/test_lend_selection_parity.py": 7.099,
+  "tests/unit/network/test_linux_prepared_writer.py": 3.518,
   "tests/unit/network/test_live_link_covers_dead_address.py": 4.464,
   "tests/unit/network/test_mcp_credentials_cli.py": 2.173,
   "tests/unit/network/test_mcp_diagnostics_link.py": 6.777,
