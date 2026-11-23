@@ -1,0 +1,55 @@
+{
+  "locale": "ur",
+  "role": "translator",
+  "session_id": "bc9d98e0db6e",
+  "author_model": "anthropic/claude-opus-5-5",
+  "model_provenance": "Current resumed authoring segment host model header: anthropic/claude-opus-5-5. No fallback observed in this segment. Previous stopped attempt reported openai/gpt-6.1-sol fallback but wrote no catalogue bytes; that earlier report is not independent host evidence for the current authoring segment.",
+  "head": "69b7e09c9b56924a7fefe561e283a73045b0a845",
+  "scope": "Exactly two existing Urdu human-facing approval choice labels; no machine-token changes",
+  "target_path": "local_operator/i18n/catalogues/ur/wire.settings.json",
+  "source_sha256": "298fc1100cb10bfa34909aa245307a735dad318f456e5bbfb5337fbcdb1e8962",
+  "context_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+  "before_full_file_sha256": "5b47f6cbefb5a6c485d44af0b40842c3e295ef72538bb30bb27bed55ba706931",
+  "after_full_file_sha256": "79869c119f2cb73152c50a4a3ffb647441cd0b0db0fb1f49a76f29a15324bc5e",
+  "before_selected_canonical_sha256": "528e62ca2b728e6ed06c2ebc9692c6c40bf4c8ee7b9f97f86556555fe04d11df",
+  "after_selected_canonical_sha256": "fde72a767a645ec6097c3fad3d1663a702018271e26153ab4bef791e181775d6",
+  "canonical_encoding": "UTF-8 JSON, ensure_ascii=false, sort_keys=true, separators comma/colon without spaces",
+  "changed_keys": {
+    "wire.settings.tool_approval_mode.choice.ask.label": {
+      "before": "ask",
+      "after": "پوچھیں",
+      "backtranslation": "Ask (respectful imperative)",
+      "rationale": "Everyday Urdu polite imperative, following the Urdu style guide's respectful command register. Names the prompting mode without saying always, every call, or granting permission.",
+      "authorship": "New value authored by this translator in this session; previous value's author unknown",
+      "literal_cells": 6,
+      "synthetic_pseudo": "[پوچھیں··]",
+      "synthetic_cells": 10
+    },
+    "wire.settings.tool_approval_mode.choice.auto.label": {
+      "before": "auto",
+      "after": "خودکار",
+      "backtranslation": "Automatic",
+      "rationale": "Established concise Urdu adjective for automatic operation; not a borrowed Latin machine token and not an assertion of unconditional authorization. No glossary term invented.",
+      "authorship": "New value authored by this translator in this session; previous value's author unknown",
+      "literal_cells": 6,
+      "synthetic_pseudo": "[خودکار··]",
+      "synthetic_cells": 10
+    }
+  },
+  "retained_keys": [],
+  "controls": {
+    "approved_input_cache": "Urdu selected canonical digest, current original whole-file hash, English whole-file hash and context whole-file hash matched approved pins; two cached contexts matched actual sidecar entries",
+    "catalogue_total_keys_before_after": [895, 895],
+    "changed_values": 2,
+    "other_values_unchanged": 893,
+    "byte_scope": "Exact original bytes restored by substituting only the two intended value literals; key order, whitespace and every other byte preserved",
+    "icu": "Both values parsed using project runtime.parse_message; literal _Text nodes only, zero arguments, zero selectors, plural N/A; unmatched-brace negative control rejected with MessageSyntaxError",
+    "placeholders": "Zero in source and both targets; unchanged",
+    "unicode": "NFC verified; no authored bidi controls",
+    "punctuation": "No added punctuation, markup, escapes, Latin abbreviations or shortcuts",
+    "width": "rich.cells.cell_len: both labels 6 cells; synthetic bracket-and-dot pseudo strings 10 cells each. Ask expands from 3 English cells to 6. Context provides no maxCells. Compact wording retained; actual shaped RTL fit is unverified, not a real-layout pass.",
+    "wire_values": "No source code edited; ask/auto stored wire values outside this catalogue scope untouched"
+  },
+  "glossary_redaction": "Unrelated redacted Hindi note was not decoded, reconstructed or re-read; resumed under manager's explicit narrowed-stop instruction using already-visible Urdu style and relevant glossary content",
+  "audit_disposition": "Authoring receipt only. No self-audit, native-speaker approval, rendered-fit or safety-auditor claim. Two independent safety auditors remain the manager's next gate."
+}

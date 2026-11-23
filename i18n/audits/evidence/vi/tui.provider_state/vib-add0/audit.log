@@ -1,0 +1,20 @@
+python /Users/damian/local-operator/.venv/bin/python
+HOME /Users/damian/.local-operator/sessions/add016b11be1/scratchpad/vi-b-home
+CONFIG /Users/damian/.local-operator/sessions/add016b11be1/scratchpad/vi-b-home/config
+module local_operator.i18n.catalogues /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/i18n/catalogues.py
+module local_operator.i18n.runtime /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/i18n/runtime.py
+module scripts.i18n.check /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/scripts/i18n/check.py
+input en local_operator/i18n/catalogues/en/tui.provider_state.json 113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912
+input context local_operator/i18n/catalogues/en/tui.provider_state.context.json 67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be
+input vi local_operator/i18n/catalogues/vi/tui.provider_state.json 74e6607520947d1910479a85be916e8fa3e0efa6104230d19cef8d74a3aa4867
+official scoped check_catalogues []
+NEGATIVE missing key ["vi/tui.provider_state: missing key 'tui.provider_state.logged_in'"]
+NEGATIVE added argument ["vi/tui.provider_state: tui.provider_state.env_key: arguments (('unexpected', 'simple'),) != en's (): en has 0 argument(s), translation has 1"]
+restored official scoped checker PASS
+{"key": "tui.provider_state.logged_in", "en": "logged in", "vi": "đã đăng nhập", "args": 0, "plural_select": 0, "NFC": true, "protected_tokens": 0, "english_cells": 9, "vi_plain_Rich_cells": 12, "pseudo": "⟦logged in ~~~⟧", "pseudo_cells": 15}
+{"key": "tui.provider_state.env_key", "en": "env key", "vi": "khóa từ biến môi trường", "args": 0, "plural_select": 0, "NFC": true, "protected_tokens": 0, "english_cells": 7, "vi_plain_Rich_cells": 23, "pseudo": "⟦env key ~~⟧", "pseudo_cells": 12}
+{"key": "tui.provider_state.needs_login", "en": "needs login", "vi": "cần đăng nhập", "args": 0, "plural_select": 0, "NFC": true, "protected_tokens": 0, "english_cells": 11, "vi_plain_Rich_cells": 13, "pseudo": "⟦needs login ~~~⟧", "pseudo_cells": 17}
+{"key": "tui.provider_state.local_ready", "en": "configured server", "vi": "máy chủ đã cấu hình", "args": 0, "plural_select": 0, "NFC": true, "protected_tokens": 0, "english_cells": 17, "vi_plain_Rich_cells": 19, "pseudo": "⟦configured server ~~~~~⟧", "pseudo_cells": 25}
+{"key": "tui.provider_state.local_unconfigured", "en": "configure server", "vi": "cấu hình máy chủ", "args": 0, "plural_select": 0, "NFC": true, "protected_tokens": 0, "english_cells": 16, "vi_plain_Rich_cells": 16, "pseudo": "⟦configure server ~~~~~⟧", "pseudo_cells": 24}
+PASS: five ordered keys; official scoped catalogue/context/ICU validation; negative controls; NFC/protected tokens; exact ICU rendering; synthetic pseudo expansion; plain Rich widths with English controls
+NOT VERIFIED: styled integration, application UI, native fonts, actual geometry, eligibility or release

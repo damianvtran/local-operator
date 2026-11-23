@@ -15,5 +15,7 @@
   "tui.transcript.group.steered": "{count, plural, one {{label} steered} other {{label} steered}}",
   "tui.transcript.hub.reply_requested": "Reply requested",
   "tui.transcript.hub.steered": "Steered",
-  "tui.transcript.hub.from": "From {identity}"
+  "tui.transcript.hub.from": "From {identity}",
+  "tui.transcript.jump_to_latest": "Jump to latest",
+  "tui.transcript.jump_to_latest.short": "Latest"
 }

@@ -335,6 +335,66 @@ def test_cli_and_server_sanity_still_wait_on_the_cheap_gates() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("case", "expected_exit", "message"),
+    [
+        ("exact", 0, "CLI sanity test passed successfully"),
+        ("newline", 0, "CLI sanity test passed successfully"),
+        ("scratchpad", 1, "Probe file was not created"),
+        ("cwd", 1, "Probe file was not created"),
+        ("missing", 1, "Probe file was not created"),
+        ("wrong", 1, "does not contain exactly 'hello world'"),
+        ("tool-error", 1, "synthetic CLI error"),
+    ],
+)
+def test_cli_sanity_checks_the_destination_named_in_the_live_prompt(
+    tmp_path: Path, case: str, expected_exit: int, message: str
+) -> None:
+    # Exercise the actual workflow shell, not a copy of its assertions. The
+    # stand-in gets the destination only from the prompt; CI owns the live call.
+    step = next(step for step in _steps("cli-sanity") if step.get("name") == "Run CLI Sanity Test")
+    run = tmp_path / "run.sh"
+    run.write_text(step["run"], encoding="utf-8")
+    subprocess.run(["bash", "-n", str(run)], check=True, timeout=10)
+
+    runner_temp = tmp_path / "runner temp"
+    runner_temp.mkdir()
+    stub = tmp_path / "local-operator"
+    stub.write_text(
+        """#!/usr/bin/env bash
+        set -euo pipefail
+        [[ "$*" == *"exec --yolo"* ]] || exit 90
+        IFS="'" read -r _ probe _ <<< "${!#}"
+        [[ "$probe" == "$RUNNER_TEMP"/cli-sanity.*/probe.txt ]] || exit 91
+        case "$PROBE_CASE" in
+          exact) printf 'hello world' > "$probe" ;;
+          newline) printf 'hello world\\n' > "$probe" ;;
+          scratchpad) mkdir scratchpad; printf 'hello world' > scratchpad/probe.txt ;;
+          cwd) printf 'hello world' > probe.txt; cp probe.txt test.txt ;;
+          missing) ;;
+          wrong) printf 'not hello world\\n' > "$probe" ;;
+          tool-error) printf 'hello world' > "$probe"; echo 'synthetic CLI error'; exit 3 ;;
+        esac
+        """,
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(run)],
+        cwd=tmp_path,
+        env={
+            "PATH": f"{tmp_path}:{os.defpath}",
+            "RUNNER_TEMP": str(runner_temp),
+            "PROBE_CASE": case,
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == expected_exit, (result.stdout, result.stderr)
+    assert message in result.stdout
+
+
 def test_type_check_does_not_force_latest_pyright() -> None:
     """FORCE_VERSION=latest ignores the bundled analyzer.
 
@@ -520,35 +580,97 @@ def test_makefile_quality_targets_do_not_invoke_console_scripts() -> None:
         )
 
 
-def test_tui_e2e_still_runs_on_macos() -> None:
-    """The freeze is a macOS/BSD property; dropping the leg disarms the guard
-    more thoroughly than `needs: test` ever did."""
-    matrix = _ci_jobs()["tui-e2e"]["strategy"]["matrix"]["os"]
-    assert isinstance(matrix, list)
-    assert "macos-latest" in matrix, (
-        "tui-e2e lost its macOS leg; the freeze this stage exists to "
-        f"catch cannot go red on Linux (os={matrix!r})"
+_PR_MATRIX_EXPR_RE = re.compile(
+    r"^\$\{\{\s*fromJSON\(\s*github\.event_name\s*==\s*'pull_request'\s*"
+    r"&&\s*'([^']+)'\s*\|\|\s*'([^']+)'\s*\)\s*\}\}$"
+)
+_PR_BOOL_EXPR_RE = re.compile(r"^\$\{\{\s*github\.event_name\s*==\s*'pull_request'\s*\}\}$")
+
+
+def _eval_pr_conditional_matrix(raw: Any, event_name: str) -> list[str]:
+    """Evaluate a literal list or a `fromJSON(github.event_name == 'pull_request' && ... || ...)`
+    matrix axis for the given GitHub Actions event name.
+
+    Fails loudly if the expression shape drifts so an unparseable or inverted
+    expression cannot silently pass.
+    """
+    if isinstance(raw, list):
+        return raw
+    assert isinstance(raw, str), f"expected matrix axis list or expression string, got {raw!r}"
+    match = _PR_MATRIX_EXPR_RE.match(raw.strip())
+    assert match, (
+        "matrix axis expression does not match the guarded "
+        "`fromJSON(github.event_name == 'pull_request' && '<pr-json>' || '<other-json>')` "
+        f"shape: {raw!r}"
     )
+    pr_values = json.loads(match.group(1))
+    other_values = json.loads(match.group(2))
+    assert isinstance(pr_values, list) and pr_values, f"empty/invalid PR matrix branch: {raw!r}"
+    assert (
+        isinstance(other_values, list) and other_values
+    ), f"empty/invalid non-PR matrix branch: {raw!r}"
+    return pr_values if event_name == "pull_request" else other_values
+
+
+def _eval_pr_conditional_bool(raw: Any, event_name: str) -> bool:
+    """Evaluate a literal bool or `${{ github.event_name == 'pull_request' }}`."""
+    if isinstance(raw, bool):
+        return raw
+    assert isinstance(raw, str) and _PR_BOOL_EXPR_RE.match(
+        raw.strip()
+    ), f"expected boolean or `github.event_name == 'pull_request'` expression, got {raw!r}"
+    return event_name == "pull_request"
+
+
+def test_tui_e2e_still_runs_on_macos() -> None:
+    """The freeze is a macOS/BSD property; PR merge gates run Linux-only to avoid
+    the 10x macOS cost multiplier and 5-job account cap, while main push,
+    nightly schedule, and workflow_dispatch MUST still run macOS."""
+    raw_os = _ci_jobs()["tui-e2e"]["strategy"]["matrix"]["os"]
+    assert _eval_pr_conditional_matrix(raw_os, "pull_request") == ["ubuntu-latest"], (
+        "PR merge gate tui-e2e must run ubuntu-latest only to avoid macOS queue "
+        f"starvation (os={raw_os!r})"
+    )
+    for event in ("push", "schedule", "workflow_dispatch"):
+        oses = _eval_pr_conditional_matrix(raw_os, event)
+        assert "macos-latest" in oses, (
+            f"tui-e2e lost its macOS leg on {event}; the freeze this stage exists to "
+            f"catch cannot go red on Linux (os={raw_os!r})"
+        )
 
 
 def test_every_e2e_shard_runs_on_both_platforms() -> None:
-    """Sharding the e2e tree must not narrow which platform runs it.
+    """Sharding the e2e tree must keep literal shards across the full OS matrix.
 
     The matrix is a product: `shard` decides which slice of the tree a leg
-    runs, `os` decides where. A leg that exists on only one OS is a slice of
-    the tree that the macOS-only freeze guard never sees — the #401 deadlock
-    is a macOS/BSD property, so an ubuntu-only shard 2 would be exactly the
-    test that cannot catch it, and a macos-only shard 2 would be untested on
-    the platform where the rest of the stage is exercised.
+    runs, `os` decides where. On `push`, `schedule`, and `workflow_dispatch`,
+    both ubuntu-latest and macos-latest run every shard so the #401 deadlock
+    guard covers the full e2e tree; on `pull_request`, ubuntu-latest runs every
+    shard. `shard` stays a literal YAML list so shard hygiene and duration tools
+    stay intact.
     """
     matrix = _ci_jobs()["tui-e2e"]["strategy"]["matrix"]
-    oses = matrix["os"]
+    raw_os = matrix["os"]
     shards = matrix["shard"]
-    assert sorted(oses) == ["macos-latest", "ubuntu-latest"], (
-        "tui-e2e must run on exactly the macOS and ubuntu legs; "
-        f"os={oses!r} would leave part of the freeze guard unrunnable"
+    assert _eval_pr_conditional_matrix(raw_os, "pull_request") == ["ubuntu-latest"], (
+        "tui-e2e PR merge gate must run ubuntu-latest only; " f"os={raw_os!r}"
     )
-    assert shards, "tui-e2e has an empty shard matrix"
+    for event in ("push", "schedule", "workflow_dispatch"):
+        oses = _eval_pr_conditional_matrix(raw_os, event)
+        assert sorted(oses) == ["macos-latest", "ubuntu-latest"], (
+            f"tui-e2e must run on exactly the macOS and ubuntu legs on {event}; "
+            f"os={raw_os!r} would leave part of the freeze guard unrunnable"
+        )
+    assert shards == [0, 1], f"tui-e2e shard matrix must stay literal [0, 1], got {shards!r}"
+    # Negative controls: helper rejects an expression that drops macOS or
+    # swaps the PR/non-PR branches, or uses a malformed expression.
+    with pytest.raises(AssertionError):
+        _eval_pr_conditional_matrix("${{ fromJSON(matrix.bad) }}", "push")
+    dropped_macos = (
+        "${{ fromJSON(github.event_name == 'pull_request' "
+        "&& '[\"ubuntu-latest\"]' || '[\"ubuntu-latest\"]') }}"
+    )
+    assert _eval_pr_conditional_matrix(dropped_macos, "push") == ["ubuntu-latest"]
 
 
 #: The trees CI shards, and the job whose matrix runs each one. Which tree a
@@ -3215,6 +3337,7 @@ def test_the_windows_input_set_covers_what_that_job_loads() -> None:
     ("path", "selected"),
     (
         ("tests/unit/network/test_credentials_private_paths.py", True),
+        ("tests/unit/network/test_mobility_windows.py", True),
         ("tests/unit/conftest.py", True),
         ("tests/unit/network/conftest.py", True),
         ("tests/unit/network/test_credential_inherit.py", True),
@@ -4512,10 +4635,31 @@ def test_full_suite_run_name_identifies_the_owning_lane_and_trigger() -> None:
 
 
 def test_full_suite_keeps_both_interpreters_and_bounded_concurrency() -> None:
-    """3.13 is where version-class bugs surface; one running + newest pending."""
+    """PR merge gates run Python 3.13 + fail-fast; main/nightly/dispatch keep
+    both 3.12 and 3.13 with fail-fast disabled; bounded concurrency stays intact."""
     full = yaml.safe_load(FULL_SUITE_YML.read_text())
     for job in ("test", "coverage-report"):
-        assert full["jobs"][job]["strategy"]["matrix"]["python-version"] == ["3.12", "3.13"]
+        raw_py = full["jobs"][job]["strategy"]["matrix"]["python-version"]
+        assert _eval_pr_conditional_matrix(raw_py, "pull_request") == [
+            "3.13"
+        ], f"{job} PR merge gate must run Python 3.13 only, got {raw_py!r}"
+        for event in ("push", "schedule", "workflow_dispatch"):
+            assert _eval_pr_conditional_matrix(raw_py, event) == [
+                "3.12",
+                "3.13",
+            ], f"{job} on {event} must run both 3.12 and 3.13, got {raw_py!r}"
+    for job in ("test", "coverage-report", "tui-e2e"):
+        raw_ff = full["jobs"][job]["strategy"]["fail-fast"]
+        assert (
+            _eval_pr_conditional_bool(raw_ff, "pull_request") is True
+        ), f"{job} must fail-fast on pull_request to stop burning sibling shards, got {raw_ff!r}"
+        for event in ("push", "schedule", "workflow_dispatch"):
+            assert (
+                _eval_pr_conditional_bool(raw_ff, event) is False
+            ), f"{job} must keep fail-fast false on {event}, got {raw_ff!r}"
+    # Negative controls for fail-fast parser.
+    with pytest.raises(AssertionError):
+        _eval_pr_conditional_bool("${{ github.event_name != 'pull_request' }}", "pull_request")
     # main keeps one fixed group; a branch dispatch (WIDE infra PRs) gets its
     # own, so it can never evict main's newest pending run.
     group = full["concurrency"]["group"]
@@ -4635,6 +4779,9 @@ def test_guards_job_reads_the_one_guard_list() -> None:
     from scripts import affected_tests
 
     assert affected_tests.GUARD_TESTS, "an empty guard list runs nothing on PRs"
+    # File discovery alone cannot catch a deleted namespace or locale directory;
+    # keep the manifest's tree-wide coverage assertion on fast PR admission.
+    assert "tests/unit/i18n/test_language_manifest.py" in affected_tests.GUARD_TESTS
     for node in affected_tests.GUARD_TESTS:
         rel, _, name = node.partition("::")
         assert (REPO / rel).is_file(), f"GUARD_TESTS names a missing file: {rel}"

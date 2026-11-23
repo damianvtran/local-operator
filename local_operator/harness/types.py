@@ -2551,6 +2551,8 @@ class ToolContext(BaseModel):
     # exactly this field, and its absence is what keeps the tool out of a
     # session that has no bridge. Stays None until the session lane wires it.
     bridge_runtime: Any | None = Field(default=None, exclude=True, repr=False)
+    # Host identity frozen for this dispatch context, not a model argument.
+    bridge_session_agent_display: str | None = Field(default=None, exclude=True, repr=False)
     # The path a READER resolved, reported by the reader itself the instant it
     # resolved it: ``(resolved_path, resolvable)``. Installed by the loop for the
     # duration of ONE call -- the recorder it holds is bound to that call's own id
@@ -2845,8 +2847,21 @@ class ToolContext(BaseModel):
     #: teardown or the scheduler's own deadline, never a steering redirect,
     #: so a tool that would otherwise convert the cancel into a background
     #: job must stop the call instead. Read by bash's cancel handler; set
-    #: by ``Session._run_monitor_check``.
+    #: by ``Session._run_monitor_check`` and the parked probe's context. A
+    #: tick's result text is also compared and parsed by the scheduler, never
+    #: read raw by a model, so the MCP manager appends no advisory line of its
+    #: own to it (see ``result_parsed_by_harness``).
     monitor_check: bool = False
+    #: True on a call whose RESULT TEXT harness code parses itself instead of
+    #: handing it to a model: a built-in delegating to a session-owned MCP
+    #: tool (``web_search``'s Tavily delegate runs ``json.loads`` on it). The
+    #: producer must then return the tool's text byte-for-byte: an advisory
+    #: line the harness appends for a model's benefit (the MCP manager's
+    #: dropped-argument note) has no reader there, and one trailing line turns
+    #: a valid JSON body into a parse failure. Set on a per-call copy of the
+    #: context by the delegating caller, never on a session's own context --
+    #: a model's direct call must keep its notes.
+    result_parsed_by_harness: bool = False
     # The video lane's durable-record writer (``Session.journal_video_job``):
     # appends one ``video_job_v1`` transcript row. Declared rather than probed
     # for, per this class's contract; ``None`` on a host that cannot journal
@@ -2959,19 +2974,23 @@ class ToolContext(BaseModel):
     #: session's teardown has begun — then nothing may be dispatched. Bound
     #: beside :attr:`enqueue_site_card`.
     begin_site_request: Callable[..., Any] | None = None
-    #: THE ASK GATE'S DOOR (design docs/design/ask-gate.md §2.2). Async — the
-    #: tool awaits one forked clearance check BEFORE the unchanged enqueue.
-    #: Bound under the same two conditions as :attr:`enqueue_ask` and ``None``
-    #: wherever it is, so its presence IS the mode, one fact. TOTAL and
-    #: fail-open: it returns a diversion mapping (``{"text": …, "details": …}``
-    #: carrying the hidden marker) or ``None``, and NEVER raises for any
-    #: policy, provider, parse or timeout condition — ``None`` means "enqueue,
-    #: unchanged". The in-callable policy read owns the kill switch; the
-    #: tool-side guard around the await is the last line so even a contract
-    #: breach cannot lose the ask (design §2.2's failure-semantics table).
-    gate_ask: Callable[..., Awaitable[Mapping[str, Any] | None]] | None = None
-    #: THE QUIET-END DOOR (docs/design/quiet-turns.md §4). Async, mirroring
-    #: :attr:`gate_ask`: the ``no_reply`` tool awaits it for the run's refusal
+    #: THE TEAM INTEGRATIONS CONSENT SEAM (RFC "Radient Team Integrations"
+    #: §8.2): a ``team_bridge.integration_consent.IntegrationConsent`` over this
+    #: session's ask queue and the ids a PERSON answered in this run. Only the
+    #: session can say that — a tool reading the ask log cannot tell a card
+    #: answer from ``answered_in_chat`` — so publishing an app or minting a
+    #: credential is reachable only where the session binds this. ``None``
+    #: without a queued-ask engine (blocking arm, children, headless hosts),
+    #: which also keeps the ``integrations`` tool off those sessions.
+    integration_consent: Any | None = Field(default=None, exclude=True, repr=False)
+    #: Test seam only: a zero-arg factory returning an object with the
+    #: ``IntegrationsClient`` surface (a faked HTTP layer). Production never
+    #: sets it; the tool then rides the Team Bridge client's pinned OAuth row.
+    integrations_client_factory: Callable[[], Any] | None = Field(
+        default=None, exclude=True, repr=False
+    )
+    #: THE QUIET-END DOOR (docs/design/quiet-turns.md §4). Async: the
+    #: ``no_reply`` tool awaits it for the run's refusal
     #: decision, and its presence IS the fact that this session may end a turn
     #: quietly — ``build_no_reply_tool`` returns ``None`` without it
     #: (footprint ladder rung 3: the tool is absent, not inert, where a quiet

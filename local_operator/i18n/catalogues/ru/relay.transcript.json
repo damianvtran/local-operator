@@ -28,7 +28,7 @@
   "relay.transcript.bridge.provenance": "Внешнее сообщение · недоверенное содержимое",
   "relay.transcript.bridge.loading": "Загрузка сообщения…",
   "relay.transcript.bridge.pending": "Ожидает доставки вашему агенту",
-  "relay.transcript.bridge.held": "Задержано модерацией",
+  "relay.transcript.bridge.held": "Задержано для проверки",
   "relay.transcript.bridge.held_transient": "Ожидает фильтрации — пока не показано вашему агенту",
   "relay.transcript.bridge.refused": "Отклонено модерацией",
   "relay.transcript.bridge.not_admitted": "Не доставлено вашему агенту",
@@ -36,7 +36,10 @@
   "relay.transcript.bridge.signed_out": "Войдите в Radient, чтобы увидеть это сообщение",
   "relay.transcript.bridge.other_account": "Получено в другой учётной записи Radient",
   "relay.transcript.bridge.not_member": "Вы больше не участвуете в этом разговоре",
-  "relay.transcript.bridge.offline": "Нет связи с Radient — откройте разговор заново, чтобы повторить попытку",
+  "relay.transcript.bridge.offline": "Нет связи с Radient — повторяем попытку",
   "relay.transcript.bridge.deleted": "Это сообщение удалено",
-  "relay.transcript.bridge.more_messages": "{count, plural, one {Ещё # сообщение в этой карточке} few {Ещё # сообщения в этой карточке} many {Ещё # сообщений в этой карточке} other {Ещё # сообщения в этой карточке}}"
+  "relay.transcript.bridge.more_messages": "{count, plural, one {Ещё # сообщение в этой карточке} few {Ещё # сообщения в этой карточке} many {Ещё # сообщений в этой карточке} other {Ещё # сообщения в этой карточке}}",
+  "relay.transcript.jump.latest": "Перейти к последнему",
+  "relay.transcript.jump.latest_short": "Последнее",
+  "relay.transcript.bridge.thread_reply": "Ответ в ветке"
 }

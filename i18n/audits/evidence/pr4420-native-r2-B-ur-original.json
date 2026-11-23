@@ -1,0 +1,3040 @@
+{
+  "locale": "ur",
+  "namespace": "tui.info",
+  "source_sha256": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+  "context_sha256": "aee21715fca769227b3bda5b500a5e81e51763cf86817f741baff8b1a5ef0ae7",
+  "target_sha256": "ccc8fd0eca869fbd1f70785b070e0d2ff59578241393d75477a84e5cce2efc03",
+  "commit": "2c282261f27b66390061563359f9cf72f2520538",
+  "scope": "e9e6c3711149..2c282261f27b",
+  "round": 2,
+  "lane": "B first participation; no retained semantic approvals",
+  "status": "blocked",
+  "translator": {
+    "agent": "info-translate-ur / translator",
+    "session": "54dba55779e0",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "fallback_from": "anthropic/claude-opus-5-5",
+    "fallback_reason": "provider quota failure",
+    "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+  },
+  "auditor": {
+    "agent": "translation-auditor / info-r2-cache-B-ur",
+    "session": "cdc25865c2e9",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "fallback_from": "anthropic/claude-opus-5-5",
+    "fallback_reason": "HOST model-switch notice: provider failure: quota",
+    "result": "blocked",
+    "findings": 0
+  },
+  "provenance_note": "Actual current model comes from the explicit host model-switch message in this fresh session, not historical R1 provenance. Five changed keys belong to remediation author; remaining 272 retain original translator. No current partner reports read. Original failed R1 and earlier B0 blocked receipt untouched.",
+  "access": {
+    "method": "Authorized immutable captures of sequential official read_public_copy output; ordinary cache parsing only. No original product prose or Git/public-copy re-read.",
+    "manifest_path": "i18n/audits/evidence/pr4420-audited-input-cache/manifest.json",
+    "manifest_head": "2c282261f27b66390061563359f9cf72f2520538",
+    "cache_byte_hashes": {
+      "en": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+      "ur": "591afea90fe68414803fa5d1020b7153c4fb903103ae3514cc00a0172370aecd"
+    },
+    "canonical_map_hashes": {
+      "en": "c06de4b6d6b19d71ff4fc20128937f72d6d18fc7757854f493e8e3834bb1423c",
+      "ur": "407ab045b5bd87b4cc21984e11cb7814a082d2135b0828090dc4232431ce20a5"
+    },
+    "verified_here": "Both cache byte hashes, canonical hashes, key sets/counts, manifest original-source/target binding to candidate pin, context sidecar SHA.",
+    "context_read": "277 metadata entries read through lossless recurring-fragment factoring.",
+    "blocker": "Tool output substitutes REDACTION_MARKER for the Urdu credential label in two rows, including ascii output. Literal marker is not in cached bytes. Redaction was not reversed; these two label segments cannot honestly receive semantic approval."
+  },
+  "coverage": {
+    "source_keys_read": 277,
+    "target_rows_visited": 277,
+    "fully_read_target_keys": 275,
+    "partially_read_or_masked_keys": [
+      "tui.info.label.credentials",
+      "tui.info.export.credentials"
+    ],
+    "context_keys_read": 277,
+    "fresh_complete_keys": 275,
+    "retained_semantic_keys": 0,
+    "changed_target_keys_reviewed": [
+      "tui.info.label.answering",
+      "tui.info.fleet_caveats.lower_bound",
+      "tui.info.env.credentials_set",
+      "tui.info.export.build_age",
+      "tui.info.export.uptime"
+    ],
+    "changed_context_keys_reviewed": [
+      "tui.info.status.bound_held",
+      "tui.info.install.build_age",
+      "tui.info.latest.checked_full",
+      "tui.info.latest.checked_short",
+      "tui.info.session.started",
+      "tui.info.fleet_caveats.lower_bound",
+      "tui.info.latest_line.checked",
+      "tui.info.not_answering_clause.full",
+      "tui.info.tree_lines.deeper",
+      "tui.info.export.build_age",
+      "tui.info.export.uptime",
+      "tui.info.state.stale"
+    ],
+    "changed_source_fields_reviewed": [
+      "tui.info.export.build_age",
+      "tui.info.export.uptime"
+    ]
+  },
+  "per_key_authors": {
+    "tui.info.heading.install": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.version": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.install_kind": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.install_path": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.interpreter": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.running_code": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.source": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.built": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.python": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.platform": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.heading.this_session": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.session_id": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.kind": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.model": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.working_dir": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.answering": {
+      "agent": "translator / info-remediate-ur",
+      "session": "efc432b4d171",
+      "model": "openai/gpt-6.1-sol"
+    },
+    "tui.info.label.started": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.config_dir": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.cache_dir": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.agent_home": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.log_dir": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.control_port": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.heading.sessions_on_this_machine": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.heading.sessions_unavailable": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.heading.agents_and_subagents": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.runtimes": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.trajectories": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.agent_profiles": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.teams": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.subagent_capacity": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.heading.environment": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.terminal": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.theme": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.approvals": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.mcp_servers": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.browser": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.mobile_relay": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.multiplexer": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.guides": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.skills": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.label.credentials": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.heading.could_not_read": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.status.leaving_silent": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.status.leaving_for_build": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.status.no_movement": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.status.leaving": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.status.bound_held": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.status.updating": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.status.updated": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.status.update_failed": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.status.moving_to_a_new_build": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.install.description": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.install.full_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.install.loading": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.install.unavailable": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.install.shadow_label_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.install.shadow_label_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.install.shadow_label_terse": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.install.shadow_meta_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.install.shadow_meta_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.install.shadow_meta_terse": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.install.source_snapshot": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.install.source_snapshot_unknown": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.install.snapshot_note_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.install.snapshot_note_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.install.source_wheel": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.install.build_age": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.install.shadow_explanation": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.latest.installed_unreadable": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.latest.full_unknown": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.latest.unknown": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.latest.never_checked": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.latest.behind_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.latest.behind_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.latest.current": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.latest.stale": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.latest.checked_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.latest.checked_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.kind_of_runtime.daemon_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.kind_of_runtime.daemon_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.kind_of_runtime.daemon_terse": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.kind_of_runtime.attached_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.kind_of_runtime.attached_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.kind_of_runtime.exec_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.kind_of_runtime.exec_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.kind_of_runtime.exec_terse": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.import_path.editable_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.import_path.editable_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.import_path.editable_terse": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.import_path.shadowed_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.import_path.shadowed_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.import_path.shadowed_terse": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.kind.editable_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.kind.editable_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.kind.uv_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.kind.uv_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.kind.non_editable": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.kind.pip_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.kind.pip_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.session.description": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.session.description_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.session.failover_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.session.failover_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.session.started": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.session.protocol": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.approval.ask_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.approval.ask_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.approval.auto_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.approval.auto_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.redirect.full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.redirect.short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.redirect.terse": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.sessions.loading": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.sessions.registry_loading": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.sessions.registry_unavailable": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.sessions.summary_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.sessions.not_answering_clause": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.sessions.summary_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.sessions.empty": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.sessions.self": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.sessions.pid": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.sessions.build_skew": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.sessions.memory_unavailable": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.fleet_caveats.lower_bound": {
+      "agent": "translator / info-remediate-ur",
+      "session": "efc432b4d171",
+      "model": "openai/gpt-6.1-sol"
+    },
+    "tui.info.agents.loading_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.loading_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.loading_mid": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.loading_terse": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.summary_terse": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.unknown_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.unknown_terse": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.queued_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.queued_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.queued_terse": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.quiet_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.quiet_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.runtimes": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.unreported_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.unreported_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.unreported_terse": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.queued_suffix": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.queued_count": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.queued_count_terse": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.trajectories_total": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.unreported_suffix": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.roster_unreadable": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.session_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.session_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.session_terse": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.retained_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.retained_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.retained_terse": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.capacity": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.capacity_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.capacity_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.roster_failure": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.empty": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.waiting": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.tree_counts": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.tree_legacy": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.env.description": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.env.description_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.env.mcp_connected": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.env.mcp_connecting_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.env.mcp_connecting_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.env.mcp_failed_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.env.mcp_failed_short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.env.mcp_empty": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.env.none": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.env.mobile_installed": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.env.mobile_absent": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.env.mobile_healthy": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.env.mobile_up": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.env.credentials_unreadable": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.env.credential_count": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.env.credentials_more": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.env.credentials_set": {
+      "agent": "translator / info-remediate-ur",
+      "session": "efc432b4d171",
+      "model": "openai/gpt-6.1-sol"
+    },
+    "tui.info.env.credentials_empty": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.report.degraded_count": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.report.degraded": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.report.captured": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.info_hint.short": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.info_hint.full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.action_copy_report.loading": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.action_copy_report.redacted": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.latest_line.installed_unreadable": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.latest_line.never_checked": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.latest_line.checked": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.not_answering_clause.no_rows": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.not_answering_clause.more": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.not_answering_clause.remedy_one": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.not_answering_clause.remedy_many": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.not_answering_clause.full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.tree_lines.deeper": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.heading_install": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.version": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.latest_known": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.install_kind": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.install_path": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.interpreter": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.running_code": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.source": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.build_age": {
+      "agent": "translator / info-remediate-ur",
+      "session": "efc432b4d171",
+      "model": "openai/gpt-6.1-sol"
+    },
+    "tui.info.export.python": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.platform": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.heading_session": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.session_id": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.kind": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.pid": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.model": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.effective_model": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.uptime": {
+      "agent": "translator / info-remediate-ur",
+      "session": "efc432b4d171",
+      "model": "openai/gpt-6.1-sol"
+    },
+    "tui.info.export.working_dir": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.config_dir": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.cache_dir": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.agent_home": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.log_dir": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.control_port": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.protocol": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.heading_sessions": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.sessions_unavailable": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.sessions_empty": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.sessions_summary": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.pid_fallback": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.heading_agents": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.runtimes": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.trajectories_unreported": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.queued_suffix": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.trajectories": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.profiles": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.teams": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.roster_unreadable": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.session_counts": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.capacity": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.tree_heading": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.tree_unreadable": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.tree_empty": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.tree_counts": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.tree_legacy": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.lower_bound": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.heading_environment": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.terminal": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.multiplexer": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.tty": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.theme": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.approvals": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.browser": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.mobile": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.mcp": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.guides": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.skills": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.credentials": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.heading_degraded": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.count.session": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.count.runtime": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.count.trajectory": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.count.subagent": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.state.running": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.state.starting": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.state.queued": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.state.pausing": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.state.paused": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.state.completed": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.state.failed": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.state.cancelled": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.state.gone": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.state.live": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.state.stale": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.state.unknown": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.leaving.signal": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.leaving.build": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.leaving.overdue": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.update.target": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.update.done_target": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.summary_full": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.agents.addends": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    },
+    "tui.info.export.summary": {
+      "agent": "info-translate-ur / translator",
+      "session": "54dba55779e0",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5",
+      "fallback_reason": "provider quota failure",
+      "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+    }
+  },
+  "key_results": {
+    "tui.info.heading.install": "fresh-semantic-pass",
+    "tui.info.label.version": "fresh-semantic-pass",
+    "tui.info.label.install_kind": "fresh-semantic-pass",
+    "tui.info.label.install_path": "fresh-semantic-pass",
+    "tui.info.label.interpreter": "fresh-semantic-pass",
+    "tui.info.label.running_code": "fresh-semantic-pass",
+    "tui.info.label.source": "fresh-semantic-pass",
+    "tui.info.label.built": "fresh-semantic-pass",
+    "tui.info.label.python": "fresh-semantic-pass",
+    "tui.info.label.platform": "fresh-semantic-pass",
+    "tui.info.heading.this_session": "fresh-semantic-pass",
+    "tui.info.label.session_id": "fresh-semantic-pass",
+    "tui.info.label.kind": "fresh-semantic-pass",
+    "tui.info.label.model": "fresh-semantic-pass",
+    "tui.info.label.working_dir": "fresh-semantic-pass",
+    "tui.info.label.answering": "fresh-semantic-pass",
+    "tui.info.label.started": "fresh-semantic-pass",
+    "tui.info.label.config_dir": "fresh-semantic-pass",
+    "tui.info.label.cache_dir": "fresh-semantic-pass",
+    "tui.info.label.agent_home": "fresh-semantic-pass",
+    "tui.info.label.log_dir": "fresh-semantic-pass",
+    "tui.info.label.control_port": "fresh-semantic-pass",
+    "tui.info.heading.sessions_on_this_machine": "fresh-semantic-pass",
+    "tui.info.heading.sessions_unavailable": "fresh-semantic-pass",
+    "tui.info.heading.agents_and_subagents": "fresh-semantic-pass",
+    "tui.info.label.runtimes": "fresh-semantic-pass",
+    "tui.info.label.trajectories": "fresh-semantic-pass",
+    "tui.info.label.agent_profiles": "fresh-semantic-pass",
+    "tui.info.label.teams": "fresh-semantic-pass",
+    "tui.info.label.subagent_capacity": "fresh-semantic-pass",
+    "tui.info.heading.environment": "fresh-semantic-pass",
+    "tui.info.label.terminal": "fresh-semantic-pass",
+    "tui.info.label.theme": "fresh-semantic-pass",
+    "tui.info.label.approvals": "fresh-semantic-pass",
+    "tui.info.label.mcp_servers": "fresh-semantic-pass",
+    "tui.info.label.browser": "fresh-semantic-pass",
+    "tui.info.label.mobile_relay": "fresh-semantic-pass",
+    "tui.info.label.multiplexer": "fresh-semantic-pass",
+    "tui.info.label.guides": "fresh-semantic-pass",
+    "tui.info.label.skills": "fresh-semantic-pass",
+    "tui.info.label.credentials": "blocked-output-redaction",
+    "tui.info.heading.could_not_read": "fresh-semantic-pass",
+    "tui.info.status.leaving_silent": "fresh-semantic-pass",
+    "tui.info.status.leaving_for_build": "fresh-semantic-pass",
+    "tui.info.status.no_movement": "fresh-semantic-pass",
+    "tui.info.status.leaving": "fresh-semantic-pass",
+    "tui.info.status.bound_held": "fresh-semantic-pass",
+    "tui.info.status.updating": "fresh-semantic-pass",
+    "tui.info.status.updated": "fresh-semantic-pass",
+    "tui.info.status.update_failed": "fresh-semantic-pass",
+    "tui.info.status.moving_to_a_new_build": "fresh-semantic-pass",
+    "tui.info.install.description": "fresh-semantic-pass",
+    "tui.info.install.full_short": "fresh-semantic-pass",
+    "tui.info.install.loading": "fresh-semantic-pass",
+    "tui.info.install.unavailable": "fresh-semantic-pass",
+    "tui.info.install.shadow_label_full": "fresh-semantic-pass",
+    "tui.info.install.shadow_label_short": "fresh-semantic-pass",
+    "tui.info.install.shadow_label_terse": "fresh-semantic-pass",
+    "tui.info.install.shadow_meta_full": "fresh-semantic-pass",
+    "tui.info.install.shadow_meta_short": "fresh-semantic-pass",
+    "tui.info.install.shadow_meta_terse": "fresh-semantic-pass",
+    "tui.info.install.source_snapshot": "fresh-semantic-pass",
+    "tui.info.install.source_snapshot_unknown": "fresh-semantic-pass",
+    "tui.info.install.snapshot_note_full": "fresh-semantic-pass",
+    "tui.info.install.snapshot_note_short": "fresh-semantic-pass",
+    "tui.info.install.source_wheel": "fresh-semantic-pass",
+    "tui.info.install.build_age": "fresh-semantic-pass",
+    "tui.info.install.shadow_explanation": "fresh-semantic-pass",
+    "tui.info.latest.installed_unreadable": "fresh-semantic-pass",
+    "tui.info.latest.full_unknown": "fresh-semantic-pass",
+    "tui.info.latest.unknown": "fresh-semantic-pass",
+    "tui.info.latest.never_checked": "fresh-semantic-pass",
+    "tui.info.latest.behind_full": "fresh-semantic-pass",
+    "tui.info.latest.behind_short": "fresh-semantic-pass",
+    "tui.info.latest.current": "fresh-semantic-pass",
+    "tui.info.latest.stale": "fresh-semantic-pass",
+    "tui.info.latest.checked_full": "fresh-semantic-pass",
+    "tui.info.latest.checked_short": "fresh-semantic-pass",
+    "tui.info.kind_of_runtime.daemon_full": "fresh-semantic-pass",
+    "tui.info.kind_of_runtime.daemon_short": "fresh-semantic-pass",
+    "tui.info.kind_of_runtime.daemon_terse": "fresh-semantic-pass",
+    "tui.info.kind_of_runtime.attached_full": "fresh-semantic-pass",
+    "tui.info.kind_of_runtime.attached_short": "fresh-semantic-pass",
+    "tui.info.kind_of_runtime.exec_full": "fresh-semantic-pass",
+    "tui.info.kind_of_runtime.exec_short": "fresh-semantic-pass",
+    "tui.info.kind_of_runtime.exec_terse": "fresh-semantic-pass",
+    "tui.info.import_path.editable_full": "fresh-semantic-pass",
+    "tui.info.import_path.editable_short": "fresh-semantic-pass",
+    "tui.info.import_path.editable_terse": "fresh-semantic-pass",
+    "tui.info.import_path.shadowed_full": "fresh-semantic-pass",
+    "tui.info.import_path.shadowed_short": "fresh-semantic-pass",
+    "tui.info.import_path.shadowed_terse": "fresh-semantic-pass",
+    "tui.info.kind.editable_full": "fresh-semantic-pass",
+    "tui.info.kind.editable_short": "fresh-semantic-pass",
+    "tui.info.kind.uv_full": "fresh-semantic-pass",
+    "tui.info.kind.uv_short": "fresh-semantic-pass",
+    "tui.info.kind.non_editable": "fresh-semantic-pass",
+    "tui.info.kind.pip_full": "fresh-semantic-pass",
+    "tui.info.kind.pip_short": "fresh-semantic-pass",
+    "tui.info.session.description": "fresh-semantic-pass",
+    "tui.info.session.description_short": "fresh-semantic-pass",
+    "tui.info.session.failover_full": "fresh-semantic-pass",
+    "tui.info.session.failover_short": "fresh-semantic-pass",
+    "tui.info.session.started": "fresh-semantic-pass",
+    "tui.info.session.protocol": "fresh-semantic-pass",
+    "tui.info.approval.ask_full": "fresh-semantic-pass",
+    "tui.info.approval.ask_short": "fresh-semantic-pass",
+    "tui.info.approval.auto_full": "fresh-semantic-pass",
+    "tui.info.approval.auto_short": "fresh-semantic-pass",
+    "tui.info.redirect.full": "fresh-semantic-pass",
+    "tui.info.redirect.short": "fresh-semantic-pass",
+    "tui.info.redirect.terse": "fresh-semantic-pass",
+    "tui.info.sessions.loading": "fresh-semantic-pass",
+    "tui.info.sessions.registry_loading": "fresh-semantic-pass",
+    "tui.info.sessions.registry_unavailable": "fresh-semantic-pass",
+    "tui.info.sessions.summary_full": "fresh-semantic-pass",
+    "tui.info.sessions.not_answering_clause": "fresh-semantic-pass",
+    "tui.info.sessions.summary_short": "fresh-semantic-pass",
+    "tui.info.sessions.empty": "fresh-semantic-pass",
+    "tui.info.sessions.self": "fresh-semantic-pass",
+    "tui.info.sessions.pid": "fresh-semantic-pass",
+    "tui.info.sessions.build_skew": "fresh-semantic-pass",
+    "tui.info.sessions.memory_unavailable": "fresh-semantic-pass",
+    "tui.info.fleet_caveats.lower_bound": "fresh-semantic-pass",
+    "tui.info.agents.loading_full": "fresh-semantic-pass",
+    "tui.info.agents.loading_short": "fresh-semantic-pass",
+    "tui.info.agents.loading_mid": "fresh-semantic-pass",
+    "tui.info.agents.loading_terse": "fresh-semantic-pass",
+    "tui.info.agents.summary_terse": "fresh-semantic-pass",
+    "tui.info.agents.unknown_full": "fresh-semantic-pass",
+    "tui.info.agents.unknown_terse": "fresh-semantic-pass",
+    "tui.info.agents.queued_full": "fresh-semantic-pass",
+    "tui.info.agents.queued_short": "fresh-semantic-pass",
+    "tui.info.agents.queued_terse": "fresh-semantic-pass",
+    "tui.info.agents.quiet_full": "fresh-semantic-pass",
+    "tui.info.agents.quiet_short": "fresh-semantic-pass",
+    "tui.info.agents.runtimes": "fresh-semantic-pass",
+    "tui.info.agents.unreported_full": "fresh-semantic-pass",
+    "tui.info.agents.unreported_short": "fresh-semantic-pass",
+    "tui.info.agents.unreported_terse": "fresh-semantic-pass",
+    "tui.info.agents.queued_suffix": "fresh-semantic-pass",
+    "tui.info.agents.queued_count": "fresh-semantic-pass",
+    "tui.info.agents.queued_count_terse": "fresh-semantic-pass",
+    "tui.info.agents.trajectories_total": "fresh-semantic-pass",
+    "tui.info.agents.unreported_suffix": "fresh-semantic-pass",
+    "tui.info.agents.roster_unreadable": "fresh-semantic-pass",
+    "tui.info.agents.session_full": "fresh-semantic-pass",
+    "tui.info.agents.session_short": "fresh-semantic-pass",
+    "tui.info.agents.session_terse": "fresh-semantic-pass",
+    "tui.info.agents.retained_full": "fresh-semantic-pass",
+    "tui.info.agents.retained_short": "fresh-semantic-pass",
+    "tui.info.agents.retained_terse": "fresh-semantic-pass",
+    "tui.info.agents.capacity": "fresh-semantic-pass",
+    "tui.info.agents.capacity_full": "fresh-semantic-pass",
+    "tui.info.agents.capacity_short": "fresh-semantic-pass",
+    "tui.info.agents.roster_failure": "fresh-semantic-pass",
+    "tui.info.agents.empty": "fresh-semantic-pass",
+    "tui.info.agents.waiting": "fresh-semantic-pass",
+    "tui.info.agents.tree_counts": "fresh-semantic-pass",
+    "tui.info.agents.tree_legacy": "fresh-semantic-pass",
+    "tui.info.env.description": "fresh-semantic-pass",
+    "tui.info.env.description_short": "fresh-semantic-pass",
+    "tui.info.env.mcp_connected": "fresh-semantic-pass",
+    "tui.info.env.mcp_connecting_full": "fresh-semantic-pass",
+    "tui.info.env.mcp_connecting_short": "fresh-semantic-pass",
+    "tui.info.env.mcp_failed_full": "fresh-semantic-pass",
+    "tui.info.env.mcp_failed_short": "fresh-semantic-pass",
+    "tui.info.env.mcp_empty": "fresh-semantic-pass",
+    "tui.info.env.none": "fresh-semantic-pass",
+    "tui.info.env.mobile_installed": "fresh-semantic-pass",
+    "tui.info.env.mobile_absent": "fresh-semantic-pass",
+    "tui.info.env.mobile_healthy": "fresh-semantic-pass",
+    "tui.info.env.mobile_up": "fresh-semantic-pass",
+    "tui.info.env.credentials_unreadable": "fresh-semantic-pass",
+    "tui.info.env.credential_count": "fresh-semantic-pass",
+    "tui.info.env.credentials_more": "fresh-semantic-pass",
+    "tui.info.env.credentials_set": "fresh-semantic-pass",
+    "tui.info.env.credentials_empty": "fresh-semantic-pass",
+    "tui.info.report.degraded_count": "fresh-semantic-pass",
+    "tui.info.report.degraded": "fresh-semantic-pass",
+    "tui.info.report.captured": "fresh-semantic-pass",
+    "tui.info.info_hint.short": "fresh-semantic-pass",
+    "tui.info.info_hint.full": "fresh-semantic-pass",
+    "tui.info.action_copy_report.loading": "fresh-semantic-pass",
+    "tui.info.action_copy_report.redacted": "fresh-semantic-pass",
+    "tui.info.latest_line.installed_unreadable": "fresh-semantic-pass",
+    "tui.info.latest_line.never_checked": "fresh-semantic-pass",
+    "tui.info.latest_line.checked": "fresh-semantic-pass",
+    "tui.info.not_answering_clause.no_rows": "fresh-semantic-pass",
+    "tui.info.not_answering_clause.more": "fresh-semantic-pass",
+    "tui.info.not_answering_clause.remedy_one": "fresh-semantic-pass",
+    "tui.info.not_answering_clause.remedy_many": "fresh-semantic-pass",
+    "tui.info.not_answering_clause.full": "fresh-semantic-pass",
+    "tui.info.tree_lines.deeper": "fresh-semantic-pass",
+    "tui.info.export.heading_install": "fresh-semantic-pass",
+    "tui.info.export.version": "fresh-semantic-pass",
+    "tui.info.export.latest_known": "fresh-semantic-pass",
+    "tui.info.export.install_kind": "fresh-semantic-pass",
+    "tui.info.export.install_path": "fresh-semantic-pass",
+    "tui.info.export.interpreter": "fresh-semantic-pass",
+    "tui.info.export.running_code": "fresh-semantic-pass",
+    "tui.info.export.source": "fresh-semantic-pass",
+    "tui.info.export.build_age": "fresh-semantic-pass",
+    "tui.info.export.python": "fresh-semantic-pass",
+    "tui.info.export.platform": "fresh-semantic-pass",
+    "tui.info.export.heading_session": "fresh-semantic-pass",
+    "tui.info.export.session_id": "fresh-semantic-pass",
+    "tui.info.export.kind": "fresh-semantic-pass",
+    "tui.info.export.pid": "fresh-semantic-pass",
+    "tui.info.export.model": "fresh-semantic-pass",
+    "tui.info.export.effective_model": "fresh-semantic-pass",
+    "tui.info.export.uptime": "fresh-semantic-pass",
+    "tui.info.export.working_dir": "fresh-semantic-pass",
+    "tui.info.export.config_dir": "fresh-semantic-pass",
+    "tui.info.export.cache_dir": "fresh-semantic-pass",
+    "tui.info.export.agent_home": "fresh-semantic-pass",
+    "tui.info.export.log_dir": "fresh-semantic-pass",
+    "tui.info.export.control_port": "fresh-semantic-pass",
+    "tui.info.export.protocol": "fresh-semantic-pass",
+    "tui.info.export.heading_sessions": "fresh-semantic-pass",
+    "tui.info.export.sessions_unavailable": "fresh-semantic-pass",
+    "tui.info.export.sessions_empty": "fresh-semantic-pass",
+    "tui.info.export.sessions_summary": "fresh-semantic-pass",
+    "tui.info.export.pid_fallback": "fresh-semantic-pass",
+    "tui.info.export.heading_agents": "fresh-semantic-pass",
+    "tui.info.export.runtimes": "fresh-semantic-pass",
+    "tui.info.export.trajectories_unreported": "fresh-semantic-pass",
+    "tui.info.export.queued_suffix": "fresh-semantic-pass",
+    "tui.info.export.trajectories": "fresh-semantic-pass",
+    "tui.info.export.profiles": "fresh-semantic-pass",
+    "tui.info.export.teams": "fresh-semantic-pass",
+    "tui.info.export.roster_unreadable": "fresh-semantic-pass",
+    "tui.info.export.session_counts": "fresh-semantic-pass",
+    "tui.info.export.capacity": "fresh-semantic-pass",
+    "tui.info.export.tree_heading": "fresh-semantic-pass",
+    "tui.info.export.tree_unreadable": "fresh-semantic-pass",
+    "tui.info.export.tree_empty": "fresh-semantic-pass",
+    "tui.info.export.tree_counts": "fresh-semantic-pass",
+    "tui.info.export.tree_legacy": "fresh-semantic-pass",
+    "tui.info.export.lower_bound": "fresh-semantic-pass",
+    "tui.info.export.heading_environment": "fresh-semantic-pass",
+    "tui.info.export.terminal": "fresh-semantic-pass",
+    "tui.info.export.multiplexer": "fresh-semantic-pass",
+    "tui.info.export.tty": "fresh-semantic-pass",
+    "tui.info.export.theme": "fresh-semantic-pass",
+    "tui.info.export.approvals": "fresh-semantic-pass",
+    "tui.info.export.browser": "fresh-semantic-pass",
+    "tui.info.export.mobile": "fresh-semantic-pass",
+    "tui.info.export.mcp": "fresh-semantic-pass",
+    "tui.info.export.guides": "fresh-semantic-pass",
+    "tui.info.export.skills": "fresh-semantic-pass",
+    "tui.info.export.credentials": "blocked-output-redaction",
+    "tui.info.export.heading_degraded": "fresh-semantic-pass",
+    "tui.info.count.session": "fresh-semantic-pass",
+    "tui.info.count.runtime": "fresh-semantic-pass",
+    "tui.info.count.trajectory": "fresh-semantic-pass",
+    "tui.info.count.subagent": "fresh-semantic-pass",
+    "tui.info.state.running": "fresh-semantic-pass",
+    "tui.info.state.starting": "fresh-semantic-pass",
+    "tui.info.state.queued": "fresh-semantic-pass",
+    "tui.info.state.pausing": "fresh-semantic-pass",
+    "tui.info.state.paused": "fresh-semantic-pass",
+    "tui.info.state.completed": "fresh-semantic-pass",
+    "tui.info.state.failed": "fresh-semantic-pass",
+    "tui.info.state.cancelled": "fresh-semantic-pass",
+    "tui.info.state.gone": "fresh-semantic-pass",
+    "tui.info.state.live": "fresh-semantic-pass",
+    "tui.info.state.stale": "fresh-semantic-pass-with-minor",
+    "tui.info.state.unknown": "fresh-semantic-pass",
+    "tui.info.leaving.signal": "fresh-semantic-pass",
+    "tui.info.leaving.build": "fresh-semantic-pass",
+    "tui.info.leaving.overdue": "fresh-semantic-pass",
+    "tui.info.update.target": "fresh-semantic-pass",
+    "tui.info.update.done_target": "fresh-semantic-pass",
+    "tui.info.agents.summary_full": "fresh-semantic-pass",
+    "tui.info.agents.addends": "fresh-semantic-pass",
+    "tui.info.export.summary": "fresh-semantic-pass"
+  },
+  "unresolved_blocker_major_findings": [],
+  "minor_count": 1,
+  "findings_detail": [
+    {
+      "id": "UR-B-M1",
+      "severity": "minor",
+      "key": "tui.info.state.stale",
+      "current": "پرانا",
+      "proposed": "پروسیس موجود نہیں",
+      "reason": "پرانا is a generic old/stale label; explicitly naming the absent process would make the new PID-gone meaning clearer without implying an expired heartbeat. Current text does not assert a heartbeat or authorize stopping, so this is non-gating clarity, not a manufactured safety major.",
+      "code_path": "session/runtime/registry.py:691-697; tui/widgets/info_panel.py:1106-1116"
+    }
+  ],
+  "r1_reconsideration": {
+    "UR1": "Freshly verified fixed: lower-bound sentence explicitly names trajectories, not runtime processes.",
+    "UR2": "Freshly verified fixed: Answering is مؤثر ماڈل, consistent with export.effective_model.",
+    "UR3": "Freshly verified fixed: credentials_set uses محفوظ, consistent with none stored.",
+    "no_r1_results_retained": true
+  },
+  "safety_results": {
+    "held_label": "حد سے تجاوز؛ اب بھی فعال expresses exceeded bound and continuing liveness, not diagnosed hang; no kill permission.",
+    "held_only_counterexample": "Compiled exact not_answering_clause with available=true, wedged=0, live held row returned empty string; no remedy.",
+    "no_rows_counterexample": "wedged=1 with no rows returned native last-heartbeat disclosure without invented PID/command.",
+    "wedged_counterexample": "Synthetic PID 987654 and 120-second age produced literal plain/force stop command forms, last-heartbeat qualification and in-flight-turn loss warning. Commands were text only, never executed.",
+    "stale_counterexample": "Compiled exact classify with mocked pid_alive=false and fresh heartbeat yielded stale; true with old heartbeat yielded wedged. No actual PID probe.",
+    "deeper_counterexample": "Compiled _tree_lines with 3 hidden nodes emitted + 3 مزید گہرائی میں; no added-level noun. This reads as three additional items deeper in the tree, not three levels.",
+    "trajectory_counterexample": "4 رن ٹائمز · ≥7 ٹریجیکٹریز; lower-bound caveat names ٹریجیکٹریز explicitly.",
+    "source_sha256": {
+      "local_operator/info/render.py": "b8e02bbe68f1eece279dc37c8dd354daebd77c0a62a706593f83e2c35d13e786",
+      "local_operator/session/runtime/registry.py": "2026a91a82d9aeb18c1c29f4fd57fb66a39ff23a8cdf923d5079e220151878e8"
+    }
+  },
+  "mechanical": {
+    "keys_parsed_each": 277,
+    "source_target_argument_kind_skeleton_select_parity": true,
+    "render_cases": 2790,
+    "missing_argument_negatives": 183,
+    "plural_ast_nodes": 47,
+    "select_arms": 50,
+    "cldr_categories": {
+      "0": "other",
+      "1": "one",
+      "2": "other",
+      "5": "other",
+      "11": "other",
+      "21": "other",
+      "1000": "other",
+      "0.5": "other",
+      "1.5": "other"
+    },
+    "authored_bidi_controls": [],
+    "technical_token_counts_equal": [
+      "/info",
+      "/reload",
+      "lop-update",
+      "sys.path",
+      "PyPI",
+      "--pid",
+      "--force",
+      "/stop",
+      "pid"
+    ],
+    "changed_pseudo": [
+      {
+        "key": "tui.info.label.answering",
+        "literal_expansion_preserves_ast_arguments": true
+      },
+      {
+        "key": "tui.info.fleet_caveats.lower_bound",
+        "literal_expansion_preserves_ast_arguments": true
+      },
+      {
+        "key": "tui.info.env.credentials_set",
+        "literal_expansion_preserves_ast_arguments": true
+      },
+      {
+        "key": "tui.info.export.build_age",
+        "literal_expansion_preserves_ast_arguments": true
+      },
+      {
+        "key": "tui.info.export.uptime",
+        "literal_expansion_preserves_ast_arguments": true
+      }
+    ],
+    "duration_helper_sha256": "4aa8d4a3de03c9a9b7c49b51b6d91749654edc621ed0cb5b15d3c3796700fcbb",
+    "duration_routing": {
+      "0": [
+        "duration_seconds",
+        {
+          "count": 0
+        }
+      ],
+      "59": [
+        "duration_seconds",
+        {
+          "count": 59
+        }
+      ],
+      "60": [
+        "duration_minutes",
+        {
+          "count": 1
+        }
+      ],
+      "3599": [
+        "duration_minutes",
+        {
+          "count": 59
+        }
+      ],
+      "3600": [
+        "duration_hours_minutes",
+        {
+          "hours": 1,
+          "minutes": 0
+        }
+      ],
+      "86399": [
+        "duration_hours_minutes",
+        {
+          "hours": 23,
+          "minutes": 59
+        }
+      ],
+      "86400": [
+        "duration_days_hours",
+        {
+          "days": "1",
+          "hours": 0
+        }
+      ],
+      "86400000": [
+        "duration_days_hours",
+        {
+          "days": "1000",
+          "hours": 0
+        }
+      ]
+    },
+    "unknown_known_samples": {
+      "tui.info.export.build_age": {
+        "unmeasured": "  بلڈ کی عمر        نامعلوم",
+        "0 سیکنڈ": "  بلڈ کی عمر        0 سیکنڈ",
+        "2 منٹ": "  بلڈ کی عمر        2 منٹ"
+      },
+      "tui.info.export.uptime": {
+        "unmeasured": "  دورانیۂ اجرا       نامعلوم",
+        "0 سیکنڈ": "  دورانیۂ اجرا       0 سیکنڈ",
+        "2 منٹ": "  دورانیۂ اجرا       2 منٹ"
+      }
+    },
+    "long_label_character_screen": [
+      {
+        "key": "tui.info.label.config_dir",
+        "en_characters": 10,
+        "ur_characters": 20
+      },
+      {
+        "key": "tui.info.label.log_dir",
+        "en_characters": 7,
+        "ur_characters": 13
+      }
+    ],
+    "limitations": [
+      "No app, browser, native renderer, visual fit, shaping or actual RTL paint tested. Character counts are screening only, not cells.",
+      "Duration routing uses compiled exact helper with recording key adapters, not actual wire.session_status catalogue values."
+    ]
+  },
+  "width_screen_followups": [
+    {
+      "key": "tui.info.label.config_dir",
+      "current": "ترتیبات کی ڈائریکٹری",
+      "en_character_count": 10,
+      "ur_character_count": 20,
+      "action": "Rendered fit check; no fixed maxCells in context, so not a proven overflow finding."
+    },
+    {
+      "key": "tui.info.label.log_dir",
+      "current": "لاگ ڈائریکٹری",
+      "en_character_count": 7,
+      "ur_character_count": 13,
+      "action": "Rendered fit check; no fixed maxCells in context, so not a proven overflow finding."
+    }
+  ],
+  "verdicts": {
+    "tui.info": "BLOCKED only on two output-redacted label segments; 275 complete fresh semantic reads, no unresolved semantic blocker/major, one non-gating clarity minor.",
+    "overall": "BLOCKED, not namespace approval"
+  },
+  "limitations": [
+    "No app/browser/native terminal renderer, RTL shaping, visual fit, native mirroring or whole-interface clearance.",
+    "Duration unit routing was checked using exact compiled info_duration with recording key adapters; wire.session_status unit catalogue values were not re-read. Known native duration samples are supplied formatter inputs, not proof of that separate namespace.",
+    "No actual stop/kill signals, live APIs/configuration, tests, builds, dependencies, ledger, generation, commits or pushes.",
+    "Original catalogue bytes were not read for product prose; original file hashes relied on authorized cache manifest binding."
+  ],
+  "evidence_files": [
+    "scratchpad://ur_audit_reader.py",
+    "scratchpad://ur_audit_controls.py",
+    "scratchpad://ur_safety_controls.py",
+    "scratchpad://pr4420-r2-B-ur-controls.json"
+  ],
+  "note": "NEW receipt preserves all prior failure/access history. Filename complete denotes completed bounded audit attempt, NOT semantic PASS. Do not apply as passed or count as second full approval."
+}

@@ -128,16 +128,40 @@ def only_with(*, flag: str) -> Msg:
     return Msg("wire.remote_compute.only_with", {"flag": flag})
 
 
+def option_spot() -> Msg:
+    return Msg("wire.remote_compute.option_spot", {})
+
+
 def preview_not_enabled() -> Msg:
     return Msg("wire.remote_compute.preview_not_enabled", {})
+
+
+def refusal_conflict() -> Msg:
+    return Msg("wire.remote_compute.refusal_conflict", {})
 
 
 def replayed(*, run_id: str) -> Msg:
     return Msg("wire.remote_compute.replayed", {"run_id": run_id})
 
 
+def repo_no_remote() -> Msg:
+    return Msg("wire.remote_compute.repo_no_remote", {})
+
+
+def repo_not_https_remote() -> Msg:
+    return Msg("wire.remote_compute.repo_not_https_remote", {})
+
+
+def repo_unpushed_commit(*, detail: str) -> Msg:
+    return Msg("wire.remote_compute.repo_unpushed_commit", {"detail": detail})
+
+
 def retrying() -> Msg:
     return Msg("wire.remote_compute.retrying", {})
+
+
+def run_busy() -> Msg:
+    return Msg("wire.remote_compute.run_busy", {})
 
 
 def run_identity_mismatch(*, answered: str, asked_for: str) -> Msg:
@@ -145,6 +169,10 @@ def run_identity_mismatch(*, answered: str, asked_for: str) -> Msg:
         "wire.remote_compute.run_identity_mismatch",
         {"answered": answered, "asked_for": asked_for},
     )
+
+
+def run_limit() -> Msg:
+    return Msg("wire.remote_compute.run_limit", {})
 
 
 def status_line(*, status: str) -> Msg:
@@ -173,6 +201,14 @@ def still_running(*, run_id: str, max_hours: str) -> Msg:
 
 def submitted(*, run_id: str, network_id: str) -> Msg:
     return Msg("wire.remote_compute.submitted", {"run_id": run_id, "network_id": network_id})
+
+
+def tier_cloud_run() -> Msg:
+    return Msg("wire.remote_compute.tier_cloud_run", {})
+
+
+def tier_dedicated() -> Msg:
+    return Msg("wire.remote_compute.tier_dedicated", {})
 
 
 def unknown_run() -> Msg:

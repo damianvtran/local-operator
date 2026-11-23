@@ -15,5 +15,7 @@
   "tui.transcript.group.steered": "{count, plural, one {{label} رخ بدلنے والا پیغام} other {{label} رخ بدلنے والے پیغامات}}",
   "tui.transcript.hub.reply_requested": "جواب کی درخواست",
   "tui.transcript.hub.steered": "رخ بدلا گیا",
-  "tui.transcript.hub.from": "{identity} کی طرف سے"
+  "tui.transcript.hub.from": "{identity} کی طرف سے",
+  "tui.transcript.jump_to_latest": "تازہ ترین پر جائیں",
+  "tui.transcript.jump_to_latest.short": "تازہ"
 }

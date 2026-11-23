@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "locale": "ur",
+  "namespace": "wire.ask_receipts",
+  "history_sha256": "bdb0e73c0b5cf291fe2c337e4880a8f9bcba147ab92e77b51c2d2fba0c73713c",
+  "entries": [
+    {
+      "locale": "ur",
+      "namespace": "wire.ask_receipts",
+      "source_sha256": "1ae74bc10135dee17828f58af819fc521bd1e15024b3ce466cca20e49e102507",
+      "context_sha256": "48222d4c8f3d776444973f6e4b1bfc5052552dada49708c06c7faa0e53e78dfa",
+      "target_sha256": "00795599a2bc4164bab6398da0e3dc5b2a8b89c0f1953af565c7dbf8c7e6637a",
+      "translator": {
+        "agent": "coding agent (translator role, this lane's earlier session); session id not supplied in the audit brief, not independently verified",
+        "model": "radient/auto (as stated in the brief; underlying served model not disclosed)",
+        "fallback": "none (as stated in the brief; not independently verified)",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev task subagent, lane ask-id-harness); not the translator, did not author these keys",
+        "session": "c4e600431e1c",
+        "model": "anthropic/claude-sonnet-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-23",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0,
+        "finding_detail": "0 blocker, 0 major, 0 minor, 0 nit",
+        "independent_from_translator": true,
+        "scope": "full audit of every key of the namespace"
+      },
+      "status": "passed",
+      "note": "Independent audit 2026-11-23 of all 6 keys of wire.ask_receipts in ur against en source 1ae74bc10135dee17828f58af819fc521bd1e15024b3ce466cca20e49e102507 and sidecar 48222d4c8f3d776444973f6e4b1bfc5052552dada49708c06c7faa0e53e78dfa; target 00795599a2bc4164bab6398da0e3dc5b2a8b89c0f1953af565c7dbf8c7e6637a recomputed from the file after the audit edits. Method: read docs/I18N.md, glossary, the locale style guide and the sidecar; compared with the shipped relay.ask / relay.asks sibling renderings of the same states; rendered every key with local_operator.i18n.messages.render for surface remote/tui/chat/desktop/other x reason answered_in_chat/moot/absent/unknown and waited 45s/3h/42m; checked placeholder and ICU select arm parity, NFC, no manual bidi controls, no English word inside a translated sentence, and cell widths against maxCells. No catalogue edits. Findings: none. RTL: no FSI/PDI/RLM/LRM in any value (the render layer isolates per string); the leading Latin {waited} token in timeout.timed_out is the one LTR island and reads correctly at the start of an RTL string; no string was bent to compensate for the TUI's best-effort RTL. Evidence is this auditor's own command output in the lane session, not an external report."
+    }
+  ]
+}

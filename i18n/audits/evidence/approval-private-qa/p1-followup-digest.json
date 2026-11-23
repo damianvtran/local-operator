@@ -1,0 +1,173 @@
+{
+  "head": "fad3ab5703fc5bb159f48cb43755c8d9e1323b6c",
+  "scope": "private P1 only; no product delta",
+  "P1": "PASS",
+  "fixture": {
+    "regular_json_files": 1669,
+    "bytes": 6571173,
+    "accepted_namespaces": 1496,
+    "escaping_symlinks": 0,
+    "old_wire_settings_overlays": 7,
+    "all_other_files_candidate_identical": true
+  },
+  "cases": [
+    {
+      "locale": "fr",
+      "key": "shell_environment.mode",
+      "size": [
+        120,
+        36
+      ],
+      "list_width": 80,
+      "detail_width": 114,
+      "region": "Region(x=1, y=1, width=118, height=29)",
+      "virtual": "Size(width=116, height=27)",
+      "first_equal_settled": false,
+      "config_unchanged": true,
+      "comparison": "p1-valid-comparison-1.png",
+      "retained_after_sha256": "5ae34fa4cf3fb03f1e267e3ef4f5dfadd9dc36ed004ba9ebd804477ae6d45437"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "shell_environment.mode",
+      "size": [
+        120,
+        36
+      ],
+      "list_width": 80,
+      "detail_width": 114,
+      "region": "Region(x=1, y=1, width=118, height=29)",
+      "virtual": "Size(width=116, height=27)",
+      "first_equal_settled": true,
+      "config_unchanged": true,
+      "comparison": "p1-valid-comparison-2.png",
+      "retained_after_sha256": "66d54dd3ab1e949b6089733fa401d602076ba799ec0d89b3660f0cf66534f6ed"
+    },
+    {
+      "locale": "hi",
+      "key": "shell_environment.mode",
+      "size": [
+        120,
+        36
+      ],
+      "list_width": 80,
+      "detail_width": 114,
+      "region": "Region(x=1, y=1, width=118, height=29)",
+      "virtual": "Size(width=116, height=27)",
+      "first_equal_settled": true,
+      "config_unchanged": true,
+      "comparison": "p1-valid-comparison-3.png",
+      "retained_after_sha256": "f240320d4a6a993a1569841c0574acc2d3a3c1bbf241d8e82b872c190d75392d"
+    },
+    {
+      "locale": "ur",
+      "key": "shell_environment.mode",
+      "size": [
+        120,
+        36
+      ],
+      "list_width": 80,
+      "detail_width": 114,
+      "region": "Region(x=1, y=1, width=118, height=29)",
+      "virtual": "Size(width=116, height=27)",
+      "first_equal_settled": true,
+      "config_unchanged": true,
+      "comparison": "p1-valid-comparison-4.png",
+      "retained_after_sha256": "fada636028daf5a2ba87f71ee6a1e41328eca17da486cee2ab0083765606d945"
+    },
+    {
+      "locale": "es",
+      "key": "shell_environment.mode",
+      "size": [
+        120,
+        36
+      ],
+      "list_width": 80,
+      "detail_width": 114,
+      "region": "Region(x=1, y=1, width=118, height=29)",
+      "virtual": "Size(width=116, height=27)",
+      "first_equal_settled": true,
+      "config_unchanged": true,
+      "comparison": "p1-valid-comparison-5.png",
+      "retained_after_sha256": "83f1b1b744979a64c50eeeb0269f57b06e6b3bd48c083a5f44e5714d966eb36d"
+    },
+    {
+      "locale": "ru",
+      "key": "shell_environment.mode",
+      "size": [
+        120,
+        36
+      ],
+      "list_width": 80,
+      "detail_width": 114,
+      "region": "Region(x=1, y=1, width=118, height=29)",
+      "virtual": "Size(width=116, height=27)",
+      "first_equal_settled": true,
+      "config_unchanged": true,
+      "comparison": "p1-valid-comparison-6.png",
+      "retained_after_sha256": "61ae9b03c823f8f9351e707994567379931b2abf5b72e3f9e2f55349a6d74221"
+    },
+    {
+      "locale": "vi",
+      "key": "shell_environment.mode",
+      "size": [
+        120,
+        36
+      ],
+      "list_width": 80,
+      "detail_width": 114,
+      "region": "Region(x=1, y=1, width=118, height=29)",
+      "virtual": "Size(width=116, height=27)",
+      "first_equal_settled": true,
+      "config_unchanged": true,
+      "comparison": "p1-valid-comparison-7.png",
+      "retained_after_sha256": "bb6e7faee7c4740d894b4f4c71bfd1b291ddbde0310c1fd968a37b6905b02c8b"
+    },
+    {
+      "locale": "hi",
+      "key": "providers.openrouter.enforce_distillable_text",
+      "size": [
+        120,
+        36
+      ],
+      "list_width": 80,
+      "detail_width": 114,
+      "region": "Region(x=1, y=1, width=118, height=29)",
+      "virtual": "Size(width=116, height=27)",
+      "first_equal_settled": true,
+      "config_unchanged": true,
+      "comparison": "p1-valid-comparison-8.png",
+      "retained_after_sha256": "a7a3947cfc32272f37010db9e212ec66142ea8789cb5bd954ec682d123f33d29"
+    },
+    {
+      "locale": "fr",
+      "key": "team_bridge.session",
+      "size": [
+        100,
+        30
+      ],
+      "list_width": 60,
+      "detail_width": 94,
+      "region": "Region(x=1, y=1, width=98, height=23)",
+      "virtual": "Size(width=96, height=21)",
+      "first_equal_settled": true,
+      "config_unchanged": true,
+      "comparison": "p1-valid-comparison-9.png",
+      "retained_after_sha256": "e6134538a6690f4ba256e8cbc4c58685cc5245994b6fac1fab471dbcd504d914"
+    }
+  ],
+  "retained_rows": "All prior current flows/API/counterfactual/Urdu compositor results retained at same head, no rerun",
+  "prior_report": "private-settings-qa-report.md",
+  "prior_invalid_frames_preserved": true,
+  "startup_text_transition": {
+    "case": "fr shell first/settled",
+    "before": "connexion…",
+    "after": "test/model",
+    "geometry_equal": true
+  },
+  "owned_pid": 56816,
+  "owned_pid_and_group_gone": true,
+  "formal_qa_clearance": false,
+  "native_urdu_clearance": false,
+  "whole_interface_no_english_clearance": false
+}

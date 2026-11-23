@@ -1,0 +1,37 @@
+{
+  "locale": "vi",
+  "namespace": "tui.provider_state",
+  "source_sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912",
+  "translator": {
+    "agent": "i18n-translator / provider-state-vi-author",
+    "session": "5644d4838456",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": false,
+    "actual_model_source": "Explicit host/user model-switch message: openai/gpt-6.1-sol replaces anthropic/claude-opus-5-5 due to provider failure: quota",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "auditor": {
+    "agent": "i18n-auditor / provider-state-vi-audit-B",
+    "session": "add016b11be1",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "actual_model_source": "Explicit model-switch notice: openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota failure; independent per-response telemetry unavailable",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "per_response_telemetry": "unknown",
+    "date": "2026-11-22",
+    "result": "passed",
+    "findings": 0
+  },
+  "status": "passed",
+  "note": "Independent B: 5 keys; 0 blocker/major. Record: i18n/audits/evidence/vi/tui.provider_state/vib-add0/record.json. Lexical only; styled geometry/native fonts unverified. GPT quota fallback disclosed."
+}

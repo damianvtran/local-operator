@@ -1,46 +1,13 @@
-"""The ask gate's model-facing half: prompt, verdict grammar, fingerprints, notes.
+"""Legacy clearance verdict grammar and standalone fork retry copy.
 
-WHY THIS MODULE EXISTS. The ask gate (``docs/design/ask-gate.md``) runs one
-forked, off-the-record request before a queued ``ask`` reaches the operator,
-asking a single question — *are the recommended options clear?* — and routes on
-its strict two-line answer. Everything that decision touches that is PURE lives
-here, one home per decision, exactly as :mod:`session.aside` owns the aside
-prompt:
-
-* the gate message (:data:`CLEARANCE_PROMPT`, :func:`build_clearance_prompt`) —
-  the genuine-user list rides it VERBATIM, because that list is where "never
-  miss a decision the operator would want to own" is enforced;
-* the verdict grammar (:func:`parse_verdict`, :func:`parse_reason`) — the only
-  routing input, so it is unit-pinned rather than trusted;
-* the honor rule's digest (:func:`fingerprint`) — the content normalisation a
-  re-raise is recognised by, in ONE place so the record and the consult cannot
-  disagree;
-* the two decision-point notes (:func:`clearance_note`) the model reads when an
-  ask is diverted — no user-attribution anywhere ("the receipt is not consent"),
-  the re-raise licence, and the ONE-subagent instruction.
-
-The module is deliberately free of session, provider and host imports (stdlib
-only): it is consumed by ``Session._gate_ask`` and by tests, and a module-scope
-import of the session would make every unit of the grammar drag the tree.
-
-NOTHING HERE TALKS TO A MODEL. The request itself is
-``Session.complete_clearance``; this module only builds the one message it
-carries and reads the one answer it returns (design §2.1/§2.3).
+Queued asks no longer call this fork or interpret its verdict as an answer.
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from collections.abc import Sequence
 from typing import Any
-
-#: The fingerprints a session remembers before evicting the oldest (design §2.5
-#: LRU). An eviction costs one redundant check for a re-raised ask — never a
-#: lost ask, because the skip direction is ENQUEUE — so the cap is generosity,
-#: not a correctness boundary.
-GATE_FINGERPRINT_CAP = 64
 
 #: The reason line's wire bound, applied at parse time (design §2.3: "truncated
 #: to 200 chars"). One constant because the prompt, the parser and the tests all
@@ -111,32 +78,9 @@ CLEARANCE_TOOL_CALL_REFUSAL = (
     "REASON: <one line, <=200 chars>"
 )
 
-#: The two decision-point notes (design §2.4). Each MUST name that no question was
-#: put to the user (no "the user said" register anywhere), carry the instruction,
-#: and license the re-raise explicitly. The resolve note carries the
-#: ONE-subagent instruction. Final copy may be tuned in a later PR for wording;
-#: these three properties are the contract.
-_CLEAR_NOTE = (
-    "[Ask clearance] No question was put to the user. A forked check read the "
-    "conversation and found your recommended option plainly the best path — "
-    "proceed with it and state the assumption where it matters. The user was NOT "
-    "asked and did not answer. If new information makes this genuinely their "
-    "call, call `ask` again: a re-raise of this same question reaches them "
-    "without another check."
-)
-_RESOLVE_NOTE = (
-    "[Ask clearance] No question was put to the user. The answer is not clear "
-    "from context and it is yours to resolve: spawn ONE `task` subagent with the "
-    "relevant expertise (scout/research, architect, designer/UX — as the question "
-    "needs), decide on its answer, and carry on. The user was NOT asked and did "
-    "not answer. If after that the decision is still genuinely theirs, call "
-    "`ask` again: a re-raise of this same question reaches them without another "
-    "check."
-)
-
 
 def _collapse(text: Any) -> str:
-    """Whitespace-collapsed string form — the fingerprint's normal form.
+    """Whitespace-collapsed string form for the legacy question prompt.
 
     ``" ".join(split())`` rather than ``str.strip()``: the design's rule
     (design §2.5) is that a re-raise whose only change is whitespace is the
@@ -236,46 +180,3 @@ def parse_reason(text: str | None) -> str:
         if match:
             reason = _REASON_TAIL.sub("", match.group(1)).strip()
     return reason[:REASON_MAX_CHARS]
-
-
-def fingerprint(questions: Sequence[Any]) -> str:
-    """The sha256 digest of an ask's USER-FACING content (design §2.5).
-
-    Per question, in order: the whitespace-collapsed question text plus the
-    option list as ``[label, description]`` pairs, canonical-JSON encoded
-    before hashing. ``id``, ``recommended`` and ``multi`` are EXCLUDED on
-    purpose — the user-facing content is question + options, and a re-raise
-    with a changed recommendation or id is the SAME content, so it must hit
-    the recorded fingerprint rather than run a second check. Option ORDER is
-    significant (the model's ranking is content; the hoist already moved the
-    recommendation to the top).
-
-    Secret questions never gate (the caller refuses before fingerprinting) and
-    are deliberately NOT special-cased here: a digest computed over their
-    (empty) options would be near-constant, and the one place that must never
-    forget the refusal is the callable, not the hash.
-    """
-    content: list[Any] = []
-    for question in questions:
-        options = [
-            [_option_text(option, "label"), _option_text(option, "description")]
-            for option in getattr(question, "options", ()) or ()
-        ]
-        content.append([_question_text(question), options])
-    canonical = json.dumps(content, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def clearance_note(verdict: str, reason: str = "") -> str:
-    """The decision-point note the tool result carries instead of a receipt.
-
-    ``clear`` and ``resolve`` only — a ``raise`` produces NO note (it enqueues
-    and the model gets today's receipt). The check's ``REASON`` is embedded
-    after the instruction when the answer carried one, bounded by
-    :func:`parse_reason`; it explains the verdict to the model and keeps the
-    diversion auditable.
-    """
-    base = _RESOLVE_NOTE if verdict == "resolve" else _CLEAR_NOTE
-    if reason:
-        return f"{base}\n(Check's reason: {reason})"
-    return base

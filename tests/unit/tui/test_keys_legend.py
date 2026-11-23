@@ -433,7 +433,11 @@ def test_narrow_widths_stack_the_key_above_the_description() -> None:
     for broken in ("compose", "r", "pagedow", "n,"):
         assert broken not in rows, f"force-broken fragment {broken!r} came back"
     # The row count is the other half of D1 (79 rows pre-fix at 30 columns).
-    assert len(rows) == 51, f"the stacked row count moved: {len(rows)}"
+    # 66 since the fold legend's `-` clause was shortened to "resets it": the
+    # section's rows are the same four, but one description now wraps to one
+    # stacked line instead of two. Re-measured from `build_legend_rows(22)` in
+    # this change rather than guessed.
+    assert len(rows) == 66, f"the stacked row count moved: {len(rows)}"
     # The boundary: at the first width whose column holds the longest word,
     # the layout is columnar again (the key shares its line with copy).
     boundary = [row.plain for row in build_legend_rows(31)]
@@ -537,8 +541,12 @@ async def test_the_hint_keeps_the_scroll_cue_and_qualifies_the_reopen_routes() -
     cue outlives the reopen route, and the reopen route leads with `/keys`
     with `?` marked as its conditional sibling.
     """
+    # 100x50 rather than 100x30: the transcript-fold section made the card
+    # taller than a 30-row screen at this width, so the "content fits, the cue
+    # is dropped" case needs ground that still fits. The PROPERTY under test is
+    # unchanged — the cue appears iff there is more to scroll.
     app = _app()
-    async with app.run_test(size=(100, 30)) as pilot:
+    async with app.run_test(size=(100, 50)) as pilot:
         await _boot(pilot, app)
         editor = app.query_one(Editor)
         editor.focus()

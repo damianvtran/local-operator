@@ -1,0 +1,437 @@
+[
+  {
+    "label": "fr history-sha",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/ledger.py",
+      "history-sha",
+      "--locale",
+      "fr",
+      "--namespace",
+      "tui.editor_readonly"
+    ],
+    "returncode": 0,
+    "stdout": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945\n",
+    "stderr": "",
+    "seconds": 0.307
+  },
+  {
+    "label": "fr append --dry-run",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/ledger.py",
+      "append",
+      "--receipt",
+      "/Users/damian/.local-operator/sessions/61203766acfe/scratchpad/readonly-footer-row-fr.json",
+      "--expected-history-sha",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "--dry-run"
+    ],
+    "returncode": 0,
+    "stdout": "i18n/audit-history/fr/tui.editor_readonly.json\n",
+    "stderr": "",
+    "seconds": 0.333
+  },
+  {
+    "label": "fr append --apply",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/ledger.py",
+      "append",
+      "--receipt",
+      "/Users/damian/.local-operator/sessions/61203766acfe/scratchpad/readonly-footer-row-fr.json",
+      "--expected-history-sha",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "--apply"
+    ],
+    "returncode": 0,
+    "stdout": "i18n/audit-history/fr/tui.editor_readonly.json\n",
+    "stderr": "",
+    "seconds": 0.327
+  },
+  {
+    "label": "zh-CN history-sha",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/ledger.py",
+      "history-sha",
+      "--locale",
+      "zh-CN",
+      "--namespace",
+      "tui.editor_readonly"
+    ],
+    "returncode": 0,
+    "stdout": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945\n",
+    "stderr": "",
+    "seconds": 0.267
+  },
+  {
+    "label": "zh-CN append --dry-run",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/ledger.py",
+      "append",
+      "--receipt",
+      "/Users/damian/.local-operator/sessions/61203766acfe/scratchpad/readonly-footer-row-zh-CN.json",
+      "--expected-history-sha",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "--dry-run"
+    ],
+    "returncode": 0,
+    "stdout": "i18n/audit-history/zh-CN/tui.editor_readonly.json\n",
+    "stderr": "",
+    "seconds": 0.324
+  },
+  {
+    "label": "zh-CN append --apply",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/ledger.py",
+      "append",
+      "--receipt",
+      "/Users/damian/.local-operator/sessions/61203766acfe/scratchpad/readonly-footer-row-zh-CN.json",
+      "--expected-history-sha",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "--apply"
+    ],
+    "returncode": 0,
+    "stdout": "i18n/audit-history/zh-CN/tui.editor_readonly.json\n",
+    "stderr": "",
+    "seconds": 0.4
+  },
+  {
+    "label": "es history-sha",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/ledger.py",
+      "history-sha",
+      "--locale",
+      "es",
+      "--namespace",
+      "tui.editor_readonly"
+    ],
+    "returncode": 0,
+    "stdout": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945\n",
+    "stderr": "",
+    "seconds": 0.293
+  },
+  {
+    "label": "es append --dry-run",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/ledger.py",
+      "append",
+      "--receipt",
+      "/Users/damian/.local-operator/sessions/61203766acfe/scratchpad/readonly-footer-row-es.json",
+      "--expected-history-sha",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "--dry-run"
+    ],
+    "returncode": 0,
+    "stdout": "i18n/audit-history/es/tui.editor_readonly.json\n",
+    "stderr": "",
+    "seconds": 0.362
+  },
+  {
+    "label": "es append --apply",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/ledger.py",
+      "append",
+      "--receipt",
+      "/Users/damian/.local-operator/sessions/61203766acfe/scratchpad/readonly-footer-row-es.json",
+      "--expected-history-sha",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "--apply"
+    ],
+    "returncode": 0,
+    "stdout": "i18n/audit-history/es/tui.editor_readonly.json\n",
+    "stderr": "",
+    "seconds": 0.388
+  },
+  {
+    "label": "ru history-sha",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/ledger.py",
+      "history-sha",
+      "--locale",
+      "ru",
+      "--namespace",
+      "tui.editor_readonly"
+    ],
+    "returncode": 0,
+    "stdout": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945\n",
+    "stderr": "",
+    "seconds": 0.386
+  },
+  {
+    "label": "ru append --dry-run",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/ledger.py",
+      "append",
+      "--receipt",
+      "/Users/damian/.local-operator/sessions/61203766acfe/scratchpad/readonly-footer-row-ru.json",
+      "--expected-history-sha",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "--dry-run"
+    ],
+    "returncode": 0,
+    "stdout": "i18n/audit-history/ru/tui.editor_readonly.json\n",
+    "stderr": "",
+    "seconds": 0.393
+  },
+  {
+    "label": "ru append --apply",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/ledger.py",
+      "append",
+      "--receipt",
+      "/Users/damian/.local-operator/sessions/61203766acfe/scratchpad/readonly-footer-row-ru.json",
+      "--expected-history-sha",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "--apply"
+    ],
+    "returncode": 0,
+    "stdout": "i18n/audit-history/ru/tui.editor_readonly.json\n",
+    "stderr": "",
+    "seconds": 0.354
+  },
+  {
+    "label": "vi history-sha",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/ledger.py",
+      "history-sha",
+      "--locale",
+      "vi",
+      "--namespace",
+      "tui.editor_readonly"
+    ],
+    "returncode": 0,
+    "stdout": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945\n",
+    "stderr": "",
+    "seconds": 0.305
+  },
+  {
+    "label": "vi append --dry-run",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/ledger.py",
+      "append",
+      "--receipt",
+      "/Users/damian/.local-operator/sessions/61203766acfe/scratchpad/readonly-footer-row-vi.json",
+      "--expected-history-sha",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "--dry-run"
+    ],
+    "returncode": 0,
+    "stdout": "i18n/audit-history/vi/tui.editor_readonly.json\n",
+    "stderr": "",
+    "seconds": 0.366
+  },
+  {
+    "label": "vi append --apply",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/ledger.py",
+      "append",
+      "--receipt",
+      "/Users/damian/.local-operator/sessions/61203766acfe/scratchpad/readonly-footer-row-vi.json",
+      "--expected-history-sha",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "--apply"
+    ],
+    "returncode": 0,
+    "stdout": "i18n/audit-history/vi/tui.editor_readonly.json\n",
+    "stderr": "",
+    "seconds": 0.521
+  },
+  {
+    "label": "hi history-sha",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/ledger.py",
+      "history-sha",
+      "--locale",
+      "hi",
+      "--namespace",
+      "tui.editor_readonly"
+    ],
+    "returncode": 0,
+    "stdout": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945\n",
+    "stderr": "",
+    "seconds": 0.36
+  },
+  {
+    "label": "hi append --dry-run",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/ledger.py",
+      "append",
+      "--receipt",
+      "/Users/damian/.local-operator/sessions/61203766acfe/scratchpad/readonly-footer-row-hi.json",
+      "--expected-history-sha",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "--dry-run"
+    ],
+    "returncode": 0,
+    "stdout": "i18n/audit-history/hi/tui.editor_readonly.json\n",
+    "stderr": "",
+    "seconds": 0.382
+  },
+  {
+    "label": "hi append --apply",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/ledger.py",
+      "append",
+      "--receipt",
+      "/Users/damian/.local-operator/sessions/61203766acfe/scratchpad/readonly-footer-row-hi.json",
+      "--expected-history-sha",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "--apply"
+    ],
+    "returncode": 0,
+    "stdout": "i18n/audit-history/hi/tui.editor_readonly.json\n",
+    "stderr": "",
+    "seconds": 0.432
+  },
+  {
+    "label": "ur history-sha",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/ledger.py",
+      "history-sha",
+      "--locale",
+      "ur",
+      "--namespace",
+      "tui.editor_readonly"
+    ],
+    "returncode": 0,
+    "stdout": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945\n",
+    "stderr": "",
+    "seconds": 0.406
+  },
+  {
+    "label": "ur append --dry-run",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/ledger.py",
+      "append",
+      "--receipt",
+      "/Users/damian/.local-operator/sessions/61203766acfe/scratchpad/readonly-footer-row-ur.json",
+      "--expected-history-sha",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "--dry-run"
+    ],
+    "returncode": 0,
+    "stdout": "i18n/audit-history/ur/tui.editor_readonly.json\n",
+    "stderr": "",
+    "seconds": 0.513
+  },
+  {
+    "label": "ur append --apply",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/ledger.py",
+      "append",
+      "--receipt",
+      "/Users/damian/.local-operator/sessions/61203766acfe/scratchpad/readonly-footer-row-ur.json",
+      "--expected-history-sha",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "--apply"
+    ],
+    "returncode": 0,
+    "stdout": "i18n/audit-history/ur/tui.editor_readonly.json\n",
+    "stderr": "",
+    "seconds": 0.467
+  },
+  {
+    "label": "current export",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/ledger.py",
+      "export",
+      "--output",
+      "/Users/damian/.local-operator/sessions/61203766acfe/scratchpad/readonly-footer-current-ledger.json"
+    ],
+    "returncode": 0,
+    "stdout": "",
+    "stderr": "",
+    "seconds": 0.458
+  },
+  {
+    "label": "generate",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/run_bounded.py",
+      "--contract=command-status",
+      "--timeout",
+      "300",
+      "--",
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/generate.py"
+    ],
+    "returncode": 0,
+    "stdout": "wrote local_operator/i18n/data/plural_rules.json\nwrote local_operator/i18n/data/formats.json\nwrote local_operator/i18n/data/shipped.json\nwrote local_operator/i18n/keys/browser_site_approval.py\nwrote local_operator/i18n/keys/cli_agents_help.py\nwrote local_operator/i18n/keys/cli_agents_picture.py\nwrote local_operator/i18n/keys/cli_aida_help.py\nwrote local_operator/i18n/keys/cli_browser.py\nwrote local_operator/i18n/keys/cli_browser_help.py\nwrote local_operator/i18n/keys/cli_browser_node.py\nwrote local_operator/i18n/keys/cli_config.py\nwrote local_operator/i18n/keys/cli_config_help.py\nwrote local_operator/i18n/keys/cli_credential_help.py\nwrote local_operator/i18n/keys/cli_daemon_build.py\nwrote local_operator/i18n/keys/cli_exec_help.py\nwrote local_operator/i18n/keys/cli_exec_remote_help.py\nwrote local_operator/i18n/keys/cli_exec_runtime.py\nwrote local_operator/i18n/keys/cli_exec_worker_help.py\nwrote local_operator/i18n/keys/cli_failure_details.py\nwrote local_operator/i18n/keys/cli_failures.py\nwrote local_operator/i18n/keys/cli_global_help.py\nwrote local_operator/i18n/keys/cli_group_help.py\nwrote local_operator/i18n/keys/cli_hub_help.py\nwrote local_operator/i18n/keys/cli_hub_org.py\nwrote local_operator/i18n/keys/cli_hub_org_help.py\nwrote local_operator/i18n/keys/cli_hub_shared_help.py\nwrote local_operator/i18n/keys/cli_install_help.py\nwrote local_operator/i18n/keys/cli_login_help.py\nwrote local_operator/i18n/keys/cli_login_status_help.py\nwrote local_operator/i18n/keys/cli_logout_help.py\nwrote local_operator/i18n/keys/cli_mcp_help.py\nwrote local_operator/i18n/keys/cli_memory_help.py\nwrote local_operator/i18n/keys/cli_mobile_help.py\nwrote local_operator/i18n/keys/cli_model_help.py\nwrote local_operator/i18n/keys/cli_monitor_help.py\nwrote local_operator/i18n/keys/cli_network_uplink.py\nwrote local_operator/i18n/keys/cli_permissions.py\nwrote local_operator/i18n/keys/cli_qwencloud_help.py\nwrote local_operator/i18n/keys/cli_refresh_help.py\nwrote local_operator/i18n/keys/cli_resume_click_help.py\nwrote local_operator/i18n/keys/cli_send_help.py\nwrote local_operator/i18n/keys/cli_serve_help.py\nwrote local_operator/i18n/keys/cli_serve_readiness.py\nwrote local_operator/i18n/keys/cli_services_heavy.py\nwrote local_operator/i18n/keys/cli_services_help.py\nwrote local_operator/i18n/keys/cli_services_status.py\nwrote local_operator/i18n/keys/cli_sessions_help.py\nwrote local_operator/i18n/keys/cli_sessions_move_workset.py\nwrote local_operator/i18n/keys/cli_skills_push.py\nwrote local_operator/i18n/keys/cli_stop_help.py\nwrote local_operator/i18n/keys/cli_team_bridge.py\nwrote local_operator/i18n/keys/cli_team_bridge_alert.py\nwrote local_operator/i18n/keys/cli_team_bridge_hold.py\nwrote local_operator/i18n/keys/cli_teams_help.py\nwrote local_operator/i18n/keys/cli_update_help.py\nwrote local_operator/i18n/keys/cli_vault.py\nwrote local_operator/i18n/keys/cli_vault_help.py\nwrote local_operator/i18n/keys/cli_wake_help.py\nwrote local_operator/i18n/keys/mobile_doctor.py\nwrote local_operator/i18n/keys/mobile_setup.py\nwrote local_operator/i18n/keys/network_pairing.py\nwrote local_operator/i18n/keys/operator_pairing.py\nwrote local_operator/i18n/keys/providers_vertex_prompts.py\nwrote local_operator/i18n/keys/relay_account_policy.py\nwrote local_operator/i18n/keys/relay_agent_avatar.py\nwrote local_operator/i18n/keys/relay_approvals.py\nwrote local_operator/i18n/keys/relay_ask.py\nwrote local_operator/i18n/keys/relay_asks.py\nwrote local_operator/i18n/keys/relay_chrome.py\nwrote local_operator/i18n/keys/relay_composer.py\nwrote local_operator/i18n/keys/relay_diagram.py\nwrote local_operator/i18n/keys/relay_health.py\nwrote local_operator/i18n/keys/relay_highlights.py\nwrote local_operator/i18n/keys/relay_library.py\nwrote local_operator/i18n/keys/relay_login.py\nwrote local_operator/i18n/keys/relay_notifications.py\nwrote local_operator/i18n/keys/relay_pairing.py\nwrote local_operator/i18n/keys/relay_session.py\nwrote local_operator/i18n/keys/relay_session_tags.py\nwrote local_operator/i18n/keys/relay_shell.py\nwrote local_operator/i18n/keys/relay_skills.py\nwrote local_operator/i18n/keys/relay_transcript.py\nwrote local_operator/i18n/keys/relay_usage_reset.py\nwrote local_operator/i18n/keys/tui_analytics.py\nwrote local_operator/i18n/keys/tui_app.py\nwrote local_operator/i18n/keys/tui_asks.py\nwrote local_operator/i18n/keys/tui_authoring.py\nwrote local_operator/i18n/keys/tui_boot_prompt.py\nwrote local_operator/i18n/keys/tui_bridge_card.py\nwrote local_operator/i18n/keys/tui_chrome_banners.py\nwrote local_operator/i18n/keys/tui_chrome_bindings.py\nwrote local_operator/i18n/keys/tui_chrome_remote_park.py\nwrote local_operator/i18n/keys/tui_community.py\nwrote local_operator/i18n/keys/tui_composer.py\nwrote local_operator/i18n/keys/tui_editor_readonly.py\nwrote local_operator/i18n/keys/tui_highlights.py\nwrote local_operator/i18n/keys/tui_hub_links.py\nwrote local_operator/i18n/keys/tui_import.py\nwrote local_operator/i18n/keys/tui_library.py\nwrote local_operator/i18n/keys/tui_notices.py\nwrote local_operator/i18n/keys/tui_notification_kinds.py\nwrote local_operator/i18n/keys/tui_notifications.py\nwrote local_operator/i18n/keys/tui_palette.py\nwrote local_operator/i18n/keys/tui_profile_actions.py\nwrote local_operator/i18n/keys/tui_projects.py\nwrote local_operator/i18n/keys/tui_projects_edit.py\nwrote local_operator/i18n/keys/tui_review.py\nwrote local_operator/i18n/keys/tui_schedule.py\nwrote local_operator/i18n/keys/tui_session_move.py\nwrote local_operator/i18n/keys/tui_session_move_workset.py\nwrote local_operator/i18n/keys/tui_session_sidebar.py\nwrote local_operator/i18n/keys/tui_settings_view.py\nwrote local_operator/i18n/keys/tui_settings_view_chrome.py\nwrote local_operator/i18n/keys/tui_setup_cues.py\nwrote local_operator/i18n/keys/tui_small.py\nwrote local_operator/i18n/keys/tui_sound.py\nwrote local_operator/i18n/keys/tui_status.py\nwrote local_operator/i18n/keys/tui_status_command.py\nwrote local_operator/i18n/keys/tui_tags.py\nwrote local_operator/i18n/keys/tui_team_authoring.py\nwrote local_operator/i18n/keys/tui_tool_card.py\nwrote local_operator/i18n/keys/tui_tool_card_extra.py\nwrote local_operator/i18n/keys/tui_tool_card_status.py\nwrote local_operator/i18n/keys/tui_transcript.py\nwrote local_operator/i18n/keys/tui_update.py\nwrote local_operator/i18n/keys/tui_usage.py\nwrote local_operator/i18n/keys/tui_usage_refusal.py\nwrote local_operator/i18n/keys/tui_viewer.py\nwrote local_operator/i18n/keys/tui_welcome.py\nwrote local_operator/i18n/keys/tunnel_status.py\nwrote local_operator/i18n/keys/tunnel_transient.py\nwrote local_operator/i18n/keys/tunnel_upgrade.py\nwrote local_operator/i18n/keys/wire_aida_cadence.py\nwrote local_operator/i18n/keys/wire_bridge_taint.py\nwrote local_operator/i18n/keys/wire_community.py\nwrote local_operator/i18n/keys/wire_console.py\nwrote local_operator/i18n/keys/wire_errors.py\nwrote local_operator/i18n/keys/wire_errors_agent_avatar.py\nwrote local_operator/i18n/keys/wire_errors_agents.py\nwrote local_operator/i18n/keys/wire_errors_auth.py\nwrote local_operator/i18n/keys/wire_errors_bedrock.py\nwrote local_operator/i18n/keys/wire_errors_desktop.py\nwrote local_operator/i18n/keys/wire_errors_files.py\nwrote local_operator/i18n/keys/wire_errors_hosting.py\nwrote local_operator/i18n/keys/wire_errors_media.py\nwrote local_operator/i18n/keys/wire_errors_notifications.py\nwrote local_operator/i18n/keys/wire_errors_sdk_spec.py\nwrote local_operator/i18n/keys/wire_errors_sdk_startup.py\nwrote local_operator/i18n/keys/wire_errors_session_host.py\nwrote local_operator/i18n/keys/wire_errors_settings.py\nwrote local_operator/i18n/keys/wire_exec.py\nwrote local_operator/i18n/keys/wire_github.py\nwrote local_operator/i18n/keys/wire_guardrails.py\nwrote local_operator/i18n/keys/wire_harness_import_detail.py\nwrote local_operator/i18n/keys/wire_host_speed.py\nwrote local_operator/i18n/keys/wire_hub_pull.py\nwrote local_operator/i18n/keys/wire_incidents.py\nwrote local_operator/i18n/keys/wire_language_receipts.py\nwrote local_operator/i18n/keys/wire_login_bedrock.py\nwrote local_operator/i18n/keys/wire_memory.py\nwrote local_operator/i18n/keys/wire_music.py\nwrote local_operator/i18n/keys/wire_notices.py\nwrote local_operator/i18n/keys/wire_notification_sound.py\nwrote local_operator/i18n/keys/wire_operator_setup.py\nwrote local_operator/i18n/keys/wire_outcome_notices.py\nwrote local_operator/i18n/keys/wire_phone_access.py\nwrote local_operator/i18n/keys/wire_providers_connect.py\nwrote local_operator/i18n/keys/wire_providers_reauth.py\nwrote local_operator/i18n/keys/wire_push_alert.py\nwrote local_operator/i18n/keys/wire_radient_saver.py\nwrote local_operator/i18n/keys/wire_remote_compute.py\nwrote local_operator/i18n/keys/wire_session.py\nwrote local_operator/i18n/keys/wire_session_status.py\nwrote local_operator/i18n/keys/wire_sessions.py\nwrote local_operator/i18n/keys/wire_settings.py\nwrote local_operator/i18n/keys/wire_settings_account_policy.py\nwrote local_operator/i18n/keys/wire_settings_hub_defaults.py\nwrote local_operator/i18n/keys/wire_settings_hub_org.py\nwrote local_operator/i18n/keys/wire_settings_keymap.py\nwrote local_operator/i18n/keys/wire_skill_adoption.py\nwrote local_operator/i18n/keys/wire_slash.py\nwrote local_operator/i18n/keys/wire_slash_library.py\nwrote local_operator/i18n/keys/wire_slash_notifications_page.py\nwrote local_operator/i18n/keys/wire_team_integrations.py\nwrote local_operator/i18n/keys/wire_teams_effective.py\nwrote local_operator/i18n/keys/wire_tool_rows_bridge.py\nwrote local_operator/i18n/keys/wire_tool_rows_bridge_skipped.py\nwrote local_operator/i18n/keys/wire_tunnel_setup.py\nwrote local_operator/i18n/keys/wire_voice.py\nwrote local_operator/i18n/keys/wire_voice_availability.py\nwrote local_operator/i18n/keys/wire_wakes_supervisor.py\nwrote local_operator/i18n/keys/__init__.py\nwrote local_operator/mobile/web/src/i18n/keys.gen.ts\nwrote local_operator/mobile/web/src/i18n/bundled.gen.ts\nwrote local_operator/mobile/web/src/i18n/bundled.es.gen.ts\nwrote local_operator/mobile/web/src/i18n/bundled.fr.gen.ts\nwrote local_operator/mobile/web/src/i18n/bundled.hi.gen.ts\nwrote local_operator/mobile/web/src/i18n/bundled.ru.gen.ts\nwrote local_operator/mobile/web/src/i18n/bundled.ur.gen.ts\nwrote local_operator/mobile/web/src/i18n/bundled.vi.gen.ts\nwrote local_operator/mobile/web/src/i18n/bundled.zh-CN.gen.ts\n",
+    "stderr": "[run_bounded] memory budget 3777 MiB (inherited); sampled owned child group and escaped descendants\n[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=04572773a36b4dc88d7ac2a5c179b75d completion=/Users/damian/.local-operator/sessions/61203766acfe/scratchpad/run-bounded-runs/04572773a36b4dc88d7ac2a5c179b75d.completion.json\n",
+    "seconds": 10.58
+  },
+  {
+    "label": "generate --check",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/run_bounded.py",
+      "--contract=command-status",
+      "--timeout",
+      "300",
+      "--",
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/generate.py",
+      "--check"
+    ],
+    "returncode": 0,
+    "stdout": "generate.py --check: 201 artifact(s) byte-identical\n",
+    "stderr": "[run_bounded] memory budget 3777 MiB (inherited); sampled owned child group and escaped descendants\n[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=16f78fbd916e4af9bdfbd81727403b26 completion=/Users/damian/.local-operator/sessions/61203766acfe/scratchpad/run-bounded-runs/16f78fbd916e4af9bdfbd81727403b26.completion.json\n",
+    "seconds": 10.345
+  },
+  {
+    "label": "check ordinary",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/run_bounded.py",
+      "--contract=command-status",
+      "--timeout",
+      "300",
+      "--",
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/check.py"
+    ],
+    "returncode": 0,
+    "stdout": "advisory: local_operator/agent_profiles.py: 4 literal(s) against a ceiling of 3\nadvisory: local_operator/browser_bridge/handoff.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/browser_bridge/node_host.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/community/cli.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/compaction/resume_card.py: 6 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/compaction/snapcompact.py: 12 literal(s) against a ceiling of 10\nadvisory: local_operator/disk_cli.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/disk_pressure.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/evaluation/action_server.py: 5 literal(s) against a ceiling of 4\nadvisory: local_operator/evaluation/runner/provider_client.py: 13 literal(s) against a ceiling of 9\nadvisory: local_operator/evaluation/session_arm.py: 3 literal(s) against a ceiling of 1\nadvisory: local_operator/evaluation/team_bridge_moderation/dataset.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/evaluation/team_bridge_moderation/fixture.py: 4 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/evaluation/team_bridge_moderation/report.py: 32 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/evaluation/team_bridge_moderation/runner.py: 6 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/evaluation/team_bridge_moderation/screenbench.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/fenced_operation.py: 9 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/guardrails/check.py: 13 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/guardrails/classify.py: 12 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/guardrails/evidence.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/guardrails/interrupted_worktree_add.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/guardrails/judge.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/guardrails/preview.py: 15 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/guardrails/provenance.py: 4 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/guardrails/resolve.py: 22 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/harness/rows.py: 3 literal(s) against a ceiling of 1\nadvisory: local_operator/harness/secret_sinks.py: 13 literal(s) against a ceiling of 12\nadvisory: local_operator/harness/subagent.py: 10 literal(s) against a ceiling of 4\nadvisory: local_operator/harness/verifier_evidence.py: 5 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/harness_import/mapping.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/harness_import/memory.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/harness_import/service.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/harness_import/sources/claude.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/harness_import/sources/codex.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/heavy_lease.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/hub_sync/service.py: 4 literal(s) against a ceiling of 1\nadvisory: local_operator/librarian/proactive.py: 5 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/library/metadata.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/library/store.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/memory.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/memory_cli.py: 81 literal(s) against a ceiling of 39\nadvisory: local_operator/memory_guard.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/memory_maintenance.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/memory_triage.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/monitors/delivery.py: 29 literal(s) against a ceiling of 14\nadvisory: local_operator/music/digest.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/network/approvals.py: 7 literal(s) against a ceiling of 6\nadvisory: local_operator/network/carry.py: 6 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/network/cli.py: 328 literal(s) against a ceiling of 228\nadvisory: local_operator/network/credentials/finite_share.py: 3 literal(s) against a ceiling of 2\nadvisory: local_operator/network/credentials/messages.py: 9 literal(s) against a ceiling of 2\nadvisory: local_operator/network/credentials/renewal.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/network/definitions.py: 4 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/network/mcpdefs.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/network/meshupdate.py: 3 literal(s) against a ceiling of 2\nadvisory: local_operator/network/mobility.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/network/readiness.py: 30 literal(s) against a ceiling of 15\nadvisory: local_operator/network/relay.py: 32 literal(s) against a ceiling of 31\nadvisory: local_operator/network/skillsync.py: 5 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/network/tool.py: 24 literal(s) against a ceiling of 23\nadvisory: local_operator/network/workset_probe.py: 12 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/network/workset_transfer.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/notifications/backfill_cleanup.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/notifications/bulk.py: 5 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/notifications/store.py: 8 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/operator/cli.py: 26 literal(s) against a ceiling of 23\nadvisory: local_operator/operator/handlers.py: 82 literal(s) against a ceiling of 69\nadvisory: local_operator/operator/pair_handlers.py: 32 literal(s) against a ceiling of 23\nadvisory: local_operator/procname.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/profile_proposals.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/profile_scope.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/providers/auth_cli.py: 23 literal(s) against a ceiling of 20\nadvisory: local_operator/providers/bedrock/profiles.py: 8 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/providers/bedrock/sso_login.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/recovery_manifest.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/saver/provenance.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/secrets/roll.py: 5 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/server/routes/desktop_imports.py: 9 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/server/routes/desktop_librarian.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/server/routes/desktop_settings_intents.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/server/routes/desktop_team_bridge.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/server/routes/notification_sounds.py: 4 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/server/utils/settings_intents.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/session/delegated_retention.py: 12 literal(s) against a ceiling of 6\nadvisory: local_operator/session/file_provenance.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/session/peek.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/session/runtime/control.py: 4 literal(s) against a ceiling of 2\nadvisory: local_operator/session/runtime/machine_memory.py: 6 literal(s) against a ceiling of 5\nadvisory: local_operator/session/runtime/process.py: 6 literal(s) against a ceiling of 4\nadvisory: local_operator/session_factory.py: 17 literal(s) against a ceiling of 15\nadvisory: local_operator/sound_cli.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/supervisors.py: 10 literal(s) against a ceiling of 6\nadvisory: local_operator/supplements/sweep.py: 6 literal(s) against a ceiling of 5\nadvisory: local_operator/supplements/validate.py: 22 literal(s) against a ceiling of 21\nadvisory: local_operator/team_bridge/agent_file_reads.py: 16 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/team_bridge/body_frame.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/team_bridge/card_projection.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/team_bridge/cli.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/team_bridge/connector/cli.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/team_bridge/connector/conversation.py: 18 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/team_bridge/link_preview/extract.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/team_bridge/store.py: 5 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/team_bridge/tool.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/tools/agent_tool.py: 6 literal(s) against a ceiling of 4\nadvisory: local_operator/tools/artifact_data_tool.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/tools/builtin.py: 143 literal(s) against a ceiling of 118\nadvisory: local_operator/tools/confinement.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/tools/secret_tool.py: 3 literal(s) against a ceiling of 1\nadvisory: local_operator/tools/skill_tool.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/tui/session_move.py: 5 literal(s) against a ceiling of 3\nadvisory: local_operator/tunnels/arguments.py: 10 literal(s) against a ceiling of 9\nadvisory: local_operator/update.py: 66 literal(s) against a ceiling of 53\nadvisory: local_operator/wakes/supervisor.py: 8 literal(s) against a ceiling of 5\nadvisory: local_operator/web_fetch/tool.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\ncheck.py: ok — 242 file(s) scanned, 2755 literal(s) at or below the baseline, catalogues consistent; 114 advisory finding(s) (report-only until activated)\n",
+    "stderr": "[run_bounded] memory budget 3777 MiB (inherited); sampled owned child group and escaped descendants\n[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=238942b522674d33972834c43994a31b completion=/Users/damian/.local-operator/sessions/61203766acfe/scratchpad/run-bounded-runs/238942b522674d33972834c43994a31b.completion.json\n",
+    "seconds": 160.956
+  },
+  {
+    "label": "check strict origin/main",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/run_bounded.py",
+      "--contract=command-status",
+      "--timeout",
+      "300",
+      "--",
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/check.py",
+      "--audit-base",
+      "origin/main"
+    ],
+    "returncode": 0,
+    "stdout": "advisory: local_operator/agent_profiles.py: 4 literal(s) against a ceiling of 3\nadvisory: local_operator/browser_bridge/handoff.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/browser_bridge/node_host.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/community/cli.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/compaction/resume_card.py: 6 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/compaction/snapcompact.py: 12 literal(s) against a ceiling of 10\nadvisory: local_operator/disk_cli.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/disk_pressure.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/evaluation/action_server.py: 5 literal(s) against a ceiling of 4\nadvisory: local_operator/evaluation/runner/provider_client.py: 13 literal(s) against a ceiling of 9\nadvisory: local_operator/evaluation/session_arm.py: 3 literal(s) against a ceiling of 1\nadvisory: local_operator/evaluation/team_bridge_moderation/dataset.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/evaluation/team_bridge_moderation/fixture.py: 4 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/evaluation/team_bridge_moderation/report.py: 32 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/evaluation/team_bridge_moderation/runner.py: 6 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/evaluation/team_bridge_moderation/screenbench.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/fenced_operation.py: 9 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/guardrails/check.py: 13 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/guardrails/classify.py: 12 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/guardrails/evidence.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/guardrails/interrupted_worktree_add.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/guardrails/judge.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/guardrails/preview.py: 15 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/guardrails/provenance.py: 4 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/guardrails/resolve.py: 22 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/harness/rows.py: 3 literal(s) against a ceiling of 1\nadvisory: local_operator/harness/secret_sinks.py: 13 literal(s) against a ceiling of 12\nadvisory: local_operator/harness/subagent.py: 10 literal(s) against a ceiling of 4\nadvisory: local_operator/harness/verifier_evidence.py: 5 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/harness_import/mapping.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/harness_import/memory.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/harness_import/service.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/harness_import/sources/claude.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/harness_import/sources/codex.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/heavy_lease.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/hub_sync/service.py: 4 literal(s) against a ceiling of 1\nadvisory: local_operator/librarian/proactive.py: 5 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/library/metadata.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/library/store.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/memory.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/memory_cli.py: 81 literal(s) against a ceiling of 39\nadvisory: local_operator/memory_guard.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/memory_maintenance.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/memory_triage.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/monitors/delivery.py: 29 literal(s) against a ceiling of 14\nadvisory: local_operator/music/digest.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/network/approvals.py: 7 literal(s) against a ceiling of 6\nadvisory: local_operator/network/carry.py: 6 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/network/cli.py: 328 literal(s) against a ceiling of 228\nadvisory: local_operator/network/credentials/finite_share.py: 3 literal(s) against a ceiling of 2\nadvisory: local_operator/network/credentials/messages.py: 9 literal(s) against a ceiling of 2\nadvisory: local_operator/network/credentials/renewal.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/network/definitions.py: 4 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/network/mcpdefs.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/network/meshupdate.py: 3 literal(s) against a ceiling of 2\nadvisory: local_operator/network/mobility.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/network/readiness.py: 30 literal(s) against a ceiling of 15\nadvisory: local_operator/network/relay.py: 32 literal(s) against a ceiling of 31\nadvisory: local_operator/network/skillsync.py: 5 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/network/tool.py: 24 literal(s) against a ceiling of 23\nadvisory: local_operator/network/workset_probe.py: 12 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/network/workset_transfer.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/notifications/backfill_cleanup.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/notifications/bulk.py: 5 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/notifications/store.py: 8 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/operator/cli.py: 26 literal(s) against a ceiling of 23\nadvisory: local_operator/operator/handlers.py: 82 literal(s) against a ceiling of 69\nadvisory: local_operator/operator/pair_handlers.py: 32 literal(s) against a ceiling of 23\nadvisory: local_operator/procname.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/profile_proposals.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/profile_scope.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/providers/auth_cli.py: 23 literal(s) against a ceiling of 20\nadvisory: local_operator/providers/bedrock/profiles.py: 8 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/providers/bedrock/sso_login.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/recovery_manifest.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/saver/provenance.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/secrets/roll.py: 5 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/server/routes/desktop_imports.py: 9 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/server/routes/desktop_librarian.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/server/routes/desktop_settings_intents.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/server/routes/desktop_team_bridge.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/server/routes/notification_sounds.py: 4 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/server/utils/settings_intents.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/session/delegated_retention.py: 12 literal(s) against a ceiling of 6\nadvisory: local_operator/session/file_provenance.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/session/peek.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/session/runtime/control.py: 4 literal(s) against a ceiling of 2\nadvisory: local_operator/session/runtime/machine_memory.py: 6 literal(s) against a ceiling of 5\nadvisory: local_operator/session/runtime/process.py: 6 literal(s) against a ceiling of 4\nadvisory: local_operator/session_factory.py: 17 literal(s) against a ceiling of 15\nadvisory: local_operator/sound_cli.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/supervisors.py: 10 literal(s) against a ceiling of 6\nadvisory: local_operator/supplements/sweep.py: 6 literal(s) against a ceiling of 5\nadvisory: local_operator/supplements/validate.py: 22 literal(s) against a ceiling of 21\nadvisory: local_operator/team_bridge/agent_file_reads.py: 16 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/team_bridge/body_frame.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/team_bridge/card_projection.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/team_bridge/cli.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/team_bridge/connector/cli.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/team_bridge/connector/conversation.py: 18 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/team_bridge/link_preview/extract.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/team_bridge/store.py: 5 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/team_bridge/tool.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/tools/agent_tool.py: 6 literal(s) against a ceiling of 4\nadvisory: local_operator/tools/artifact_data_tool.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/tools/builtin.py: 143 literal(s) against a ceiling of 118\nadvisory: local_operator/tools/confinement.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/tools/secret_tool.py: 3 literal(s) against a ceiling of 1\nadvisory: local_operator/tools/skill_tool.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\nadvisory: local_operator/tui/session_move.py: 5 literal(s) against a ceiling of 3\nadvisory: local_operator/tunnels/arguments.py: 10 literal(s) against a ceiling of 9\nadvisory: local_operator/update.py: 66 literal(s) against a ceiling of 53\nadvisory: local_operator/wakes/supervisor.py: 8 literal(s) against a ceiling of 5\nadvisory: local_operator/web_fetch/tool.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0\ncheck.py: ok — 242 file(s) scanned, 2755 literal(s) at or below the baseline, catalogues consistent; 114 advisory finding(s) (report-only until activated)\n",
+    "stderr": "[run_bounded] memory budget 3777 MiB (inherited); sampled owned child group and escaped descendants\n[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=d3e5fa1383b44b4b857279ae3f9c0ae0 completion=/Users/damian/.local-operator/sessions/61203766acfe/scratchpad/run-bounded-runs/d3e5fa1383b44b4b857279ae3f9c0ae0.completion.json\n",
+    "seconds": 189.817
+  }
+]

@@ -1,0 +1,72 @@
+"""Candidate-only real CSS-loaded App. Baseline varies catalogue data, never product code."""
+import scripts.probe_isolation as isolation
+import asyncio,json,os,sys,hashlib
+from pathlib import Path
+from rich.cells import cell_len
+ROOT=Path('/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad')
+assert isolation.SANDBOX.is_relative_to(ROOT)
+from scripts.visual_capture import save_capture
+from local_operator import settings_io
+from local_operator.config import ConfigManager
+from local_operator.i18n import catalogues
+from local_operator.i18n.text import set_active_locale,active_locale
+from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.settings_view import SettingsView
+from local_operator.team_bridge import availability
+from tests.unit.tui.test_app_pilot import FakeSession,_factory
+STAGE=sys.argv[1]
+if STAGE=='before': catalogues.catalogue_root=lambda:ROOT/'baseline-catalogues'
+CHANGES=json.loads((ROOT/'catalogue-changes.json').read_text())
+print('ISOLATION',os.environ['HOME'],os.environ['LOCAL_OPERATOR_CONFIG_DIR'],str(Path.cwd()),flush=True)
+manager=ConfigManager(Path(os.environ['LOCAL_OPERATOR_CONFIG_DIR']))
+# Resolve the role row by message identity, not a guessed config key.
+role=next(s for s in settings_io.SETTINGS if getattr(s.label,'message',None) and s.label.message.code=='wire.settings.team_bridge_session.label')
+print('ROLE_IDENTITY',role.key,role.label.message.code,flush=True)
+values={'tool_approval_mode':'auto','shell_environment.mode':'inherit','providers.openrouter.enforce_distillable_text':'true'}
+for key,value in values.items():
+ if key in settings_io.BY_KEY:settings_io.write_setting(manager,settings_io.BY_KEY[key],value)
+manager.set_config_value('language','fr')
+availability.record(manager.config_dir,visible=True,state='ready',checked_at=0)
+config=manager.config_dir/'config.yml'; original=config.read_bytes()
+results=[]
+def select(view,key):
+ view._expanded=None;view._repaint()
+ for i,r in enumerate(view._rows):
+  if r.kind=='setting' and r.setting.key==key:view._selected=i;view._repaint();view._scroll_to_selection();return r
+ raise AssertionError('missing visible row '+key)
+def snap(app,view,name):
+ path=ROOT/(STAGE+'-'+name)
+ save_capture(app,str(path)+'.first.svg'); first=app.export_screenshot()
+ return path,first
+async def main():
+ app=OperatorApp(lambda:_factory(FakeSession()))
+ async with app.run_test(size=(120,36)) as pilot:
+  await pilot.pause();app._open_settings_view();await pilot.pause();view=app.query_one(SettingsView)
+  for locale in ('fr','zh-CN','hi','ur','es','ru','vi'):
+   set_active_locale(locale);assert active_locale()==locale
+   for key in ('tool_approval_mode','shell_environment.mode','providers.openrouter.enforce_distillable_text'):
+    if key not in settings_io.BY_KEY:continue
+    row=select(view,key);await pilot.pause()
+    record={'locale':locale,'key':key,'stage':STAGE,'label':str(row.setting.label),'help':str(row.setting.help),'summary':view._row_text(row,view._selected,view._list_width()).plain,'default':view._detail_clause(row),'detail':view._detail_text.plain,'width':view._list_width(),'detail_width':view._detail_width(),'pane_display':view._pane_view.display}
+    path,first=snap(app,view,locale+'-'+key);await pilot.pause();save_capture(app,str(path)+'.settled.svg');record['first_equal_settled']=first==app.export_screenshot()
+    view.action_activate();await pilot.pause();save_capture(app,str(path)+'.expanded.svg')
+    record['choices']=[{'value':r.choice.value,'label':str(r.choice.label),'description':str(r.choice.description),'paint':view._row_text(r,i,view._list_width()).plain} for i,r in enumerate(view._rows) if r.kind=='choice']
+    await pilot.press('escape');await pilot.press('tab');await pilot.pause();record['tab_state']={'focused':str(app.focused),'detail':view._detail_text.plain}
+    view.action_pane(1);await pilot.pause();record['pane']=str(view.rendered_pane())
+    assert config.read_bytes()==original,'paint/navigation wrote config'
+    record['config_unchanged']=True;results.append(record)
+    (ROOT/(STAGE+'-capture-result.json')).write_text(json.dumps(results,ensure_ascii=False,indent=2))
+   print('LOCALE_DONE',locale,flush=True)
+  # Real narrow + ordinary role and Hindi cases; widths are measurements, never forced budgets.
+  for locale,key in [('fr',role.key),('hi','providers.openrouter.enforce_distillable_text'),('ur','shell_environment.mode')]:
+   set_active_locale(locale)
+   for size in ((100,30),(80,24)):
+    await pilot.resize_terminal(*size);await pilot.pause();row=select(view,key);await pilot.pause()
+    if row.setting.choices:view.action_activate();await pilot.pause()
+    name=f'{locale}-compact-{key}-{size[0]}x{size[1]}'
+    path,first=snap(app,view,name);await pilot.pause();save_capture(app,str(path)+'.settled.svg')
+    record={'locale':locale,'key':key,'compact':True,'size':size,'source_label':str(row.setting.label),'source_label_cells':cell_len(str(row.setting.label)),'help':str(row.setting.help),'detail':view._detail_text.plain,'list_width':view._list_width(),'detail_width':view._detail_width(),'region':str(view.region),'virtual':str(view.virtual_size),'pane_display':view._pane_view.display,'first_equal_settled':first==app.export_screenshot(),'paint':str(view.rendered_list()) if hasattr(view,'rendered_list') else str(view._list_text),'config_unchanged':config.read_bytes()==original}
+    results.append(record);assert record['config_unchanged']
+  print('CAPTURE_DONE',len(results),flush=True)
+ (ROOT/(STAGE+'-capture-result.json')).write_text(json.dumps(results,ensure_ascii=False,indent=2))
+asyncio.run(main())

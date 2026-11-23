@@ -1,0 +1,99 @@
+{
+  "schema": 1,
+  "receipt_kind": "independent_merged_namespace_translation_audit",
+  "instance": "aeac444fcb4b",
+  "date": "2026-11-22",
+  "repository": "local-operator",
+  "pr_url": "https://github.com/damianvtran/local-operator/pull/4408",
+  "head": "9be06fc428a0f5f9617a87d762f59c1b0ffbd8a8",
+  "base": "f815ea7b74fe06e13266bef583e15293fbce7532",
+  "role": "Independent semantic merged-namespace audit; no implementation or translation edits",
+  "model": "openai/gpt-6.2-sol",
+  "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.2-sol before catalogue review, due to provider quota failure",
+  "auditor": {
+    "agent": "independent-translation-auditor (lopdev reviewer)",
+    "session": "aeac444fcb4b",
+    "model": "openai/gpt-6.2-sol",
+    "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.2-sol before catalogue review, due to provider quota failure",
+    "date": "2026-11-22",
+    "result": "passed",
+    "findings": [],
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "namespace": "relay.transcript",
+  "locale": "ur",
+  "source_sha256": "87a3e3d62fddefb9212eeba2d1981e15ebf532237c5034d56f464ab47dde0af1",
+  "target_sha256": "cf5ad77eee325ead728f06c7de0f4acb5d4fc58fd159ea8aaa0c545ad2e4cdde",
+  "keys_reverified": [
+    "relay.transcript.bridge.held",
+    "relay.transcript.bridge.offline",
+    "relay.transcript.bridge.thread_reply",
+    "relay.transcript.jump.latest",
+    "relay.transcript.jump.latest_short"
+  ],
+  "keys_changed_from_origin_main": [
+    "relay.transcript.bridge.held",
+    "relay.transcript.bridge.offline",
+    "relay.transcript.bridge.thread_reply"
+  ],
+  "scope_note": "Read all 43 current English/Urdu value pairs. This fresh semantic delta approval covers only the three changed Urdu values. The 40 unchanged value literals are byte-identical to origin/main and retain prior audits. The two jump labels were re-read specifically for the merged context and retain prior approval; no new approval of unchanged keys. No native-speaker claim, no rendered fit, bidi shaping, mirroring or activation approval. Underlying review unchanged; delta vs the previously attested bytes is whitespace-only (tab -> 2-space re-serialization). Verified parsed-JSON equality.",
+  "checks": {
+    "key_and_placeholder_parity": "43/43 unique keys, no missing or extras; ordered ICU placeholder/selector/brace/# skeleton matches",
+    "raw_value_bytes_vs_origin_main": "40 unchanged literals byte-identical; no raw-only delta",
+    "NFC": "passed",
+    "bidi_controls": "no Unicode format characters, including bidi controls",
+    "escapes": "no HTML entities or JSON escapes",
+    "brand": "Radient preserved with identical per-value occurrence counts",
+    "semantics": "Held is for review, not refusal; offline says retry in progress without user action; thread marker describes a reply; provenance signals external and untrusted without claiming a moderation decision. The separate screening, pending delivery, and refused states retain those distinctions. The jump action and its compact label retain the same destination."
+  },
+  "namespaces": {
+    "relay.transcript": {
+      "status": "passed",
+      "sha256": {
+        "en": "87a3e3d62fddefb9212eeba2d1981e15ebf532237c5034d56f464ab47dde0af1",
+        "ur": "cf5ad77eee325ead728f06c7de0f4acb5d4fc58fd159ea8aaa0c545ad2e4cdde"
+      },
+      "source_path": "local_operator/i18n/catalogues/en/relay.transcript.json",
+      "locales": {
+        "ur": {
+          "target_path": "local_operator/i18n/catalogues/ur/relay.transcript.json",
+          "keys_reviewed": [
+            "relay.transcript.bridge.held",
+            "relay.transcript.bridge.offline",
+            "relay.transcript.bridge.thread_reply",
+            "relay.transcript.jump.latest",
+            "relay.transcript.jump.latest_short"
+          ],
+          "reviewed_values": {
+            "relay.transcript.bridge.held": {
+              "english": "Held for review",
+              "target": "جائزے کے لیے روکا گیا",
+              "result": "passed"
+            },
+            "relay.transcript.bridge.offline": {
+              "english": "Couldn't reach Radient — retrying",
+              "target": "Radient سے رابطہ نہیں ہوا — دوبارہ کوشش جاری ہے",
+              "result": "passed"
+            },
+            "relay.transcript.bridge.thread_reply": {
+              "english": "Thread reply",
+              "target": "تھریڈ میں جواب",
+              "result": "passed"
+            },
+            "relay.transcript.jump.latest": {
+              "english": "Jump to latest",
+              "target": "تازہ ترین پیغام پر جائیں",
+              "result": "retained byte-identical from origin/main; reread"
+            },
+            "relay.transcript.jump.latest_short": {
+              "english": "Latest",
+              "target": "تازہ ترین",
+              "result": "retained byte-identical from origin/main; reread"
+            }
+          }
+        }
+      }
+    }
+  }
+}

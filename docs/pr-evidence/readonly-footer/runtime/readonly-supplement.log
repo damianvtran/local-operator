@@ -1,0 +1,10 @@
+operator authority: the anchor's private half is a 0600 FILE, so any process running as this user can sign for the operator — loosening is authorised but NOT presence-gated on this host
+{"locale": "fr", "persisted": true, "hint": "Lecture seule · esc retour", "escape": "closed page, restored editable composer focus", "notice": ["langue : fr enregistrée — fr (Français) active"]}
+{"locale": "zh-CN", "persisted": true, "hint": "只读 · esc返回", "escape": "closed page, restored editable composer focus", "notice": ["语言：已保存zh-CN——当前使用zh-CN（简体中文）"]}
+{"locale": "en", "persisted": true, "hint": "Read-only · esc back", "escape": "closed page, restored editable composer focus", "notice": ["language: en saved — active en (English)"]}
+{"locale": "es", "persisted": true, "hint": "Solo lectura · esc volver", "escape": "closed page, restored editable composer focus", "notice": ["idioma: es guardado — activo es (Español)"]}
+{"locale": "ru", "persisted": true, "hint": "Только чтение · esc назад", "escape": "closed page, restored editable composer focus", "notice": ["язык: ru сохранён — активен ru (Русский)"]}
+{"locale": "vi", "persisted": true, "hint": "Chỉ đọc · esc quay lại", "escape": "closed page, restored editable composer focus", "notice": ["ngôn ngữ: đã lưu vi — đang dùng vi (Tiếng Việt)"]}
+{"locale": "hi", "persisted": true, "hint": "केवल पढ़ने के लिए · esc लौटें", "escape": "closed page, restored editable composer focus", "notice": ["भाषा: hi सहेजा गया — hi (हिन्दी) सक्रिय"]}
+{"locale": "ur", "persisted": true, "hint": "صرف پڑھنے کے لیے · esc واپس", "escape": "closed page, restored editable composer focus", "notice": ["زبان: ur محفوظ ہو گئی — فعال ur (اردو)"]}
+PASS all8 persisted language + actual Escape; context exited

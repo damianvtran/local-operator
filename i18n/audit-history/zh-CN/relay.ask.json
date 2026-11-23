@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "relay.ask",
+  "history_sha256": "f8a9184928e7e44f29f85a0b83ee189eab9feaf36da8e3e013b2a8e5936cb83a",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.ask",
+      "source_sha256": "a79fa2b558172f58f329da3cbc30b795c4129cab1ecbb417767d105476662494",
+      "translator": {
+        "agent": "lopdev coder (PR #4495 commits bc826fc62..0e439855a); identity and model as stated in the lopdev manager's audit brief, not recorded in the commits",
+        "model": "anthropic/claude-sonnet-5-5",
+        "fallback": "unknown (not recorded in the commits)",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev reviewer role, session b7ef3c226fc6; not the translator)",
+        "session": "b7ef3c226fc6",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "PR #4495 relay ask-panel parity delta, independent audit 2026-11-23 by reviewer b7ef3c226fc6 (anthropic/claude-opus-5-5, no fallback): 6 changed/new key(s) passed; 5 unchanged key(s) carried by byte proof from the passed 2ead3ad3 row. Source a79fa2b558172f58f329da3cbc30b795c4129cab1ecbb417767d105476662494 and target 762329a022dd7ddeeeb6e3a296fc09cb794af25a2288e08a830bc3f0a336b35b recomputed from the files. Evidence: i18n/audits/evidence/zh-CN/relay.ask/askparity-r1-b7ef3c226fc6/record.json"
+    }
+  ]
+}

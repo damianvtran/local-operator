@@ -1,0 +1,125 @@
+{
+  "kind": "manager-primary-receipt-reachability-and-current-major-index",
+  "head": "4880031aeed59ef17ae6ffccc15d28e1fc0db104",
+  "resolvable": 14,
+  "unresolvable": 0,
+  "absent": 0,
+  "rows": [
+    {
+      "locale": "zh-CN",
+      "side": "A",
+      "path": "/Users/damian/.local-operator/sessions/46477cf7eb33/scratchpad/approval-repair-audit-zh-CN-A-r2.json",
+      "sha256": "857122c0a9a2694131a9a47e819f84612861e5caeb5cf4621bfee99a50e7a726",
+      "major_keys": []
+    },
+    {
+      "locale": "zh-CN",
+      "side": "B",
+      "path": "/Users/damian/.local-operator/sessions/f11074ee208d/scratchpad/approval-repair-audit-zh-CN-B-r2.json",
+      "sha256": "58ef1782be215667c4a77f9af03afe52f83efdd5b075cdc4eb4d2ece649cc5fa",
+      "major_keys": []
+    },
+    {
+      "locale": "fr",
+      "side": "A",
+      "path": "/Users/damian/.local-operator/sessions/d85317d32b42/scratchpad/approval-repair-audit-fr-A-r2.json",
+      "sha256": "7cf0718177880cf515076fbb1798fddc21614fcd9f4242164a48b286561d0fa3",
+      "major_keys": []
+    },
+    {
+      "locale": "fr",
+      "side": "B",
+      "path": "/Users/damian/.local-operator/sessions/a65929487d09/scratchpad/approval-repair-audit-fr-B-r2.json",
+      "sha256": "6aa8034ab21b3acef0244b6a560aafbd6041ab9ba92fae84cc49c00409579bcc",
+      "major_keys": []
+    },
+    {
+      "locale": "es",
+      "side": "A",
+      "path": "/Users/damian/.local-operator/sessions/62b5777013c2/scratchpad/approval-repair-audit-es-A-r2.json",
+      "sha256": "b6124224ca10a08c1b60130752af8244b87e5b61bb17922924cab454d70ac8b7",
+      "major_keys": [
+        "wire.settings.providers_openrouter_allow_fallbacks.help",
+        "wire.settings.providers_openrouter_data_collection.help",
+        "wire.settings.providers_openrouter_enforce_distillable_text.help",
+        "wire.settings.providers_openrouter_require_parameters.help",
+        "wire.settings.providers_openrouter_sort.help",
+        "wire.settings.providers_openrouter_zdr.help",
+        "wire.settings.shell_environment_mode.help"
+      ]
+    },
+    {
+      "locale": "es",
+      "side": "B",
+      "path": "/Users/damian/.local-operator/sessions/1898eabd4159/scratchpad/approval-repair-audit-es-B-r2.json",
+      "sha256": "af116da3d3ee3b3d8b6d0bf798f725ee50639470fbc5cffe52d7cd87a581f1bb",
+      "major_keys": [
+        "wire.settings.providers_openrouter_allow_fallbacks.help",
+        "wire.settings.providers_openrouter_data_collection.help",
+        "wire.settings.providers_openrouter_enforce_distillable_text.help",
+        "wire.settings.providers_openrouter_require_parameters.help",
+        "wire.settings.providers_openrouter_sort.help",
+        "wire.settings.providers_openrouter_zdr.help",
+        "wire.settings.shell_environment_mode.help"
+      ]
+    },
+    {
+      "locale": "ru",
+      "side": "A",
+      "path": "/Users/damian/.local-operator/sessions/119c681eb085/scratchpad/approval-repair-audit-ru-A-r2.json",
+      "sha256": "13c66554a633a761fe33da6b48c93f8d5f0ecd30db47ed78f392d19636c38f7a",
+      "major_keys": []
+    },
+    {
+      "locale": "ru",
+      "side": "B",
+      "path": "/Users/damian/.local-operator/sessions/40d37dadb2dc/scratchpad/approval-repair-audit-ru-B-r2.json",
+      "sha256": "c1c916440ba7989e27988042c449b2d129a40d8b3371f2060cfa418c843611de",
+      "major_keys": []
+    },
+    {
+      "locale": "vi",
+      "side": "A",
+      "path": "/Users/damian/.local-operator/sessions/e764273c566b/scratchpad/approval-repair-audit-vi-A-r2.json",
+      "sha256": "ee52cb63498d3f353e30aa650284d0166dcfa240649c1d290f3ab5dfe4a32134",
+      "major_keys": []
+    },
+    {
+      "locale": "vi",
+      "side": "B",
+      "path": "/Users/damian/.local-operator/sessions/465096fd021d/scratchpad/approval-repair-audit-vi-B-r2.json",
+      "sha256": "f4080d71e211a1812fab58bf0fe7060c8f2cfc03537ad79981e3a1c2217a540a",
+      "major_keys": [
+        "wire.settings.display_nerd_icons.help"
+      ]
+    },
+    {
+      "locale": "hi",
+      "side": "A",
+      "path": "/Users/damian/.local-operator/sessions/bfd433d0c3db/scratchpad/approval-repair-audit-hi-A-r2.json",
+      "sha256": "a58762cd180e8ed17c317641e15e345318a965bc03fc62c684db2e4ac9c26e37",
+      "major_keys": []
+    },
+    {
+      "locale": "hi",
+      "side": "B",
+      "path": "/Users/damian/.local-operator/sessions/3ece276fdbf2/scratchpad/approval-repair-audit-hi-B-r2.json",
+      "sha256": "3b76370ea1c6816c2e89fbb8a2afcc8189faf1a03bd458ba991642633e6285b7",
+      "major_keys": []
+    },
+    {
+      "locale": "ur",
+      "side": "A",
+      "path": "/Users/damian/.local-operator/sessions/24912b8fdad9/scratchpad/approval-repair-audit-ur-A-r2.json",
+      "sha256": "eb6f8ab7775afde03ca6c379c524717d94dfa4fe6f38f7a24a931d0b6eeaf1e2",
+      "major_keys": []
+    },
+    {
+      "locale": "ur",
+      "side": "B",
+      "path": "/Users/damian/.local-operator/sessions/8a8a999ccce7/scratchpad/approval-repair-audit-ur-B-r2.json",
+      "sha256": "d5c1fcedc8d79efff2e17784aea581ceff4f65fd50d4cb639591a6fce9302f51",
+      "major_keys": []
+    }
+  ]
+}

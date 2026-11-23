@@ -3988,9 +3988,7 @@ def _owner_mesh(monkeypatch: pytest.MonkeyPatch, owner_root: Path) -> list[list[
 async def test_remote_peek_windows_match_the_owners_local_peek(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Acceptance: with `peer`, head/query/regex/digest/around_id/before_id/steps
-    return the same text as the equivalent LOCAL call on the owner — and the
-    session is STORED (no live record anywhere), which the v1 tail refused."""
+    """Stored remote journals keep window parity and report peer-only search/fold scope."""
     _, ids, _ = _big_journal(
         root, "abab12121212", rows=120, pad=40, custom_every=7, needle="needle-x", needle_row=30
     )
@@ -4011,14 +4009,23 @@ async def test_remote_peek_windows_match_the_owners_local_peek(
         remote = await _peek(root, {"op": "peek", "session": "abab12121212", "peer": PEER, **case})
         assert not local.is_error, (case, local.text)
         assert not remote.is_error, (case, remote.text)
-        assert remote.text == local.text, case
-        # ``bridge_taint`` is the one deliberate difference (#3796, S-60): the
-        # local peek judges the journal's own Team Bridge latch, while a mesh
-        # peer reports none, so any step it returns latches fail closed.
-        skip = {"peer", "bridge_taint"}
-        local_details = {k: v for k, v in local.details.items() if k not in skip}
-        remote_details = {k: v for k, v in remote.details.items() if k not in skip}
-        assert remote_details == local_details, case
+        if case.get("query"):
+            found = case["query"] != "no-such-needle"
+            assert remote.details["match_count"] == int(found)
+            assert remote.details["match_count_complete"] is True
+            assert f"match count: {int(found)} (whole transcript)" in remote.text
+            assert remote.details.get("match_id") == local.details.get("match_id")
+        elif case.get("digest"):
+            assert "digest fold (not the full transcript)" in remote.text
+            assert remote.details["steps_seen"] == local.details["steps_seen"]
+        else:
+            assert remote.text == local.text, case
+            skip = {"peer", "bridge_taint"}
+            local_details = {k: v for k, v in local.details.items() if k not in skip}
+            remote_details = {k: v for k, v in remote.details.items() if k not in skip}
+            assert remote_details == local_details, case
+        # The owner doesn't report its Team Bridge latch on the mesh, so
+        # any step it returns still latches fail closed (#3796, S-60).
         assert remote.details["peer"] == PEER
         assert "bridge_taint" not in local.details, case
         shown = remote.details.get("steps_shown") or remote.details.get("steps_seen")

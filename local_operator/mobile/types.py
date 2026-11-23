@@ -88,6 +88,30 @@ INPUT_MODES = ("typed", "dictated", "mixed")
 #: durable state.
 INPUT_PATH_MAX_CHARS = 96
 
+#: The busy-send delivery-mode vocabulary (``delivery``). Absence and an
+#: explicit empty string BOTH read as ``steer`` — every pre-feature producer
+#: sends nothing — while any other present value must be one of these. The
+#: value is refused (never coerced) at the wire so a typo cannot silently
+#: become an urgent steer.
+DELIVERY_MODES = ("steer", "queue", "both")
+
+
+def _delivery(data: Any) -> str:
+    """Validate the reserved ``delivery`` mode on a payload; empty is legacy.
+
+    Shared by every boundary this module serves (HTTP body, control frame,
+    continuation envelope): absent is ``steer``, a present non-empty value
+    must be in :data:`DELIVERY_MODES`, and anything else is refused rather
+    than coerced. Returns the value as sent (``""`` for legacy), so callers
+    that forward verbatim keep the legacy frame byte-identical.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("delivery payload must be an object")
+    delivery = data.get("delivery", "")
+    if not isinstance(delivery, str) or (delivery and delivery not in DELIVERY_MODES):
+        raise ValueError("delivery must be one of 'steer', 'queue' or 'both'")
+    return delivery
+
 
 def _input_annotation(data: Any) -> tuple[str, str]:
     """Validate the reserved ``input_mode``/``input_path`` pair on a payload.
@@ -122,6 +146,11 @@ class ContinuationCommand:
     envelope as text/images so a retry replays the annotation under the same
     UUID — the fields are part of the command's immutable identity, not a
     transport option.
+
+    ``delivery`` is the busy-send mode (``steer``/``queue``/``both``), riding
+    the same envelope for the same reason: a retry of a queued send must
+    replay as queued, not as an urgent steer. Absence ("") is the legacy
+    reading; see ``_delivery``. It is ignored when the session is idle.
     """
 
     command_id: str
@@ -131,6 +160,7 @@ class ContinuationCommand:
     submitted_at: float = field(default_factory=time.time)
     input_mode: str = ""
     input_path: str = ""
+    delivery: str = ""
 
     @staticmethod
     def create(
@@ -188,6 +218,7 @@ class ContinuationCommand:
             submitted_at=float(submitted_at),
             input_mode=input_mode,
             input_path=input_path,
+            delivery=_delivery(data),
         )
 
 
@@ -287,6 +318,9 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
         # unknown fields are deliberately not rejected in general, so without
         # this a mangled input_mode would ride silently to a durable row.
         _input_annotation(frame)
+        # Likewise the busy-send delivery mode: shape-checked here so a
+        # mangled `delivery` never rides silently to a queued steer.
+        _delivery(frame)
         # Protocol-v3 producers send identity on both paths. Older authenticated
         # loopback clients omitted it, so absence remains compatible; a supplied
         # id is always validated before reaching transcript or steering state.

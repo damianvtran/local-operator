@@ -1,0 +1,26 @@
+BEFORE en/tui.model_persistence.json 4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff
+BEFORE en/tui.model_persistence.context.json b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc
+BEFORE vi/tui.model_persistence.json d6b5f00ab0a25ea2596879299e5cda07b5b5bb66bf8ea8bc9081f503719cf505
+INTERPRETER /Users/damian/local-operator/.venv/bin/python
+MODULE local_operator.i18n.catalogues /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/catalogues.py
+MODULE local_operator.i18n.runtime /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/runtime.py
+MODULE local_operator.i18n.messages /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/messages.py
+MODULE scripts.i18n.check /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/scripts/i18n/check.py
+ISOLATION /Users/damian/.local-operator/sessions/fcb8a76716b3/scratchpad/viA1-home /Users/damian/.local-operator/sessions/fcb8a76716b3/scratchpad/viA1-home/config CMUX absent
+OFFICIAL scoped catalogue/context/ICU []
+NEGATIVE missing key ["vi/tui.model_persistence: missing key 'tui.model_persistence.persist'"]
+NEGATIVE renamed argument ["vi/tui.model_persistence: tui.model_persistence.with_model: arguments (('wrong', 'simple'), ('routes', 'simple')) != en's (('label', 'simple'), ('routes', 'simple')): argument 1 is 'wrong', en's is 'label' (renamed or reordered)"]
+KEY tui.model_persistence.persist arguments () plural/select=0 NFC=yes cells 49 no explicit cap
+KEY tui.model_persistence.settings arguments () plural/select=0 NFC=yes cells 48 no explicit cap
+KEY tui.model_persistence.saved arguments () plural/select=0 NFC=yes cells 63 no explicit cap
+KEY tui.model_persistence.with_model arguments (('label', 'simple'), ('routes', 'simple')) plural/select=0 NFC=yes cells 27 no explicit cap
+PROTECTED /model default ASCII bytes unchanged
+PROTECTED /settings ASCII bytes unchanged
+PROTECTED /model saved ASCII bytes unchanged
+NEGATIVE missing label MessageFormatError message argument 'label' was not supplied (have: routes)
+NEGATIVE missing routes MessageFormatError message argument 'routes' was not supplied (have: label)
+Traceback (most recent call last):
+  File "/Users/damian/local-operator/.worktrees/i18n-model-persist-notice/i18n/audits/evidence/vi/tui.model_persistence/viA1/script.py.txt", line 61, in <module>
+    else: raise AssertionError('Unknown message unexpectedly accepted')
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Unknown message unexpectedly accepted

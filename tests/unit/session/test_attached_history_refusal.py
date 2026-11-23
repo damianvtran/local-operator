@@ -131,11 +131,37 @@ def _local_viewer(tmp_path: Path) -> AttachedSession:
     return viewer
 
 
+@pytest.mark.parametrize(
+    ("locale", "units"),
+    [
+        ("es", "Límites de la página: en bytes ({bytes}) o en mensajes ({messages})."),
+        ("fr", "Limites de la page\u00a0: en octets ({bytes}) ou en messages ({messages})."),
+        ("ru", "Лимиты страницы: в байтах — {bytes} или в сообщениях — {messages}."),
+        ("ur", "صفحے پر دکھانے کی حد: بائٹس میں {bytes} یا پیغامات میں {messages}۔"),
+    ],
+)
+def test_size_refusal_audited_units_are_count_neutral(locale: str, units: str) -> None:
+    from local_operator.i18n.catalogues import load_catalogue
+    from local_operator.i18n.runtime import render_message
+
+    # Held locales deliberately cannot be activated; exercise the ICU renderer
+    # on their candidate source directly without bypassing the shipping guard.
+    source = load_catalogue(locale, "session.remote_peek")["session.remote_peek.display_too_large"]
+    assert source.count("{bytes}") == source.count("{messages}") == 1
+    assert source.count("`head=20`") == source.count("`digest`") == 1
+    for params in ({"bytes": "1", "messages": "1"}, {"bytes": "1,000,000", "messages": "21"}):
+        remedies, _, limit, owning_device = render_message(source, params, locale).splitlines()
+        assert limit == units.format(**params)
+        assert "`head=20`" in remedies and "`digest`" in remedies
+        assert owning_device and "`" not in owning_device
+
+
 @pytest.mark.asyncio
 async def test_a_size_verdict_names_the_size_and_never_the_build(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The defect: a same-build size verdict reported as "the peer is too old"."""
+    """A same-build size verdict offers bounded views, not a peer update."""
+    monkeypatch.setenv("LOP_LANG", "en")
     viewer = _remote_viewer(tmp_path)
     # NO ``caplog.set_level`` HERE, deliberately: forcing the level is what makes
     # a level regression invisible (agent review round 1, MINOR-2). At the
@@ -148,10 +174,18 @@ async def test_a_size_verdict_names_the_size_and_never_the_build(
     message = str(raised.value)
     assert "too old" not in message, message
     assert "update" not in message, message
-    assert "too large" in message and "device that holds it" in message, message
+    assert message.splitlines() == [
+        "Try `head=20` for the opening steps or `digest` for a compact fold.",
+        "The newest history exceeded a display page or runtime socket limit.",
+        "Display page limits: 524,288 bytes or 120 messages.",
+        "For exact history, open the conversation on the owning device.",
+        "lop network sessions --peer peer-device --peek s1 --head=20",
+        "lop network sessions --peer peer-device --peek s1 --digest",
+    ]
     # THE LANE BUDGET (design review round 1, D1): 110 cells is the transcript
-    # lane at 120 columns, and a sentence over it orphans its closing clause.
-    assert len(message) <= 110, f"{len(message)} chars: {message}"
+    # lane at 120 columns, so keep the commands on independent lines.
+    assert all(len(line) <= 110 for line in message.splitlines()), message
+    print(message)
 
     # The log line is the after-the-fact record of WHY the page was refused:
     # nothing on the wire carries the reason, so this is where size is told

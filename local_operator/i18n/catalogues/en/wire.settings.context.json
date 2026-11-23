@@ -255,6 +255,16 @@
     "tone": "plain",
     "note": "Boolean row label under the Remote compute section. Keep under 29 cells."
   },
+  "wire.settings.composer.title": {
+    "role": "settings section title",
+    "tone": "plain",
+    "note": "Section heading for the busy-send delivery mode. The section holds the default for a message sent while the agent is working; it is not a screen and not a button."
+  },
+  "wire.settings.composer.description": {
+    "role": "settings section description",
+    "tone": "plain, precise",
+    "note": "Says the change applies immediately in the terminal and the desktop app (one shared config, read at send time). It must not name a restart, and it must not promise the phone: the mobile web chip stays per-device and does not read this row."
+  },
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.15m.label": {
     "role": "settings choice label",
     "tone": "plain",
@@ -417,6 +427,86 @@
     "tone": "concise, neutral",
     "note": "Claims to preserve, hedged exactly as in English: (1) only SOME requests to start or decide NEW work are held (the code holds only a request whose sole concern is new work, within a per-sender budget, when the screening answer is trusted; anything else is still rejected), so never say 'every request' or 'all'; (2) nothing reaches the user's agent unless the person delivers it, so this is never automatic delivery and never widens who may give the agent instructions; (3) OFF rejects these requests (the earlier behaviour). 'deliver'/'discard' are lowercase verbs describing the person's choice, not button labels; keep this locale's established discard verb distinct from its reject verb. Do not use the word for screening/filtering. WIDTH: the row shows the help in a two-row band 74 cells wide at 80 columns and 94 at 100 columns, wrapping at spaces; English is kept under 140 cells, and a translation must wrap into two rows of 94 cells (at most 188 cells, less once words wrap). Put the 'held for you to deliver or discard' clause first so the 80-column cut keeps it. No ICU arguments, no numbers."
   },
+  "wire.settings.speech_voice_expressiveness.choice.high.description": {
+    "role": "voice expressiveness choice description",
+    "tone": "concise, plain, explanatory",
+    "note": "A brief user-facing explanation beside the choice label, not an instruction to the synthesizer. Preserve the meaning of the English explanation. Lively and expressive delivery, not increased volume or pitch. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+  },
+  "wire.settings.speech_voice_expressiveness.choice.high.label": {
+    "role": "voice expressiveness choice label",
+    "tone": "concise, adjectival",
+    "note": "A concise adjectival choice label for the voice expressiveness level; use a natural localized adjective or level term, not an untranslated identifier. Lively and expressive delivery, not increased volume or pitch. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+  },
+  "wire.settings.speech_voice_expressiveness.choice.low.description": {
+    "role": "voice expressiveness choice description",
+    "tone": "concise, plain, explanatory",
+    "note": "A brief user-facing explanation beside the choice label, not an instruction to the synthesizer. Preserve the meaning of the English explanation. Restrained and plain delivery with little expressive variation. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+  },
+  "wire.settings.speech_voice_expressiveness.choice.low.label": {
+    "role": "voice expressiveness choice label",
+    "tone": "concise, adjectival",
+    "note": "A concise adjectival choice label for the voice expressiveness level; use a natural localized adjective or level term, not an untranslated identifier. Restrained and plain delivery with little expressive variation. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+  },
+  "wire.settings.speech_voice_expressiveness.choice.medium.description": {
+    "role": "voice expressiveness choice description",
+    "tone": "concise, plain, explanatory",
+    "note": "A brief user-facing explanation beside the choice label, not an instruction to the synthesizer. Preserve the meaning of the English explanation. The middle level of expressiveness; the description refers to the existing standard delivery ('Today's constant'), not a calendar date, mathematical constant or a promise that the voice never varies. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+  },
+  "wire.settings.speech_voice_expressiveness.choice.medium.label": {
+    "role": "voice expressiveness choice label",
+    "tone": "concise, adjectival",
+    "note": "A concise adjectival choice label for the voice expressiveness level; use a natural localized adjective or level term, not an untranslated identifier. The middle level of expressiveness; the description refers to the existing standard delivery ('Today's constant'), not a calendar date, mathematical constant or a promise that the voice never varies. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+  },
+  "wire.settings.speech_voice_tone.choice.authoritative.description": {
+    "role": "voice tone choice description",
+    "tone": "concise, plain, explanatory",
+    "note": "A brief user-facing explanation beside the choice label, not an instruction to the synthesizer. Preserve the meaning of the English explanation. Confident and assured, not authoritarian or a claim of permission or factual authority. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+  },
+  "wire.settings.speech_voice_tone.choice.authoritative.label": {
+    "role": "voice tone choice label",
+    "tone": "concise, adjectival",
+    "note": "A concise adjectival choice label for the voice tone; use a natural localized adjective or level term, not an untranslated identifier. Confident and assured, not authoritarian or a claim of permission or factual authority. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+  },
+  "wire.settings.speech_voice_tone.choice.bright.description": {
+    "role": "voice tone choice description",
+    "tone": "concise, plain, explanatory",
+    "note": "A brief user-facing explanation beside the choice label, not an instruction to the synthesizer. Preserve the meaning of the English explanation. Upbeat and energetic, not visual brightness. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+  },
+  "wire.settings.speech_voice_tone.choice.bright.label": {
+    "role": "voice tone choice label",
+    "tone": "concise, adjectival",
+    "note": "A concise adjectival choice label for the voice tone; use a natural localized adjective or level term, not an untranslated identifier. Upbeat and energetic, not visual brightness. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+  },
+  "wire.settings.speech_voice_tone.choice.calm.description": {
+    "role": "voice tone choice description",
+    "tone": "concise, plain, explanatory",
+    "note": "A brief user-facing explanation beside the choice label, not an instruction to the synthesizer. Preserve the meaning of the English explanation. Unhurried and steady vocal delivery. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+  },
+  "wire.settings.speech_voice_tone.choice.calm.label": {
+    "role": "voice tone choice label",
+    "tone": "concise, adjectival",
+    "note": "A concise adjectival choice label for the voice tone; use a natural localized adjective or level term, not an untranslated identifier. Unhurried and steady vocal delivery. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+  },
+  "wire.settings.speech_voice_tone.choice.neutral.description": {
+    "role": "voice tone choice description",
+    "tone": "concise, plain, explanatory",
+    "note": "A brief user-facing explanation beside the choice label, not an instruction to the synthesizer. Preserve the meaning of the English explanation. Even and unmarked vocal tone, without a pronounced emotional colouring. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+  },
+  "wire.settings.speech_voice_tone.choice.neutral.label": {
+    "role": "voice tone choice label",
+    "tone": "concise, adjectival",
+    "note": "A concise adjectival choice label for the voice tone; use a natural localized adjective or level term, not an untranslated identifier. Even and unmarked vocal tone, without a pronounced emotional colouring. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+  },
+  "wire.settings.speech_voice_tone.choice.warm.description": {
+    "role": "voice tone choice description",
+    "tone": "concise, plain, explanatory",
+    "note": "A brief user-facing explanation beside the choice label, not an instruction to the synthesizer. Preserve the meaning of the English explanation. Friendly and approachable, not a literal temperature. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+  },
+  "wire.settings.speech_voice_tone.choice.warm.label": {
+    "role": "voice tone choice label",
+    "tone": "concise, adjectival",
+    "note": "A concise adjectival choice label for the voice tone; use a natural localized adjective or level term, not an untranslated identifier. Friendly and approachable, not a literal temperature. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+  },
   "wire.settings.update_auto_prune.choice.false.description": {
     "role": "description of the 'off' choice",
     "tone": "terse fragment",
@@ -440,6 +530,16 @@
     "tone": "terse, Sentence case (first word capitalised) like its neighbours",
     "width": "short label column; painted in a 29-cell column; keep <=29 cells in every locale",
     "note": "An on/off switch: delete old unused install generations automatically after each update."
+  },
+  "wire.settings.tool_approval_mode.choice.ask.label": {
+    "role": "approval mode dropdown choice label",
+    "tone": "concise, neutral, sentence case",
+    "note": "Human-facing name for the prompting mode, not the ask tool or a command. Translate naturally as a mode label; do not preserve the raw English enum token. Choice.value remains the machine value ask, while Choice.label is independently localized display copy. Ask mode prompts for write and command tools, not unconditionally for every tool call. Existing guardrail risk checks and mandatory human-approval requirements still apply in both modes. This label is neither authorization nor permission to execute a tool. Keep it compact; no ICU arguments. See settings_io.py's tool_approval_mode choices, harness/approval.py and guardrails/check.py."
+  },
+  "wire.settings.tool_approval_mode.choice.auto.label": {
+    "role": "approval mode dropdown choice label",
+    "tone": "concise, neutral, sentence case",
+    "note": "Human-facing name for the automatic tool-approval mode. Translate naturally as a mode label, not as an untranslated machine token; use an idiomatic local abbreviation only if natural. Choice.value remains the machine value auto, while Choice.label is independently localized display copy. Automatic does not mean every action is allowed: existing guardrail risk checks and mandatory human-approval requirements still apply, including person-only gates for account profile saves and community posts. Do not imply a guardrail bypass, unconditional approval, authorization or permission to execute a tool. Keep it compact; no ICU arguments. See settings_io.py's tool_approval_mode choices, harness/approval.py and guardrails/check.py."
   },
   "wire.settings.update_keep_generations.help": {
     "role": "settings row help",

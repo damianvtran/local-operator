@@ -1,0 +1,48 @@
+{
+  "record_reference": "i18n/audits/evidence/ur/tui.provider_state/ua3ba0/record.json",
+  "auditor": {
+    "agent": "i18n-auditor/provider-state-ur-audit-A",
+    "session": "3ba03317d047",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "ab6b56b73e1e",
+    "actual_model_source": "Host-delivered model-switch notice in this transcript; provider failure: quota",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "independent_per_response_served_model_telemetry": "unknown; not available",
+    "method": "native Urdu LLM reasoning; no MT/service/API"
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ur/tui.provider_state/ua3ba0/audit.log",
+      "sha256": "e425af13d6f60b89225f228a1300f87231054d25d7bd684956e04c11ebd28629"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.provider_state/ua3ba0/directledger-receipt.json",
+      "sha256": "bac3b453e9fe67cf3c5650527294d86ea2d0f98ae75abbf9a2064f7aa7eef4e7"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.provider_state/ua3ba0/input-hashes.json",
+      "sha256": "d7b0c3c0a015e4619eed558eb9c12883937860812045451cc72071371d8b7d12"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.provider_state/ua3ba0/ledger-dry-run.log",
+      "sha256": "69a8b758fd422b080e07ae40b0d4c3933b2bdad27c01e6290d72d3afea159a9e"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.provider_state/ua3ba0/record.json",
+      "sha256": "57c27ab742f821555725daabd2b954d23c85bf511aac2bccc43b63f252011067"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.provider_state/ua3ba0/report.md",
+      "sha256": "4a5ff3bc3c8826b3b1a8ddc412dc5319f8e0d73bf4e1a1e57a6e9f67e9630fa7"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.provider_state/ua3ba0/script.py.txt",
+      "sha256": "f3c4bbe795fae35325d8bf5d7907a59599b99179646dd0c5683c90639c0d631b"
+    }
+  ]
+}

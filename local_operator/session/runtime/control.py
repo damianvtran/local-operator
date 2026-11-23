@@ -822,12 +822,16 @@ def _mark_wakes_dormant(record: SessionRecord, root: Path, marker: str = STOP_MA
         # counted; the receipt says the pass still runs instead. (A PARK keeps
         # everything armed anyway, so it counts the rows like any session.)
         return 0
-    entry = wake_store.read_entry(root, record.session_id)
-    if entry is None:
-        return 0
+    entry = wake_store.read_entry(root, record.session_id) or {}
     schedules = entry.get("schedules") or []
-    if not schedules:
+    from local_operator.wakes.goals import retry_at
+
+    # The explicit stop lever owns goal recovery too, even with zero schedules.
+    goal_only = not schedules and retry_at(session_dir(root, record.session_id)) is not None
+    if not schedules and not goal_only:
         return 0
+    if goal_only:
+        entry["goal_only"] = True
     wake_store.write_entry(
         root,
         record.session_id,

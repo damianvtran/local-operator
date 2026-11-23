@@ -1,0 +1,125 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.providers.connect",
+  "source_sha256": "6277c0656675f9e4cfe3704cd2d62035b49f11e717aab2bd8c8e392438fd7959",
+  "target_sha256": "fe781c5c8ffb3cdd27b7cb72c4214f4fb6add3bab361678a8c2c557d7a7d2b48",
+  "context_sha256": "c4dbbb698f0cc7c17f5f19434146b46de2376c93e5c89b8dc2368cc38dd2ab38",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-21",
+    "provenance_source": "delegator brief; not independently observable from catalogue bytes"
+  },
+  "auditor": {
+    "agent": "translation-auditor / conn-audit-zh-CN",
+    "session": "a885f062f30a",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "fallback_used": false,
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "keys_read": 5,
+  "findings": [],
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-backend-english",
+  "head": "b5bb56079c5067fd2efc81d6d223ac0283171142",
+  "checks": {
+    "catalogues_only": {
+      "command": "PYTHONPATH=<worktree> /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only",
+      "exit_code": 0,
+      "actual_output": "check.py: catalogue checks: 0 problem(s)"
+    },
+    "message_arguments_ordered_parity": true,
+    "render_message": [
+      {
+        "key": "wire.providers.connect.key_invalid_characters",
+        "source_arguments": [],
+        "target_arguments": [],
+        "source_rendered": "This key contains characters an API key cannot have. Re-copy it and try again.",
+        "target_rendered": "此密钥包含API密钥中不应出现的字符。请重新复制后重试。",
+        "source_cells": 78,
+        "target_cells": 53
+      },
+      {
+        "key": "wire.providers.connect.key_rejected",
+        "source_arguments": [
+          [
+            "label",
+            "simple"
+          ]
+        ],
+        "target_arguments": [
+          [
+            "label",
+            "simple"
+          ]
+        ],
+        "source_rendered": "OpenAI rejected this API key. Check it and try again.",
+        "target_rendered": "OpenAI拒绝了此API密钥。请检查后重试。",
+        "source_cells": 53,
+        "target_cells": 37
+      },
+      {
+        "key": "wire.providers.connect.key_unreachable",
+        "source_arguments": [
+          [
+            "label",
+            "simple"
+          ]
+        ],
+        "target_arguments": [
+          [
+            "label",
+            "simple"
+          ]
+        ],
+        "source_rendered": "Could not reach OpenAI to check this key. It was saved without being verified.",
+        "target_rendered": "无法连接OpenAI来检查此密钥。密钥已保存，但未经验证。",
+        "source_cells": 78,
+        "target_cells": 52
+      },
+      {
+        "key": "wire.providers.connect.key_unverified",
+        "source_arguments": [
+          [
+            "label",
+            "simple"
+          ],
+          [
+            "status",
+            "simple"
+          ]
+        ],
+        "target_arguments": [
+          [
+            "label",
+            "simple"
+          ],
+          [
+            "status",
+            "simple"
+          ]
+        ],
+        "source_rendered": "OpenAI could not check this key right now (HTTP 429). It was saved without being verified.",
+        "target_rendered": "OpenAI暂时无法检查此密钥（HTTP 429）。密钥已保存，但未经验证。",
+        "source_cells": 90,
+        "target_cells": 62
+      },
+      {
+        "key": "wire.providers.connect.suggested_automatic",
+        "source_arguments": [],
+        "target_arguments": [],
+        "source_rendered": "Automatic",
+        "target_rendered": "自动",
+        "source_cells": 9,
+        "target_cells": 4
+      }
+    ],
+    "width_method": "Unicode East Asian W/F=2, otherwise 1; verified no combining or control characters",
+    "probe_setup": "wcwidth unavailable; used stdlib Unicode width for these ASCII/CJK strings, no installation"
+  },
+  "notes": "Independent side-by-side semantic audit of all 5 en/zh-CN keys and English context. Reviewed key_check.py classify/unverified/exception branches, defaults.py suggested_model_for, server/routes/auth.py save/rejection and suggested_model shape, server/routes/models.py suggestion serialization. Compared shipped zh-CN wire.errors.auth, wire.errors.bedrock, relevant wire.settings copy; UI ui.common.models.model_select.auto_recommended is 自动（推荐） (fr: Auto (recommandé)). 密钥/检查/未经验证 and 请 directives match shipped register; API/HTTP allowed technical acronyms; provider label remains untouched. No ICU plurals/number/date skeletons/markup in these 5 keys; zh-CN is LTR. No maxCells sidecar budget and none of the rendered targets exceeds English cell width with OpenAI/429. render_message is string-formatting evidence, not a screenshot or native-speaker certification. No repo edits; no eligibility/hold changes authorized or made."
+}

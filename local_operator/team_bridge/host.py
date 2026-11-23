@@ -118,7 +118,9 @@ __all__ = [
 ]
 
 
-def bridge_runtime_for_session(*, config_manager: Any, session_id: str) -> BridgeRuntime | None:
+def bridge_runtime_for_session(
+    *, config_manager: Any, session_id: str, session_agent_display: str | None = None
+) -> BridgeRuntime | None:
     """Build the session's bridge runtime, or ``None`` — a gate miss is not an error.
 
     No network, no fetch, no spawn: the client is cheap until its first
@@ -159,6 +161,7 @@ def bridge_runtime_for_session(*, config_manager: Any, session_id: str) -> Bridg
             tenant_id=owner.tenant_id,
             owner=owner,
             session_id=session_id,
+            session_agent_display=session_agent_display,
         )
     except (StoreRefused, sqlite3.Error):
         return None

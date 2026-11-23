@@ -1,0 +1,37 @@
+{
+  "locale": "es",
+  "namespace": "tui.model_persistence",
+  "source_sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff",
+  "status": "passed",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "e069889d36f8",
+    "model": "openai/gpt-6.1-sol",
+    "primary_model": "anthropic/claude-opus-5-5",
+    "fallback_used": true,
+    "fallback_reason": "provider failure: quota",
+    "actual_model_source": "Runtime model-switch message in this session explicitly names openai/gpt-6.1-sol as temporary quota fallback; Spanish authorship and validation occurred after this message. No external provider telemetry queried.",
+    "independent_from_translator_session": false,
+    "role": "author; not an independent auditor"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "c8fbb0cb0ff6",
+    "model": "openai/gpt-6.1-sol",
+    "primary_model": "anthropic/claude-opus-5-5",
+    "fallback_used": true,
+    "fallback_reason": "provider failure: quota",
+    "actual_model_source": "Explicit runtime model-switch message in this audit session; substantive audit executed after fallback. No external provider telemetry queried.",
+    "independent_from_translator_session": "e069889d36f8"
+  },
+  "audit_date": "2026-11-22",
+  "auditor_result": "passed",
+  "unresolved_blocker_major_count": 0,
+  "note": "Independent A: 4/4 passed; 0 blocker/major. Record: i18n/audits/evidence/es/tui.model_persistence/esA-c8fb/record.json; B/native/global gates remain open.",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.model_persistence/esA-c8fb/record.json",
+      "sha256": "eacaab5b92676bbfbaa514cf84a19427ffa1a5ef5c004c190f92d7ae5d97c03c"
+    }
+  ]
+}

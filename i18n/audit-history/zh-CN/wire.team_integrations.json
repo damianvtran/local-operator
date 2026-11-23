@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "wire.team_integrations",
+  "history_sha256": "aacba6094a3973221f3de39cb3cdee1ea1a73a0a99b22b86d4a5d31bdd248ea2",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.team_integrations",
+      "source_sha256": "a113b72685ea6475e63a216a53a9e957a47abba045c8c7f02bd81866b79104d5",
+      "context_sha256": "8f9a04256cdec81b4d47d4414632b6585bbe2200c9b8bc0b556cf68db5431648",
+      "target_sha256": "5f9b79419752d622127fbce6542646ce25b7dea8c6d276a4000d6ea1e6319780",
+      "translator": {
+        "agent": "coder",
+        "session": "10387053fcae",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-19",
+        "provenance": "Translator identity/model supplied in manager brief; final rig report used openai/gpt-6.1-sol fallback, but the brief explicitly identifies these translations as Opus. English row records source author, not a translation."
+      },
+      "auditor": {
+        "agent": "copy-reviewer / independent i18n auditor",
+        "session": "46d4abcf4224",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-19",
+        "fallback": "Host switched from anthropic/claude-opus-5-5 to openai/gpt-6.1-sol before substantive audit (provider quota failure).",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true,
+        "scope": "All 22 catalogue strings and English sidecar at aa3d38fcafa1fe88eed79088432b46f260dc0930. Catalogue semantics/consent meaning, idiom, glossary, placeholders, static widths and raw RTL controls; not full UI/server approval."
+      },
+      "status": "passed",
+      "note": "Independent catalogue-only pass: 22/22 keys, exact placeholder parity, actual ICU render_message samples preserve all parameter values; no plural/select branches (CLDR N/A), no manual bidi controls. Three labels fit maxCells=24 using rich.cells.cell_len; Urdu publish label is exactly 24 cells. copy_scan.py: 8 files, 164 candidates, 0 findings (scanner filters some placeholder-bearing strings; all 176 values reviewed separately). English, French, Spanish, Simplified Chinese, Russian, Vietnamese, Urdu and Hindi reviewed against glossary and locale guides. Rendered frame, real UI wrapping, pseudo-layout, RTL shaping/mirroring and real-server E2E UNAVAILABLE in authorized LIGHT lane; this pass does not certify them. Separate C1 MAJOR in approval assembly: create_hook card omits destination channels even when supplied in AskCopy; reproduced locally and reported to manager. C1 is not a translation defect and is NOT waived by these passed catalogue receipts. PR must not be represented as copy-clean until corrected."
+    }
+  ]
+}

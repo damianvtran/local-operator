@@ -21,6 +21,58 @@ plus `local_operator.computer_input` and `local_operator.helpers` — by design:
 session construction belongs to the driver process, never to the isolated
 adapter worker.
 
+## Retaining score diagnostics after a run
+
+A selective seal that keeps `outcome.json` and events but drops the artifact
+store can leave `score.details` pointing at bytes that disappear when the raw
+run is cleaned up. `scripts/retain_score_detail.py` projects just that reference.
+It uses the existing `EvidenceArtifactRef` digest and byte count, requires a
+regular file at `artifacts/<lowercase-sha256>`, checks size and SHA-256, and
+copies the exact bytes without overwriting anything. Its 1 MiB ceiling matches
+OSWorld's scorer limit. Enable it only for finalized outcomes from a scorer
+known to emit scrubbed `application/json` detail: a matching hash is not a
+redaction or authenticity check. Do not feed it agent-supplied outcomes or paths.
+
+For an operator-owned, post-exit campaign sealer, stage the helper next to the
+sealer **after the active wave**. Both run on the ambient POSIX Python; no
+adapter or harness install is needed. Keep the existing skip for already-sealed
+bundles. Only after the normal outcome/events/judge directory rename **and**
+successful results-ledger append, add this optional step (`sys` is the standard
+library module):
+
+```python
+try:
+    from retain_score_detail import publish_score_detail
+except ImportError:
+    print("   sealed: WARNING: optional score detail helper unavailable", file=sys.stderr)
+else:
+    publish_score_detail(outcome, run_dir, sealed_dir)
+```
+
+Here `outcome` is the parsed copied `outcome.json` (or `None` if there is no
+outcome), and `run_dir` is the caller-owned run root, **not** the episode bundle
+under `run_dir/evidence/`. The run-level `run_dir/artifacts/` is the declared
+source; the helper does not search other locations. Within the caller-owned
+`sealed_dir`, let only this helper create the `score-detail` child. It prepares
+the receipt and any verified bytes in private staging and renames them into
+place together. If that step raises an I/O error, it warns without logging
+paths or content, and leaves the primary seal and ledger alone. It does not
+replace an existing `score-detail` entry or backfill previously sealed bundles.
+
+`score-detail/score-detail-receipt.json` records `retained`, `missing` (no
+reference or no referenced file), or `refused` (with a reason, but no diagnostic
+content). Retained bytes are under `score-detail/artifacts/<sha256>`. Keep this
+private: the helper never enumerates or captures screenshots, process logs,
+guest outputs, or other artifacts. This is a selective diagnostic capsule, not
+full evidence verification, a new score, or a way to regrade stateful tasks
+after the guest is gone.
+
+Synthetic filesystem checks, from the repository root:
+
+```sh
+python3 -I -B -m unittest discover -s benchmarks/osworld_v2_adapter/scripts -p test_retain_score_detail.py -v
+```
+
 ## Guest-local action-server supervision
 
 During allocation, after disk preparation and **before task setup**, the adapter

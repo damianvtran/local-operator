@@ -1,0 +1,7 @@
+{
+  "tui.provider_state.logged_in": "लॉग इन है",
+  "tui.provider_state.env_key": "परिवेश चर से कुंजी",
+  "tui.provider_state.needs_login": "लॉग इन ज़रूरी",
+  "tui.provider_state.local_ready": "सर्वर कॉन्फ़िगर है",
+  "tui.provider_state.local_unconfigured": "सर्वर कॉन्फ़िगर करें"
+}

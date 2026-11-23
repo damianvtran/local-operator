@@ -1,0 +1,2215 @@
+{
+  "schema": "approval-full-repair-author/v1",
+  "locale": "hi",
+  "namespace": "wire.settings",
+  "role": "fresh Hindi repair author, NOT auditor",
+  "author": {
+    "agent": "translator / settings-major-repair-hi",
+    "session": "0b83e6902e55",
+    "actual_model": "openai/gpt-6.1-sol",
+    "fallback": "Host explicitly switched from anthropic/claude-opus-5-5 due to provider quota before authoring; exact serving-model identifier comes from that host switch notice, not original header.",
+    "date": "2026-11-22T02:36:50.212611+00:00"
+  },
+  "allocation": "ONE locale author repair <=45 minutes",
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+  "head": "90009effa833836ce4471e99d90d3b6438de7f60",
+  "round": 1,
+  "source": {
+    "envelope": "i18n/audits/evidence/approval-full-inputs/Englishvoiceconstant-full-en-approved-capture.json",
+    "envelope_sha256": "c17b1262dc76d312cfa21313bd0d1414e2b4132d9900265119d4c1d8d9c237f6",
+    "canonical_map_sha256": "8df2396d637f817a9b184aaf6f5c46fbde24f29532c9c8dd937a58fc3ecf3ae9",
+    "english_before_sha256": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+    "english_after_sha256": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+    "context_before_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+    "context_after_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+    "target_original_hash_matched_manifest_before_first_edit": true,
+    "target_before_sha256": "64bf453ca81721ed35d89ba95d7e5e5aac343765d5e6010fbd37ccbc50704f48",
+    "target_after_sha256": "b030c730c0f8a179773b082a8e907d4487e8cf31a590714b62bab51614a5c30a",
+    "approved_target_input": "i18n/audits/evidence/approval-full-inputs/hi-approved-envelope.json",
+    "approved_target_envelope_sha256": "444e3b4284616f74b29316a4086e57acd9ba2a3cfdc7b6bef5223ea947c62399"
+  },
+  "summary": {
+    "catalogue_keys": 895,
+    "changed_values": 63,
+    "diff_added_lines": 63,
+    "diff_removed_lines": 63,
+    "major_union_keys": 55,
+    "major_keys_authored": 45,
+    "major_keys_retained_by_Root_technical_boundary": 10,
+    "direct_neighbors_and_folded_minors": 18,
+    "unresolved_authoring_major_keys": 0,
+    "independent_audit_clearance": "NOT CLAIMED; all 55 adjudications remain subject to independent A/B delta review"
+  },
+  "major_dispositions": [
+    {
+      "finding_id": "I18N-WS-4BCC4EE3F5D9",
+      "message_id": "wire.settings.bash_memory_limit_mb.label",
+      "auditor_original_ids": [
+        "H-A-MIX-35",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-E6C2188A81F3",
+      "message_id": "wire.settings.bash_memory_mode.choice.auto.label",
+      "auditor_original_ids": [
+        "H-A-EN-1",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-802B8268724D",
+      "message_id": "wire.settings.bash_memory_mode.choice.manual.label",
+      "auditor_original_ids": [
+        "H-A-EN-2",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-803C522C3F62",
+      "message_id": "wire.settings.classification_vendor.choice.auto.label",
+      "auditor_original_ids": [
+        "H-A-EN-3",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-3081EAF521B2",
+      "message_id": "wire.settings.classification_vendor.choice.typesafe.description",
+      "auditor_original_ids": [
+        "H-A-MIX-36"
+      ],
+      "disposition": "unchanged technical usage retained under Root instruction; see technical_counterclaims"
+    },
+    {
+      "finding_id": "I18N-WS-240C498CA1C1",
+      "message_id": "wire.settings.compaction_strategy.choice.auto.label",
+      "auditor_original_ids": [
+        "H-A-EN-4",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-CDE402D4ABB5",
+      "message_id": "wire.settings.display_nerd_icons.choice.none.label",
+      "auditor_original_ids": [
+        "H-A-EN-5",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-7BC71BEE5100",
+      "message_id": "wire.settings.hub.description",
+      "auditor_original_ids": [
+        "H-A-MIX-49"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-E4736E35DC92",
+      "message_id": "wire.settings.hub_auto_update_agents.choice.true.description",
+      "auditor_original_ids": [
+        "H-A-MIX-47"
+      ],
+      "disposition": "unchanged technical usage retained under Root instruction; see technical_counterclaims"
+    },
+    {
+      "finding_id": "I18N-WS-E649D656620C",
+      "message_id": "wire.settings.hub_auto_update_agents.help",
+      "auditor_original_ids": [
+        "H-A-MIX-50"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-89000E708CCA",
+      "message_id": "wire.settings.hub_auto_update_teams.choice.true.description",
+      "auditor_original_ids": [
+        "H-A-MIX-48"
+      ],
+      "disposition": "unchanged technical usage retained under Root instruction; see technical_counterclaims"
+    },
+    {
+      "finding_id": "I18N-WS-B46B76077316",
+      "message_id": "wire.settings.hub_auto_update_teams.help",
+      "auditor_original_ids": [
+        "H-A-MIX-51"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-578CE3D533FF",
+      "message_id": "wire.settings.local_providers.base_url.help",
+      "auditor_original_ids": [
+        "H-A-MIX-37"
+      ],
+      "disposition": "unchanged technical usage retained under Root instruction; see technical_counterclaims"
+    },
+    {
+      "finding_id": "I18N-WS-5FAF63734560",
+      "message_id": "wire.settings.local_providers.base_url.label",
+      "auditor_original_ids": [
+        "H-A-EN-6"
+      ],
+      "disposition": "unchanged technical usage retained under Root instruction; see technical_counterclaims"
+    },
+    {
+      "finding_id": "I18N-WS-DA5C5E873CD2",
+      "message_id": "wire.settings.local_providers.description",
+      "auditor_original_ids": [
+        "H-A-MIX-38"
+      ],
+      "disposition": "unchanged technical usage retained under Root instruction; see technical_counterclaims"
+    },
+    {
+      "finding_id": "I18N-WS-C4D3DE320B13",
+      "message_id": "wire.settings.model_effort.choice.unset.label",
+      "auditor_original_ids": [
+        "H-A-EN-7",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-18110E8894F1",
+      "message_id": "wire.settings.network_advertise_hosts.label",
+      "auditor_original_ids": [
+        "H-A-MIX-39"
+      ],
+      "disposition": "unchanged technical usage retained under Root instruction; see technical_counterclaims"
+    },
+    {
+      "finding_id": "I18N-WS-552A0CCFA416",
+      "message_id": "wire.settings.network_max_handshakes.help",
+      "auditor_original_ids": [
+        "H-A-MIX-52"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-DAA433E4300B",
+      "message_id": "wire.settings.network_port.help",
+      "auditor_original_ids": [
+        "H-A-MIX-40"
+      ],
+      "disposition": "unchanged technical usage retained under Root instruction; see technical_counterclaims"
+    },
+    {
+      "finding_id": "I18N-WS-66D2D9CC6848",
+      "message_id": "wire.settings.network_rollout_on_update.choice.auto.label",
+      "auditor_original_ids": [
+        "H-A-EN-8",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-513A71CB406C",
+      "message_id": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+      "auditor_original_ids": [
+        "H-A-EN-9",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-32DB6C298E5C",
+      "message_id": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+      "auditor_original_ids": [
+        "H-A-EN-10",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-DD21D2852FC7",
+      "message_id": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "auditor_original_ids": [
+        "H-A-EN-11",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-961F6FF2DA51",
+      "message_id": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "auditor_original_ids": [
+        "H-A-EN-12",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-EAD73985D2C9",
+      "message_id": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+      "auditor_original_ids": [
+        "H-A-EN-13",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-B76646004E00",
+      "message_id": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.description",
+      "auditor_original_ids": [
+        "H-A-MIX-41"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-378BA7328B99",
+      "message_id": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+      "auditor_original_ids": [
+        "H-A-EN-14",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-CD06C73F8E78",
+      "message_id": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+      "auditor_original_ids": [
+        "H-A-EN-15",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-572D791F9AEE",
+      "message_id": "wire.settings.providers_openrouter_enforce_distillable_text.help",
+      "auditor_original_ids": [
+        "H-A-MIX-43"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-1F436A4FCED3",
+      "message_id": "wire.settings.providers_openrouter_enforce_distillable_text.label",
+      "auditor_original_ids": [
+        "H-A-MIX-42",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-2B7797E9A40D",
+      "message_id": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+      "auditor_original_ids": [
+        "H-A-EN-16",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-653D8954B431",
+      "message_id": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+      "auditor_original_ids": [
+        "H-A-EN-17",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-A20600314A71",
+      "message_id": "wire.settings.providers_openrouter_require_parameters.help",
+      "auditor_original_ids": [
+        "H-A-MIX-54"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-8DDA7C4D87CB",
+      "message_id": "wire.settings.providers_openrouter_sort.choice.unset.label",
+      "auditor_original_ids": [
+        "H-A-EN-18",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-4853E8732AB9",
+      "message_id": "wire.settings.providers_openrouter_zdr.choice.true.description",
+      "auditor_original_ids": [
+        "H-A-MIX-44"
+      ],
+      "disposition": "unchanged technical usage retained under Root instruction; see technical_counterclaims"
+    },
+    {
+      "finding_id": "I18N-WS-3DE117B6A717",
+      "message_id": "wire.settings.providers_openrouter_zdr.choice.true.label",
+      "auditor_original_ids": [
+        "H-A-EN-19",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-A73734B5D1A9",
+      "message_id": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+      "auditor_original_ids": [
+        "H-A-EN-20",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-7E0C387948DC",
+      "message_id": "wire.settings.providers_openrouter_zdr.help",
+      "auditor_original_ids": [
+        "H-A-MIX-45"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-990B74AC45EF",
+      "message_id": "wire.settings.shell_environment_inherit.label",
+      "auditor_original_ids": [
+        "H-A-MIX-46"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-B7F88E3953BA",
+      "message_id": "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "auditor_original_ids": [
+        "H-A-EN-21",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-3CD94E41B2B7",
+      "message_id": "wire.settings.shell_environment_mode.choice.inherit.label",
+      "auditor_original_ids": [
+        "H-A-EN-22",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-2E0C22F21B6C",
+      "message_id": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+      "auditor_original_ids": [
+        "H-A-EN-23",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-F8A25CCB46D7",
+      "message_id": "wire.settings.speech_transcription_cleanup.choice.client.label",
+      "auditor_original_ids": [
+        "H-A-EN-24",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-B66F879551DE",
+      "message_id": "wire.settings.speech_transcription_cleanup.choice.off.label",
+      "auditor_original_ids": [
+        "H-A-EN-25",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-9F37CDCBD6ED",
+      "message_id": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+      "auditor_original_ids": [
+        "H-A-EN-26",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-635FB1A76ED6",
+      "message_id": "wire.settings.speech_transcription_cleanup.help",
+      "auditor_original_ids": [
+        "H-A-MIX-53"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-86C0F950D222",
+      "message_id": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+      "auditor_original_ids": [
+        "H-A-SEM-1",
+        "HI-B-M2"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-FA7340FF8D3C",
+      "message_id": "wire.settings.speech_voice_gender.choice.auto.label",
+      "auditor_original_ids": [
+        "H-A-EN-27",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-C3F93F5552D5",
+      "message_id": "wire.settings.speech_voice_gender.choice.female.label",
+      "auditor_original_ids": [
+        "H-A-EN-28",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-6E07BEFC2F49",
+      "message_id": "wire.settings.speech_voice_gender.choice.male.label",
+      "auditor_original_ids": [
+        "H-A-EN-29",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-7AB27EDC4AA9",
+      "message_id": "wire.settings.web_fetch_render_backend.choice.auto.label",
+      "auditor_original_ids": [
+        "H-A-EN-30",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-2059EB7BAFBB",
+      "message_id": "wire.settings.web_fetch_render_backend.help",
+      "auditor_original_ids": [
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-8377F1BF1C46",
+      "message_id": "wire.settings.web_search_searxng_endpoint.label",
+      "auditor_original_ids": [
+        "H-A-EN-31"
+      ],
+      "disposition": "unchanged technical usage retained under Root instruction; see technical_counterclaims"
+    },
+    {
+      "finding_id": "I18N-WS-21B6A15BD737",
+      "message_id": "wire.settings.web_search_strategy.choice.ordered.label",
+      "auditor_original_ids": [
+        "H-A-EN-32",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    },
+    {
+      "finding_id": "I18N-WS-3886CD8B7B42",
+      "message_id": "wire.settings.web_search_strategy.choice.round_robin.label",
+      "auditor_original_ids": [
+        "H-A-EN-33",
+        "HI-B-M1"
+      ],
+      "disposition": "authored repair"
+    }
+  ],
+  "changes": [
+    {
+      "message_id": "wire.settings.bash_memory_limit_mb.help",
+      "english_approved": "The ceiling when 'manual' is selected above. 0 means use the auto ceiling instead, so leaving this at 0 never disables the guard.",
+      "before_approved": "ऊपर 'manual' चुनने पर यही सीमा लागू होती है। 0 का मतलब है कि 'auto' सीमा इस्तेमाल होगी, इसलिए इसे 0 पर छोड़ने से गार्ड कभी बंद नहीं होता।",
+      "authored": "ऊपर 'ख़ुद तय करें' चुनने पर यही सीमा लागू होती है। 0 का मतलब है कि स्वचालित सीमा इस्तेमाल होगी, इसलिए इसे 0 पर छोड़ने से गार्ड कभी बंद नहीं होता।",
+      "backtranslation": "The ceiling when Self-set is selected above. Zero means use the automatic ceiling, so leaving zero never disables the guard.",
+      "finding_ids": [],
+      "scope": "direct help/reference neighbor or folded feminine-register minor"
+    },
+    {
+      "message_id": "wire.settings.bash_memory_limit_mb.label",
+      "english_approved": "Manual ceiling (MB)",
+      "before_approved": "manual सीमा (MB)",
+      "authored": "ख़ुद तय की गई सीमा (MB)",
+      "backtranslation": "Self-set ceiling (MB)",
+      "finding_ids": [
+        "I18N-WS-4BCC4EE3F5D9"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.bash_memory_mode.choice.auto.label",
+      "english_approved": "auto",
+      "before_approved": "auto",
+      "authored": "स्वचालित",
+      "backtranslation": "Automatic",
+      "finding_ids": [
+        "I18N-WS-E6C2188A81F3"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.bash_memory_mode.choice.manual.label",
+      "english_approved": "manual",
+      "before_approved": "manual",
+      "authored": "ख़ुद तय करें",
+      "backtranslation": "Self-set",
+      "finding_ids": [
+        "I18N-WS-802B8268724D"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.bash_memory_mode.help",
+      "english_approved": "'auto' derives the ceiling from the memory this device has free right now, so it tightens on its own when the machine is busy. 'manual' pins it to the number below.",
+      "before_approved": "'auto' इस डिवाइस की इस समय उपलब्ध मेमोरी से सीमा तय करता है, इसलिए मशीन व्यस्त होते ही यह ख़ुद सख़्त हो जाता है। 'manual' इसे नीचे दिए नंबर पर स्थिर रखता है।",
+      "authored": "'स्वचालित' इस डिवाइस की इस समय उपलब्ध मेमोरी से सीमा तय करता है, इसलिए मशीन व्यस्त होने पर सीमा अपने-आप घट जाती है। 'ख़ुद तय करें' चुनने पर नीचे दी गई संख्या ही सीमा होती है।",
+      "backtranslation": "Automatic derives the ceiling from current free memory on the device, reducing it automatically when the machine is busy. Self-set uses exactly the number below as the ceiling.",
+      "finding_ids": [],
+      "scope": "direct help/reference neighbor or folded feminine-register minor"
+    },
+    {
+      "message_id": "wire.settings.classification_vendor.choice.auto.label",
+      "english_approved": "auto",
+      "before_approved": "auto",
+      "authored": "स्वचालित",
+      "backtranslation": "Automatic",
+      "finding_ids": [
+        "I18N-WS-803C522C3F62"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.classification_vendor.help",
+      "english_approved": "Needs recommendations on. Pin one leg; auto prefers Radient.",
+      "before_approved": "सिफ़ारिशें चालू होने पर ही लागू। एक कड़ी पिन करें; auto Radient को प्राथमिकता देता है।",
+      "authored": "सिफ़ारिशें चालू होने पर ही लागू। एक विकल्प तय करें; स्वचालित मोड Radient को प्राथमिकता देता है।",
+      "backtranslation": "Applies only when recommendations are on. Fix one option; Automatic prefers Radient.",
+      "finding_ids": [],
+      "scope": "direct help/reference neighbor or folded feminine-register minor"
+    },
+    {
+      "message_id": "wire.settings.compaction_strategy.choice.auto.label",
+      "english_approved": "auto",
+      "before_approved": "auto",
+      "authored": "स्वचालित",
+      "backtranslation": "Automatic",
+      "finding_ids": [
+        "I18N-WS-240C498CA1C1"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.compaction_strategy.help",
+      "english_approved": "Which mechanism compacts. Auto picks per model.",
+      "before_approved": "कौन-सा तंत्र संपीडित करता है। auto हर मॉडल के हिसाब से चुनता है।",
+      "authored": "संपीडन के लिए इस्तेमाल होने वाला तंत्र। स्वचालित मोड हर मॉडल के हिसाब से चुनता है।",
+      "backtranslation": "The mechanism used for compaction. Automatic chooses per model.",
+      "finding_ids": [],
+      "scope": "direct help/reference neighbor or folded feminine-register minor"
+    },
+    {
+      "message_id": "wire.settings.display_nerd_icons.choice.none.label",
+      "english_approved": "auto",
+      "before_approved": "auto",
+      "authored": "स्वचालित",
+      "backtranslation": "Automatic",
+      "finding_ids": [
+        "I18N-WS-CDE402D4ABB5"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.display_nerd_icons.help",
+      "english_approved": "Expanded tool-row icons. Auto reads the terminal emulator's markers.",
+      "before_approved": "टूल-पंक्तियों के विस्तृत आइकॉन। auto टर्मिनल एमुलेटर के मार्कर पढ़ता है।",
+      "authored": "टूल-पंक्तियों के विस्तृत आइकॉन। स्वचालित मोड टर्मिनल एमुलेटर के मार्कर पढ़ता है।",
+      "backtranslation": "Expanded tool-row icons. Automatic reads terminal-emulator markers.",
+      "finding_ids": [],
+      "scope": "direct help/reference neighbor or folded feminine-register minor"
+    },
+    {
+      "message_id": "wire.settings.hub.description",
+      "english_approved": "Keep agents and teams you pulled from the Agent Hub current: whether updates are merged in automatically, how often the hub is checked, and which model resolves a conflict. Your edits and deletions are merged, never overwritten.",
+      "before_approved": "Agent Hub से pull किए गए एजेंट और टीमें अपडेट रहें: अपडेट अपने-आप merge होते हैं या नहीं, हब कितनी बार जाँचा जाता है, और टकराव कौन-सा मॉडल सुलझाता है। आपने जो संपादित या हटाया, वह merge हो जाता है, कभी ओवरराइट नहीं।",
+      "authored": "Agent Hub से pull किए गए एजेंट और टीमों को अपडेट रखें: अपडेट अपने-आप merge होते हैं या नहीं, हब कितनी बार जाँचा जाता है, और टकराव कौन-सा मॉडल सुलझाता है। आपके संपादन और हटाए गए हिस्से merge किए जाते हैं, कभी ओवरराइट नहीं किए जाते।",
+      "backtranslation": "Keep agents and teams pulled from Agent Hub up to date: whether updates merge automatically, how often the hub is checked, and which model resolves a conflict. Your edits and deleted parts are merged, never overwritten.",
+      "finding_ids": [
+        "I18N-WS-7BC71BEE5100"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.hub_auto_update_agents.help",
+      "english_approved": "Merge hub updates into pulled agents automatically.",
+      "before_approved": "हब अपडेट pull किए गए एजेंट में अपने-आप merge करें।",
+      "authored": "हब से pull किए गए एजेंटों में हब के अपडेट अपने-आप merge करें।",
+      "backtranslation": "Automatically merge hub updates into agents pulled from the hub.",
+      "finding_ids": [
+        "I18N-WS-E649D656620C"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.hub_auto_update_teams.help",
+      "english_approved": "Merge hub updates into pulled teams automatically.",
+      "before_approved": "हब अपडेट pull की गई टीमों में अपने-आप merge करें।",
+      "authored": "हब से pull की गई टीमों में हब के अपडेट अपने-आप merge करें।",
+      "backtranslation": "Automatically merge hub updates into teams pulled from the hub.",
+      "finding_ids": [
+        "I18N-WS-B46B76077316"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.librarian.description",
+      "english_approved": "The Librarian keeps the global Library organised: her display name, the daily pass, and the pause switch. The Library is long-term and shared by every conversation.",
+      "before_approved": "लाइब्रेरियन वैश्विक लाइब्रेरी को व्यवस्थित रखता है: उसका प्रदर्शित नाम, दैनिक पास और पॉज़ स्विच। लाइब्रेरी दीर्घकालिक है और हर बातचीत में साझा है।",
+      "authored": "लाइब्रेरियन वैश्विक लाइब्रेरी को व्यवस्थित रखती हैं: उनका प्रदर्शित नाम, दैनिक पास और पॉज़ स्विच। लाइब्रेरी दीर्घकालिक है और हर बातचीत में साझा है।",
+      "backtranslation": "The Librarian (polite feminine) keeps the global Library organized: her display name, daily pass, pause switch. The Library is long-term and shared across every conversation.",
+      "finding_ids": [
+        "I18N-WS-521BD8E7974A"
+      ],
+      "scope": "direct help/reference neighbor or folded feminine-register minor"
+    },
+    {
+      "message_id": "wire.settings.librarian_cadence_max_extra_per_day.help",
+      "english_approved": "How many extra passes she may request per day. 0 disables extra passes.",
+      "before_approved": "वह प्रति दिन कितने अतिरिक्त पास माँग सकता है। 0 अतिरिक्त पास बंद करता है।",
+      "authored": "वे प्रति दिन कितने अतिरिक्त पास माँग सकती हैं। 0 अतिरिक्त पास बंद करता है।",
+      "backtranslation": "How many extra passes she (polite) may request per day. Zero disables extra passes.",
+      "finding_ids": [
+        "I18N-WS-01B7C6EA667A"
+      ],
+      "scope": "direct help/reference neighbor or folded feminine-register minor"
+    },
+    {
+      "message_id": "wire.settings.librarian_cadence_min_gap_minutes.help",
+      "english_approved": "Minimum spacing between her passes; closer requests are refused.",
+      "before_approved": "उसके पासों के बीच न्यूनतम अंतर; इससे निकट अनुरोध अस्वीकार होते हैं।",
+      "authored": "उनके पासों के बीच न्यूनतम अंतर; इससे कम अंतर वाले अनुरोध अस्वीकार होते हैं।",
+      "backtranslation": "Minimum spacing between her passes; requests with shorter spacing are refused.",
+      "finding_ids": [],
+      "scope": "direct help/reference neighbor or folded feminine-register minor"
+    },
+    {
+      "message_id": "wire.settings.librarian_cadence_paused.help",
+      "english_approved": "Pausing removes her scheduled rows; resuming re-arms the next pass. The desktop and /librarian write the same key.",
+      "before_approved": "पॉज़ उसकी निर्धारित पंक्तियाँ हटाता है; फिर से शुरू करने पर अगला पास तय होता है। डेस्कटॉप और /librarian एक ही कुंजी लिखते हैं।",
+      "authored": "पॉज़ करने पर उनकी निर्धारित पंक्तियाँ हट जाती हैं; फिर से शुरू करने पर अगला पास तय होता है। डेस्कटॉप और /librarian एक ही कुंजी लिखते हैं।",
+      "backtranslation": "Pausing removes her scheduled rows; resuming schedules the next pass. Desktop and the literal librarian command write the same key.",
+      "finding_ids": [],
+      "scope": "direct help/reference neighbor or folded feminine-register minor"
+    },
+    {
+      "message_id": "wire.settings.librarian_enabled.help",
+      "english_approved": "Read at boot and by /v1/desktop/librarian; a disabled install never creates her session.",
+      "before_approved": "बूट पर और /v1/desktop/librarian द्वारा पढ़ा जाता है; अक्षम इंस्टॉल उसका सत्र कभी नहीं बनाता।",
+      "authored": "बूट पर और /v1/desktop/librarian द्वारा पढ़ा जाता है; अक्षम इंस्टॉल उनका सत्र कभी नहीं बनाता।",
+      "backtranslation": "Read at boot and by the literal desktop librarian API route; a disabled install never creates her session.",
+      "finding_ids": [],
+      "scope": "direct help/reference neighbor or folded feminine-register minor"
+    },
+    {
+      "message_id": "wire.settings.librarian_name.help",
+      "english_approved": "The name her pinned conversation and every receipt use.",
+      "before_approved": "वह नाम जो उसकी पिन की गई बातचीत और हर रसीद उपयोग करती है।",
+      "authored": "वह नाम जो उनकी पिन की गई बातचीत और हर रसीद इस्तेमाल करती है।",
+      "backtranslation": "The name her pinned conversation and every receipt use.",
+      "finding_ids": [],
+      "scope": "direct help/reference neighbor or folded feminine-register minor"
+    },
+    {
+      "message_id": "wire.settings.model_effort.choice.unset.label",
+      "english_approved": "auto",
+      "before_approved": "auto",
+      "authored": "स्वचालित",
+      "backtranslation": "Automatic",
+      "finding_ids": [
+        "I18N-WS-C4D3DE320B13"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.model_effort.help",
+      "english_approved": "Effort for new conversations. Unset: the model's default.",
+      "before_approved": "नई बातचीत के लिए प्रयास। 'unset': मॉडल का डिफ़ॉल्ट।",
+      "authored": "नई बातचीत के लिए प्रयास। स्वचालित: मॉडल का डिफ़ॉल्ट।",
+      "backtranslation": "Effort for new conversations. Automatic: the model's default.",
+      "finding_ids": [],
+      "scope": "direct help/reference neighbor or folded feminine-register minor"
+    },
+    {
+      "message_id": "wire.settings.network_max_handshakes.help",
+      "english_approved": "Unauthenticated connections this relay will hold at once. A pairing holds one for the seconds until the code is typed; anything past the cap is dropped at accept, with no reply frame.",
+      "before_approved": "यह रिले एक बार में कितने अप्रमाणित कनेक्शन रखेगा। पेयरिंग कोड टाइप होने तक के सेकंडों भर एक कनेक्शन रोकती है; सीमा से ऊपर का हर कनेक्शन accept पर ही गिरा दिया जाता है, बिना कोई reply फ़्रेम।",
+      "authored": "यह रिले एक बार में कितने अप्रमाणित कनेक्शन रखेगा। पेयरिंग में कोड टाइप किए जाने तक एक कनेक्शन बना रहता है; सीमा से ऊपर के कनेक्शन स्वीकार होते ही बंद कर दिए जाते हैं, बिना जवाबी फ़्रेम भेजे।",
+      "backtranslation": "How many unauthenticated connections this relay holds at once. Pairing keeps a connection until the code is typed; connections above the cap are closed upon acceptance without a reply frame.",
+      "finding_ids": [
+        "I18N-WS-552A0CCFA416"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.network_rollout_on_update.choice.auto.label",
+      "english_approved": "auto",
+      "before_approved": "auto",
+      "authored": "स्वचालित",
+      "backtranslation": "Automatic",
+      "finding_ids": [
+        "I18N-WS-66D2D9CC6848"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+      "english_approved": "false",
+      "before_approved": "false",
+      "authored": "नहीं",
+      "backtranslation": "No",
+      "finding_ids": [
+        "I18N-WS-513A71CB406C"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+      "english_approved": "default",
+      "before_approved": "default",
+      "authored": "डिफ़ॉल्ट",
+      "backtranslation": "Default",
+      "finding_ids": [
+        "I18N-WS-32DB6C298E5C"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.providers_openrouter_allow_fallbacks.help",
+      "english_approved": "'default' sends nothing (OpenRouter falls through to another host when the preferred one fails); 'false' fails rather than fall through to a host outside your preferences.",
+      "before_approved": "'default' कुछ नहीं भेजता (पसंदीदा होस्ट विफल होने पर OpenRouter किसी और होस्ट पर चला जाता है); 'false' आपकी प्राथमिकताओं के बाहर के होस्ट पर चले जाने के बजाय विफल हो जाता है।",
+      "authored": "'डिफ़ॉल्ट' कुछ नहीं भेजता (पसंदीदा होस्ट विफल होने पर OpenRouter किसी और होस्ट पर चला जाता है); 'नहीं' चुनने पर आपकी प्राथमिकताओं के बाहर के होस्ट पर जाने के बजाय अनुरोध विफल हो जाता है।",
+      "backtranslation": "Default sends nothing (OpenRouter goes to another host when the preferred one fails); selecting No fails the request rather than going outside your host preferences.",
+      "finding_ids": [],
+      "scope": "direct help/reference neighbor or folded feminine-register minor"
+    },
+    {
+      "message_id": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "english_approved": "allow",
+      "before_approved": "allow",
+      "authored": "अनुमति दें",
+      "backtranslation": "Allow",
+      "finding_ids": [
+        "I18N-WS-DD21D2852FC7"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "english_approved": "deny",
+      "before_approved": "deny",
+      "authored": "अनुमति न दें",
+      "backtranslation": "Do not allow",
+      "finding_ids": [
+        "I18N-WS-961F6FF2DA51"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+      "english_approved": "default",
+      "before_approved": "default",
+      "authored": "डिफ़ॉल्ट",
+      "backtranslation": "Default",
+      "finding_ids": [
+        "I18N-WS-EAD73985D2C9"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.providers_openrouter_data_collection.help",
+      "english_approved": "'deny' excludes hosts that may train on or retain your prompts. 'default' sends no preference (OpenRouter's default: allow).",
+      "before_approved": "'deny' ऐसे होस्ट हटा देता है जो आपके प्रॉम्प्ट पर ट्रेनिंग कर सकते हैं या उन्हें रख सकते हैं। 'default' कोई प्राथमिकता नहीं भेजता (OpenRouter का डिफ़ॉल्ट: अनुमति)।",
+      "authored": "'अनुमति न दें' ऐसे होस्ट को बाहर रखता है जो आपके प्रॉम्प्ट पर ट्रेनिंग कर सकते हैं या उन्हें रख सकते हैं। 'डिफ़ॉल्ट' कोई प्राथमिकता नहीं भेजता (OpenRouter का डिफ़ॉल्ट: अनुमति दें)।",
+      "backtranslation": "Do not allow excludes hosts that may train on or retain your prompts. Default sends no preference (OpenRouter default: Allow).",
+      "finding_ids": [],
+      "scope": "direct help/reference neighbor or folded feminine-register minor"
+    },
+    {
+      "message_id": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.description",
+      "english_approved": "distillable-text endpoints only",
+      "before_approved": "सिर्फ़ distillable-text endpoint",
+      "authored": "सिर्फ़ ऐसे endpoint जिनके टेक्स्ट से मॉडल डिस्टिलेशन की अनुमति हो",
+      "backtranslation": "Only endpoints whose text is permitted for model distillation.",
+      "finding_ids": [
+        "I18N-WS-B76646004E00"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+      "english_approved": "true",
+      "before_approved": "true",
+      "authored": "हाँ",
+      "backtranslation": "Yes",
+      "finding_ids": [
+        "I18N-WS-378BA7328B99"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+      "english_approved": "default",
+      "before_approved": "default",
+      "authored": "डिफ़ॉल्ट",
+      "backtranslation": "Default",
+      "finding_ids": [
+        "I18N-WS-CD06C73F8E78"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.providers_openrouter_enforce_distillable_text.help",
+      "english_approved": "'true': restrict to endpoints whose text output may be distilled. 'default': nothing sent.",
+      "before_approved": "'true': सिर्फ़ ऐसे endpoint जिनका टेक्स्ट आउटपुट distill किया जा सके। 'default': कुछ नहीं भेजा जाता।",
+      "authored": "'हाँ': सिर्फ़ ऐसे endpoint जिनके टेक्स्ट आउटपुट से मॉडल डिस्टिलेशन की अनुमति हो। 'डिफ़ॉल्ट': कुछ नहीं भेजा जाता।",
+      "backtranslation": "Yes: only endpoints whose text output is permitted for model distillation. Default: nothing is sent.",
+      "finding_ids": [
+        "I18N-WS-572D791F9AEE"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.providers_openrouter_enforce_distillable_text.label",
+      "english_approved": "distillable text",
+      "before_approved": "distillable टेक्स्ट",
+      "authored": "डिस्टिलेशन योग्य टेक्स्ट",
+      "backtranslation": "Distillable text",
+      "finding_ids": [
+        "I18N-WS-1F436A4FCED3"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+      "english_approved": "true",
+      "before_approved": "true",
+      "authored": "हाँ",
+      "backtranslation": "Yes",
+      "finding_ids": [
+        "I18N-WS-2B7797E9A40D"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+      "english_approved": "default",
+      "before_approved": "default",
+      "authored": "डिफ़ॉल्ट",
+      "backtranslation": "Default",
+      "finding_ids": [
+        "I18N-WS-653D8954B431"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.providers_openrouter_require_parameters.help",
+      "english_approved": "'true' restricts to hosts that support every parameter you send (tools, structured output); 'default' lets OpenRouter silently drop unsupported ones.",
+      "before_approved": "'true' सिर्फ़ उन होस्ट तक सीमित करता है जो आपके भेजे हर पैरामीटर को सपोर्ट करते हैं (टूल, structured output); 'default' में OpenRouter असमर्थित पैरामीटर चुपचाप हटा देता है।",
+      "authored": "'हाँ' सिर्फ़ उन होस्ट तक सीमित करता है जो आपके भेजे हर पैरामीटर को सपोर्ट करते हैं (टूल, संरचित आउटपुट); 'डिफ़ॉल्ट' में OpenRouter असमर्थित पैरामीटर चुपचाप हटा देता है।",
+      "backtranslation": "Yes restricts to hosts supporting every parameter you send (tools, structured output); Default lets OpenRouter silently drop unsupported parameters.",
+      "finding_ids": [
+        "I18N-WS-A20600314A71"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.providers_openrouter_sort.choice.unset.label",
+      "english_approved": "default",
+      "before_approved": "default",
+      "authored": "डिफ़ॉल्ट",
+      "backtranslation": "Default",
+      "finding_ids": [
+        "I18N-WS-8DDA7C4D87CB"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.providers_openrouter_sort.help",
+      "english_approved": "How OpenRouter ranks hosts for this call. May route away from the host holding your warm prompt cache (a cold start on long conversations); 'default' sends no preference at all.",
+      "before_approved": "OpenRouter इस कॉल के लिए होस्ट कैसे क्रमबद्ध करता है। यह आपका वॉर्म प्रॉम्प्ट कैश रखने वाले होस्ट से हटा सकता है (लंबी बातचीत पर कोल्ड स्टार्ट); 'default' कोई प्राथमिकता नहीं भेजता।",
+      "authored": "OpenRouter इस कॉल के लिए होस्ट कैसे क्रमबद्ध करता है। यह आपका वॉर्म प्रॉम्प्ट कैश रखने वाले होस्ट से हटा सकता है (लंबी बातचीत पर कोल्ड स्टार्ट); 'डिफ़ॉल्ट' कोई प्राथमिकता नहीं भेजता।",
+      "backtranslation": "How OpenRouter ranks hosts for this call. May move away from the host holding your warm prompt cache (cold start in long conversations); Default sends no preference.",
+      "finding_ids": [],
+      "scope": "direct help/reference neighbor or folded feminine-register minor"
+    },
+    {
+      "message_id": "wire.settings.providers_openrouter_zdr.choice.true.label",
+      "english_approved": "true",
+      "before_approved": "true",
+      "authored": "हाँ",
+      "backtranslation": "Yes",
+      "finding_ids": [
+        "I18N-WS-3DE117B6A717"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+      "english_approved": "default",
+      "before_approved": "default",
+      "authored": "डिफ़ॉल्ट",
+      "backtranslation": "Default",
+      "finding_ids": [
+        "I18N-WS-A73734B5D1A9"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.providers_openrouter_zdr.help",
+      "english_approved": "'true': restrict to zero-data-retention endpoints. 'default': nothing sent.",
+      "before_approved": "'true': सिर्फ़ शून्य-डेटा-रिटेंशन endpoint तक सीमित। 'default': कुछ नहीं भेजा जाता।",
+      "authored": "'हाँ': सिर्फ़ शून्य-डेटा-रिटेंशन endpoint तक सीमित। 'डिफ़ॉल्ट': कुछ नहीं भेजा जाता।",
+      "backtranslation": "Yes: restricted to zero-data-retention endpoints. Default: nothing is sent.",
+      "finding_ids": [
+        "I18N-WS-7E0C387948DC"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.shell_environment_inherit.help",
+      "english_approved": "Empty = the safe set alone. Names the allowlist mode keeps ON TOP of the safe set — e.g. LOCAL_OPERATOR_CONFIG_DIR for a shell that must still resolve $(lop secret get NAME), or LANG. Inert in inherit mode.",
+      "before_approved": "खाली = सिर्फ़ सुरक्षित सेट। allowlist मोड में सुरक्षित सेट के ऊपर ही रखे जाने वाले नाम — जैसे उस शेल के लिए LOCAL_OPERATOR_CONFIG_DIR जिसमें $(lop secret get NAME) अब भी काम करे, या LANG। inherit मोड में बेअसर।",
+      "authored": "खाली = सिर्फ़ सुरक्षित सेट। अनुमति-सूची मोड में सुरक्षित सेट के अलावा रखे जाने वाले नाम — जैसे उस शेल के लिए LOCAL_OPERATOR_CONFIG_DIR जिसमें $(lop secret get NAME) अब भी काम करे, या LANG। मौजूदा परिवेश मोड में बेअसर।",
+      "backtranslation": "Empty means only the safe set. Names kept in addition to the safe set in Allowlist mode, such as LOCAL_OPERATOR_CONFIG_DIR so a shell can still resolve the literal lop secret command, or LANG. Inert in Existing environment mode.",
+      "finding_ids": [],
+      "scope": "direct help/reference neighbor or folded feminine-register minor"
+    },
+    {
+      "message_id": "wire.settings.shell_environment_inherit.label",
+      "english_approved": "…kept in allowlist mode",
+      "before_approved": "…allowlist मोड में रखे जाते हैं",
+      "authored": "…अनुमति-सूची मोड में रखे जाते हैं",
+      "backtranslation": "…kept in allowlist mode",
+      "finding_ids": [
+        "I18N-WS-990B74AC45EF"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "english_approved": "allowlist",
+      "before_approved": "allowlist",
+      "authored": "अनुमति-सूची",
+      "backtranslation": "Allowlist",
+      "finding_ids": [
+        "I18N-WS-B7F88E3953BA"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.shell_environment_mode.choice.inherit.label",
+      "english_approved": "inherit",
+      "before_approved": "inherit",
+      "authored": "मौजूदा परिवेश",
+      "backtranslation": "Existing environment",
+      "finding_ids": [
+        "I18N-WS-3CD94E41B2B7"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.shell_environment_mode.help",
+      "english_approved": "'inherit' lets a command the agent runs see your environment (gh, aws, npm keep their tokens). 'allowlist' passes only PATH/HOME/SHELL/TERM/USER/LOGNAME plus the two lists beside this, so the provider key this session launched with is not handed to a command the model writes. Read once per session: changing it takes effect at the next launch.",
+      "before_approved": "'inherit' में एजेंट के चलाए कमांड को आपका एनवायरनमेंट दिखता है (gh, aws, npm अपने टोकन रखते हैं)। 'allowlist' सिर्फ़ PATH/HOME/SHELL/TERM/USER/LOGNAME और इसके पास की दोनों सूचियाँ भेजता है, इसलिए जिस प्रोवाइडर कुंजी से यह सत्र शुरू हुआ, वह मॉडल के लिखे कमांड को नहीं दी जाती। हर सत्र में एक बार पढ़ा जाता है: बदलाव अगले लॉन्च पर लागू होगा।",
+      "authored": "'मौजूदा परिवेश' मोड में एजेंट के चलाए कमांड को आपका परिवेश मिलता है (gh, aws, npm अपने टोकन रखते हैं)। 'अनुमति-सूची' सिर्फ़ PATH/HOME/SHELL/TERM/USER/LOGNAME और इसके पास की दोनों सूचियाँ भेजता है, इसलिए जिस प्रोवाइडर कुंजी से यह सत्र शुरू हुआ, वह मॉडल के लिखे कमांड को नहीं दी जाती। हर सत्र में एक बार पढ़ा जाता है: बदलाव अगले लॉन्च पर लागू होगा।",
+      "backtranslation": "Existing environment mode gives the agent-run command your environment (gh, aws, npm retain their tokens). Allowlist passes only the literal safe variables and the adjacent two lists, so the provider key used to launch the session is not given to model-written commands. Read once per session; changes apply at next launch.",
+      "finding_ids": [],
+      "scope": "direct help/reference neighbor or folded feminine-register minor"
+    },
+    {
+      "message_id": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+      "english_approved": "auto",
+      "before_approved": "auto",
+      "authored": "स्वचालित",
+      "backtranslation": "Automatic",
+      "finding_ids": [
+        "I18N-WS-2E0C22F21B6C"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.speech_transcription_cleanup.choice.client.label",
+      "english_approved": "client",
+      "before_approved": "client",
+      "authored": "क्लाइंट",
+      "backtranslation": "Client",
+      "finding_ids": [
+        "I18N-WS-F8A25CCB46D7"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.speech_transcription_cleanup.choice.off.label",
+      "english_approved": "off",
+      "before_approved": "off",
+      "authored": "बंद",
+      "backtranslation": "Off",
+      "finding_ids": [
+        "I18N-WS-B66F879551DE"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+      "english_approved": "provider",
+      "before_approved": "provider",
+      "authored": "प्रोवाइडर",
+      "backtranslation": "Provider",
+      "finding_ids": [
+        "I18N-WS-9F37CDCBD6ED"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.speech_transcription_cleanup.help",
+      "english_approved": "How dictation strips filler words and non-speech cues. auto uses the provider's native cleanup where available and the conservative client rules elsewhere; provider and client each use only one of the two mechanisms; off keeps the verbatim transcript. A per-request `cleanup` field still wins.",
+      "before_approved": "डिक्टेशन भरने वाले शब्द और गैर-भाषाई संकेत कैसे हटाता है। auto उपलब्ध होने पर प्रोवाइडर की अंतर्निहित सफ़ाई और बाक़ी मामलों में सतर्क क्लाइंट नियम लागू करता है; provider और client में से प्रत्येक केवल एक तंत्र लागू करता है; off ट्रांसक्रिप्ट ज्यों का त्यों रखता है। हर अनुरोध का `cleanup` फ़ील्ड अभी भी प्राथमिकता पाता है।",
+      "authored": "डिक्टेशन में भराव शब्द और गैर-वाचिक संकेत कैसे हटते हैं। स्वचालित मोड उपलब्ध होने पर प्रोवाइडर की अंतर्निहित सफ़ाई और बाक़ी मामलों में सतर्क क्लाइंट नियम लागू करता है; प्रोवाइडर और क्लाइंट मोड केवल अपना-अपना तंत्र इस्तेमाल करते हैं; बंद मोड ट्रांसक्रिप्ट ज्यों का त्यों रखता है। हर अनुरोध का `cleanup` फ़ील्ड अब भी प्राथमिकता पाता है।",
+      "backtranslation": "How dictation removes filler words and non-verbal cues. Automatic uses native provider cleanup where available, otherwise conservative client rules; Provider and Client modes each use only their own mechanism; Off keeps the transcript verbatim. Per-request cleanup field still takes priority.",
+      "finding_ids": [
+        "I18N-WS-635FB1A76ED6"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+      "english_approved": "Standard vocal delivery.",
+      "before_approved": "मौजूदा स्थिर मान।",
+      "authored": "बोलने का सामान्य अंदाज़।",
+      "backtranslation": "A normal speaking style.",
+      "finding_ids": [
+        "I18N-WS-86C0F950D222"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.speech_voice_gender.choice.auto.label",
+      "english_approved": "auto",
+      "before_approved": "auto",
+      "authored": "स्वचालित",
+      "backtranslation": "Automatic",
+      "finding_ids": [
+        "I18N-WS-FA7340FF8D3C"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.speech_voice_gender.choice.female.label",
+      "english_approved": "female",
+      "before_approved": "female",
+      "authored": "स्त्री",
+      "backtranslation": "Female",
+      "finding_ids": [
+        "I18N-WS-C3F93F5552D5"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.speech_voice_gender.choice.male.label",
+      "english_approved": "male",
+      "before_approved": "male",
+      "authored": "पुरुष",
+      "backtranslation": "Male",
+      "finding_ids": [
+        "I18N-WS-6E07BEFC2F49"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.speech_voice_gender.help",
+      "english_approved": "auto picks per agent; a fixed value overrides the classifier.",
+      "before_approved": "auto हर एजेंट के लिए चुनता है; तय मान वर्गीकरण को ओवरराइड करता है।",
+      "authored": "स्वचालित मोड हर एजेंट के लिए आवाज़ चुनता है; तय मान चुनने पर वर्गीकरण का परिणाम लागू नहीं होता।",
+      "backtranslation": "Automatic chooses a voice for each agent; choosing a fixed value means the classification result does not apply.",
+      "finding_ids": [],
+      "scope": "direct help/reference neighbor or folded feminine-register minor"
+    },
+    {
+      "message_id": "wire.settings.web_fetch_render_backend.choice.auto.label",
+      "english_approved": "auto",
+      "before_approved": "auto",
+      "authored": "स्वचालित",
+      "backtranslation": "Automatic",
+      "finding_ids": [
+        "I18N-WS-7AB27EDC4AA9"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.web_fetch_render_backend.help",
+      "english_approved": "Auto uses markdownify when the [fetch] extra is installed.",
+      "before_approved": "Auto, [fetch] extra इंस्टॉल होने पर markdownify इस्तेमाल करता है।",
+      "authored": "स्वचालित मोड में, [fetch] extra इंस्टॉल होने पर markdownify इस्तेमाल होता है।",
+      "backtranslation": "Automatic mode uses markdownify when the fetch pip extra is installed.",
+      "finding_ids": [
+        "I18N-WS-2059EB7BAFBB"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.web_search_strategy.choice.ordered.label",
+      "english_approved": "ordered",
+      "before_approved": "ordered",
+      "authored": "सूची के क्रम में",
+      "backtranslation": "In list order",
+      "finding_ids": [
+        "I18N-WS-21B6A15BD737"
+      ],
+      "scope": "major repair"
+    },
+    {
+      "message_id": "wire.settings.web_search_strategy.choice.round_robin.label",
+      "english_approved": "round_robin",
+      "before_approved": "round_robin",
+      "authored": "बारी-बारी",
+      "backtranslation": "In turns",
+      "finding_ids": [
+        "I18N-WS-3886CD8B7B42"
+      ],
+      "scope": "major repair"
+    }
+  ],
+  "technical_counterclaims": [
+    {
+      "finding_id": "I18N-WS-3081EAF521B2",
+      "message_id": "wire.settings.classification_vendor.choice.typesafe.description",
+      "retained_technical_tokens": [
+        "endpoint"
+      ],
+      "glossary": "i18n/glossary.md lines 195–200, Wave-2 kept-English set (all locales): endpoint (Latin, undeclined); merge / pull / push / commit (git/hub operations).",
+      "individual_consumer_proof": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          4054
+        ],
+        "setting_key": "classification.vendor",
+        "choice_value": "typesafe",
+        "choice_value_verified_from_ast": true
+      },
+      "source_english_approved": "TypeSafe's Jev endpoint",
+      "target_from_approved_capture": "TypeSafe का Jev endpoint",
+      "changed_surrounding_prose": false,
+      "disposition": "Root-approved technical-boundary counterclaim, not a blanket English exemption; independent delta adjudication still required",
+      "hub_operation_proof": "Concrete server/API endpoint address, not a generic mode or ordinary display enum."
+    },
+    {
+      "finding_id": "I18N-WS-7BC71BEE5100",
+      "message_id": "wire.settings.hub.description",
+      "retained_technical_tokens": [
+        "pull",
+        "merge"
+      ],
+      "glossary": "i18n/glossary.md lines 195–200, Wave-2 kept-English set (all locales): endpoint (Latin, undeclined); merge / pull / push / commit (git/hub operations).",
+      "individual_consumer_proof": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          1061
+        ],
+        "setting_key": null,
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "source_english_approved": "Keep agents and teams you pulled from the Agent Hub current: whether updates are merged in automatically, how often the hub is checked, and which model resolves a conflict. Your edits and deletions are merged, never overwritten.",
+      "target_from_approved_capture": "Agent Hub से pull किए गए एजेंट और टीमें अपडेट रहें: अपडेट अपने-आप merge होते हैं या नहीं, हब कितनी बार जाँचा जाता है, और टकराव कौन-सा मॉडल सुलझाता है। आपने जो संपादित या हटाया, वह merge हो जाता है, कभी ओवरराइट नहीं।",
+      "changed_surrounding_prose": true,
+      "disposition": "Root-approved technical-boundary counterclaim, not a blanket English exemption; independent delta adjudication still required",
+      "hub_operation_proof": "local_operator/hub_sync/provenance.py:55 (pull/merge-pull/merge-push); hub_sync/service.py:1655–1656 (three-way merge)"
+    },
+    {
+      "finding_id": "I18N-WS-E4736E35DC92",
+      "message_id": "wire.settings.hub_auto_update_agents.choice.true.description",
+      "retained_technical_tokens": [
+        "merge"
+      ],
+      "glossary": "i18n/glossary.md lines 195–200, Wave-2 kept-English set (all locales): endpoint (Latin, undeclined); merge / pull / push / commit (git/hub operations).",
+      "individual_consumer_proof": {
+        "file": "local_operator/settings_io.py",
+        "lines": [],
+        "setting_key": null,
+        "choice_value": null,
+        "choice_value_verified_from_ast": false,
+        "current_key_consumer": "No direct _ws consumer at frozen head; carried inherited catalogue key. Current setting uses _hd.agents_on_description / _hd.agents_help in wire.settings.hub_defaults",
+        "corresponding_setting_lines": [
+          5844,
+          5851,
+          5854
+        ]
+      },
+      "source_english_approved": "merge hub updates automatically",
+      "target_from_approved_capture": "हब अपडेट अपने-आप merge करें",
+      "changed_surrounding_prose": false,
+      "disposition": "Root-approved technical-boundary counterclaim, not a blanket English exemption; independent delta adjudication still required",
+      "hub_operation_proof": "local_operator/hub_sync/provenance.py:55 (pull/merge-pull/merge-push); hub_sync/service.py:1655–1656 (three-way merge)"
+    },
+    {
+      "finding_id": "I18N-WS-E649D656620C",
+      "message_id": "wire.settings.hub_auto_update_agents.help",
+      "retained_technical_tokens": [
+        "pull",
+        "merge"
+      ],
+      "glossary": "i18n/glossary.md lines 195–200, Wave-2 kept-English set (all locales): endpoint (Latin, undeclined); merge / pull / push / commit (git/hub operations).",
+      "individual_consumer_proof": {
+        "file": "local_operator/settings_io.py",
+        "lines": [],
+        "setting_key": null,
+        "choice_value": null,
+        "choice_value_verified_from_ast": false,
+        "current_key_consumer": "No direct _ws consumer at frozen head; carried inherited catalogue key. Current setting uses _hd.agents_on_description / _hd.agents_help in wire.settings.hub_defaults",
+        "corresponding_setting_lines": [
+          5844,
+          5851,
+          5854
+        ]
+      },
+      "source_english_approved": "Merge hub updates into pulled agents automatically.",
+      "target_from_approved_capture": "हब अपडेट pull किए गए एजेंट में अपने-आप merge करें।",
+      "changed_surrounding_prose": true,
+      "disposition": "Root-approved technical-boundary counterclaim, not a blanket English exemption; independent delta adjudication still required",
+      "hub_operation_proof": "local_operator/hub_sync/provenance.py:55 (pull/merge-pull/merge-push); hub_sync/service.py:1655–1656 (three-way merge)"
+    },
+    {
+      "finding_id": "I18N-WS-89000E708CCA",
+      "message_id": "wire.settings.hub_auto_update_teams.choice.true.description",
+      "retained_technical_tokens": [
+        "merge"
+      ],
+      "glossary": "i18n/glossary.md lines 195–200, Wave-2 kept-English set (all locales): endpoint (Latin, undeclined); merge / pull / push / commit (git/hub operations).",
+      "individual_consumer_proof": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          5864
+        ],
+        "setting_key": "hub.auto_update.teams",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "source_english_approved": "merge hub updates automatically",
+      "target_from_approved_capture": "हब अपडेट अपने-आप merge करें",
+      "changed_surrounding_prose": false,
+      "disposition": "Root-approved technical-boundary counterclaim, not a blanket English exemption; independent delta adjudication still required",
+      "hub_operation_proof": "local_operator/hub_sync/provenance.py:55 (pull/merge-pull/merge-push); hub_sync/service.py:1655–1656 (three-way merge)"
+    },
+    {
+      "finding_id": "I18N-WS-B46B76077316",
+      "message_id": "wire.settings.hub_auto_update_teams.help",
+      "retained_technical_tokens": [
+        "pull",
+        "merge"
+      ],
+      "glossary": "i18n/glossary.md lines 195–200, Wave-2 kept-English set (all locales): endpoint (Latin, undeclined); merge / pull / push / commit (git/hub operations).",
+      "individual_consumer_proof": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          5867
+        ],
+        "setting_key": "hub.auto_update.teams",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "source_english_approved": "Merge hub updates into pulled teams automatically.",
+      "target_from_approved_capture": "हब अपडेट pull की गई टीमों में अपने-आप merge करें।",
+      "changed_surrounding_prose": true,
+      "disposition": "Root-approved technical-boundary counterclaim, not a blanket English exemption; independent delta adjudication still required",
+      "hub_operation_proof": "local_operator/hub_sync/provenance.py:55 (pull/merge-pull/merge-push); hub_sync/service.py:1655–1656 (three-way merge)"
+    },
+    {
+      "finding_id": "I18N-WS-578CE3D533FF",
+      "message_id": "wire.settings.local_providers.base_url.help",
+      "retained_technical_tokens": [
+        "endpoint"
+      ],
+      "glossary": "i18n/glossary.md lines 195–200, Wave-2 kept-English set (all locales): endpoint (Latin, undeclined); merge / pull / push / commit (git/hub operations).",
+      "individual_consumer_proof": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          5318
+        ],
+        "setting_key": null,
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "source_english_approved": "HTTP(S) API root. Changing servers requires a new token through /login; existing tokens are never forwarded to another endpoint.",
+      "target_from_approved_capture": "HTTP(S) API रूट। सर्वर बदलने पर /login से नया टोकन लेना पड़ता है; मौजूदा टोकन कभी दूसरे endpoint पर नहीं भेजे जाते।",
+      "changed_surrounding_prose": false,
+      "disposition": "Root-approved technical-boundary counterclaim, not a blanket English exemption; independent delta adjudication still required",
+      "hub_operation_proof": "Concrete server/API endpoint address, not a generic mode or ordinary display enum."
+    },
+    {
+      "finding_id": "I18N-WS-5FAF63734560",
+      "message_id": "wire.settings.local_providers.base_url.label",
+      "retained_technical_tokens": [
+        "endpoint"
+      ],
+      "glossary": "i18n/glossary.md lines 195–200, Wave-2 kept-English set (all locales): endpoint (Latin, undeclined); merge / pull / push / commit (git/hub operations).",
+      "individual_consumer_proof": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          5315
+        ],
+        "setting_key": null,
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "source_english_approved": "{name} endpoint",
+      "target_from_approved_capture": "{name} endpoint",
+      "changed_surrounding_prose": false,
+      "disposition": "Root-approved technical-boundary counterclaim, not a blanket English exemption; independent delta adjudication still required",
+      "hub_operation_proof": "Concrete server/API endpoint address, not a generic mode or ordinary display enum."
+    },
+    {
+      "finding_id": "I18N-WS-DA5C5E873CD2",
+      "message_id": "wire.settings.local_providers.description",
+      "retained_technical_tokens": [
+        "endpoint"
+      ],
+      "glossary": "i18n/glossary.md lines 195–200, Wave-2 kept-English set (all locales): endpoint (Latin, undeclined); merge / pull / push / commit (git/hub operations).",
+      "individual_consumer_proof": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          930
+        ],
+        "setting_key": null,
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "source_english_approved": "Server endpoints and exact-model metadata. Use /login to connect; reselect with /model saved to apply model changes.",
+      "target_from_approved_capture": "सर्वर endpoint और सटीक मॉडल मेटाडेटा। जोड़ने के लिए /login इस्तेमाल करें; मॉडल बदलाव लागू करने के लिए /model saved से दोबारा चुनें।",
+      "changed_surrounding_prose": false,
+      "disposition": "Root-approved technical-boundary counterclaim, not a blanket English exemption; independent delta adjudication still required",
+      "hub_operation_proof": "Concrete server/API endpoint address, not a generic mode or ordinary display enum."
+    },
+    {
+      "finding_id": "I18N-WS-18110E8894F1",
+      "message_id": "wire.settings.network_advertise_hosts.label",
+      "retained_technical_tokens": [
+        "endpoint"
+      ],
+      "glossary": "i18n/glossary.md lines 195–200, Wave-2 kept-English set (all locales): endpoint (Latin, undeclined); merge / pull / push / commit (git/hub operations).",
+      "individual_consumer_proof": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          5576
+        ],
+        "setting_key": "network.advertise_hosts",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "source_english_approved": "Advertised endpoints",
+      "target_from_approved_capture": "घोषित endpoint",
+      "changed_surrounding_prose": false,
+      "disposition": "Root-approved technical-boundary counterclaim, not a blanket English exemption; independent delta adjudication still required",
+      "hub_operation_proof": "Concrete server/API endpoint address, not a generic mode or ordinary display enum."
+    },
+    {
+      "finding_id": "I18N-WS-DAA433E4300B",
+      "message_id": "wire.settings.network_port.help",
+      "retained_technical_tokens": [
+        "endpoint"
+      ],
+      "glossary": "i18n/glossary.md lines 195–200, Wave-2 kept-English set (all locales): endpoint (Latin, undeclined); merge / pull / push / commit (git/hub operations).",
+      "individual_consumer_proof": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          5563
+        ],
+        "setting_key": "network.port",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "source_english_approved": "The port peers dial; endpoints without one use it.",
+      "target_from_approved_capture": "वह पोर्ट जो पीयर डायल करते हैं; बिना पोर्ट के endpoint इसी का इस्तेमाल करते हैं।",
+      "changed_surrounding_prose": false,
+      "disposition": "Root-approved technical-boundary counterclaim, not a blanket English exemption; independent delta adjudication still required",
+      "hub_operation_proof": "Concrete server/API endpoint address, not a generic mode or ordinary display enum."
+    },
+    {
+      "finding_id": "I18N-WS-B76646004E00",
+      "message_id": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.description",
+      "retained_technical_tokens": [
+        "endpoint"
+      ],
+      "glossary": "i18n/glossary.md lines 195–200, Wave-2 kept-English set (all locales): endpoint (Latin, undeclined); merge / pull / push / commit (git/hub operations).",
+      "individual_consumer_proof": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2424
+        ],
+        "setting_key": "providers.openrouter.enforce_distillable_text",
+        "choice_value": "true",
+        "choice_value_verified_from_ast": true
+      },
+      "source_english_approved": "distillable-text endpoints only",
+      "target_from_approved_capture": "सिर्फ़ distillable-text endpoint",
+      "changed_surrounding_prose": true,
+      "disposition": "Root-approved technical-boundary counterclaim, not a blanket English exemption; independent delta adjudication still required",
+      "hub_operation_proof": "Concrete server/API endpoint address, not a generic mode or ordinary display enum."
+    },
+    {
+      "finding_id": "I18N-WS-572D791F9AEE",
+      "message_id": "wire.settings.providers_openrouter_enforce_distillable_text.help",
+      "retained_technical_tokens": [
+        "endpoint"
+      ],
+      "glossary": "i18n/glossary.md lines 195–200, Wave-2 kept-English set (all locales): endpoint (Latin, undeclined); merge / pull / push / commit (git/hub operations).",
+      "individual_consumer_proof": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2414
+        ],
+        "setting_key": "providers.openrouter.enforce_distillable_text",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "source_english_approved": "'true': restrict to endpoints whose text output may be distilled. 'default': nothing sent.",
+      "target_from_approved_capture": "'true': सिर्फ़ ऐसे endpoint जिनका टेक्स्ट आउटपुट distill किया जा सके। 'default': कुछ नहीं भेजा जाता।",
+      "changed_surrounding_prose": true,
+      "disposition": "Root-approved technical-boundary counterclaim, not a blanket English exemption; independent delta adjudication still required",
+      "hub_operation_proof": "Concrete server/API endpoint address, not a generic mode or ordinary display enum."
+    },
+    {
+      "finding_id": "I18N-WS-4853E8732AB9",
+      "message_id": "wire.settings.providers_openrouter_zdr.choice.true.description",
+      "retained_technical_tokens": [
+        "endpoint"
+      ],
+      "glossary": "i18n/glossary.md lines 195–200, Wave-2 kept-English set (all locales): endpoint (Latin, undeclined); merge / pull / push / commit (git/hub operations).",
+      "individual_consumer_proof": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2402
+        ],
+        "setting_key": "providers.openrouter.zdr",
+        "choice_value": "true",
+        "choice_value_verified_from_ast": true
+      },
+      "source_english_approved": "zero-data-retention endpoints only",
+      "target_from_approved_capture": "सिर्फ़ शून्य-डेटा-रिटेंशन endpoint",
+      "changed_surrounding_prose": false,
+      "disposition": "Root-approved technical-boundary counterclaim, not a blanket English exemption; independent delta adjudication still required",
+      "hub_operation_proof": "Concrete server/API endpoint address, not a generic mode or ordinary display enum."
+    },
+    {
+      "finding_id": "I18N-WS-7E0C387948DC",
+      "message_id": "wire.settings.providers_openrouter_zdr.help",
+      "retained_technical_tokens": [
+        "endpoint"
+      ],
+      "glossary": "i18n/glossary.md lines 195–200, Wave-2 kept-English set (all locales): endpoint (Latin, undeclined); merge / pull / push / commit (git/hub operations).",
+      "individual_consumer_proof": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          2392
+        ],
+        "setting_key": "providers.openrouter.zdr",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "source_english_approved": "'true': restrict to zero-data-retention endpoints. 'default': nothing sent.",
+      "target_from_approved_capture": "'true': सिर्फ़ शून्य-डेटा-रिटेंशन endpoint तक सीमित। 'default': कुछ नहीं भेजा जाता।",
+      "changed_surrounding_prose": true,
+      "disposition": "Root-approved technical-boundary counterclaim, not a blanket English exemption; independent delta adjudication still required",
+      "hub_operation_proof": "Concrete server/API endpoint address, not a generic mode or ordinary display enum."
+    },
+    {
+      "finding_id": "I18N-WS-8377F1BF1C46",
+      "message_id": "wire.settings.web_search_searxng_endpoint.label",
+      "retained_technical_tokens": [
+        "endpoint"
+      ],
+      "glossary": "i18n/glossary.md lines 195–200, Wave-2 kept-English set (all locales): endpoint (Latin, undeclined); merge / pull / push / commit (git/hub operations).",
+      "individual_consumer_proof": {
+        "file": "local_operator/settings_io.py",
+        "lines": [
+          4792
+        ],
+        "setting_key": "web_search.searxng_endpoint",
+        "choice_value": null,
+        "choice_value_verified_from_ast": false
+      },
+      "source_english_approved": "SearXNG endpoint",
+      "target_from_approved_capture": "SearXNG endpoint",
+      "changed_surrounding_prose": false,
+      "disposition": "Root-approved technical-boundary counterclaim, not a blanket English exemption; independent delta adjudication still required",
+      "hub_operation_proof": "Concrete server/API endpoint address, not a generic mode or ordinary display enum."
+    }
+  ],
+  "other_technical_retention": [
+    {
+      "message_id": "wire.settings.web_fetch_render_backend.help",
+      "tokens": [
+        "[fetch]",
+        "extra",
+        "markdownify"
+      ],
+      "glossary": "i18n/glossary.md lines 195–200: extra (pip extras)",
+      "consumer": "local_operator/settings_io.py web_fetch_render_backend setting; approved English specifically names [fetch] extra",
+      "disposition": "Translate Auto and surrounding prose; retain pip-extra technical notation and package name"
+    }
+  ],
+  "terms_chosen": {
+    "auto": "स्वचालित",
+    "manual": "ख़ुद तय करें; paired ceiling label ख़ुद तय की गई सीमा",
+    "boolean_choices": "हाँ / नहीं (only localized display copy, not serialized values)",
+    "default": "डिफ़ॉल्ट",
+    "allow_deny": "अनुमति दें / अनुमति न दें",
+    "allowlist_inherit": "अनुमति-सूची / मौजूदा परिवेश",
+    "distillable_text": "डिस्टिलेशन योग्य टेक्स्ट; description clarifies permission for model distillation, not summarization",
+    "filler_words_non_speech_cues": "भराव शब्द / गैर-वाचिक संकेत",
+    "voice_medium": "बोलने का सामान्य अंदाज़।; normal vocal delivery, not fixed number or price",
+    "librarian": "Existing लाइब्रेरियन / लाइब्रेरी retained; feminine polite pronouns/verbs aligned with source her. No default agent/config ID renamed."
+  },
+  "paired_help_reference_policy": "Quoted ordinary mode references in settings help now use the actual translated display choices. Literal commands, flags, env names, JSON/API field cleanup and protocol values in code spans are unchanged. No serialized Choice.value is in this patch.",
+  "folded_minor_ids": [
+    "I18N-WS-521BD8E7974A",
+    "I18N-WS-01B7C6EA667A"
+  ],
+  "minor_width_deferred": "No new prose/width-only rewriting. Static changed-label measurements have no >29-cell label; no fixed choice-row budget invented. Width arithmetic is not observed clipping or native fit clearance.",
+  "bedrock_masked_input": "Unchanged; no masked source reconstructed, no lease/public-reader call made.",
+  "mechanical_evidence": {
+    "keys": 895,
+    "changed_keys": [
+      "wire.settings.bash_memory_limit_mb.help",
+      "wire.settings.bash_memory_limit_mb.label",
+      "wire.settings.bash_memory_mode.choice.auto.label",
+      "wire.settings.bash_memory_mode.choice.manual.label",
+      "wire.settings.bash_memory_mode.help",
+      "wire.settings.classification_vendor.choice.auto.label",
+      "wire.settings.classification_vendor.help",
+      "wire.settings.compaction_strategy.choice.auto.label",
+      "wire.settings.compaction_strategy.help",
+      "wire.settings.display_nerd_icons.choice.none.label",
+      "wire.settings.display_nerd_icons.help",
+      "wire.settings.hub.description",
+      "wire.settings.hub_auto_update_agents.help",
+      "wire.settings.hub_auto_update_teams.help",
+      "wire.settings.librarian.description",
+      "wire.settings.librarian_cadence_max_extra_per_day.help",
+      "wire.settings.librarian_cadence_min_gap_minutes.help",
+      "wire.settings.librarian_cadence_paused.help",
+      "wire.settings.librarian_enabled.help",
+      "wire.settings.librarian_name.help",
+      "wire.settings.model_effort.choice.unset.label",
+      "wire.settings.model_effort.help",
+      "wire.settings.network_max_handshakes.help",
+      "wire.settings.network_rollout_on_update.choice.auto.label",
+      "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+      "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+      "wire.settings.providers_openrouter_allow_fallbacks.help",
+      "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+      "wire.settings.providers_openrouter_data_collection.help",
+      "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.description",
+      "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+      "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+      "wire.settings.providers_openrouter_enforce_distillable_text.help",
+      "wire.settings.providers_openrouter_enforce_distillable_text.label",
+      "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+      "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+      "wire.settings.providers_openrouter_require_parameters.help",
+      "wire.settings.providers_openrouter_sort.choice.unset.label",
+      "wire.settings.providers_openrouter_sort.help",
+      "wire.settings.providers_openrouter_zdr.choice.true.label",
+      "wire.settings.providers_openrouter_zdr.choice.unset.label",
+      "wire.settings.providers_openrouter_zdr.help",
+      "wire.settings.shell_environment_inherit.help",
+      "wire.settings.shell_environment_inherit.label",
+      "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "wire.settings.shell_environment_mode.choice.inherit.label",
+      "wire.settings.shell_environment_mode.help",
+      "wire.settings.speech_transcription_cleanup.choice.auto.label",
+      "wire.settings.speech_transcription_cleanup.choice.client.label",
+      "wire.settings.speech_transcription_cleanup.choice.off.label",
+      "wire.settings.speech_transcription_cleanup.choice.provider.label",
+      "wire.settings.speech_transcription_cleanup.help",
+      "wire.settings.speech_voice_expressiveness.choice.medium.description",
+      "wire.settings.speech_voice_gender.choice.auto.label",
+      "wire.settings.speech_voice_gender.choice.female.label",
+      "wire.settings.speech_voice_gender.choice.male.label",
+      "wire.settings.speech_voice_gender.help",
+      "wire.settings.web_fetch_render_backend.choice.auto.label",
+      "wire.settings.web_fetch_render_backend.help",
+      "wire.settings.web_search_strategy.choice.ordered.label",
+      "wire.settings.web_search_strategy.choice.round_robin.label"
+    ],
+    "parsed_and_rendered_en_hi_pairs": 895,
+    "errors": [],
+    "placeholder_messages": [
+      [
+        "wire.settings.local_providers.base_url.label",
+        [
+          [
+            "name",
+            "simple"
+          ]
+        ]
+      ],
+      [
+        "wire.settings.local_providers.models.label",
+        [
+          [
+            "name",
+            "simple"
+          ]
+        ]
+      ]
+    ],
+    "malformed_brace_negative_control_rejected": true,
+    "hi_CLDR": {
+      "categories": [
+        "one",
+        "other"
+      ],
+      "0_1_2": [
+        "one",
+        "one",
+        "other"
+      ],
+      "actual_plural_select_messages": 0
+    },
+    "NFC_and_no_bidi_controls_changed_values": true,
+    "code_spans_commands_env_and_placeholder_tokens_preserved": true,
+    "pseudo_fixture_count": 63,
+    "pseudo_scope": "existing parser/render only; no rendered layout proof",
+    "RTL": "Hindi LTR; Urdu untouched; no native shaping/isolation clearance",
+    "width": [
+      {
+        "key": "wire.settings.bash_memory_limit_mb.help",
+        "en_cells": 129,
+        "hi_cells": 104,
+        "relative_expansion": 0.806,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.bash_memory_limit_mb.label",
+        "en_cells": 19,
+        "hi_cells": 18,
+        "relative_expansion": 0.947,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.bash_memory_mode.choice.auto.label",
+        "en_cells": 4,
+        "hi_cells": 5,
+        "relative_expansion": 1.25,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.bash_memory_mode.choice.manual.label",
+        "en_cells": 6,
+        "hi_cells": 8,
+        "relative_expansion": 1.333,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.bash_memory_mode.help",
+        "en_cells": 164,
+        "hi_cells": 129,
+        "relative_expansion": 0.787,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.classification_vendor.choice.auto.label",
+        "en_cells": 4,
+        "hi_cells": 5,
+        "relative_expansion": 1.25,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.classification_vendor.help",
+        "en_cells": 60,
+        "hi_cells": 66,
+        "relative_expansion": 1.1,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.compaction_strategy.choice.auto.label",
+        "en_cells": 4,
+        "hi_cells": 5,
+        "relative_expansion": 1.25,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.compaction_strategy.help",
+        "en_cells": 47,
+        "hi_cells": 57,
+        "relative_expansion": 1.213,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.display_nerd_icons.choice.none.label",
+        "en_cells": 4,
+        "hi_cells": 5,
+        "relative_expansion": 1.25,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.display_nerd_icons.help",
+        "en_cells": 68,
+        "hi_cells": 55,
+        "relative_expansion": 0.809,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.hub.description",
+        "en_cells": 228,
+        "hi_cells": 174,
+        "relative_expansion": 0.763,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.hub_auto_update_agents.help",
+        "en_cells": 51,
+        "hi_cells": 48,
+        "relative_expansion": 0.941,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.hub_auto_update_teams.help",
+        "en_cells": 50,
+        "hi_cells": 46,
+        "relative_expansion": 0.92,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.librarian.description",
+        "en_cells": 164,
+        "hi_cells": 101,
+        "relative_expansion": 0.616,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.librarian_cadence_max_extra_per_day.help",
+        "en_cells": 71,
+        "hi_cells": 52,
+        "relative_expansion": 0.732,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.librarian_cadence_min_gap_minutes.help",
+        "en_cells": 64,
+        "hi_cells": 53,
+        "relative_expansion": 0.828,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.librarian_cadence_paused.help",
+        "en_cells": 114,
+        "hi_cells": 99,
+        "relative_expansion": 0.868,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.librarian_enabled.help",
+        "en_cells": 88,
+        "hi_cells": 72,
+        "relative_expansion": 0.818,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.librarian_name.help",
+        "en_cells": 55,
+        "hi_cells": 47,
+        "relative_expansion": 0.855,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.model_effort.choice.unset.label",
+        "en_cells": 4,
+        "hi_cells": 5,
+        "relative_expansion": 1.25,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.model_effort.help",
+        "en_cells": 57,
+        "hi_cells": 37,
+        "relative_expansion": 0.649,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.network_max_handshakes.help",
+        "en_cells": 183,
+        "hi_cells": 134,
+        "relative_expansion": 0.732,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.network_rollout_on_update.choice.auto.label",
+        "en_cells": 4,
+        "hi_cells": 5,
+        "relative_expansion": 1.25,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+        "en_cells": 5,
+        "hi_cells": 2,
+        "relative_expansion": 0.4,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+        "en_cells": 7,
+        "hi_cells": 4,
+        "relative_expansion": 0.571,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_allow_fallbacks.help",
+        "en_cells": 171,
+        "hi_cells": 135,
+        "relative_expansion": 0.789,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+        "en_cells": 5,
+        "hi_cells": 6,
+        "relative_expansion": 1.2,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+        "en_cells": 4,
+        "hi_cells": 8,
+        "relative_expansion": 2.0,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+        "en_cells": 7,
+        "hi_cells": 4,
+        "relative_expansion": 0.571,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_data_collection.help",
+        "en_cells": 124,
+        "hi_cells": 127,
+        "relative_expansion": 1.024,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.description",
+        "en_cells": 31,
+        "hi_cells": 46,
+        "relative_expansion": 1.484,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+        "en_cells": 4,
+        "hi_cells": 1,
+        "relative_expansion": 0.25,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+        "en_cells": 7,
+        "hi_cells": 4,
+        "relative_expansion": 0.571,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.help",
+        "en_cells": 90,
+        "hi_cells": 79,
+        "relative_expansion": 0.878,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.label",
+        "en_cells": 16,
+        "hi_cells": 15,
+        "relative_expansion": 0.938,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+        "en_cells": 4,
+        "hi_cells": 1,
+        "relative_expansion": 0.25,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+        "en_cells": 7,
+        "hi_cells": 4,
+        "relative_expansion": 0.571,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_require_parameters.help",
+        "en_cells": 149,
+        "hi_cells": 123,
+        "relative_expansion": 0.826,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+        "en_cells": 7,
+        "hi_cells": 4,
+        "relative_expansion": 0.571,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_sort.help",
+        "en_cells": 177,
+        "hi_cells": 132,
+        "relative_expansion": 0.746,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+        "en_cells": 4,
+        "hi_cells": 1,
+        "relative_expansion": 0.25,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+        "en_cells": 7,
+        "hi_cells": 4,
+        "relative_expansion": 0.571,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_zdr.help",
+        "en_cells": 75,
+        "hi_cells": 58,
+        "relative_expansion": 0.773,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.shell_environment_inherit.help",
+        "en_cells": 206,
+        "hi_cells": 167,
+        "relative_expansion": 0.811,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.shell_environment_inherit.label",
+        "en_cells": 23,
+        "hi_cells": 21,
+        "relative_expansion": 0.913,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+        "en_cells": 9,
+        "hi_cells": 7,
+        "relative_expansion": 0.778,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+        "en_cells": 7,
+        "hi_cells": 8,
+        "relative_expansion": 1.143,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.shell_environment_mode.help",
+        "en_cells": 344,
+        "hi_cells": 258,
+        "relative_expansion": 0.75,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+        "en_cells": 4,
+        "hi_cells": 5,
+        "relative_expansion": 1.25,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+        "en_cells": 6,
+        "hi_cells": 4,
+        "relative_expansion": 0.667,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+        "en_cells": 3,
+        "hi_cells": 2,
+        "relative_expansion": 0.667,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+        "en_cells": 8,
+        "hi_cells": 6,
+        "relative_expansion": 0.75,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.speech_transcription_cleanup.help",
+        "en_cells": 293,
+        "hi_cells": 234,
+        "relative_expansion": 0.799,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+        "en_cells": 24,
+        "hi_cells": 15,
+        "relative_expansion": 0.625,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.speech_voice_gender.choice.auto.label",
+        "en_cells": 4,
+        "hi_cells": 5,
+        "relative_expansion": 1.25,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.speech_voice_gender.choice.female.label",
+        "en_cells": 6,
+        "hi_cells": 3,
+        "relative_expansion": 0.5,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.speech_voice_gender.choice.male.label",
+        "en_cells": 4,
+        "hi_cells": 3,
+        "relative_expansion": 0.75,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.speech_voice_gender.help",
+        "en_cells": 61,
+        "hi_cells": 68,
+        "relative_expansion": 1.115,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.web_fetch_render_backend.choice.auto.label",
+        "en_cells": 4,
+        "hi_cells": 5,
+        "relative_expansion": 1.25,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.web_fetch_render_backend.help",
+        "en_cells": 58,
+        "hi_cells": 60,
+        "relative_expansion": 1.034,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.web_search_strategy.choice.ordered.label",
+        "en_cells": 7,
+        "hi_cells": 10,
+        "relative_expansion": 1.429,
+        "maxCells": null,
+        "label_static_risk": false
+      },
+      {
+        "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+        "en_cells": 11,
+        "hi_cells": 5,
+        "relative_expansion": 0.455,
+        "maxCells": null,
+        "label_static_risk": false
+      }
+    ],
+    "target_before_sha256": "64bf453ca81721ed35d89ba95d7e5e5aac343765d5e6010fbd37ccbc50704f48",
+    "target_after_sha256": "b030c730c0f8a179773b082a8e907d4487e8cf31a590714b62bab51614a5c30a",
+    "english_before_after_sha256": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+    "context_before_after_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+    "head": "90009effa833836ce4471e99d90d3b6438de7f60"
+  },
+  "invariants": {
+    "exact_value_only_patch_reconstruction": true,
+    "key_order_and_895_key_set_preserved": true,
+    "english_and_context_match_root_before_and_after_hashes": true,
+    "all_other_target_bytes_preserved": true,
+    "other_locales_code_histories_generated_baselines_eligibility": "No author writes. Other six concurrent disjoint locale edits are not attributed to this author; no false global-unchanged claim.",
+    "staging_commits_pushes": "None performed; index was not modified by this author.",
+    "head_frozen": true
+  },
+  "not_claimed": [
+    "Independent native audit",
+    "UI/browser/native/rendered frame clearance",
+    "RTL shaping or full pseudo layout validation",
+    "Whole-interface no-English approval",
+    "PR/merge/release readiness"
+  ],
+  "receipt_destination_for_Root": "i18n/audits/evidence/approval-full-repair-author-hi.json (copy this scratch receipt; no evidence-write tool available)"
+}

@@ -1,0 +1,8 @@
+{
+  "wire.settings.transcript_display.choice.by_response.description": "cada respuesta completada",
+  "wire.settings.transcript_display.choice.by_response.label": "Por respuesta",
+  "wire.settings.transcript_display.choice.by_turn.description": "una respuesta por turno",
+  "wire.settings.transcript_display.choice.by_turn.label": "Por turno",
+  "wire.settings.transcript_display.help": "“Por turno” condensa cada turno en su respuesta. “Por respuesta” mantiene en pantalla cada respuesta completada, con la respuesta final del turno aún marcada.",
+  "wire.settings.transcript_display.label": "Vista de la transcripción"
+}

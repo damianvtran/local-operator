@@ -1,0 +1,39 @@
+COMMAND ['/Users/damian/local-operator/.venv/bin/python', '/Users/damian/local-operator/.worktrees/i18n-provider-state-labels/i18n/audits/evidence/es/tui.provider_state/bf608/script.py.txt']
+interpreter /Users/damian/local-operator/.venv/bin/python
+isolated HOME /Users/damian/.local-operator/sessions/f6084ca8999b/scratchpad/es-b-isolated config /Users/damian/.local-operator/sessions/f6084ca8999b/scratchpad/es-b-isolated/config
+module local_operator.i18n.catalogues /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/i18n/catalogues.py
+module local_operator.i18n.messages /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/i18n/messages.py
+module local_operator.i18n.runtime /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/i18n/runtime.py
+module scripts.i18n.check /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/scripts/i18n/check.py
+input en 113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912
+input context 67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be
+input es 4567c719cd1492b7edc62ae85ef4769f40a2adc774a1eb49dca072883a36b490
+OFFICIAL scoped check_catalogues []
+KEY tui.provider_state.logged_in EN 'logged in' ES 'sesión iniciada' args=0 plural/select=0 NFC=yes protected-token-count=0 cells en/es/pseudo 9 15 25
+Rich synthetic segment width 17 EN/ES/pseudo ['logged in', 'sesión iniciada', '⟦seesiióón iinii…']
+Rich synthetic segment width 23 EN/ES/pseudo ['logged in', 'sesión iniciada', '⟦seesiióón iiniiciiaad…']
+Rich synthetic segment width 31 EN/ES/pseudo ['logged in', 'sesión iniciada', '⟦seesiióón iiniiciiaadaa⟧']
+KEY tui.provider_state.env_key EN 'env key' ES 'clave del entorno' args=0 plural/select=0 NFC=yes protected-token-count=0 cells en/es/pseudo 7 17 25
+Rich synthetic segment width 17 EN/ES/pseudo ['env key', 'clave del entorno', '⟦claavee deel ee…']
+Rich synthetic segment width 23 EN/ES/pseudo ['env key', 'clave del entorno', '⟦claavee deel eentoorn…']
+Rich synthetic segment width 31 EN/ES/pseudo ['env key', 'clave del entorno', '⟦claavee deel eentoornoo⟧']
+KEY tui.provider_state.needs_login EN 'needs login' ES 'requiere iniciar sesión' args=0 plural/select=0 NFC=yes protected-token-count=0 cells en/es/pseudo 11 23 37
+Rich synthetic segment width 17 EN/ES/pseudo ['needs login', 'requiere iniciar…', '⟦reequuiieeree i…']
+Rich synthetic segment width 23 EN/ES/pseudo ['needs login', 'requiere iniciar sesión', '⟦reequuiieeree iiniici…']
+Rich synthetic segment width 31 EN/ES/pseudo ['needs login', 'requiere iniciar sesión', '⟦reequuiieeree iiniiciiaar see…']
+KEY tui.provider_state.local_ready EN 'configured server' ES 'servidor configurado' args=0 plural/select=0 NFC=yes protected-token-count=0 cells en/es/pseudo 17 20 30
+Rich synthetic segment width 17 EN/ES/pseudo ['configured server', 'servidor configu…', '⟦seerviidoor coo…']
+Rich synthetic segment width 23 EN/ES/pseudo ['configured server', 'servidor configurado', '⟦seerviidoor coonfiigu…']
+Rich synthetic segment width 31 EN/ES/pseudo ['configured server', 'servidor configurado', '⟦seerviidoor coonfiiguuraadoo⟧']
+KEY tui.provider_state.local_unconfigured EN 'configure server' ES 'configurar servidor' args=0 plural/select=0 NFC=yes protected-token-count=0 cells en/es/pseudo 16 19 28
+Rich synthetic segment width 17 EN/ES/pseudo ['configure server', 'configurar servi…', '⟦coonfiiguuraar …']
+Rich synthetic segment width 23 EN/ES/pseudo ['configure server', 'configurar servidor', '⟦coonfiiguuraar seervi…']
+Rich synthetic segment width 31 EN/ES/pseudo ['configure server', 'configurar servidor', '⟦coonfiiguuraar seerviidoor⟧']
+NEGATIVE missing-key ["es/tui.provider_state: missing key 'tui.provider_state.logged_in'"]
+NEGATIVE added-argument ["es/tui.provider_state: tui.provider_state.logged_in: arguments (('unexpected', 'simple'),) != en's (): en has 0 argument(s), translation has 1"]
+PASS scoped catalogue/context/ICU/real render-record APIs, negative controls, NFC, protected tokens and synthetic Rich/pseudo checks
+LIMIT: not app/native/font/styled integration evidence; widths have no global fixed maximum; no locale eligibility clearance
+
+STDERR
+
+RETURN_CODE 0

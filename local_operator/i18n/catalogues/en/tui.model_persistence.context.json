@@ -1,0 +1,29 @@
+{
+  "tui.model_persistence.persist": {
+    "role": "model-picker opening system notice: persistence instruction",
+    "tone": "plain, concise, instructional",
+    "note": "Zero ICU arguments. Preserve the exact ASCII command /model default, including its single internal space; translate the surrounding instruction, not the command. Saves the current model as the boot default for NEW sessions, not a model switch in this session. Canonical persistence message for the notice; future integration must resolve it when opening the picker, never translate an import-time constant. Existing slash_commands.PERSIST_HINT remains a byte-compatible English adapter for legacy CLI/help/footer/receipt consumers in this slice; model_picker.PERSIST_HINT_PREFIX recognises that legacy footer, not this localized notice. Do not feed translated text into that prefix parser. Shown in ordinary and missing-model setup states, omitted when hosting is absent or unknown. This is a wrapping notice, not the fixed-width picker footer: do not inherit the footer's 43-cell cap. Audit wrapping at 80/100/120 columns in pristine and non-empty transcript families, with short and long opaque model IDs. For Urdu keep the command in LTR reading order without changing stored command bytes. No plural/select arms.",
+    "placeholders": {}
+  },
+  "tui.model_persistence.settings": {
+    "role": "model-picker opening system notice: settings route",
+    "tone": "plain, concise, instructional",
+    "note": "Zero ICU arguments. Preserve literal /settings exactly. Boot default means the model used to start new sessions, not the current session model. The word 'too' links this route to other persistence routes when present; this same complete clause is intentionally the sole route in absent/unknown-hosting setup, where all /model commands refuse. Do not add a /model route in those states. Clause order is persistence, saved-default switch, settings, separated by the existing middle-dot layout seams; absent clauses are omitted by semantic state, never by parsing translated prose. Wrapping notice: no fixed maxCells. Audit 80/100/120 columns and both transcript width families; prevent a lone command on the final row. For Urdu preserve /settings as an LTR command without modifying stored bytes. Resolve at picker opening so live locale changes affect reopened notices. No plural/select arms.",
+    "placeholders": {}
+  },
+  "tui.model_persistence.saved": {
+    "role": "model-picker opening system notice: return-to-default route",
+    "tone": "plain, concise, instructional",
+    "note": "Zero ICU arguments. Preserve the exact ASCII command /model saved, including its single internal space. This command switches THIS session to its saved boot-default model; it does not save the current model and is distinct from /model default. Shown only in ordinary session state, never in setup (including missing-model setup). Wrapping notice: no fixed maxCells. Audit 80/100/120 columns in pristine and non-empty transcript families, keeping the two-word command readable in LTR order for Urdu. Existing narrow-width command-fold regressions remain the integration baseline; do not claim a new all-width guarantee. Resolve when opening the picker, not at import or session snapshot time. No plural/select arms.",
+    "placeholders": {}
+  },
+  "tui.model_persistence.with_model": {
+    "role": "model-picker opening system notice: current-model envelope",
+    "tone": "plain, factual",
+    "note": "ICU arguments: label (string), routes (string); preserve both names exactly once. Translate the human label 'model', not the opaque label argument. label is the unchanged effective provider/model identity, possibly a long dated ID; routes is already-localized complete route clauses joined with the existing middle-dot separators. Never translate or parse either argument again. Preserve the English source punctuation/spacing for byte-compatible English notices. Omit this envelope entirely when no model label exists; do not introduce an empty 'model:' prefix. This system notice must preserve the boot composition and existing pinned-working-tail placement. At integration, resolve clauses and envelope in the same current-locale snapshot per opening: identical rendered text still deduplicates against the last non-pinned NoticeBlock; a changed locale or semantic state must produce fresh text on reopen, without rewriting historic transcript rows or changing model-switch semantics. No fixed maxCells: validate short/long labels and real NoticeBlock budgets at 80/100/120 columns for pristine and non-empty transcript families. Urdu audit must distinguish human RTL text from LTR label/command runs; qualify the presentation bidi boundary during integration; do not assume terminal shaping support or change opaque IDs or stored command bytes. Pseudo-localization must expand only human copy, retaining placeholders and command tokens. No plural/select arms.",
+    "placeholders": {
+      "label": "Opaque effective provider/model ID; preserve byte-for-byte.",
+      "routes": "Already-localized complete route clauses; do not translate or parse again."
+    }
+  }
+}

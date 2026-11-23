@@ -990,3 +990,122 @@ async def test_advisory_guidance_is_appended_once_per_distinct_note() -> None:
     assert marker not in second.text
     assert third.text.count(marker) == 1 and "Prefer no_reply" in third.text
     assert fourth.text.count(marker) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["dm", "channel_post"])
+@pytest.mark.parametrize("display", [None, "Actual manager"])
+async def test_named_session_tool_sends_host_snapshot_on_both_live_paths(tmp_path, op, display):
+    """Drive the real model tool boundary and HTTP serializer, not just kwargs."""
+    from local_operator.harness.types import ToolContext
+
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if request.url.path.endswith("/status"):
+            context.bridge_session_agent_display = "Late mutable name"
+            runtime.session_agent_display = "Late birth mutation"
+            return _ok({"features": {"team_bridge_agent_session_display": 1}})
+        if request.url.path.endswith("/directory"):
+            return _ok(
+                {
+                    "members": [
+                        {
+                            "account_id": "acc_2",
+                            "display_label": "Peer",
+                            "role": "member",
+                            "bridge_enabled": True,
+                            "bridge_state": "active",
+                            "agent": {
+                                "endpoint_id": "bep_2",
+                                "name": "Endpoint",
+                                "state": "active",
+                            },
+                        }
+                    ]
+                }
+            )
+        if request.url.path.endswith("/messages"):
+            return _ok({"id": "bcmsg_display01", "seq": 1}, status=201)
+        return _ok({"id": "bcv_direct01", "kind": "dm", "member_count": 2})
+
+    client = tb_client.TeamBridgeClient(
+        base_url="https://hub.example",
+        store=FakeStore(),
+        transport=httpx.MockTransport(handler),
+        credential_id=1,
+    )
+    runtime = _runtime(client, config_dir=tmp_path)
+    runtime.admission = "admitted"
+    runtime.session_agent_display = "Old birth name"
+    context = ToolContext(bridge_runtime=runtime, bridge_session_agent_display=display)
+    tool = build_bridge_tool(context)
+    assert tool is not None
+    assert "agent_session" not in tool.parameters["properties"]
+    args = {
+        "op": op,
+        "body": "unchanged body",
+        "new_post": True,
+        **({"account_id": "acc_2"} if op == "dm" else {"channel_id": "bcv_direct01"}),
+    }
+    result = await tool.execute("display-call", args, None, None, context)
+    assert not result.is_error, result
+    posts = [
+        request
+        for request in requests
+        if request.method == "POST" and request.url.path.endswith("/messages")
+    ]
+    assert len(posts) == 1
+    payload = json.loads(posts[0].content)
+    if display is None:
+        assert "agent_session" not in payload
+    else:
+        assert payload["agent_session"] == {"display_label": display}
+    assert payload["actor_endpoint_id"] == "bep_1" and payload["origin_session_id"] == "sess_1"
+    assert len([r for r in requests if r.url.path.endswith("/status")]) == (
+        0 if display is None else 1
+    )
+    for request in requests:
+        if request.method == "POST" and not request.url.path.endswith("/messages"):
+            assert "agent_session" not in json.loads(request.content)
+
+
+@pytest.mark.asyncio
+async def test_uncertain_file_replay_keeps_same_display_envelope(tmp_path, monkeypatch):
+    from copy import deepcopy
+
+    from local_operator.team_bridge import agent_files, host
+
+    monkeypatch.setattr(host, "outbound_tool_fence", lambda _: None)
+    bodies = []
+
+    def handler(request):
+        payload = json.loads(request.content)
+        bodies.append(deepcopy(payload))
+        if len(bodies) == 1:
+            raise httpx.ReadTimeout("uncertain fixture")
+        return _ok({"id": "bcmsg_display01", "seq": 1}, status=201)
+
+    client = tb_client.TeamBridgeClient(
+        base_url="https://hub.example",
+        store=FakeStore(),
+        transport=httpx.MockTransport(handler),
+        credential_id=1,
+    )
+    runtime = _runtime(client, config_dir=tmp_path)
+    batch = agent_files.FileBatch(runtime, "bep_1")
+    batch.staged = ["batt_file00001"]
+    await batch.send(
+        "bcv_direct01",
+        client_ref="stable-ref",
+        text="body",
+        tenant_id=runtime.tenant_id,
+        actor_endpoint_id="bep_1",
+        origin_session_id="sess_1",
+        agent_session={"display_label": "Frozen task"},
+    )
+    assert len(bodies) == 2 and bodies[0] == bodies[1]
+    assert bodies[0]["client_ref"] == "stable-ref"
+    assert bodies[0]["agent_session"] == {"display_label": "Frozen task"}
+    assert bodies[0]["files"] == ["batt_file00001"]

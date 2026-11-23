@@ -1,0 +1,527 @@
+{
+  "locale": "hi",
+  "namespace": "wire.settings",
+  "side": "B",
+  "round": 1,
+  "head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+  "scope": "fa4fb006..a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+  "source_sha256": "298fc1100cb10bfa34909aa245307a735dad318f456e5bbfb5337fbcdb1e8962",
+  "context_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+  "target_sha256": "64bf453ca81721ed35d89ba95d7e5e5aac343765d5e6010fbd37ccbc50704f48",
+  "status": "failed",
+  "translator": {
+    "agent": "approval-labels-author-hi / c456dba3488d",
+    "model": "openai/gpt-6.1-sol",
+    "provenance": "Read approval-choice-translator-hi.json; actual authorship is Automatic only. Ask retained, original author unknown; other 893 authors unknown."
+  },
+  "auditor": {
+    "agent": "approval-full-hi-B-cached / bbc40416334c",
+    "model": "openai/gpt-6.1-sol",
+    "host_fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota",
+      "source": "Host model-switch message before substantive pair auditing"
+    },
+    "findings": 35,
+    "minor_count": 1
+  },
+  "coverage": {
+    "pairs_inspected": 895,
+    "pairs_semantically_readable": 894,
+    "context_entries_read": 104,
+    "retained_semantic_keys": 0,
+    "unreadable_keys": [
+      "wire.settings.providers_bedrock_auth.help"
+    ],
+    "fresh_semantic_basis": "All current approved EN/HI pairs read in numbered batches, including every elided spill span. Bedrock help target masking prevents one complete semantic judgment. No prior auditor opinions consulted."
+  },
+  "new_two_labels": {
+    "status": "passed",
+    "findings": [],
+    "ask": {
+      "current": "पूछें",
+      "meaning": "Polite Ask; no all-tools prompting claim",
+      "source_cells": 3,
+      "target_cells": 2
+    },
+    "auto": {
+      "current": "स्वचालित",
+      "meaning": "Automatic mode; no permission, guard bypass or unconditional execution claim",
+      "source_cells": 9,
+      "target_cells": 5
+    }
+  },
+  "findings": [
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.bash_memory_mode.choice.auto.label",
+      "current": "auto",
+      "proposed": "स्वचालित",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.bash_memory_mode.choice.manual.label",
+      "current": "manual",
+      "proposed": "मैन्युअल",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.bash_memory_limit_mb.label",
+      "current": "manual सीमा (MB)",
+      "proposed": "मैन्युअल सीमा (MB)",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.classification_vendor.choice.auto.label",
+      "current": "auto",
+      "proposed": "स्वचालित",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.compaction_strategy.choice.auto.label",
+      "current": "auto",
+      "proposed": "स्वचालित",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.display_nerd_icons.choice.none.label",
+      "current": "auto",
+      "proposed": "स्वचालित",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.model_effort.choice.unset.label",
+      "current": "auto",
+      "proposed": "स्वचालित",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.network_rollout_on_update.choice.auto.label",
+      "current": "auto",
+      "proposed": "स्वचालित",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+      "current": "false",
+      "proposed": "नहीं",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+      "current": "default",
+      "proposed": "डिफ़ॉल्ट",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "current": "allow",
+      "proposed": "अनुमति दें",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "current": "deny",
+      "proposed": "मना करें",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+      "current": "default",
+      "proposed": "डिफ़ॉल्ट",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+      "current": "true",
+      "proposed": "हाँ",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+      "current": "default",
+      "proposed": "डिफ़ॉल्ट",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+      "current": "true",
+      "proposed": "हाँ",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+      "current": "default",
+      "proposed": "डिफ़ॉल्ट",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+      "current": "default",
+      "proposed": "डिफ़ॉल्ट",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+      "current": "true",
+      "proposed": "हाँ",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+      "current": "default",
+      "proposed": "डिफ़ॉल्ट",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "current": "allowlist",
+      "proposed": "अनुमति-सूची",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+      "current": "inherit",
+      "proposed": "विरासत में लें",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+      "current": "auto",
+      "proposed": "स्वचालित",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+      "current": "client",
+      "proposed": "क्लाइंट",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+      "current": "off",
+      "proposed": "बंद",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+      "current": "provider",
+      "proposed": "प्रोवाइडर",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.speech_voice_gender.choice.auto.label",
+      "current": "auto",
+      "proposed": "स्वचालित",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.speech_voice_gender.choice.female.label",
+      "current": "female",
+      "proposed": "स्त्री",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.speech_voice_gender.choice.male.label",
+      "current": "male",
+      "proposed": "पुरुष",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.web_fetch_render_backend.choice.auto.label",
+      "current": "auto",
+      "proposed": "स्वचालित",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.web_search_strategy.choice.ordered.label",
+      "current": "ordered",
+      "proposed": "क्रमानुसार",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+      "current": "round_robin",
+      "proposed": "बारी-बारी",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.label",
+      "current": "distillable टेक्स्ट",
+      "proposed": "डिस्टिलेशन योग्य टेक्स्ट",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M1",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.web_fetch_render_backend.help",
+      "current": "Auto, [fetch] extra इंस्टॉल होने पर markdownify इस्तेमाल करता है।",
+      "proposed": "स्वचालित मोड में, [fetch] extra इंस्टॉल होने पर markdownify इस्तेमाल होता है।",
+      "reason": "Human-facing display copy retains an ordinary English mode, boolean, action or descriptive term; separate Choice.value is the machine token and can remain unchanged. This violates the entire-UI localization acceptance criterion.",
+      "source": "Current approved HI capture; settings_io.py Choice definitions independently checked for memory, privacy, shell, speech gender and search strategies."
+    },
+    {
+      "id": "HI-B-M2",
+      "severity": "major",
+      "scope": "inherited namespace",
+      "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+      "current": "मौजूदा स्थिर मान।",
+      "proposed": "मौजूदा सामान्य बोलने की शैली।",
+      "reason": "स्थिर मान means a fixed/constant numerical value; context entry 83 explicitly means the existing standard delivery, not a mathematical constant or invariant voice.",
+      "source": "Approved EN/HI pair 665 and current context entry 83."
+    },
+    {
+      "id": "HI-B-m1",
+      "severity": "minor",
+      "scope": "inherited namespace",
+      "key": "wire.settings.librarian.description",
+      "current": "लाइब्रेरियन वैश्विक लाइब्रेरी को व्यवस्थित रखता है: उसका प्रदर्शित नाम, दैनिक पास और पॉज़ स्विच। लाइब्रेरी दीर्घकालिक है और हर बातचीत में साझा है।",
+      "proposed": "लाइब्रेरियन वैश्विक लाइब्रेरी को व्यवस्थित रखती हैं: उनका प्रदर्शित नाम, रोज़ की जाँच और पॉज़ स्विच। लाइब्रेरी दीर्घकालिक है और हर बातचीत में साझा है।",
+      "reason": "Source explicitly describes a female assistant, whereas रखता है/उसका and sibling माँग सकता है use masculine forms; use the same polite feminine register as the Aida section.",
+      "related_keys": [
+        "wire.settings.librarian_cadence_max_extra_per_day.help",
+        "wire.settings.librarian_cadence_min_gap_minutes.help",
+        "wire.settings.librarian_cadence_paused.help",
+        "wire.settings.librarian_enabled.help",
+        "wire.settings.librarian_name.help"
+      ]
+    }
+  ],
+  "finding_groups": {
+    "HI-B-M1": "Untranslated human display copy: 34 keys, same systemic cause",
+    "HI-B-M2": "Existing standard voice delivery mistranslated as fixed value",
+    "HI-B-m1": "Librarian feminine/polite register drift; minor, not separate blocking wave"
+  },
+  "passed_vs_uncleared": {
+    "whole_namespace": "FAILED: current inherited majors; Bedrock key additionally unreadable",
+    "changed_label_delta": "PASSED semantically and literal/placeholder controls",
+    "other_keys": "All other readable pairs checked; no additional blocker/major identified. This is not a full-UI or rendered-fit clearance."
+  },
+  "exceptions": {
+    "brands": [
+      "aida.title = Aida",
+      "hub.title = Agent Hub",
+      "classification_vendor.choice.openrouter.label = openrouter",
+      "classification_vendor.choice.radient.label = radient",
+      "classification_vendor.choice.typesafe.label = typesafe"
+    ],
+    "named_technical_labels": [
+      "compaction_strategy.choice.context_full.label = context-full (named compaction mechanism)",
+      "compaction_strategy.choice.snapcompact.label = snapcompact (named compaction mechanism)",
+      "providers_openai_api.choice.chat_completions.label = chat_completions (API surface identifier)",
+      "providers_openai_api.choice.responses.label = responses (Responses API surface)",
+      "web_fetch_render_backend.choice.stdlib.label = stdlib (Python renderer implementation)",
+      "local_providers.base_url.label = {name} endpoint; web_search_searxng_endpoint.label = SearXNG endpoint (explicit kept-English endpoint glossary section 2 Wave-2 set)"
+    ],
+    "technical_prose": "Commands, paths, environment keys, named tools, provider/model IDs, API/JSON/HTTP/SSRF/OSC tokens, exact quoted config values, HH:MM and time examples preserved; merge/pull/push/commit/endpoint/extra retained per explicit shared glossary. No blanket exemption for Choice.label.",
+    "model_facing_prompts": "None in this namespace; settings labels/descriptions are human display copy."
+  },
+  "controls": {
+    "keys": 895,
+    "keysets_equal": true,
+    "parse_errors": 0,
+    "argument_kind_mismatches": 0,
+    "argument_keys": {
+      "wire.settings.local_providers.base_url.label": [
+        [
+          "name",
+          "simple"
+        ]
+      ],
+      "wire.settings.local_providers.models.label": [
+        [
+          "name",
+          "simple"
+        ]
+      ]
+    },
+    "plural_nodes": 0,
+    "select_nodes": 0,
+    "number_date_skeleton_nodes": 0,
+    "hindi_cldr_probes": {
+      "0": "one",
+      "1": "one",
+      "2": "other",
+      "0.5": "one",
+      "1.5": "other",
+      "2.5": "other"
+    },
+    "missing_argument_negative": "Both actual parameterized strings raised MessageFormatError with empty params",
+    "literal_pseudobidi": "Both actual name arguments rendered a synthetic isolated Arabic run plus TEST {literal} 0 unchanged; no code execution or ICU reparsing. Not native bidi/layout proof.",
+    "new_two_literal_pseudo": [
+      "⟦पूछें··⟧ = 6 cells",
+      "⟦स्वचालित··⟧ = 9 cells"
+    ],
+    "non_NFC": 0,
+    "authored_bidi_controls": 0,
+    "explicit_maxCells_exceedances": 0,
+    "width_risks": [
+      {
+        "key": "wire.settings.network_rollout_on_update.choice.off.description",
+        "en_cells": 31,
+        "hi_cells": 38,
+        "action": "Rendered check recommended; 1.23x relative width, not observed clipping."
+      },
+      {
+        "key": "wire.settings.supplements_denyprefixes.label",
+        "en_cells": 18,
+        "hi_cells": 22,
+        "action": "Rendered check recommended; 1.22x relative width, not observed clipping."
+      }
+    ],
+    "output_file": "/Users/damian/.local-operator/sessions/bbc40416334c/scratchpad/hi-controls-output.txt"
+  },
+  "sources": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/6448acb16e8d/scratchpad/approval-full-en-A-approved-capture.json",
+      "envelope_sha256": "9ff37d2efa1d9c367ce7dcc9a01f1fa9f60f74601daf20dbb9d86c85698bf096",
+      "canonical_map_sha256": "f621866fb5e74c1b617e29e17d02008cb42dce6574aa3624ff9a557e1ef2a7b6"
+    },
+    {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-full-inputs/hi-approved-envelope.json",
+      "envelope_sha256": "444e3b4284616f74b29316a4086e57acd9ba2a3cfdc7b6bef5223ea947c62399",
+      "canonical_map_sha256": "5b23e59e189b2a767a4c47ddd5af911cc0f1d2187c52f4d914b00687dc56bafc"
+    }
+  ],
+  "source_binding": "Both API envelopes have public_copy=true, repository_verified=true, exact root and H. Original raw file bytes were hashed only, matching source/target SHA. Context raw bytes hash matched before JSON read. details.sha256 is formatted tool text, not original file SHA.",
+  "limits": [
+    "One scoped masked target key awaits dedicated approved reader lease; no raw prose fallback, reconstructing or decoding.",
+    "No browser, app, real settings mutation, renderer, test suite, git mutation or repo edits. Pure runtime controls only.",
+    "No human/native-speaker certification; model linguistic judgment.",
+    "No whole-UI, merge or release clearance."
+  ],
+  "created_at": "2026-11-22T01:58:24.626300+00:00"
+}

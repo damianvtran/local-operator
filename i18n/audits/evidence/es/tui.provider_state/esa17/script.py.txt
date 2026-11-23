@@ -1,0 +1,80 @@
+# Reproduce from the worktree with its primary checkout interpreter and isolated HOME.
+import contextlib, datetime, hashlib, importlib.util, io, json, os, pathlib, re, subprocess, sys, unicodedata
+from unittest.mock import patch
+from rich.cells import cell_len
+from rich.console import Console
+from rich.text import Text
+ROOT = pathlib.Path.cwd()
+B = ROOT / 'i18n/audits/evidence/es/tui.provider_state/esa17'
+NS = 'tui.provider_state'
+sys.path.insert(0, str(ROOT))
+from local_operator.i18n import catalogues, runtime
+spec = importlib.util.spec_from_file_location('scoped_check', ROOT/'scripts/i18n/check.py')
+check = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = check
+spec.loader.exec_module(check)
+def sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
+def save(p, data): p.write_text(json.dumps(data, ensure_ascii=False, indent=2)+'\n')
+paths = {'en': ROOT/f'local_operator/i18n/catalogues/en/{NS}.json', 'context': ROOT/f'local_operator/i18n/catalogues/en/{NS}.context.json', 'es': ROOT/f'local_operator/i18n/catalogues/es/{NS}.json'}
+expected = {'en':'113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912','context':'67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be','es':'4567c719cd1492b7edc62ae85ef4769f40a2adc774a1eb49dca072883a36b490'}
+translator_record = json.loads((ROOT/'i18n/audits/evidence/es/tui.provider_state/es22a/record.json').read_text())
+translator = translator_record['translator']
+auditor = {'agent':'i18n-auditor / provider-state-es-audit-A','session':'a17a04a01711','model':'openai/gpt-6.1-sol','independent_from_translator_session':True,'actual_model_source':'Host model-switch notice; no independent per-response served-model telemetry available','fallback':{'from':'anthropic/claude-opus-5-5','to':'openai/gpt-6.1-sol','reason':'provider failure: quota'}}
+with (B/'audit.log').open('w') as log, contextlib.redirect_stdout(log):
+ print('UTC', datetime.datetime.now(datetime.timezone.utc).isoformat())
+ print('COMMAND env -i HOME=<session-scratch>/home LOCAL_OPERATOR_CONFIG_DIR=<session-scratch>/home/config PATH=<inherited PATH> PYTHONPATH=<worktree> /Users/damian/local-operator/.venv/bin/python <bundle>/script.py.txt')
+ print('executable',sys.executable,'worktree',ROOT,'runtime module',runtime.__file__,'catalogues module',catalogues.__file__)
+ assert pathlib.Path(runtime.__file__).is_relative_to(ROOT)
+ assert not any(k.startswith('CMUX_') for k in os.environ)
+ print('Isolation HOME', os.environ['HOME'], 'config', os.environ['LOCAL_OPERATOR_CONFIG_DIR'])
+ for name,p in paths.items():
+  print('INPUT',name,str(p.relative_to(ROOT)),sha(p)); assert sha(p)==expected[name]
+ source=catalogues.load_catalogue('en',NS); target=catalogues.load_catalogue('es',NS)
+ assert list(source)==list(target) and len(source)==5
+ original_load=catalogues.load_catalogue
+ def scoped(override=None):
+  def loader(locale, namespace):
+   assert locale in ('en','es') and namespace==NS
+   return override if locale=='es' and override is not None else original_load(locale,namespace)
+  with patch.object(catalogues,'locales',return_value=['en','es']), patch.object(catalogues,'namespaces',return_value=[NS]), patch.object(catalogues,'load_catalogue',side_effect=loader):
+   return check.check_catalogues()
+ problems=scoped(); print('OFFICIAL check_catalogues en/es namespace-only',problems); assert not problems
+ missing=dict(target); missing.pop(next(iter(missing)))
+ p=scoped(missing); print('NEGATIVE missing key',p); assert any('missing key' in x for x in p)
+ arg=dict(target); arg[next(iter(arg))]+=' {added_argument}'
+ p=scoped(arg); print('NEGATIVE added argument',p); assert any('arguments' in x for x in p)
+ protected=re.compile(r'`[^`]*`|</?[^>]+>|--[\w-]+|https?://\S+|\b[A-Z][A-Z0-9]+_[A-Z0-9_]+\b')
+ for key in source:
+  en,es=source[key],target[key]
+  for locale,text in [('en',en),('es',es)]:
+   assert runtime.message_arguments(text)==()
+   assert not runtime.plural_arguments(text)
+   assert unicodedata.normalize('NFC',text)==text
+   assert runtime.render_message(text,{},locale)==text
+  assert protected.findall(en)==protected.findall(es)
+  pseudo='⟦'+en+' '+('é'*max(4,len(en)//2))+'⟧'
+  assert runtime.render_message(pseudo,{},'es')==pseudo
+  widths={}
+  for locale,text in [('en',en),('es',es),('pseudo',pseudo)]:
+   buf=io.StringIO(); con=Console(file=buf,width=80,color_system=None,force_terminal=False)
+   con.print(Text(text),end=''); assert buf.getvalue()==text
+   widths[locale]=cell_len(text)
+  fitted=Text(es); fitted.truncate(17,overflow='ellipsis')
+  print('KEY',key,'arguments=0 plural/select=0 NFC=True protected=True widths',widths,'17cell_example',fitted.plain)
+  assert cell_len(fitted.plain)<=17
+ print('PASS five keys; actual assertions completed; no application/native/font/global eligibility claim')
+ note='Independent A passed, 0 unresolved blocker/major. Record: i18n/audits/evidence/es/tui.provider_state/esa17/record.json; plain Rich only; styled integration unverified.'
+ assert len(note)<=280
+ row={'locale':'es','namespace':NS,'source_sha256':expected['en'],'status':'passed','translator':translator,'auditor':auditor,'audit_date':datetime.datetime.now(datetime.timezone.utc).date().isoformat(),'unresolved_blocker_major_count':0,'note':note}
+ save(B/'ledger-receipt.json',row)
+ cmd=[sys.executable,'scripts/i18n/ledger.py','history-sha','--locale','es','--namespace',NS]
+ proc=subprocess.run(cmd,text=True,capture_output=True); print('COMMAND',cmd,'rc',proc.returncode,'stdout',proc.stdout,'stderr',proc.stderr); assert proc.returncode==0
+ cmd=[sys.executable,'scripts/i18n/ledger.py','append','--receipt',str(B/'ledger-receipt.json'),'--expected-history-sha',proc.stdout.strip(),'--dry-run']
+ proc=subprocess.run(cmd,text=True,capture_output=True); print('COMMAND',cmd,'rc',proc.returncode,'stdout',proc.stdout,'stderr',proc.stderr); assert proc.returncode==0
+ print('FINAL_RC 0')
+artifacts=[{'path':str(p.relative_to(ROOT)),'sha256':sha(p)} for p in [B/'report.md',B/'script.py.txt',B/'audit.log',B/'ledger-receipt.json',B/'harness-diagnostic-1.log']]
+record={'locale':'es','namespace':NS,'audit_date':datetime.datetime.now(datetime.timezone.utc).date().isoformat(),'key_count':5,'source_audit_revision':'2b924d84f0e663302fd93a7b36411ee6035576fe','auditor':auditor,'translator':translator,'translator_identity_source':'i18n/audits/evidence/es/tui.provider_state/es22a/record.json','input_hashes':{n:{'path':str(p.relative_to(ROOT)),'sha256':sha(p)} for n,p in paths.items()},'artifacts':artifacts,'current_report_verdict':{'status':'passed','unresolved_blocker_major_count':0,'finding_ids':[]},'report':'i18n/audits/evidence/es/tui.provider_state/esa17/report.md','notes_classification':'audit_notes_not_execution_log','execution_log':'i18n/audits/evidence/es/tui.provider_state/esa17/audit.log','ledger_action':'actual append CLI --dry-run only; no history modification','limitations':['Independent A only; B is separate','Plain Rich/synthetic pseudo only, no styled or native UI proof','No global eligibility clearance']}
+save(B/'record.json',record)
+manifest={'record_reference':str((B/'record.json').relative_to(ROOT)),'artifacts':artifacts+[{'path':str((B/'record.json').relative_to(ROOT)),'sha256':sha(B/'record.json')}]}
+save(B/'artifact-manifest.json',manifest)
+print('PASS canonical independent A bundle',B)

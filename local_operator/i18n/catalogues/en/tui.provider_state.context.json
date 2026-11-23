@@ -1,0 +1,27 @@
+{
+  "tui.provider_state.logged_in": {
+    "role": "short provider authentication-state label",
+    "tone": "terse, factual, lower-case status",
+    "note": "Human presentation of machine state logged_in, not a state code or provider identifier. A stored login credential exists; distinguish this from env_key, which describes a credential supplied by an environment variable. Shown beside an opaque provider ID in the settings provider column, the /provider listing and /login choices, and as a model-access status suffix. Translate only the label, never IDs, aliases, commands or environment-variable names. Zero arguments; no plural/select branches. No fixed maxCells: settings truncates the state segment to max(pane width - provider-ID cell width - 4, 3); other consumers have their own layout. Prefer compact natural wording, not a complete sentence. English bytes intentionally preserve the existing label. Surrounding login/warning prose and opaque provider-supplied state_detail are outside this namespace."
+  },
+  "tui.provider_state.env_key": {
+    "role": "short provider authentication-state label",
+    "tone": "terse, factual, lower-case status",
+    "note": "Human presentation of machine state env_key: a usable API credential comes from an environment variable, rather than a stored login. 'env' means environment, not an environment name or a server configuration. Translate the human label; actual variable names and provider IDs remain opaque technical identifiers. Shared by /provider, /login choices and model-access suffixes; settings retains its stored_credentials > 0 filter and must not add rows merely to display every label. Zero arguments; no plural/select branches. No fixed maxCells: settings fits the state segment to max(pane width - provider-ID cell width - 4, 3); other consumers fit independently. Prefer compact natural wording. English bytes intentionally preserve 'env key'."
+  },
+  "tui.provider_state.needs_login": {
+    "role": "short provider authentication-state label",
+    "tone": "terse, factual, lower-case status",
+    "note": "Human presentation of machine state needs_login: this provider needs authentication before it can be used. This is a status, not a button, a login command, or the surrounding actionable warning sentence. Shared by /provider, /login choices and the provider-state presentation boundary; settings keeps its stored-credential filter. Runtime warning decisions must compare the machine state code BEFORE rendering this label, never English or translated text. Provider IDs, aliases and /login syntax stay opaque. Zero arguments; no plural/select branches. No fixed maxCells: settings truncates the state segment to max(pane width - provider-ID cell width - 4, 3), with other consumers applying their own fitting. Keep compact natural status wording; preserve existing English bytes."
+  },
+  "tui.provider_state.local_ready": {
+    "role": "short local-provider configuration-state label",
+    "tone": "terse, factual, lower-case status",
+    "note": "Human presentation of machine state local_ready: a local inference server has been configured. This reports configuration readiness, NOT a successful login, verified network reachability, or a healthy-server probe. Distinguish the completed-state wording 'configured server' from local_unconfigured's action 'configure server'. Shared by provider listings, login-choice details and model-access suffixes; settings does not widen its stored-credential filter. IDs and configured server addresses are not translated. Zero arguments; no plural/select branches. No fixed maxCells: settings fits the state segment to max(pane width - provider-ID cell width - 4, 3); other consumers fit independently. Prefer compact natural wording and retain existing English bytes."
+  },
+  "tui.provider_state.local_unconfigured": {
+    "role": "short local-provider configuration-action label",
+    "tone": "terse, actionable, lower-case instruction",
+    "note": "Human presentation of machine state local_unconfigured: the local inference server still needs configuration. 'configure server' is an instruction, not a claim that configuration succeeded, a login failure, or the name of a clickable button. Contrast local_ready's completed-state label 'configured server'. Shared by provider listings, login-choice details and model-access suffixes; settings retains its stored-credential filter. Preserve opaque IDs, server addresses and command syntax. Zero arguments; no plural/select branches. No fixed maxCells: settings truncates the state segment to max(pane width - provider-ID cell width - 4, 3); other consumers apply their own fitting. Prefer compact natural action wording; preserve existing English bytes."
+  }
+}

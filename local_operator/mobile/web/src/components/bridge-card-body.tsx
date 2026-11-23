@@ -4,8 +4,10 @@
  * WHAT IT ADDS. The card's row is still the receipt line the relay projects
  * ("<sender> · <conversation>"), drawn by the transcript's notice row. When
  * the relay advertises `features.team_bridge_card_body`, this panel sits
- * under it and reads the card's body once per mount (retries on a
- * not-yet-written row, below)
+ * under it and reads the card's body on mount, then keeps re-reading while
+ * mounted until the answer is final (`lib/bridge-card-reread.ts`: a pending
+ * body is handed off minutes to hours later), plus retries on a
+ * not-yet-written row, below
  * (`GET /api/sessions/{sid}/bridge-cards/{entry}/body`, `lib/bridge-card-body.ts`
  * for the contract and its constraints), then shows, per message:
  *  - an admitted body as markdown, under the "External message · untrusted
@@ -58,7 +60,8 @@ import {
 	type BridgeCardBody,
 	type BridgeCardBodyItem,
 } from "../lib/bridge-card-body";
-import { messageRuntime, useCapabilities } from "../store";
+import { bridgeAnswerIsFinal, rereadDelay } from "../lib/bridge-card-reread";
+import { messageRuntime, useCapabilities, useLocaleSnapshot } from "../store";
 import { Markdown } from "./markdown";
 
 type Load = { phase: "loading" } | { phase: "ready"; answer: BridgeCardBody } | { phase: "failed" };
@@ -99,39 +102,100 @@ export function BridgeCardBodyPanel({ pid, entryId }: { pid: string; entryId: st
 	return <BridgeCardBodyRead pid={pid} entryId={entryId} />;
 }
 
+/** When the card's row was recorded: the time alone today, else a short date
+    with it. The runtime's `Intl` picks the parts in the copy's locale (the
+    usage sheet's recipe); the catalogue only owns words. */
+function receivedText(at: number, locale: string): string {
+	const date = new Date(at);
+	const today = new Date();
+	const sameYear = date.getFullYear() === today.getFullYear();
+	const sameDay = sameYear && date.getMonth() === today.getMonth() && date.getDate() === today.getDate();
+	const options: Intl.DateTimeFormatOptions = sameDay ? { hour: "numeric", minute: "2-digit" }
+		: { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", ...(sameYear ? {} : { year: "numeric" }) };
+	try { return new Intl.DateTimeFormat(locale, options).format(date); } catch { return new Intl.DateTimeFormat(undefined, options).format(date); }
+}
+
 function BridgeCardBodyRead({ pid, entryId }: { pid: string; entryId: string }) {
 	const [load, setLoad] = useState<Load>({ phase: "loading" });
+	const locale = useLocaleSnapshot();
 	const box = useRef<HTMLDivElement>(null);
 
 	useEffect(() => {
-		/* Read on every mount, keep no copy (revocation stays live). The abort
-		   keeps an unmounted row from writing a late answer into state. */
+		/* Read on every mount, keep no copy past it (revocation stays live). The
+		   abort keeps an unmounted row from writing a late answer into state and
+		   wakes any wait, so an unmounted row stops asking. */
 		const controller = new AbortController();
 		const { signal } = controller;
 		setLoad({ phase: "loading" });
-		void (async () => {
+
+		/* One read, with the not-yet-written re-asks (M1). `null` = failed.
+		   `gone` marks a 404 that outlived those re-asks (or any other 404):
+		   the relay answered that it has no such card, which waiting cannot
+		   change, so the panel stops asking. A network error, a 5xx or a
+		   malformed frame is a failed READ and is asked again later. */
+		let gone = false;
+		const readOnce = async (): Promise<BridgeCardBody | null> => {
 			for (let attempt = 0; ; attempt += 1) {
 				try {
 					const payload = await getBridgeCardBody(pid, entryId, signal);
-					if (signal.aborted) return;
-					const answer = bridgeCardBodyOf(payload);
-					setLoad(answer ? { phase: "ready", answer } : { phase: "failed" });
-					return;
+					return bridgeCardBodyOf(payload);
 				} catch (error) {
-					if (signal.aborted) return;
-					/* Still Loading: the row may simply not be written yet (M1). The
-					   abort wakes the wait, so an unmounted row stops here. */
+					if (signal.aborted) return null;
 					if (cardNotYetWritten(error) && attempt < NOT_YET_RETRY_MS.length) {
 						await sleep(NOT_YET_RETRY_MS[attempt], signal);
-						if (signal.aborted) return;
+						if (signal.aborted) return null;
 						continue;
 					}
-					setLoad({ phase: "failed" });
-					return;
+					gone = error instanceof HttpError && error.status === 404;
+					return null;
 				}
 			}
+		};
+
+		/* Coming back to the app asks at once instead of finishing a (up to
+		   60 s) wait: the reader just looked, so that is when a delivered body
+		   should appear. */
+		let wake: (() => void) | null = null;
+		const onVisible = () => {
+			if (document.visibilityState === "visible") wake?.();
+		};
+		document.addEventListener("visibilitychange", onVisible);
+
+		void (async () => {
+			let shown = "";
+			for (let attempt = 0; ; attempt += 1) {
+				const answer = await readOnce();
+				if (signal.aborted) return;
+				if (answer) {
+					/* An unchanged answer is not re-set: each set would re-render
+					   and signal a resize to the transcript every re-read. */
+					const key = JSON.stringify(answer);
+					if (key !== shown) setLoad({ phase: "ready", answer });
+					shown = key;
+				} else if (!shown) {
+					setLoad({ phase: "failed" });
+				}
+				/* A failed re-read keeps the last answer on screen (no flash back
+				   to Loading or to "unavailable") and simply asks again later. */
+				if (gone || (answer && bridgeAnswerIsFinal(answer))) return;
+				await new Promise<void>((resolve) => {
+					const timer = setTimeout(done, rereadDelay(attempt));
+					function done() {
+						clearTimeout(timer);
+						wake = null;
+						signal.removeEventListener("abort", done);
+						resolve();
+					}
+					wake = done;
+					signal.addEventListener("abort", done, { once: true });
+				});
+				if (signal.aborted) return;
+			}
 		})();
-		return () => controller.abort();
+		return () => {
+			controller.abort();
+			document.removeEventListener("visibilitychange", onVisible);
+		};
 	}, [pid, entryId]);
 
 	/* The panel changes height when the answer lands: tell the transcript, the
@@ -153,6 +217,18 @@ function BridgeCardBodyRead({ pid, entryId }: { pid: string; entryId: string }) 
 	if (load.phase === "ready" && load.answer.items.length === 0 && load.answer.more === 0) {
 		return <div ref={box} data-bridge-card-body="" data-state="empty" hidden />;
 	}
+
+	/* Where and when, beside the body: the receipt line above already names
+	   the sender and the conversation, so this adds what the relay row cannot
+	   carry — the thread-reply marker and the time — from the answer's `card`
+	   facts (core `card_body._card_facts`). Nothing known, no line. */
+	const facts = load.phase === "ready" ? load.answer.card : undefined;
+	const context = facts
+		? [
+			facts.threadReply ? messageRuntime.t("relay.transcript.bridge.thread_reply") : null,
+			facts.receivedAt !== undefined ? receivedText(facts.receivedAt, locale.uiLocale) : null,
+		].filter(Boolean).join(" · ")
+		: "";
 
 	let content;
 	if (load.phase === "loading") {
@@ -189,6 +265,7 @@ function BridgeCardBodyRead({ pid, entryId }: { pid: string; entryId: string }) 
 			className="ml-[22px] mt-1 mb-2.5 flex min-w-0 flex-col gap-2 rounded-md border border-control px-3 py-2"
 		>
 			<p className="text-meta text-ink-dim">{messageRuntime.t("relay.transcript.bridge.provenance")}</p>
+			{context ? <p data-bridge-card-context="" className="text-meta text-ink-dim">{context}</p> : null}
 			{content}
 		</div>
 	);

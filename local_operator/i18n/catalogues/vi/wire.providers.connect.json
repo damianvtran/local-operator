@@ -1,0 +1,7 @@
+{
+  "wire.providers.connect.key_invalid_characters": "Khóa này chứa ký tự mà khóa API không thể có. Hãy sao chép lại rồi thử lại.",
+  "wire.providers.connect.key_rejected": "{label} đã từ chối khóa API này. Hãy kiểm tra khóa rồi thử lại.",
+  "wire.providers.connect.key_unreachable": "Không thể kết nối tới {label} để kiểm tra khóa này. Khóa đã được lưu nhưng chưa được xác minh.",
+  "wire.providers.connect.key_unverified": "{label} hiện không thể kiểm tra khóa này (HTTP {status}). Khóa đã được lưu nhưng chưa được xác minh.",
+  "wire.providers.connect.suggested_automatic": "Tự động"
+}

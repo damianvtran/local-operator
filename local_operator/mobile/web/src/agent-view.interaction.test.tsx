@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./app";
 import { AgentConversation, AgentUnavailable } from "./screens/agent-view";
@@ -415,6 +415,58 @@ describe("AgentConversation", () => {
 			expect(getSubagentHistory).toHaveBeenCalledWith("root", "current", null, 80, expect.anything()),
 		);
 		await waitFor(() => expect(screen.getByText("Lazily loaded reply")).toBeTruthy());
+	});
+
+	it("reveals only new persisted assistant and tool rows from consecutive newest child polls", async () => {
+		vi.useFakeTimers();
+		try {
+			const { detail, projection } = fixture();
+			const empty = { ...detail, status: "running" as const, transcript: [], prompt: "", launch_message_id: "" };
+			const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+			const animate = vi.fn(function (this: HTMLElement) { return { id: "", cancel: vi.fn(), text: this.textContent }; });
+			Object.defineProperty(Element.prototype, "animate", { configurable: true, value: animate });
+			vi.spyOn(window, "matchMedia").mockReturnValue({ matches: true } as MediaQueryList);
+			const assistant = (id: string, text: string) => ({ ...entry(id, "assistant", text), final: true });
+			const seed = assistant("seed", "Previously saved");
+			const first = assistant("new", "Fresh persisted reply");
+			const corrected = assistant("seed", "Corrected saved"); // same-length edit
+			const older = assistant("older", "Older history");
+			const recovered = assistant("recovered", "Recovery baseline");
+			const tool = { ...entry("work", "tool", ""), tool_name: "Read", tool_call_id: "fresh-tool" };
+			const page = (entries: TranscriptEntry[]) => ({ entries, has_more: false });
+			getSubagentHistory.mockReset()
+				.mockResolvedValueOnce(page([seed]))
+				.mockResolvedValueOnce(page([seed, first]))
+				.mockResolvedValueOnce(page([older, corrected, first]))
+				.mockResolvedValueOnce(page([older, corrected, first, tool]))
+				.mockRejectedValueOnce(new Error("lost poll"))
+				.mockResolvedValueOnce(page([older, corrected, first, tool, recovered]))
+				.mockResolvedValueOnce(page([older, corrected, first, tool, recovered, assistant("later", "Next live reply")]))
+				.mockResolvedValue(page([]));
+			const poll = async () => { await act(async () => { await vi.advanceTimersByTimeAsync(1500); }); };
+			const painted = () => animate.mock.contexts.map(node => (node as HTMLElement).getAttribute("data-completion-anchor"));
+			render(<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={empty} journalEpoch={{}} />);
+			await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+			expect(screen.getByText("Previously saved")).toBeTruthy();
+			expect(painted()).toEqual([]);
+			await poll();
+			expect(screen.getByText("Fresh persisted reply")).toBeTruthy();
+			expect(painted()).toEqual(["new"]);
+			await poll();
+			expect(screen.getByText("Corrected saved")).toBeTruthy();
+			expect(painted()).toEqual(["new"]);
+			await poll();
+			expect(painted()).toEqual(["new", "work"]);
+			await poll();
+			await poll();
+			expect(screen.getByText("Recovery baseline")).toBeTruthy();
+			expect(painted()).toEqual(["new", "work"]);
+			await poll();
+			expect(painted()).toEqual(["new", "work", "later"]);
+		} finally {
+			Reflect.deleteProperty(Element.prototype, "animate");
+			vi.useRealTimers();
+		}
 	});
 
 	it("does not fetch when a legacy daemon still inlines the transcript", () => {

@@ -21,15 +21,10 @@ export function shouldDrawDiagram(fence: FenceSummary): boolean {
 
 /**
  * A stable React key for one diagram: its source plus how many identical
- * sources came before it in the same message. Every other markdown block takes
- * a fresh key per render, which is right for text but would tear a diagram down
- * and redraw it on each streamed frame of the surrounding answer.
+ * sources came before it in the same message. Ordinary Markdown blocks use
+ * their source offset, which would tear a diagram down when preceding prose
+ * is corrected without changing the fence.
  */
 export function diagramKey(source: string, occurrence: number): string {
-	let hash = 0x811c9dc5;
-	for (let i = 0; i < source.length; i++) {
-		hash ^= source.charCodeAt(i);
-		hash = Math.imul(hash, 0x01000193) >>> 0;
-	}
-	return `diagram-${hash.toString(36)}-${source.length}-${occurrence}`;
+	return `diagram:${occurrence}:${source}`;
 }

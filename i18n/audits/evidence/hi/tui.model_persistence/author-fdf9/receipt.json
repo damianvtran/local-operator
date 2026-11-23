@@ -1,0 +1,50 @@
+{
+  "record_reference": "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/record.json",
+  "provenance": {
+    "agent": "i18n-translator",
+    "session": "fdf96049990f",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": false,
+    "actual_model_source": "Host model-switch telemetry: provider failure: quota; fallback from anthropic/claude-opus-5-5 to openai/gpt-6.1-sol before Hindi authorship",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "status": "translated",
+  "cwd": "/Users/damian/local-operator/.worktrees/i18n-model-persist-notice",
+  "executions": [
+    {
+      "command": "env -i HOME=\"$LOCAL_OPERATOR_SCRATCHPAD/hi-author-home\" LOCAL_OPERATOR_CONFIG_DIR=\"$LOCAL_OPERATOR_SCRATCHPAD/hi-author-home/.local-operator\" PATH=\"$PATH\" TERM=xterm-256color PYTHONPATH=/Users/damian/local-operator/.worktrees/i18n-model-persist-notice /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/validator.py.txt",
+      "exit_code": 1,
+      "log": "initial-attempt.log",
+      "cause": "Initial arguments_match invocation used incorrect keywords; preserved TypeError output"
+    },
+    {
+      "command": "env -i HOME=\"$LOCAL_OPERATOR_SCRATCHPAD/hi-author-home\" LOCAL_OPERATOR_CONFIG_DIR=\"$LOCAL_OPERATOR_SCRATCHPAD/hi-author-home/.local-operator\" PATH=\"$PATH\" TERM=xterm-256color PYTHONPATH=/Users/damian/local-operator/.worktrees/i18n-model-persist-notice /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/validator.py.txt",
+      "exit_code": 0,
+      "log": "audit.log",
+      "result": "Official scoped catalogue/context/ICU validation passed; 4 ordered keys; negative controls passed"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/notes.md",
+      "sha256": "06e7324edd9edc13d76f35313d8df75528e388fc87958e96082d1e76c486b34c"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/validator.py.txt",
+      "sha256": "0dc66292dabeba398d0c62464480d77bee1e82fdce73b03bcff7250ec675c485"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/audit.log",
+      "sha256": "4ac41baf6debac4ed0523132656d89d6444d83516525f10483698fda65d22c60"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/initial-attempt.log",
+      "sha256": "fe2e1bb54cfd5d652f1d3d044895893430c5644577eb0d73ff0e4bdd5551aabb"
+    }
+  ]
+}

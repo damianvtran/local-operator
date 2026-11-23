@@ -50,6 +50,29 @@ def test_the_receipt_names_the_ask_and_where_it_is_showing():
     assert "1 question(s)" in text
 
 
+def test_the_receipt_tells_the_model_how_to_refer_to_the_ask():
+    """Ben, 2026-11-23: the id alone is hard to match to an ask, so the receipt
+    hands the model the ask's few words beside the id and asks for both."""
+    text = render.receipt_text(_record(), "terminal")
+    assert 'Refer to it as the "Which database?" ask (a-7f3), your words and its id.' in text
+
+
+def test_the_receipt_never_quotes_a_secret_question():
+    record = _record(
+        questions=[
+            {
+                "id": "q0",
+                "question": "Paste the production API key",
+                "secret": True,
+                "persist": False,
+            }
+        ]
+    )
+    text = render.receipt_text(record, "terminal")
+    assert 'Refer to it as the "secret question" ask (a-7f3)' in text
+    assert "API" not in text
+
+
 def test_the_receipt_says_it_is_not_consent():
     """Risk 1: a model that reads a receipt as approval runs the very command the
     ask was meant to authorise, so the warning is in capitals and in both arms."""

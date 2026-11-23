@@ -1,0 +1,56 @@
+{
+  "locale": "hi",
+  "namespace": "tui.model_persistence",
+  "source_sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff",
+  "context_sha256": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc",
+  "target_sha256": "b64d9953f8abb7bc1e2e5f2bfab5d286d7b095d50e833211bf90df71d69eca68",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "fdf96049990f",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": false,
+    "actual_model_source": "Host model-switch telemetry: provider failure: quota; fallback from anthropic/claude-opus-5-5 to openai/gpt-6.1-sol before Hindi authorship",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "date": "2026-11-22"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "29fd3d454da2",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "independent_from_source_author_session": true,
+    "independence_basis": "Separate auditor session; no translation/source authorship; same actual model as translator, not model-independent",
+    "actual_model_source": "Host [model switch] notice in this session before substantive audit: provider failure: quota",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "date": "2026-11-22",
+    "result": "passed_with_minor",
+    "unresolved_blocker_major": 0,
+    "finding_ids": [
+      "HI-A1"
+    ]
+  },
+  "status": "passed",
+  "note": "A independent; 4 keys; 0 blocker/major; HI-A1 minor. Record: i18n/audits/evidence/hi/tui.model_persistence/a29fd/record.json",
+  "evidence": "i18n/audits/evidence/hi/tui.model_persistence/a29fd/record.json",
+  "round": "A",
+  "audit_date": "2026-11-22",
+  "record_reference": "i18n/audits/evidence/hi/tui.model_persistence/a29fd/record.json",
+  "executions": [
+    {
+      "command": "env -i HOME=\"$LOCAL_OPERATOR_SCRATCHPAD/hi-a29fd-home\" LOCAL_OPERATOR_CONFIG_DIR=\"$LOCAL_OPERATOR_SCRATCHPAD/hi-a29fd-home/config\" PATH=\"$PATH\" TERM=xterm-256color PYTHONPATH=\"$PWD\" /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/hi/tui.model_persistence/a29fd/script.py.txt > i18n/audits/evidence/hi/tui.model_persistence/a29fd/audit.log 2>&1",
+      "cwd": "/Users/damian/local-operator/.worktrees/i18n-model-persist-notice",
+      "exit_code": 0,
+      "log": "i18n/audits/evidence/hi/tui.model_persistence/a29fd/audit.log"
+    }
+  ]
+}

@@ -1,0 +1,135 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "tui.model_persistence",
+  "history_sha256": "0765f0ed49f53a002d92396d4304e86d5c2965d821d8fc57168f213ca9790fe7",
+  "entries": [
+    {
+      "locale": "vi",
+      "namespace": "tui.model_persistence",
+      "source_sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff",
+      "status": "passed",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "edc50a6f3d77",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": false,
+        "actual_model_source": "Host model-switch message: anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; provider failure: quota. Translation and validation authored after switch.",
+        "fallback": {
+          "used": true,
+          "from": "anthropic/claude-opus-5-5",
+          "to": "openai/gpt-6.1-sol",
+          "reason": "provider failure: quota"
+        }
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "fcb8a76716b3",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": true,
+        "actual_model_source": "Host model-switch message: anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; provider failure: quota; native assessment and validation after switch.",
+        "fallback": {
+          "used": true,
+          "from": "anthropic/claude-opus-5-5",
+          "to": "openai/gpt-6.1-sol",
+          "reason": "provider failure: quota"
+        }
+      },
+      "date": "2026-11-22",
+      "audit_date": "2026-11-22",
+      "audit_result": "passed",
+      "unresolved_blocker_major_count": 0,
+      "note": "Independent A; 4/4 keys; no B/M. Record: i18n/audits/evidence/vi/tui.model_persistence/viA1/record.json. Plain Rich only; B and consumer integration separate.",
+      "evidence_record": {
+        "path": "i18n/audits/evidence/vi/tui.model_persistence/viA1/record.json",
+        "sha256": "277fdce734b37e556c1608f57bb019e871f37e5fc57b57375c7cf614ee8b1ef3"
+      },
+      "artifacts": [
+        {
+          "path": "i18n/audits/evidence/vi/tui.model_persistence/viA1/report.md",
+          "sha256": "1d062044dd557a17f9a98090edb22a107b5193f08aff7291059d602ff669ddfa",
+          "kind": "audit_notes_not_execution_log"
+        },
+        {
+          "path": "i18n/audits/evidence/vi/tui.model_persistence/viA1/script.py.txt",
+          "sha256": "762be4b36e51d5cc31b6a07f094a4abdcc095cb3209a36f30b2bf439cfd19244",
+          "kind": "executed_reproduction_source"
+        },
+        {
+          "path": "i18n/audits/evidence/vi/tui.model_persistence/viA1/audit.log",
+          "sha256": "0b878ce2070340ee76e2cadd82e0cbb151a763d7f46b10e322711d3c846f0617",
+          "kind": "actual_execution_log"
+        },
+        {
+          "path": "i18n/audits/evidence/vi/tui.model_persistence/viA1/failed-script.py.txt",
+          "sha256": "49948321e4f43c01ae8898852a0bf58632177bddf2dbbc20fda17a81811e2198",
+          "kind": "failed_harness_reproduction_source"
+        },
+        {
+          "path": "i18n/audits/evidence/vi/tui.model_persistence/viA1/harness-failure.log",
+          "sha256": "1b40412638877712cf31558fd3980dbed7994c59c07b0b05d212f9bfce7834c1",
+          "kind": "actual_failed_harness_execution_log"
+        }
+      ]
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.model_persistence",
+      "source_sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff",
+      "status": "passed",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "edc50a6f3d77",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": false,
+        "actual_model_source": "Host model-switch message: anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; provider failure: quota. Translation and validation authored after switch.",
+        "fallback": {
+          "used": true,
+          "from": "anthropic/claude-opus-5-5",
+          "to": "openai/gpt-6.1-sol",
+          "reason": "provider failure: quota"
+        }
+      },
+      "auditor": {
+        "agent": "i18n-auditor B",
+        "session": "674d6e6c175e",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": true,
+        "translator_session": "edc50a6f3d77",
+        "actual_model_source": "Host model-switch message during this audit: anthropic/claude-opus-5-5 to openai/gpt-6.1-sol; provider failure: quota. Assessment and execution after fallback.",
+        "fallback": {
+          "used": true,
+          "from": "anthropic/claude-opus-5-5",
+          "to": "openai/gpt-6.1-sol",
+          "reason": "provider failure: quota"
+        },
+        "date": "2026-11-22",
+        "result": "passed",
+        "unresolved_blocker_major": 0,
+        "findings": 0
+      },
+      "note": "Independent B; 4 keys, zero findings; plain Rich only, not styled/native proof. Record: i18n/audits/evidence/vi/tui.model_persistence/vib674/record.json",
+      "record_reference": {
+        "path": "i18n/audits/evidence/vi/tui.model_persistence/vib674/record.json",
+        "sha256": "2c12f19343862ccafab93afbda6f339b3a131bdccb7edfe762689b98e1a1cfaa"
+      },
+      "artifacts": [
+        {
+          "path": "i18n/audits/evidence/vi/tui.model_persistence/vib674/report.md",
+          "sha256": "47beecc7cdbf2a87d1843b81e80552a7df698f4dd0fc2ccd0fa18dfe6c34a10d",
+          "kind": "audit_notes_not_execution_log"
+        },
+        {
+          "path": "i18n/audits/evidence/vi/tui.model_persistence/vib674/audit.log",
+          "sha256": "47ca15b86797726ce1e3448d83246a93d4d8a273f8ff5617cffd7038592bfb1c",
+          "kind": "actual_execution_log"
+        },
+        {
+          "path": "i18n/audits/evidence/vi/tui.model_persistence/vib674/script.py.txt",
+          "sha256": "614b0d1d0f1171b4eea2fb1a7674b5ac2dfd3b32101b08a7965e715d79727f63",
+          "kind": "reproduction_source"
+        }
+      ]
+    }
+  ]
+}

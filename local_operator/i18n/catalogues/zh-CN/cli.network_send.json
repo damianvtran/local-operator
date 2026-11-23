@@ -1,0 +1,3 @@
+{
+  "cli.network_send.still_starting": "会话{session_id}仍在{peer}上启动；消息未加入队列"
+}

@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "kind": "english-source-author",
+  "status": "authored-not-linguistic-approval",
+  "agent": "coder",
+  "session_id": "0be89bc16927",
+  "actual_model": "openai/gpt-6.1-sol",
+  "fallback": {
+    "from": "anthropic/claude-opus-5-5",
+    "reason": "provider failure: quota (host model-switch message)"
+  },
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+  "base_head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+  "namespace": "wire.settings",
+  "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+  "old_text": "Today's constant.",
+  "new_text": "Standard vocal delivery.",
+  "source_context": {
+    "role": "voice expressiveness choice description",
+    "tone": "concise, plain, explanatory",
+    "note": "A brief user-facing explanation beside the choice label, not an instruction to the synthesizer. Preserve the meaning of the English explanation. The middle level of expressiveness; the description refers to the existing standard delivery ('Today's constant'), not a calendar date, mathematical constant or a promise that the voice never varies. settings_io.py:6277-6332 constructs Choice(value, localized label, localized description): these are independently localized display fields, not the stable machine value. Translate naturally; natural cognates may match English. Display only: never a provider token or input for machine parsing. Fit: settings_view.py:4219-4243 places the label and description together in the choice row; :3939-3947 truncates that row to the available list width with an ellipsis rather than wrapping. No fixed per-field cell cap is enforced; keep it compact without inventing one. The settings API exposes label and description separately for client layout."
+  },
+  "reason": "The medium choice means existing standard vocal delivery. Directly naming it removes calendar and mathematical ambiguity without changing that meaning.",
+  "context_retained_reason": "Existing context explicitly identifies standard delivery, display-only semantics and compact row constraints; no missing constraint requires an edit.",
+  "source_sha256_before": "298fc1100cb10bfa34909aa245307a735dad318f456e5bbfb5337fbcdb1e8962",
+  "source_sha256_after": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+  "source_canonical_sha256_before": "f621866fb5e74c1b617e29e17d02008cb42dce6574aa3624ff9a557e1ef2a7b6",
+  "source_canonical_sha256_after": "8df2396d637f817a9b184aaf6f5c46fbde24f29532c9c8dd937a58fc3ecf3ae9",
+  "context_sha256_before": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+  "context_sha256_after": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+  "verification": {
+    "keys": 895,
+    "unchanged_other_key_values": 894,
+    "key_order_unchanged": true,
+    "exact_single_value_byte_replacement": true,
+    "context_bytes_unchanged": true,
+    "preexisting_untracked_files_unchanged": 35,
+    "parser_source": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/local_operator/i18n/runtime.py",
+    "arguments": [],
+    "selectors": [],
+    "literal_render": "Standard vocal delivery.",
+    "negative_control_argument_detected": true,
+    "negative_control_select_detected": true,
+    "negative_control_plural_detected": true
+  },
+  "non_shipping_limitations": [
+    "No native-language audit or approval performed.",
+    "No generator, eligibility, ledger or product logic changed; generated artifacts may be stale until integration.",
+    "Private commit only; no push, PR, build, suite or release."
+  ]
+}

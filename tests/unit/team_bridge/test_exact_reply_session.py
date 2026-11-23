@@ -202,6 +202,93 @@ async def test_missing_rendered_text_cannot_carry_admitted_proof(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_refused_request_preserves_owed_card_until_dispatch(tmp_path, monkeypatch):
+    from local_operator.harness.request_admission import RequestAdmissionRefused
+    from local_operator.harness.types import AgentEndEvent
+    from local_operator.model.configure import SessionStreamFn
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.team_bridge.card_projection import presented_bridge_ref
+
+    config = tmp_path / "config"
+    config.mkdir()
+    _reserve(_store(config), config_dir=config)
+    runtime = BridgeRuntime(
+        cast(TeamBridgeClient, ControlledHub()),
+        config,
+        TENANT,
+        _owner(),
+        SESSION_ID,
+        admission="admitted",
+    )
+    auth = AuthStore(config / "auth.db", config_dir=config)
+    stream = SessionStreamFn(auth, None, SESSION_ID)
+    session = _session(tmp_path, cast(Any, stream), runtime)
+    card = _card(session)
+    session._context.messages.append(card)
+    session._bridge_cards_owed_wake = [card]
+    allowed = False
+    admission_ids = []
+    refused = []
+    dispatched = []
+
+    def admit(request_id):
+        admission_ids.append(request_id)
+        if not allowed:
+            raise RequestAdmissionRefused("synthetic-refusal")
+
+    def observe(event):
+        if isinstance(event, AgentEndEvent) and event.aborted:
+            refused.append(
+                (
+                    runtime.bridge_input_presented,
+                    session._attention_run_request_dispatched,
+                    list(session._bridge_cards_owed_wake),
+                )
+            )
+
+    async def provider(request, _signal, _boundary, *, admission):
+        assert admission is not None
+        dispatched.append(
+            (
+                presented_bridge_ref(request.messages) is not None,
+                runtime.bridge_input_presented,
+                session._attention_run_request_dispatched,
+                list(session._bridge_cards_owed_wake),
+            )
+        )
+        yield StreamTextDelta(delta="card read")
+        yield StreamEndEvent(stop_reason="stop")
+
+    # Keep real request admission and Bridge projection; no provider I/O.
+    monkeypatch.setattr(stream, "_stream_account_request", provider)
+    uninstall = session.install_request_admission(admit)
+    unsubscribe = session.subscribe(observe)
+    try:
+        async with session._turn_lock:
+            await session._run_turn([], opened_body=await _claim(session, config))
+            assert len(admission_ids) == 1 and not dispatched
+            assert refused == [(False, False, [card])]
+            assert session._bridge_cards_owed_wake == [card]
+
+            # A fresh arrival clears the prior turn's abort before reoffering
+            # the same reservation; drive both turns without the wake waiter.
+            session._abort_requested = False
+            allowed = True
+            await session._run_turn([], opened_body=await _claim(session, config))
+            assert len(admission_ids) == 2
+            assert dispatched == [(True, True, True, [])]
+            assert not session._bridge_cards_owed_wake
+    finally:
+        unsubscribe()
+        uninstall()
+        try:
+            await session.dispose()
+        finally:
+            await stream.close()
+            auth.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("ending", ["cancel", "failure"])
 async def test_actual_dispatch_latch_clears_on_abnormal_run_exit(tmp_path, ending, caplog):
     config = tmp_path / "config"

@@ -76,17 +76,6 @@ export const PANEL_FRACTION = 0.4;
 export const ASK_QUESTION_FRACTION = 0.3;
 
 /**
- * A multi-question ask card's whole question stack, as a share of the column
- * (PR #3777 code review M2). The per-question cap alone lets three long
- * questions take ~90% of the column before their options, so the card's
- * shared send/decline row fell off screen. Capping the stack at half the
- * column leaves room for the sheet chrome and that row below it, while one
- * question's capped excerpt (0.3) plus its options still fit without the
- * stack scrolling for a typical two-question card.
- */
-export const ASK_QUESTION_LIST_FRACTION = 0.5;
-
-/**
  * The `$skill` tray's share of the column.
  *
  * Shown while the keyboard is up by definition, so a `vh` cap measured the
@@ -98,6 +87,23 @@ export const ASK_QUESTION_LIST_FRACTION = 0.5;
  * product supports, and the tray scrolls rather than growing.
  */
 export const SKILL_TRAY_FRACTION = 0.45;
+
+/** A sheet's pinned footer takes at most this share of the column and scrolls
+ *  inside itself past it (design D1, QA Q-1): at 200% text on a 320x568 phone the
+ *  uncapped bar, with the dismiss reasons open, left the reading area 0-14 px. */
+export const SHEET_FOOTER_FRACTION = 0.4;
+
+/** What a sheet's scroller keeps, as a share of the column, while a footer is
+ *  present: footer cap + this + the header stays inside the sheet's own 0.85
+ *  cap, so the question is always at least this tall. */
+export const SHEET_READING_MIN_FRACTION = 0.28;
+
+/** `min-height` in column units, the floor twin of `columnCap`. */
+export function columnFloor(fraction: number): { minHeight: string } {
+	return {
+		minHeight: `calc(var(${COLUMN_HEIGHT_VAR}, 100dvh) * ${fraction})`,
+	};
+}
 
 /** `max-height` in column units — see the module docstring for why not `dvh`. */
 export function columnCap(fraction: number): { maxHeight: string } {

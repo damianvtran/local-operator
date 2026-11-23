@@ -1598,6 +1598,249 @@ def test_a_small_rosters_graph_is_not_spent_to_save_a_transcript() -> None:
     assert len(json.dumps({"op": "projection", "data": data}).encode()) <= 700_000
 
 
+def test_the_text_tier_never_walks_the_answer_down_to_the_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap may spend tool output to fit a frame; the ANSWER is not spent.
+
+    The text tier is the last one, and it walks ``text``/``summary``/``error``
+    down from ``FRAME_CAP_ENTRY_TEXT_CHARS`` to ``FRAME_CAP_ENTRY_TEXT_FLOOR``.
+    It used to treat an answer exactly like a tool result, so two messages of
+    3,012 and 1,842 source characters crossed to the phone as 200-character
+    rows ending in a "…" — reproduced over a real session, where the phone's
+    rendering matched the frame character for character — and nothing could get
+    the text back: the flag is not a recovery path (its only reader, the
+    peer-cycle restore predicate, refuses a drill-in over a clipped row) and
+    nothing re-fetches the row.
+
+    The walk usually cannot even buy the frame it is spent for. The tail floor
+    keeps at most ``FRAME_CAP_TRANSCRIPT_FLOOR`` rows, so 4,000 ASCII chars/row
+    is ~64 KB of a 700 KB budget. This fixture is sized (``asks``, which no tier
+    bounds, plus a ``cap_bytes`` just above what the floor reaches) so the tool
+    and notice walk reaches its floor and FITS there, and both behaviours are
+    visible side by side: the answer stops at its first bound, while the
+    notice's text and the tool rows' summary/error go all the way down. A frame
+    that does not fit even then is the next test's case.
+    """
+    import local_operator.mobile.projection as projection_module
+    from local_operator.mobile.projection import (
+        FRAME_CAP_ENTRY_TEXT_CHARS,
+        FRAME_CAP_ENTRY_TEXT_FLOOR,
+        FRAME_CAP_TRANSCRIPT_FLOOR,
+        cap_projection_frame,
+    )
+    from local_operator.mobile.types import (
+        PendingAskWire,
+        SessionProjection,
+        TranscriptEntry,
+    )
+
+    projection = SessionProjection(session_id="s1", pid=1, kind="tui")
+    projection.transcript = [
+        TranscriptEntry(id="opener", kind="user", text="open the conversation"),
+        # The long answer: 12,000 source characters, three times the first bound.
+        TranscriptEntry(id="answer", kind="assistant", text="A" * 12_000),
+        # The REPRO length: one of the two messages that reached a phone as 200
+        # characters. It is under the first bound, so it must not move at all.
+        TranscriptEntry(id="short-answer", kind="assistant", text="B" * 3_012),
+        # A notice is prose the tier may still spend: its text walks.
+        TranscriptEntry(id="notice", kind="notice", text="N" * 50_000),
+        # A tool row's payload lives in ``summary`` (the args line) and
+        # ``error``; its ``text`` is empty, and its output is ``details``,
+        # which tier 3 drops before this tier runs.
+        *[
+            TranscriptEntry(
+                id=f"tool-{index}",
+                kind="tool",
+                summary="S" * 50_000,
+                error="E" * 50_000,
+                tool_name="bash",
+            )
+            for index in range(12)
+        ],
+    ]
+    projection.asks = [
+        PendingAskWire(
+            ask_id="a1",
+            questions=[{"qid": f"q{index}", "question": "Q" * 225_000} for index in range(3)],
+        )
+    ]
+
+    # Spy on the normalizer to pin WHICH bounds the tier asked for, per source
+    # text: the answer must be asked exactly once, tool output once per step.
+    calls: list[tuple[int, int]] = []
+    real_compact_multiline = projection_module._compact_multiline
+
+    def spy(text: str, limit: int) -> str:
+        calls.append((len(text), limit))
+        return real_compact_multiline(text, limit)
+
+    monkeypatch.setattr(projection_module, "_compact_multiline", spy)
+
+    # 693,000 sits between what the floor reaches (692,780) and what the 250
+    # step reaches (694,030): the walk must go to the floor to fit.
+    data, degraded = cap_projection_frame(projection, cap_bytes=693_000)
+
+    assert degraded is True
+    assert len(json.dumps({"op": "projection", "data": data}).encode()) <= 693_000
+    rows = {row["id"]: row for row in data["transcript"]}
+    assert len(rows) == FRAME_CAP_TRANSCRIPT_FLOOR, "the tail was already at its floor"
+
+    # The answer keeps its first bound and says so, instead of becoming a
+    # 200-character stub.
+    answer = rows["answer"]
+    assert len(answer["text"]) == FRAME_CAP_ENTRY_TEXT_CHARS
+    assert answer["text"].endswith("…")
+    assert answer["text_complete"] is False, "a clipped answer must not claim completeness"
+    assert answer["kind"] == "assistant"
+
+    # The repro row fits inside the bound, so it is untouched — and, being
+    # whole, it reports complete.
+    repro = rows["short-answer"]
+    assert len(repro["text"]) == 3_012
+    assert repro["text_complete"] is True
+
+    # Tool output is still the tier's spending money: floored, and its text
+    # (none of it here) untouched. The notice walks with it.
+    assert len(rows["notice"]["text"]) == FRAME_CAP_ENTRY_TEXT_FLOOR
+    assert rows["notice"]["text_complete"] is False
+    for index in range(12):
+        tool_row = rows[f"tool-{index}"]
+        assert len(tool_row["summary"]) == FRAME_CAP_ENTRY_TEXT_FLOOR
+        assert len(tool_row["error"]) == FRAME_CAP_ENTRY_TEXT_FLOOR
+        assert tool_row["text"] == "", "a tool row carries no answer text to clip"
+
+    # The opener is under every bound, so it never moves either.
+    assert rows["opener"]["text"] == "open the conversation"
+    assert rows["opener"]["text_complete"] is True
+
+    # WHICH bounds were asked for. The answer's source text is normalised
+    # EXACTLY ONCE, at the first bound; the notice's text and the tool rows'
+    # summary/error are walked four times each (the ladder from the first bound
+    # to the floor) and reach the floor. The rows already inside a bound are
+    # never normalised at all.
+    limits = [limit for _length, limit in calls]
+    assert [limit for length, limit in calls if length == 12_000] == [
+        FRAME_CAP_ENTRY_TEXT_CHARS
+    ], "the answer was walked down after its first bound"
+    assert len(limits) == 1 + 25 * 4, (
+        "one answer pass plus four spendable passes (one notice text and twelve "
+        "tool rows x summary/error)"
+    )
+    assert min(limits) == FRAME_CAP_ENTRY_TEXT_FLOOR, "output stopped above the floor"
+    assert not any(
+        length in (3_012, 21) for length, _limit in calls
+    ), "a row already inside the bound must be skipped, not rewritten"
+
+
+def test_the_answers_walk_too_when_sparing_them_would_drop_the_frame(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Sparing the answer must never cost the frame: a frame over the cap is lost.
+
+    The daemon's reader drops a frame still over the cap whole, so a repaint the
+    old walk kept and this tier lost would be a worse outcome than a clipped
+    answer. The ~64 KB the first bound costs is ASCII: JSON-escaped, an emoji is
+    12 bytes, so thirty answers of 6,000 emoji beside an unbounded ``asks``
+    question stayed at 1,055,583 bytes with the answers held at 4,000 characters,
+    where the old walk fit them at 515,476. The answers are therefore spared
+    FIRST and walked only when everything else is already at its floor and the
+    frame is still over the cap.
+    """
+    import logging
+
+    from local_operator.mobile.projection import (
+        FRAME_CAP_ENTRY_TEXT_CHARS,
+        FRAME_CAP_ENTRY_TEXT_FLOOR,
+        PROJECTION_FRAME_SOFT_CAP_BYTES,
+        cap_projection_frame,
+    )
+    from local_operator.mobile.types import (
+        PendingAskWire,
+        SessionProjection,
+        TranscriptEntry,
+    )
+
+    projection = SessionProjection(session_id="s1", pid=1, kind="tui")
+    projection.transcript = [
+        TranscriptEntry(id="opener", kind="user", text="open the conversation"),
+        *[
+            TranscriptEntry(id=f"answer-{index}", kind="assistant", text="\U0001f600" * 6_000)
+            for index in range(30)
+        ],
+    ]
+    projection.asks = [
+        PendingAskWire(ask_id="a1", questions=[{"qid": "q0", "question": "Q" * 330_000}])
+    ]
+
+    with caplog.at_level(logging.WARNING):
+        data, degraded = cap_projection_frame(projection)
+
+    assert degraded is True
+    size = len(json.dumps({"op": "projection", "data": data}).encode())
+    assert size <= PROJECTION_FRAME_SOFT_CAP_BYTES, "the frame the old walk kept was lost"
+    assert not [r for r in caplog.records if "after every degradation tier" in r.getMessage()]
+    answers = [row for row in data["transcript"] if row["kind"] == "assistant"]
+    assert answers and all(row["text_complete"] is False for row in answers)
+    longest = max(len(row["text"]) for row in answers)
+    assert (
+        FRAME_CAP_ENTRY_TEXT_FLOOR < longest < FRAME_CAP_ENTRY_TEXT_CHARS
+    ), "the answers walk only as far as the frame needs, not straight to the floor"
+    assert data["transcript"][0]["text"] == "open the conversation"
+
+
+def test_a_text_heavy_frame_still_fits_with_the_answer_at_its_bound() -> None:
+    """The exemption must not switch the tier off: text-heavy frames still fit.
+
+    Row payload IS the weight here — twelve tool rows of 50,000-character
+    ``summary`` plus 50,000-character ``error``, a 1.2 MB frame. The tier's
+    first pass (answers bounded once, tool payload at 4,000) is what brings it
+    under the cap, and nothing else is spent: the tail is already at its floor
+    and no row is dropped.
+    """
+    from local_operator.mobile.projection import (
+        FRAME_CAP_ENTRY_TEXT_CHARS,
+        PROJECTION_FRAME_SOFT_CAP_BYTES,
+        cap_projection_frame,
+    )
+    from local_operator.mobile.types import SessionProjection, TranscriptEntry
+
+    projection = SessionProjection(session_id="s1", pid=1, kind="tui")
+    projection.transcript = [
+        TranscriptEntry(id="opener", kind="user", text="open the conversation"),
+        TranscriptEntry(id="answer", kind="assistant", text="A" * 12_000),
+        TranscriptEntry(id="short-answer", kind="assistant", text="B" * 3_012),
+        *[
+            TranscriptEntry(
+                id=f"tool-{index}",
+                kind="tool",
+                summary="S" * 50_000,
+                error="E" * 50_000,
+                tool_name="bash",
+            )
+            for index in range(12)
+        ],
+    ]
+
+    data, degraded = cap_projection_frame(projection)
+
+    assert degraded is True
+    size = len(json.dumps({"op": "projection", "data": data}).encode())
+    assert size <= PROJECTION_FRAME_SOFT_CAP_BYTES
+    assert len(data["transcript"]) == 15, "the tail floor already held every row"
+
+    rows = {row["id"]: row for row in data["transcript"]}
+    assert len(rows["answer"]["text"]) == FRAME_CAP_ENTRY_TEXT_CHARS
+    assert rows["answer"]["text_complete"] is False
+    assert len(rows["short-answer"]["text"]) == 3_012
+    assert rows["short-answer"]["text_complete"] is True
+    assert rows["opener"]["text"] == "open the conversation"
+    assert rows["opener"]["text_complete"] is True
+    for index in range(12):
+        assert len(rows[f"tool-{index}"]["summary"]) == FRAME_CAP_ENTRY_TEXT_CHARS
+        assert len(rows[f"tool-{index}"]["error"]) == FRAME_CAP_ENTRY_TEXT_CHARS
+
+
 def test_the_pinned_head_is_stated_on_the_wire() -> None:
     """The pin is a FACT the daemon publishes, not something the client infers.
 

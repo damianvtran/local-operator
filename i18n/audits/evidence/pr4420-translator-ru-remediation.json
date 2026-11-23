@@ -1,0 +1,1107 @@
+{
+  "locale": "ru",
+  "namespace": "tui.info",
+  "stage": "round2-authoring-not-independent-audit",
+  "agent": "info-remediate-ru / translator; session 6301b4199e0c",
+  "model": "openai/gpt-6.1-sol",
+  "fallback_from": "anthropic/claude-opus-5-5; host notice: provider quota",
+  "head": "8f1e45a3a98ca9f8b7312b6707c36e21b758966d",
+  "source_sha256": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+  "context_sha256": "aee21715fca769227b3bda5b500a5e81e51763cf86817f741baff8b1a5ef0ae7",
+  "target_before_sha256": "c6b6287844dcc19f0a98d71d5a72a6da38599c7f15c085066b2ee1754a8cd071",
+  "target_after_sha256": "76d33638ccd3a9f6490babea6c6c0c761bad1d6db80aa5a18c508eef765c773f",
+  "keys": 277,
+  "changed_keys": [
+    "tui.info.status.bound_held",
+    "tui.info.sessions.not_answering_clause",
+    "tui.info.fleet_caveats.lower_bound",
+    "tui.info.agents.runtimes",
+    "tui.info.agents.unreported_full",
+    "tui.info.agents.unreported_short",
+    "tui.info.agents.unreported_suffix",
+    "tui.info.env.mcp_connected",
+    "tui.info.export.build_age",
+    "tui.info.export.uptime",
+    "tui.info.export.sessions_summary",
+    "tui.info.export.runtimes",
+    "tui.info.export.trajectories_unreported",
+    "tui.info.export.mcp",
+    "tui.info.state.stale"
+  ],
+  "unchanged_values": 262,
+  "finding_dispositions": [
+    {
+      "id": "R1",
+      "key": "tui.info.status.bound_held",
+      "disposition": "authored proposed remediation; independent audit pending"
+    },
+    {
+      "id": "R2",
+      "key": "tui.info.sessions.not_answering_clause",
+      "disposition": "authored proposed remediation; independent audit pending"
+    },
+    {
+      "id": "R3",
+      "key": "tui.info.agents.runtimes",
+      "disposition": "authored proposed remediation; independent audit pending"
+    },
+    {
+      "id": "R4",
+      "key": "tui.info.export.sessions_summary",
+      "disposition": "authored proposed remediation; independent audit pending"
+    },
+    {
+      "id": "R5",
+      "key": "tui.info.export.runtimes",
+      "disposition": "authored proposed remediation; independent audit pending"
+    },
+    {
+      "id": "R6",
+      "key": "tui.info.agents.unreported_full",
+      "disposition": "authored proposed remediation; independent audit pending"
+    },
+    {
+      "id": "R7",
+      "key": "tui.info.agents.unreported_short",
+      "disposition": "authored proposed remediation; independent audit pending"
+    },
+    {
+      "id": "R8",
+      "key": "tui.info.agents.unreported_suffix",
+      "disposition": "authored proposed remediation; independent audit pending"
+    },
+    {
+      "id": "R9",
+      "key": "tui.info.export.trajectories_unreported",
+      "disposition": "authored proposed remediation; independent audit pending"
+    },
+    {
+      "id": "R10",
+      "key": "tui.info.env.mcp_connected",
+      "disposition": "authored proposed remediation; independent audit pending"
+    },
+    {
+      "id": "R11",
+      "key": "tui.info.export.mcp",
+      "disposition": "authored proposed remediation; independent audit pending"
+    }
+  ],
+  "context_corrections": {
+    "tui.info.state.stale": "Changed-context OS PID-gone meaning; процесс завершён instead of stale data. This is a concrete new-context correction beyond initial R1–R11, not a broader audit.",
+    "tui.info.fleet_caveats.lower_bound": "Changed-context explicitly qualifies trajectories, not runtimes; inserted траекторий to disambiguate total. Existing deeper phrase counts subagents, not depth; unchanged."
+  },
+  "glossary_choices": [
+    "рантайм, сессия, субагент retained per ru style guide",
+    "без ответа and данные не переданы avoid fixed-plural verbs with simple count placeholders",
+    "срок истёк; процесс жив preserves held/unproven uncertainty without claiming a hang",
+    "возраст сборки неизвестен (masculine); время работы неизвестно (neuter); latest-version неизвестна not reused",
+    "No new technical terminology; commands, PID/model/source identifiers untouched"
+  ],
+  "mechanical": {
+    "interpreter": "/Users/damian/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/bin/python3.12",
+    "python_version": "Python 3.12.13",
+    "checker": "scripts/i18n/check.py arguments_match scoped to changed keys only; runtime parser, formatter and tr_record",
+    "render_count": 154,
+    "pseudo_ast_literal_expansion_count": 154,
+    "pseudo_limitation": "Synthetic AST-literal expansion only; no advertised core pseudo-localization CLI, no rendered-width or pseudo visual clearance",
+    "missing_argument_rejections": 27,
+    "counts": [
+      0,
+      1,
+      2,
+      5,
+      11,
+      21,
+      1000
+    ],
+    "cldr_categories": {
+      "0": "many",
+      "1": "one",
+      "2": "few",
+      "5": "many",
+      "11": "many",
+      "21": "one",
+      "1000": "many"
+    },
+    "select_contracts": "Both whole-field selects retain unmeasured/other and same other interpolation",
+    "negative_controls": {
+      "malformed_icu_rejected": true,
+      "renamed_placeholder_rejected": true
+    },
+    "authored_bidi_controls": 0,
+    "rows": [
+      {
+        "key": "tui.info.status.bound_held",
+        "arguments": [],
+        "selects": [],
+        "samples": [
+          {
+            "count": 1,
+            "selects": [],
+            "text": "срок истёк; процесс жив"
+          },
+          {
+            "count": 2,
+            "selects": [],
+            "text": "срок истёк; процесс жив"
+          },
+          {
+            "count": 5,
+            "selects": [],
+            "text": "срок истёк; процесс жив"
+          },
+          {
+            "count": 21,
+            "selects": [],
+            "text": "срок истёк; процесс жив"
+          }
+        ]
+      },
+      {
+        "key": "tui.info.sessions.not_answering_clause",
+        "arguments": [
+          [
+            "wedged",
+            "simple"
+          ]
+        ],
+        "selects": [],
+        "samples": [
+          {
+            "count": 1,
+            "selects": [],
+            "text": " · 1 без ответа"
+          },
+          {
+            "count": 2,
+            "selects": [],
+            "text": " · 2 без ответа"
+          },
+          {
+            "count": 5,
+            "selects": [],
+            "text": " · 5 без ответа"
+          },
+          {
+            "count": 21,
+            "selects": [],
+            "text": " · 21 без ответа"
+          }
+        ]
+      },
+      {
+        "key": "tui.info.fleet_caveats.lower_bound",
+        "arguments": [
+          [
+            "count",
+            "plural"
+          ]
+        ],
+        "selects": [],
+        "samples": [
+          {
+            "count": 1,
+            "selects": [],
+            "text": "1 сессия работает на старой сборке и не сообщает о субагентах — общее число траекторий по всем сессиям указано как нижняя граница."
+          },
+          {
+            "count": 2,
+            "selects": [],
+            "text": "2 сессии работают на старой сборке и не сообщают о субагентах — общее число траекторий по всем сессиям указано как нижняя граница."
+          },
+          {
+            "count": 5,
+            "selects": [],
+            "text": "5 сессий работают на старой сборке и не сообщают о субагентах — общее число траекторий по всем сессиям указано как нижняя граница."
+          },
+          {
+            "count": 21,
+            "selects": [],
+            "text": "21 сессия работает на старой сборке и не сообщает о субагентах — общее число траекторий по всем сессиям указано как нижняя граница."
+          }
+        ]
+      },
+      {
+        "key": "tui.info.agents.runtimes",
+        "arguments": [
+          [
+            "live",
+            "plural"
+          ],
+          [
+            "has_wedged",
+            "select"
+          ],
+          [
+            "wedged",
+            "simple"
+          ]
+        ],
+        "selects": [
+          [
+            "has_wedged",
+            [
+              "yes",
+              "other"
+            ]
+          ]
+        ],
+        "samples": [
+          {
+            "count": 1,
+            "selects": [
+              "yes"
+            ],
+            "text": "1 активный · 1 без ответа"
+          },
+          {
+            "count": 1,
+            "selects": [
+              "other"
+            ],
+            "text": "1 активный"
+          },
+          {
+            "count": 2,
+            "selects": [
+              "yes"
+            ],
+            "text": "2 активных · 2 без ответа"
+          },
+          {
+            "count": 2,
+            "selects": [
+              "other"
+            ],
+            "text": "2 активных"
+          },
+          {
+            "count": 5,
+            "selects": [
+              "yes"
+            ],
+            "text": "5 активных · 5 без ответа"
+          },
+          {
+            "count": 5,
+            "selects": [
+              "other"
+            ],
+            "text": "5 активных"
+          },
+          {
+            "count": 21,
+            "selects": [
+              "yes"
+            ],
+            "text": "21 активный · 21 без ответа"
+          },
+          {
+            "count": 21,
+            "selects": [
+              "other"
+            ],
+            "text": "21 активный"
+          }
+        ]
+      },
+      {
+        "key": "tui.info.agents.unreported_full",
+        "arguments": [
+          [
+            "subagents_unreported",
+            "simple"
+          ],
+          [
+            "runtimes",
+            "plural"
+          ]
+        ],
+        "selects": [],
+        "samples": [
+          {
+            "count": 1,
+            "selects": [],
+            "text": "1 из 1 рантайма — данные не переданы"
+          },
+          {
+            "count": 2,
+            "selects": [],
+            "text": "2 из 2 рантаймов — данные не переданы"
+          },
+          {
+            "count": 5,
+            "selects": [],
+            "text": "5 из 5 рантаймов — данные не переданы"
+          },
+          {
+            "count": 21,
+            "selects": [],
+            "text": "21 из 21 рантайма — данные не переданы"
+          }
+        ]
+      },
+      {
+        "key": "tui.info.agents.unreported_short",
+        "arguments": [
+          [
+            "subagents_unreported",
+            "simple"
+          ]
+        ],
+        "selects": [],
+        "samples": [
+          {
+            "count": 1,
+            "selects": [],
+            "text": "1 без данных"
+          },
+          {
+            "count": 2,
+            "selects": [],
+            "text": "2 без данных"
+          },
+          {
+            "count": 5,
+            "selects": [],
+            "text": "5 без данных"
+          },
+          {
+            "count": 21,
+            "selects": [],
+            "text": "21 без данных"
+          }
+        ]
+      },
+      {
+        "key": "tui.info.agents.unreported_suffix",
+        "arguments": [
+          [
+            "subagents_unreported",
+            "simple"
+          ]
+        ],
+        "selects": [],
+        "samples": [
+          {
+            "count": 1,
+            "selects": [],
+            "text": " · 1 без данных"
+          },
+          {
+            "count": 2,
+            "selects": [],
+            "text": " · 2 без данных"
+          },
+          {
+            "count": 5,
+            "selects": [],
+            "text": " · 5 без данных"
+          },
+          {
+            "count": 21,
+            "selects": [],
+            "text": " · 21 без данных"
+          }
+        ]
+      },
+      {
+        "key": "tui.info.env.mcp_connected",
+        "arguments": [
+          [
+            "mcp_connected",
+            "simple"
+          ],
+          [
+            "mcp_configured",
+            "simple"
+          ]
+        ],
+        "selects": [],
+        "samples": [
+          {
+            "count": 1,
+            "selects": [],
+            "text": "подключено: 1 из 1"
+          },
+          {
+            "count": 2,
+            "selects": [],
+            "text": "подключено: 2 из 2"
+          },
+          {
+            "count": 5,
+            "selects": [],
+            "text": "подключено: 5 из 5"
+          },
+          {
+            "count": 21,
+            "selects": [],
+            "text": "подключено: 21 из 21"
+          }
+        ]
+      },
+      {
+        "key": "tui.info.export.build_age",
+        "arguments": [
+          [
+            "build_age_s",
+            "select"
+          ]
+        ],
+        "selects": [
+          [
+            "build_age_s",
+            [
+              "unmeasured",
+              "other"
+            ]
+          ]
+        ],
+        "samples": [
+          {
+            "count": 1,
+            "selects": [
+              "unmeasured"
+            ],
+            "text": "  возраст сборки    неизвестен"
+          },
+          {
+            "count": 1,
+            "selects": [
+              "other"
+            ],
+            "text": "  возраст сборки    2 мин"
+          },
+          {
+            "count": 2,
+            "selects": [
+              "unmeasured"
+            ],
+            "text": "  возраст сборки    неизвестен"
+          },
+          {
+            "count": 2,
+            "selects": [
+              "other"
+            ],
+            "text": "  возраст сборки    2 мин"
+          },
+          {
+            "count": 5,
+            "selects": [
+              "unmeasured"
+            ],
+            "text": "  возраст сборки    неизвестен"
+          },
+          {
+            "count": 5,
+            "selects": [
+              "other"
+            ],
+            "text": "  возраст сборки    2 мин"
+          },
+          {
+            "count": 21,
+            "selects": [
+              "unmeasured"
+            ],
+            "text": "  возраст сборки    неизвестен"
+          },
+          {
+            "count": 21,
+            "selects": [
+              "other"
+            ],
+            "text": "  возраст сборки    2 мин"
+          }
+        ]
+      },
+      {
+        "key": "tui.info.export.uptime",
+        "arguments": [
+          [
+            "uptime_s",
+            "select"
+          ]
+        ],
+        "selects": [
+          [
+            "uptime_s",
+            [
+              "unmeasured",
+              "other"
+            ]
+          ]
+        ],
+        "samples": [
+          {
+            "count": 1,
+            "selects": [
+              "unmeasured"
+            ],
+            "text": "  время работы      неизвестно"
+          },
+          {
+            "count": 1,
+            "selects": [
+              "other"
+            ],
+            "text": "  время работы      2 мин"
+          },
+          {
+            "count": 2,
+            "selects": [
+              "unmeasured"
+            ],
+            "text": "  время работы      неизвестно"
+          },
+          {
+            "count": 2,
+            "selects": [
+              "other"
+            ],
+            "text": "  время работы      2 мин"
+          },
+          {
+            "count": 5,
+            "selects": [
+              "unmeasured"
+            ],
+            "text": "  время работы      неизвестно"
+          },
+          {
+            "count": 5,
+            "selects": [
+              "other"
+            ],
+            "text": "  время работы      2 мин"
+          },
+          {
+            "count": 21,
+            "selects": [
+              "unmeasured"
+            ],
+            "text": "  время работы      неизвестно"
+          },
+          {
+            "count": 21,
+            "selects": [
+              "other"
+            ],
+            "text": "  время работы      2 мин"
+          }
+        ]
+      },
+      {
+        "key": "tui.info.export.sessions_summary",
+        "arguments": [
+          [
+            "live",
+            "plural"
+          ],
+          [
+            "wedged",
+            "simple"
+          ],
+          [
+            "total",
+            "plural"
+          ],
+          [
+            "has_build_skew",
+            "select"
+          ]
+        ],
+        "selects": [
+          [
+            "has_build_skew",
+            [
+              "yes",
+              "other"
+            ]
+          ]
+        ],
+        "samples": [
+          {
+            "count": 1,
+            "selects": [
+              "yes"
+            ],
+            "text": "  1 активная · 1 без ответа · 1 всего · РАЗНЫЕ СБОРКИ"
+          },
+          {
+            "count": 1,
+            "selects": [
+              "other"
+            ],
+            "text": "  1 активная · 1 без ответа · 1 всего"
+          },
+          {
+            "count": 2,
+            "selects": [
+              "yes"
+            ],
+            "text": "  2 активные · 2 без ответа · 2 всего · РАЗНЫЕ СБОРКИ"
+          },
+          {
+            "count": 2,
+            "selects": [
+              "other"
+            ],
+            "text": "  2 активные · 2 без ответа · 2 всего"
+          },
+          {
+            "count": 5,
+            "selects": [
+              "yes"
+            ],
+            "text": "  5 активных · 5 без ответа · 5 всего · РАЗНЫЕ СБОРКИ"
+          },
+          {
+            "count": 5,
+            "selects": [
+              "other"
+            ],
+            "text": "  5 активных · 5 без ответа · 5 всего"
+          },
+          {
+            "count": 21,
+            "selects": [
+              "yes"
+            ],
+            "text": "  21 активная · 21 без ответа · 21 всего · РАЗНЫЕ СБОРКИ"
+          },
+          {
+            "count": 21,
+            "selects": [
+              "other"
+            ],
+            "text": "  21 активная · 21 без ответа · 21 всего"
+          }
+        ]
+      },
+      {
+        "key": "tui.info.export.runtimes",
+        "arguments": [
+          [
+            "sessions_live_sessions_wedged",
+            "plural"
+          ],
+          [
+            "live",
+            "plural"
+          ],
+          [
+            "wedged",
+            "simple"
+          ]
+        ],
+        "selects": [],
+        "samples": [
+          {
+            "count": 1,
+            "selects": [],
+            "text": "  рантаймы          1 всего — 1 активный · 1 без ответа"
+          },
+          {
+            "count": 2,
+            "selects": [],
+            "text": "  рантаймы          2 всего — 2 активных · 2 без ответа"
+          },
+          {
+            "count": 5,
+            "selects": [],
+            "text": "  рантаймы          5 всего — 5 активных · 5 без ответа"
+          },
+          {
+            "count": 21,
+            "selects": [],
+            "text": "  рантаймы          21 всего — 21 активный · 21 без ответа"
+          }
+        ]
+      },
+      {
+        "key": "tui.info.export.trajectories_unreported",
+        "arguments": [
+          [
+            "subagents_unreported",
+            "simple"
+          ],
+          [
+            "sessions_live_sessions_wedged",
+            "plural"
+          ]
+        ],
+        "selects": [],
+        "samples": [
+          {
+            "count": 1,
+            "selects": [],
+            "text": "  траектории        — (1 из 1 рантайма — данные не переданы)"
+          },
+          {
+            "count": 2,
+            "selects": [],
+            "text": "  траектории        — (2 из 2 рантаймов — данные не переданы)"
+          },
+          {
+            "count": 5,
+            "selects": [],
+            "text": "  траектории        — (5 из 5 рантаймов — данные не переданы)"
+          },
+          {
+            "count": 21,
+            "selects": [],
+            "text": "  траектории        — (21 из 21 рантайма — данные не переданы)"
+          }
+        ]
+      },
+      {
+        "key": "tui.info.export.mcp",
+        "arguments": [
+          [
+            "mcp_connected",
+            "simple"
+          ],
+          [
+            "mcp_configured",
+            "simple"
+          ],
+          [
+            "has_mcp_settling",
+            "select"
+          ],
+          [
+            "has_env_mcp_failed_and_not_env_mcp_settling",
+            "select"
+          ],
+          [
+            "mcp_failed",
+            "plural"
+          ]
+        ],
+        "selects": [
+          [
+            "has_mcp_settling",
+            [
+              "yes",
+              "other"
+            ]
+          ],
+          [
+            "has_env_mcp_failed_and_not_env_mcp_settling",
+            [
+              "yes",
+              "other"
+            ]
+          ]
+        ],
+        "samples": [
+          {
+            "count": 1,
+            "selects": [
+              "yes",
+              "yes"
+            ],
+            "text": "  MCP               1/1 подключено · подключение ещё идёт · 1 сбой"
+          },
+          {
+            "count": 1,
+            "selects": [
+              "yes",
+              "other"
+            ],
+            "text": "  MCP               1/1 подключено · подключение ещё идёт"
+          },
+          {
+            "count": 1,
+            "selects": [
+              "other",
+              "yes"
+            ],
+            "text": "  MCP               1/1 подключено · 1 сбой"
+          },
+          {
+            "count": 1,
+            "selects": [
+              "other",
+              "other"
+            ],
+            "text": "  MCP               1/1 подключено"
+          },
+          {
+            "count": 2,
+            "selects": [
+              "yes",
+              "yes"
+            ],
+            "text": "  MCP               2/2 подключено · подключение ещё идёт · 2 сбоя"
+          },
+          {
+            "count": 2,
+            "selects": [
+              "yes",
+              "other"
+            ],
+            "text": "  MCP               2/2 подключено · подключение ещё идёт"
+          },
+          {
+            "count": 2,
+            "selects": [
+              "other",
+              "yes"
+            ],
+            "text": "  MCP               2/2 подключено · 2 сбоя"
+          },
+          {
+            "count": 2,
+            "selects": [
+              "other",
+              "other"
+            ],
+            "text": "  MCP               2/2 подключено"
+          },
+          {
+            "count": 5,
+            "selects": [
+              "yes",
+              "yes"
+            ],
+            "text": "  MCP               5/5 подключено · подключение ещё идёт · 5 сбоев"
+          },
+          {
+            "count": 5,
+            "selects": [
+              "yes",
+              "other"
+            ],
+            "text": "  MCP               5/5 подключено · подключение ещё идёт"
+          },
+          {
+            "count": 5,
+            "selects": [
+              "other",
+              "yes"
+            ],
+            "text": "  MCP               5/5 подключено · 5 сбоев"
+          },
+          {
+            "count": 5,
+            "selects": [
+              "other",
+              "other"
+            ],
+            "text": "  MCP               5/5 подключено"
+          },
+          {
+            "count": 21,
+            "selects": [
+              "yes",
+              "yes"
+            ],
+            "text": "  MCP               21/21 подключено · подключение ещё идёт · 21 сбой"
+          },
+          {
+            "count": 21,
+            "selects": [
+              "yes",
+              "other"
+            ],
+            "text": "  MCP               21/21 подключено · подключение ещё идёт"
+          },
+          {
+            "count": 21,
+            "selects": [
+              "other",
+              "yes"
+            ],
+            "text": "  MCP               21/21 подключено · 21 сбой"
+          },
+          {
+            "count": 21,
+            "selects": [
+              "other",
+              "other"
+            ],
+            "text": "  MCP               21/21 подключено"
+          }
+        ]
+      },
+      {
+        "key": "tui.info.state.stale",
+        "arguments": [],
+        "selects": [],
+        "samples": [
+          {
+            "count": 1,
+            "selects": [],
+            "text": "процесс завершён"
+          },
+          {
+            "count": 2,
+            "selects": [],
+            "text": "процесс завершён"
+          },
+          {
+            "count": 5,
+            "selects": [],
+            "text": "процесс завершён"
+          },
+          {
+            "count": 21,
+            "selects": [],
+            "text": "процесс завершён"
+          }
+        ]
+      }
+    ]
+  },
+  "width_risks_retained_from_independent_report": [
+    {
+      "key": "tui.info.status.leaving_silent",
+      "en": 33,
+      "ru": 42,
+      "delta": 9,
+      "severity": "minor",
+      "kind": "fit-risk-not-observed-overflow",
+      "current": "завершается (нет отклика {SIGNAL_DRAIN_S})",
+      "proposed": "завершается (нет отклика {SIGNAL_DRAIN_S})",
+      "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+    },
+    {
+      "key": "tui.info.status.leaving_for_build",
+      "en": 17,
+      "ru": 28,
+      "delta": 11,
+      "severity": "minor",
+      "kind": "fit-risk-not-observed-overflow",
+      "current": "завершается для смены сборки",
+      "proposed": "завершается для смены сборки",
+      "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+    },
+    {
+      "key": "tui.info.status.bound_held",
+      "en": 10,
+      "ru": 20,
+      "delta": 10,
+      "severity": "minor",
+      "kind": "fit-risk-not-observed-overflow",
+      "current": "завис; не остановлен",
+      "proposed": "завис; не остановлен",
+      "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+    },
+    {
+      "key": "tui.info.install.shadow_label_terse",
+      "en": 22,
+      "ru": 27,
+      "delta": 5,
+      "severity": "minor",
+      "kind": "fit-risk-not-observed-overflow",
+      "current": "не из установленного дерева",
+      "proposed": "не из установленного дерева",
+      "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+    },
+    {
+      "key": "tui.info.install.shadow_meta_short",
+      "en": 26,
+      "ru": 31,
+      "delta": 5,
+      "severity": "minor",
+      "kind": "fit-risk-not-observed-overflow",
+      "current": "исполняет код из другого дерева",
+      "proposed": "исполняет код из другого дерева",
+      "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+    },
+    {
+      "key": "tui.info.kind_of_runtime.attached_short",
+      "en": 8,
+      "ru": 20,
+      "delta": 12,
+      "severity": "minor",
+      "kind": "fit-risk-not-observed-overflow",
+      "current": "привязан к терминалу",
+      "proposed": "привязан к терминалу",
+      "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+    },
+    {
+      "key": "tui.info.import_path.editable_short",
+      "en": 17,
+      "ru": 27,
+      "delta": 10,
+      "severity": "minor",
+      "kind": "fit-risk-not-observed-overflow",
+      "current": "редактируемая рабочая копия",
+      "proposed": "редактируемая рабочая копия",
+      "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+    },
+    {
+      "key": "tui.info.import_path.editable_terse",
+      "en": 8,
+      "ru": 13,
+      "delta": 5,
+      "severity": "minor",
+      "kind": "fit-risk-not-observed-overflow",
+      "current": "редактируемая",
+      "proposed": "редактируемая",
+      "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+    },
+    {
+      "key": "tui.info.kind.editable_short",
+      "en": 22,
+      "ru": 35,
+      "delta": 13,
+      "severity": "minor",
+      "kind": "fit-risk-not-observed-overflow",
+      "current": "редактируемая · код действует сразу",
+      "proposed": "редактируемая · код действует сразу",
+      "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+    },
+    {
+      "key": "tui.info.session.failover_short",
+      "en": 8,
+      "ru": 16,
+      "delta": 8,
+      "severity": "minor",
+      "kind": "fit-risk-not-observed-overflow",
+      "current": "резервная модель",
+      "proposed": "резервная модель",
+      "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+    },
+    {
+      "key": "tui.info.approval.ask_short",
+      "en": 9,
+      "ru": 16,
+      "delta": 7,
+      "severity": "minor",
+      "kind": "fit-risk-not-observed-overflow",
+      "current": "с подтверждением",
+      "proposed": "с подтверждением",
+      "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+    },
+    {
+      "key": "tui.info.agents.unreported_terse",
+      "en": 12,
+      "ru": 18,
+      "delta": 6,
+      "severity": "minor",
+      "kind": "fit-risk-not-observed-overflow",
+      "current": "данные не переданы",
+      "proposed": "данные не переданы",
+      "action": "Keep meaning; require real rendered narrow-rung check before deciding whether shortening is necessary."
+    }
+  ],
+  "width_risk_note": "No fit-only shortening. Bound-held and unreported_full need rendered fit verification; inherited risks are flags, not demonstrated overflow. No fit asserted from string length.",
+  "not_run": [
+    "pytest",
+    "App/TUI/native/browser/rendered geometry or screenshots",
+    "build",
+    "whole-catalogue check",
+    "generation",
+    "ledger writes",
+    "CI",
+    "independent native audit",
+    "commit/push/stage/rebase"
+  ],
+  "receipt_path": "i18n/audits/evidence/pr4420-translator-ru-remediation.json"
+}

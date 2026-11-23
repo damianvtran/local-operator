@@ -7,6 +7,7 @@ import asyncio
 import errno
 import json
 import random
+import re
 import ssl
 import time
 from collections.abc import AsyncIterator
@@ -498,6 +499,137 @@ class ScriptedClient:
 
 def _request(provider: str = "openai", model_id: str = "gpt-4o") -> ChatRequest:
     return ChatRequest(model=ModelSpec(provider=provider, model_id=model_id))
+
+
+@pytest.mark.parametrize(
+    ("hint", "pinned", "exhausted", "vertex_attempts", "expected_sleeps"),
+    [
+        pytest.param(None, False, False, 3, None, id="unhinted-recovery"),
+        pytest.param("4s", True, False, 3, [4000, 4000], id="hinted-recovery"),
+        pytest.param("45s", False, False, 1, [], id="above-interactive-cap"),
+        pytest.param("45s", True, False, 2, [45000], id="pinned-probation"),
+        pytest.param("120s", True, False, 1, [], id="above-pinned-cap"),
+        pytest.param("4s", True, True, 3, [4000, 4000], id="all-routes-exhausted"),
+    ],
+)
+async def test_vertex_http_429_waits_or_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+    hint: str | None,
+    pinned: bool,
+    exhausted: bool,
+    vertex_attempts: int,
+    expected_sleeps: list[int] | None,
+) -> None:
+    """Exercise the real Vertex HTTP error parser and streaming retry driver."""
+    from local_operator.providers.clients import client_for_spec
+
+    attempts: list[str] = []
+    sleeps: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append("vertex")
+        if exhausted or len(attempts) <= 2:
+            error: dict[str, Any] = {
+                "message": "Resource exhausted, please try again later.",
+                "status": "RESOURCE_EXHAUSTED",
+            }
+            if hint is not None:
+                error["details"] = [
+                    {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": hint}
+                ]
+            return httpx.Response(429, json={"error": error})
+        return httpx.Response(
+            200,
+            text='data: {"candidates":[{"content":{"parts":[{"text":"ok"}]},'
+            '"finishReason":"STOP"}]}\n\n',
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async def record_sleep(delay_ms: int, signal: Any) -> None:
+        sleeps.append(delay_ms)
+
+    async def fallback(
+        request: ChatRequest, api_key: str | None, oauth_access: Any
+    ) -> AsyncIterator[Any]:
+        attempts.append("fallback")
+        if exhausted:
+            raise ProviderError(401, "fallback credential rejected")
+        yield StreamTextDelta(delta="fallback result")
+        async for event in _clean_stream():
+            yield event
+
+    monkeypatch.setattr(failover_module, "_abortable_sleep", record_sleep)
+    request = _request("google-vertex", "gemini-3.8-flash")
+    state = FailoverRouteState()
+    if pinned:
+        state.launch_pin = "google-vertex/gemini-3.8-flash"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+
+        async def client_for(spec: ModelSpec) -> Any:
+            if spec.provider == "google-vertex":
+                return client_for_spec(spec, http_client=http)
+            return _FnClient(fallback)
+
+        events = stream_with_failover(
+            request,
+            FakeAuth({"google-vertex": ["vertex-key"], "openai": ["fallback-key"]}),
+            {"retry": {"fallbackChains": {"default": ["openai/gpt-5.4"]}}},
+            client_for,
+            route_state=state,
+        )
+        if exhausted:
+            with pytest.raises(ProviderError):
+                await _collect(events)
+        else:
+            result = await _collect(events)
+            assert [e.delta for e in result if isinstance(e, StreamTextDelta)] == [
+                "ok" if vertex_attempts == 3 else "fallback result"
+            ]
+
+    assert attempts == ["vertex"] * vertex_attempts + (
+        ["fallback"] if exhausted or vertex_attempts < 3 else []
+    )
+    if expected_sleeps is None:
+        assert len(sleeps) == 2
+        assert 750 <= sleeps[0] <= 1000
+        assert 1500 <= sleeps[1] <= 2000
+    else:
+        assert sleeps == expected_sleeps
+
+
+async def test_vertex_429_after_visible_output_never_replays(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def late_throttle(
+        request: ChatRequest, api_key: str | None, oauth_access: Any
+    ) -> AsyncIterator[Any]:
+        yield StreamTextDelta(delta="partial")
+        raise ProviderError(429, "late throttle", retry_after_ms=4000)
+
+    async def unexpected_sleep(delay_ms: int, signal: Any) -> None:
+        pytest.fail(f"replay after visible output: attempted sleep of {delay_ms} ms")
+
+    async def client_for(spec: ModelSpec) -> Any:
+        requested.append(spec.provider)
+        return _FnClient(late_throttle)
+
+    monkeypatch.setattr(failover_module, "_abortable_sleep", unexpected_sleep)
+    auth = FakeAuth({"google-vertex": ["vertex-key", "sibling"], "openai": ["fallback-key"]})
+    requested: list[str] = []
+    forwarded: list[str] = []
+    with pytest.raises(ProviderError) as error:
+        async for event in stream_with_failover(
+            _request("google-vertex", "gemini-3.8-flash"),
+            auth,
+            {"retry": {"fallbackChains": {"default": ["openai/gpt-5.4"]}}},
+            client_for,
+        ):
+            if isinstance(event, StreamTextDelta):
+                forwarded.append(event.delta)
+    assert error.value.status == 429
+    assert forwarded == ["partial"]
+    assert requested == ["google-vertex"]
+    assert auth.rotations == []
 
 
 async def test_local_output_envelope_never_retries_rotates_or_hops() -> None:
@@ -4280,12 +4412,16 @@ class TestCredentialErrorSaysWhichProblemItIs:
         message = str(excinfo.value)
         assert "No API key configured" not in message, message
         assert "not usable right now" in message
-        # The three causes a present-but-unresolvable row can have. A message
-        # naming only the first two told an R21 user to wait for a limit that
-        # was never the problem.
-        assert "rate limited" in message
+        # A LIVE BLOCK is proven (the selector dropped the row on it), so the
+        # message names a temporary block with its remaining time instead of the
+        # three-way hedge: an unreadable row (R21) has no block to show, and that
+        # hedge stays covered by the stale/unreadable cases of
+        # ``TestEmptyPickNamesThePoolCauseTheSelectorProves``. The block's origin
+        # (a rate limit or a failed refresh) is not recorded, so both are named.
+        assert "temporarily blocked" in message
+        assert "rate limit" in message
         assert "token refresh" in message
-        assert "could not be read" in message
+        assert "retry in ~9 min" in message or "retry in ~10 min" in message
         assert "OAuth sign-in" in message
 
     async def test_a_provider_with_no_credential_still_says_so(self, tmp_path: Any) -> None:
@@ -4309,6 +4445,340 @@ class TestCredentialErrorSaysWhichProblemItIs:
                 pass
 
         assert "No API key configured for provider 'openai'" in str(excinfo.value)
+
+
+class TestEmptyPickNamesThePoolCauseTheSelectorProves:
+    """The empty-selection sentence says WHY, from the selector's own verdicts.
+
+    2026-11-23: all six Anthropic accounts had spent their weekly quota and the
+    error still read "rate limited, a token refresh failed, or the stored
+    credential could not be read", which sent the diagnosis toward a routing
+    defect. ``AuthStore.quota_eligibility`` is built from the same gates the
+    pick applies, so the message may only claim what it proves: exhaustion when
+    EVERY row is out on quota (and then a reopening only when proven), a plain
+    temporary block when none is spent, and an honest hedge when any row's
+    evidence is missing or stale. These tests drive a REAL ``AuthStore`` over a
+    temp auth DB and a temp usage cache, never a stub of the verdicts.
+    """
+
+    PROVIDER = "anthropic"
+    MODEL = "claude-opus-5"
+
+    def _pool(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch, emails: list[str]
+    ) -> tuple[AuthStore, list[Any], Any]:
+        """A store with one OAuth row per email, reading a temp usage cache."""
+        from local_operator.providers.usage_cache import UsageCacheStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        cache_path = tmp_path / "usage.db"
+        monkeypatch.setattr(store, "_usage_cache_store", lambda: UsageCacheStore(cache_path))
+        rows = [
+            store.upsert_credential(
+                self.PROVIDER,
+                {
+                    "type": "oauth",
+                    "access": f"synthetic-access-{i}",
+                    "refresh": f"synthetic-refresh-{i}",
+                    "expires": None,
+                    "email": email,
+                },
+            )
+            for i, email in enumerate(emails)
+        ]
+        return store, rows, cache_path
+
+    def _report(
+        self,
+        store: AuthStore,
+        cache_path: Any,
+        row: Any,
+        *,
+        used: float,
+        resets_in_ms: int | None,
+        age_ms: int = 1_000,
+    ) -> None:
+        """Seed one row's usage the way the message-boundary preflight does."""
+        from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+        from local_operator.providers.usage_cache import (
+            UsageCacheStore,
+            account_preflight_key,
+        )
+
+        now = store._now_ms()
+        report = UsageReport(
+            provider=self.PROVIDER,
+            fetched_at=now - age_ms,
+            identity=row.data["email"],
+            limits=[
+                UsageLimit(
+                    id="synthetic:weekly",
+                    label="Weekly",
+                    window="7 day",
+                    shared=True,
+                    amount=UsageAmount(used_fraction=used),
+                    resets_at_ms=None if resets_in_ms is None else now + resets_in_ms,
+                )
+            ],
+        )
+        cache = UsageCacheStore(cache_path)
+        try:
+            cache.set(
+                account_preflight_key(store._storage_id(self.PROVIDER), row.data["email"]),
+                self.PROVIDER,
+                [report],
+                expires_at_ms=now + 60_000,
+            )
+        finally:
+            cache.close()
+
+    def _message(self, store: Any, *, model_id: str | None = MODEL) -> tuple[ProviderError, str]:
+        error = failover_module._no_credential_error(store, self.PROVIDER, model_id=model_id)
+        return error, str(error)
+
+    def _assert_unchanged_contract(self, error: ProviderError) -> None:
+        """Message text only: the error's behaviour is the same in every shape."""
+        assert error.kind == "quota"
+        assert error.retryable is True
+        assert error.request_sent is False
+        assert error.retry_after_ms is None  # reset timing is prose, never a backoff
+        assert getattr(error, failover_module.PREWIRE_REFUSAL_ATTR, False) is True
+
+    def _assert_no_identity(self, message: str, rows: list[Any]) -> None:
+        for row in rows:
+            assert row.data["email"] not in message
+            assert row.data["access"] not in message
+            assert row.data["refresh"] not in message
+        assert "@" not in message
+
+    async def test_mixed_states_name_the_counts_and_the_soonest_proven_reopening(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """2 depleted + 1 blocked + 0 unknown: quota is spent on two, one is blocked."""
+        store, rows, cache_path = self._pool(
+            tmp_path,
+            monkeypatch,
+            ["a@example.test", "b@example.test", "c@example.test"],
+        )
+        self._report(store, cache_path, rows[0], used=1.0, resets_in_ms=48 * 60_000)
+        self._report(store, cache_path, rows[1], used=1.0, resets_in_ms=3 * 3_600_000)
+        store.block_credential(rows[2].id, self.PROVIDER, block_ms=30 * 60_000)
+
+        error, message = self._message(store)
+
+        assert "All 3 OAuth sign-in credentials" in message, message
+        assert "usage quota is exhausted on 2 of 3" in message, message
+        assert "the other 1 are temporarily blocked" in message, message
+        # The soonest of the three proven reopenings (the 30 minute block).
+        assert re.search(r"earliest reopening in ~(29|30) min\.", message), message
+        # Not the hedge: nothing here is uncertain.
+        assert "token refresh failed" not in message
+        assert "could not be read" not in message
+        self._assert_unchanged_contract(error)
+        self._assert_no_identity(message, rows)
+
+    async def test_an_unproven_reopening_is_not_given_a_time(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Spent usage with no stated reset: exhaustion is proven, a timestamp is not."""
+        store, rows, cache_path = self._pool(
+            tmp_path, monkeypatch, ["a@example.test", "b@example.test", "c@example.test"]
+        )
+        self._report(store, cache_path, rows[0], used=1.0, resets_in_ms=None)
+        self._report(store, cache_path, rows[1], used=1.0, resets_in_ms=None)
+        store.block_credential(rows[2].id, self.PROVIDER, block_ms=30 * 60_000)
+
+        error, message = self._message(store)
+
+        assert "usage quota is exhausted on 2 of 3" in message, message
+        assert "when the quota reopens is not known" in message, message
+        assert "earliest reopening" not in message
+        assert not re.search(r"~\d+ min|\d+h", message), message
+        self._assert_unchanged_contract(error)
+
+    async def test_an_all_depleted_pool_says_the_pool_is_exhausted(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store, rows, cache_path = self._pool(
+            tmp_path, monkeypatch, ["a@example.test", "b@example.test"]
+        )
+        for row in rows:
+            self._report(store, cache_path, row, used=1.0, resets_in_ms=48 * 60_000)
+
+        error, message = self._message(store)
+
+        assert "All 2 OAuth sign-in credentials" in message
+        assert "their usage quota is exhausted" in message, message
+        assert re.search(r"earliest reopening in ~(47|48) min\.", message), message
+        self._assert_unchanged_contract(error)
+        self._assert_no_identity(message, rows)
+
+    async def test_a_pool_blocked_without_spent_usage_is_not_called_exhausted(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A live block alone (a rate limit OR a failed refresh) makes no quota claim."""
+        store, rows, _cache = self._pool(
+            tmp_path, monkeypatch, ["a@example.test", "b@example.test"]
+        )
+        for row in rows:
+            store.block_credential(row.id, self.PROVIDER, block_ms=3_600_000)
+
+        error, message = self._message(store)
+
+        assert "temporarily blocked after a rate limit or a failed token refresh" in message
+        assert re.search(r"retry in ~(59|60) min\)", message), message
+        assert "exhaust" not in message
+        self._assert_unchanged_contract(error)
+
+    @pytest.mark.parametrize(
+        "age_ms, resets_in_ms",
+        [
+            # Stale: older than the pick's freshness bound and with no stated reset,
+            # which the selector reads as UNKNOWN, never as a limit.
+            (45 * 60_000, None),
+            # No report at all for this row.
+            (None, None),
+        ],
+    )
+    async def test_stale_or_missing_usage_data_is_never_called_exhaustion(
+        self,
+        tmp_path: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        age_ms: int | None,
+        resets_in_ms: int | None,
+    ) -> None:
+        """One spent row plus one whose evidence is unusable: the pick's empty
+        answer may be a failed refresh, so the message hedges and counts."""
+        store, rows, cache_path = self._pool(
+            tmp_path, monkeypatch, ["a@example.test", "b@example.test"]
+        )
+        self._report(store, cache_path, rows[0], used=1.0, resets_in_ms=48 * 60_000)
+        if age_ms is not None:
+            self._report(
+                store, cache_path, rows[1], used=1.0, resets_in_ms=resets_in_ms, age_ms=age_ms
+            )
+        assert store.quota_eligibility(self.PROVIDER, self.MODEL).all_quota_limited is False
+
+        error, message = self._message(store)
+
+        # The original hedge survives verbatim, and says it cannot name a cause.
+        assert "not usable right now (rate limited, a token refresh failed" in message
+        assert "could not be read" in message
+        assert "Spent quota is not established" in message, message
+        assert "1 of 2 are out of quota or temporarily blocked" in message, message
+        assert "exhausted" not in message
+        assert "earliest reopening" not in message
+        self._assert_unchanged_contract(error)
+        self._assert_no_identity(message, rows)
+
+    async def test_a_store_that_cannot_answer_keeps_the_original_hedge(self, tmp_path: Any) -> None:
+        """No ``quota_eligibility``, a raising one, or one answering with anything
+        at all: no cause is claimed and the sentence is the pre-existing one."""
+        real = AuthStore(db_path=tmp_path / "auth.db")
+        row = real.upsert_credential(
+            self.PROVIDER, {"type": "oauth", "access": "t", "refresh": "r", "expires": None}
+        )
+
+        class _Lister:
+            def list_credentials(self, provider: str) -> list[Any]:
+                return [row]
+
+        class _Raises(_Lister):
+            def quota_eligibility(self, *args: Any, **kwargs: Any) -> Any:
+                raise RuntimeError("cache unreadable")
+
+        class _AnswersAnything(_Lister):
+            def quota_eligibility(self, *args: Any, **kwargs: Any) -> Any:
+                return SimpleNamespace(all_quota_limited=True, rows=[], retry_after_ms=60_000)
+
+        for store in (_Lister(), _Raises(), _AnswersAnything()):
+            error, message = self._message(store)
+            assert message.endswith("sign in again to replace them."), message
+            assert "exhaust" not in message
+            self._assert_unchanged_contract(error)
+
+        # No model named (an older caller): the eligibility read is skipped.
+        error, message = self._message(real, model_id=None)
+        assert message.endswith("sign in again to replace them."), message
+
+    async def test_recovery_returns_the_pick_and_the_message_to_the_ordinary_path(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every row spent with a reopening seconds away, then the verdict clears."""
+        store, rows, cache_path = self._pool(
+            tmp_path, monkeypatch, ["a@example.test", "b@example.test"]
+        )
+        for row in rows:
+            self._report(store, cache_path, row, used=1.0, resets_in_ms=30_000)
+
+        assert await store.get_oauth_access(self.PROVIDER, "s0", model_id=self.MODEL) is None
+        error, message = self._message(store)
+        assert "their usage quota is exhausted" in message, message
+        assert "earliest reopening in under a minute" in message, message
+        self._assert_unchanged_contract(error)
+
+        # The window rolls over: fresh evidence says there is room again.
+        for row in rows:
+            self._report(store, cache_path, row, used=0.1, resets_in_ms=7 * 24 * 3_600_000)
+
+        assert store.quota_eligibility(self.PROVIDER, self.MODEL).all_quota_limited is False
+        recovered = await store.get_oauth_access(self.PROVIDER, "s0", model_id=self.MODEL)
+        assert recovered is not None, "the pick must serve again once the verdict clears"
+        # And the exhaustion sentence is no longer reachable from this state.
+        _, after = self._message(store)
+        assert "exhausted" not in after, after
+
+    async def test_the_real_request_path_names_spent_quota(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Through ``stream_with_failover``: the raised error carries the cause."""
+        store, rows, cache_path = self._pool(
+            tmp_path, monkeypatch, ["a@example.test", "b@example.test"]
+        )
+        for row in rows:
+            self._report(store, cache_path, row, used=1.0, resets_in_ms=48 * 60_000)
+
+        def never_reached(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            raise AssertionError("no bearer should resolve for a spent pool")
+
+        async def no_sleep(delay_ms: int, signal: Any) -> None:
+            return None
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(never_reached)
+
+        monkeypatch.setattr(failover_module, "_abortable_sleep", no_sleep)
+        with pytest.raises(ProviderError) as excinfo:
+            async for _ in stream_with_failover(
+                _request(self.PROVIDER, self.MODEL),
+                store,
+                {"retry": {"enabled": True, "baseDelayMs": 1}},
+                client_for,
+                session_id="s0",
+            ):
+                pass
+
+        error = excinfo.value
+        message = error.message
+        assert "their usage quota is exhausted" in message, message
+        assert re.search(r"earliest reopening in ~(47|48) min\.", message), message
+        assert error.kind == "quota"
+        assert error.retryable is True
+        assert error.request_sent is False
+        self._assert_no_identity(message, rows)
+        self._assert_no_identity(str(error), rows)
+
+    async def test_no_credential_at_all_is_still_not_configured(self, tmp_path: Any) -> None:
+        """The eligibility read is never consulted for a provider with no rows."""
+        store = AuthStore(db_path=tmp_path / "auth.db")
+
+        error, message = self._message(store)
+
+        assert message == f"No API key configured for provider '{self.PROVIDER}'"
+        assert error.retryable is False
+        assert "exhaust" not in message
 
 
 async def _clean_stream() -> AsyncIterator[Any]:

@@ -168,6 +168,11 @@ DEFERRED_NAMESPACES: dict[str, str] = {
     "wire.settings.keymap": (
         "hotkey row labels/help rendered by settings_io._t as plain label/help strings"
     ),
+    "wire.settings.transcript_display": (
+        "transcript layout row label/help and its two choice labels/descriptions "
+        "rendered by settings_io._t as plain strings; the slash command reuses the "
+        "rendered label as a receipt, never a code"
+    ),
     "wire.language_receipts": (
         "the /language receipts printed by tui/app.py and returned as finished "
         "text by session/runtime/serving.py; no envelope identity is sent"
@@ -274,6 +279,19 @@ DEFERRED_NAMESPACES: dict[str, str] = {
         "sdk.py through spec_refusal_text (active locale) and raised as a "
         "one-string SessionSpecError; the exception carries finished text, never "
         "a catalogue key"
+    ),
+    # Deferred rather than raising the eager total ceiling (PR #4297, merge gate
+    # run 44928980132): this namespace's 22 keys took hi's eager total to
+    # 78,277 B against EAGER_TOTAL_MAX_BYTES (77,824 B); it is 3,805 B in hi.
+    # No client resolves one of its keys: ``ask_question`` renders the consent
+    # card in-process and the integrations tool files the finished question,
+    # option labels and descriptions as plain strings (the affirm/decline labels
+    # are then matched as text), so no startup surface needs this copy.
+    "wire.team_integrations": (
+        "Team Integrations consent-card copy rendered in-process by "
+        "team_bridge/integrations.py::ask_question; the integrations tool files "
+        "the finished question and option labels as plain strings, never a "
+        "catalogue key"
     ),
 }
 

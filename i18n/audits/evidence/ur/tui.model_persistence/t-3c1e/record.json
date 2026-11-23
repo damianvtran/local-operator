@@ -1,0 +1,85 @@
+{
+  "locale": "ur",
+  "namespace": "tui.model_persistence",
+  "audit_date": "2026-11-22",
+  "key_count": 4,
+  "status": "translated",
+  "record_kind": "translation_author_receipt_not_independent_audit",
+  "source_revision": "87d87ec8b02ef3c279fda673302ce775f4a0329e",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "3c1e111e2598",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Explicit host model-switch notice: provider quota failure",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "method": "Direct LLM reasoning; no translation service"
+  },
+  "auditor": null,
+  "independent_audit_performed": false,
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.json",
+      "sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.context.json",
+      "sha256": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc"
+    },
+    "ur": {
+      "path": "local_operator/i18n/catalogues/ur/tui.model_persistence.json",
+      "sha256": "0e00e1ee1715d3ec8ad8d07440984da33fcb05336a35ceefbd32a87180a3e5f9"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ur/tui.model_persistence/t-3c1e/notes.md",
+      "sha256": "5c6ad2fc497965330119974312e2844f663725ad7d0a91d05ce9eb005521bef8"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.model_persistence/t-3c1e/validator.py.txt",
+      "sha256": "09414b9a6cd89cf528a157e9b34315665ab76e2e1bff0e100037676afc1d97c3"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.model_persistence/t-3c1e/audit.log",
+      "sha256": "7d5bb70bb2f59f938c11a33c686d7449bbb51fd49b7debfae1548f3b7c4b5976"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "translated",
+    "unresolved_blocker_major_count": null,
+    "finding_ids": [],
+    "note": "Author-only; no independent linguistic verdict or eligibility claim"
+  },
+  "validation": {
+    "exit_code": 0,
+    "scope": "Only four keys in tui.model_persistence; official catalogue/context/ICU and scoped checker argument APIs",
+    "python": "/Users/damian/local-operator/.venv/bin/python",
+    "PYTHONPATH": "/Users/damian/local-operator/.worktrees/i18n-model-persist-notice",
+    "isolated_home_config": true,
+    "inherited_cmux_stripped": true,
+    "english_context_unchanged": true,
+    "native_rtl_font_proof": false,
+    "global_check_run": false,
+    "execution_log": "audit.log",
+    "reproduction": "validator.py.txt"
+  },
+  "notes_kind": "audit_notes_not_execution_log",
+  "glossary_proposals": [
+    {
+      "term": "boot default",
+      "ur": "نئے سیشن کا ابتدائی ماڈل",
+      "context": "new-session starting model"
+    },
+    {
+      "term": "saved boot default",
+      "ur": "محفوظ ابتدائی ماڈل",
+      "context": "return to saved starting model in this session"
+    }
+  ],
+  "next_gate": "Manager private root commit, then independent approved-reader A/B audits and styled/native integration gates"
+}

@@ -1,0 +1,107 @@
+{
+  "schema": 1,
+  "kind": "private-source-binding-not-audit",
+  "source_head": "1ad0b8c8547243f8257ee8838fbb35ed795b13f3",
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer",
+  "origin": "ssh://git@github.com/damianvtran/local-operator.git",
+  "source_title": "Private source handoff: read-only composer footer",
+  "source_document": "docs/i18n-readonly-footer-source.md",
+  "source_document_sha256": "f4fe2d80baf4de7e8951a77efb4965f0f529ad93eb2e1a245dd6969930a432f4",
+  "source_inputs_sha256": {
+    "local_operator/i18n/catalogues/en/tui.editor_readonly.json": "a2a8bfb8a250b38e3a950bb2b02d885ec76cc726d77521086801099b6e99b5f2",
+    "local_operator/i18n/catalogues/en/tui.editor_readonly.context.json": "46c48a659223ad5e4861a1407c2c7a685183b9c7caecf6e19f53adb8131389ee"
+  },
+  "author_receipt": "docs/pr-evidence/readonly-footer/readonly-footer-author.json",
+  "author_receipt_sha256": "61604b5a8ae9f29f96cfc114e47eb5cd64bf2d6e2a8b2ae46f4546b1909a7313",
+  "targets": [
+    {
+      "locale": "fr",
+      "path": "local_operator/i18n/catalogues/fr/tui.editor_readonly.json",
+      "raw_sha256": "98e716bcdc26c724f9e556e3ed366349cf0a596a8dc81bb350fc95a9f39d0ad5",
+      "canonical_map_sha256": "26fb16974301080b3da6088beb7fac1b51fe7e9582e1009bb97d8e9e51ab908e",
+      "key_count": 1,
+      "arguments": [
+        "key"
+      ],
+      "author_session": "9309411c87eb"
+    },
+    {
+      "locale": "zh-CN",
+      "path": "local_operator/i18n/catalogues/zh-CN/tui.editor_readonly.json",
+      "raw_sha256": "de698b3c4f9a184351bd627147bfe086da057890e287e01a78d87539471fa65f",
+      "canonical_map_sha256": "48f44363629d04eb0577268730ae02937ae6f93a9a42b939e7832a5136542d56",
+      "key_count": 1,
+      "arguments": [
+        "key"
+      ],
+      "author_session": "9309411c87eb"
+    },
+    {
+      "locale": "es",
+      "path": "local_operator/i18n/catalogues/es/tui.editor_readonly.json",
+      "raw_sha256": "d92fbdd397bbf7dd424c51c79b302c3b1b35b155a97a30cd5fd0973dbe1d950b",
+      "canonical_map_sha256": "54ea7faed1b2f54979550e21751d26fe2304090bac4f9b329b2c7e726b034e4c",
+      "key_count": 1,
+      "arguments": [
+        "key"
+      ],
+      "author_session": "9309411c87eb"
+    },
+    {
+      "locale": "ru",
+      "path": "local_operator/i18n/catalogues/ru/tui.editor_readonly.json",
+      "raw_sha256": "07740014857374da1b9bec31999f65955e6a6069faf97fa753e109e28f88d1e0",
+      "canonical_map_sha256": "e60f924b70dcdd7219a7f8f916422b82b3c825126b5b6da4d9976c640de38f30",
+      "key_count": 1,
+      "arguments": [
+        "key"
+      ],
+      "author_session": "9309411c87eb"
+    },
+    {
+      "locale": "vi",
+      "path": "local_operator/i18n/catalogues/vi/tui.editor_readonly.json",
+      "raw_sha256": "86c9aa76cd934591e291b4140ef3cc1b391662fe8f94d8db6646b7bc89366198",
+      "canonical_map_sha256": "917051d8def3d93700c0844f056743b554f41d0a12836cb1640d9d5930561d71",
+      "key_count": 1,
+      "arguments": [
+        "key"
+      ],
+      "author_session": "9309411c87eb"
+    },
+    {
+      "locale": "hi",
+      "path": "local_operator/i18n/catalogues/hi/tui.editor_readonly.json",
+      "raw_sha256": "6a682bddc90feaa5627dd033b11a30c6fa4e6bb53c623e0c09fa500d30bbae7f",
+      "canonical_map_sha256": "13b669eb0d421ca462f1e2d000d16be7a8b32d56f35e44d6146235a596d34b23",
+      "key_count": 1,
+      "arguments": [
+        "key"
+      ],
+      "author_session": "9309411c87eb"
+    },
+    {
+      "locale": "ur",
+      "path": "local_operator/i18n/catalogues/ur/tui.editor_readonly.json",
+      "raw_sha256": "c423782b7450e73a070fa4f774a8c2324f89629909698d2a27175ced2e717817",
+      "canonical_map_sha256": "8f6223efb6683b12ae2ef98cfefcef6462dd5a7df47c313d873e99857ae71543",
+      "key_count": 1,
+      "arguments": [
+        "key"
+      ],
+      "author_session": "9309411c87eb"
+    }
+  ],
+  "integrator": {
+    "session": "61203766acfe",
+    "model": "openai/gpt-6.1-sol",
+    "provenance": "Host fallback notice; no independent provider telemetry"
+  },
+  "status": "private candidate; no audit or eligibility approval",
+  "excluded_auditors": [
+    "9309411c87eb (all seven target author)",
+    "61203766acfe (integrator; no self-audit)",
+    "English/code implementer and Root source author (manager to resolve exact IDs)"
+  ],
+  "validation": "Seven one-key maps; one key argument; NFC; no Unicode format controls; target raw hashes match author; English/context unchanged. No rendering or language audit."
+}

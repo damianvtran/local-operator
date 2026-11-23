@@ -8,10 +8,13 @@ WHAT THE COS MAY DO with a delivered bridge message, per contract:
   proves the fetched message IS the screened one. A mismatch is a typed HOLD:
   nothing is acked, nothing is handed to the model.
 - **ack** — ``working`` claims the message for THIS session (the §13.6 local
-  claim/lease, so a second session cannot also wake it); ``done`` releases
-  that claim (a claim releases on ack done, §13.6/N2). Claim tokens are held
-  by the runtime for the session's lifetime; a lost token refuses rather than
-  stealing a successor's claim.
+  claim/lease, so a second session cannot also wake it) and then posts
+  ``working`` to the hub; ``done`` posts ``done`` and then releases that claim
+  (a claim releases on ack done, §13.6/N2). Both posts are write-intent-first
+  with a stored ``client_ref`` (``_post_progress_ack``), so the hub's delivery
+  audit reads read → working → done. Claim tokens are held by the runtime for
+  the session's lifetime; a lost token refuses rather than stealing a
+  successor's claim. ``bcmsg_`` ids are refused (conversation lane).
 - **send / reply** — outbound notes/questions/requests through the durable
   outbox (write-intent-first, §6.2). ``reply`` is the §13.5 pairing: thread_id
   AND to always together. ``state=sent`` means server acceptance into the
@@ -169,10 +172,10 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.json_schema import SkipJsonSchema
@@ -197,7 +200,7 @@ from local_operator.harness.types import (
 )
 
 from . import agent_attachments, agent_files, reply_guard, secret_guard
-from .client import ATTACHMENT_MAX_COUNT, TeamBridgeClient
+from .client import ATTACHMENT_MAX_COUNT, BridgeRefusal, TeamBridgeClient
 from .emoji_names import ACCEPTED_FORMS_HINT, normalize_reaction_emoji
 from .inline_data import bound_inline_data_payload, bound_inline_data_uris
 from .outbox import Outbox, send_from_outbox
@@ -439,6 +442,8 @@ class BridgeRuntime:
     #: session-scoped, so a context that ever shares a runtime still gets the
     #: note once itself. Process-lifetime: a restart shows it once more.
     advised_guidance: dict[str, str] = field(default_factory=dict)
+    # Host-resolved birth snapshot, never a model argument or endpoint identity.
+    session_agent_display: str | None = None
 
     def note_presented(self, ref: Any) -> None:
         """Remember where a presented message lives, for default thread placement."""
@@ -1596,8 +1601,98 @@ def _refuses_human_dm_member(failure: BaseException) -> bool:
     )
 
 
+async def _session_display_send_kwargs(
+    runtime: BridgeRuntime,
+    display: str | None,
+    pre_http_guard: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    """Freeze optional display once per logical send, never per file replay.
+
+    Status/POST are not atomic: a mixed pre-parser fleet can refuse the POST.
+    Such a 400 remains visible; never strip the object and silently resend.
+    """
+    # "Each NEW logical send" means one that may attach this optional object.
+    # A send with no captured display cannot attach it: keep legacy omission
+    # free of a new status-call failure/latency path. Named sends probe anew; no
+    # capability (positive or negative) is latched between logical sends.
+    if not isinstance(display, str) or not display.strip():
+        return {}
+    from .host import _admission_from_payload, outbound_tool_fence
+
+    client = runtime.client
+    base = client.base_url
+    owner = agent_files._owner(runtime)
+    source = client._auth_store()
+    credential = getattr(client, "_pinned_credential_id", None)
+    access = await client.current_access()
+
+    def guard() -> None:
+        row = client._pinned_row()
+        if (
+            row is None
+            or row.id != access.credential_id
+            or not isinstance(row.data, Mapping)
+            or row.data.get("account_id") != access.account_id
+            or outbound_tool_fence(runtime) is not None
+            or runtime.client is not client
+            or client.base_url != base
+            or base != runtime.owner.canonical_base_url
+            or agent_files._owner(runtime) != owner
+            or client._auth_store() is not source
+            or getattr(client, "_pinned_credential_id", None) != credential
+            or access.account_id != runtime.owner.account_id
+            or access.credential_id != runtime.owner.credential_id
+        ):
+            raise BridgeRefusal("owner_changed", "send authority changed", http_status=409)
+        if pre_http_guard is not None:
+            pre_http_guard()
+
+    guard()
+    try:
+        payload = await client.status(
+            access=access, expected_account_id=runtime.owner.account_id, pre_http_guard=guard
+        )
+    except BridgeRefusal as failure:
+        # Optional-support uncertainty degrades; authority/destination refusals
+        # must not grant permission to send under the legacy envelope.
+        if (
+            failure.http_status not in (408, 429)
+            and not (failure.http_status is not None and failure.http_status >= 500)
+            and failure.code != "bridge_unreachable"
+        ):
+            raise
+        payload = None
+    except (TimeoutError, OSError):
+        payload = None
+    guard()
+    if isinstance(payload, Mapping):
+        if payload.get("available") is False:
+            raise BridgeRefusal("bridge_disabled", "bridge is unavailable", http_status=403)
+        if isinstance(payload.get("tenants"), list):
+            state, note = _admission_from_payload(payload, runtime.owner)
+            if state != "admitted":
+                raise BridgeRefusal(
+                    note or "bridge_disabled", "bridge send is not admitted", http_status=403
+                )
+    kwargs: dict[str, Any] = {
+        "access": access,
+        "expected_account_id": runtime.owner.account_id,
+        "pre_http_guard": guard,
+    }
+    features = payload.get("features") if isinstance(payload, dict) else None
+    value = (
+        features.get("team_bridge_agent_session_display") if isinstance(features, dict) else None
+    )
+    if type(value) is int and value == 1:
+        kwargs["agent_session"] = {"display_label": display}
+    return kwargs
+
+
 async def _direct_message(
-    runtime: "BridgeRuntime", params: "BridgeToolParams", endpoint_id: str
+    runtime: "BridgeRuntime",
+    params: "BridgeToolParams",
+    endpoint_id: str,
+    session_agent_display: str | None = None,
 ) -> dict[str, Any]:
     if params.thread_id or params.channel_id or params.members:
         return _error(
@@ -1787,6 +1882,7 @@ async def _direct_message(
             in_reply_to=params.in_reply_to_message_id,
         )
         try:
+            display_kwargs = await _session_display_send_kwargs(runtime, session_agent_display)
             sender = file_batch.send if file_batch else runtime.client.conversation_send
             result = await sender(
                 conversation_id,
@@ -1796,7 +1892,7 @@ async def _direct_message(
                 actor_endpoint_id=endpoint_id,
                 origin_session_id=runtime.session_id,
                 thread_root_id=thread_root_id or None,
-                expected_account_id=runtime.owner.account_id,
+                **({"expected_account_id": runtime.owner.account_id} | display_kwargs),
                 **agent_attachments.send_kwargs(staged_images),
             )
         except Exception as failure:
@@ -2784,7 +2880,59 @@ def _name_taken(failure: BaseException) -> tuple[str, str] | None:
     return conversation_id, stored if isinstance(stored, str) else ""
 
 
-async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[str, Any]:
+async def _post_progress_ack(
+    runtime: BridgeRuntime, message_id: str, target: Literal["working", "done"]
+) -> dict[str, Any]:
+    """Post the agent's own ``working``/``done`` to the hub, write-intent-first.
+
+    WHY: the tool's ack used to be a local SQLite claim only, so the hub row
+    stayed at ``read`` and its append-only ``state_events`` audit never showed
+    the request being worked or finished (Team Bridge requirements #2/#4).
+    Same discipline as the connector's read ack (``pull.ack``): the
+    write-once intent and its ``client_ref`` are durable BEFORE the POST, the
+    stored ref is reused on every replay (a crash between intent and POST
+    re-sends the identical request, never a fresh identity), and the outcome
+    mapping is ``pull.ack``'s. No screening rides the request:
+    the hub gates ``working`` on the allow verdict it stored at ``read``.
+
+    Returns ``hub_ack`` = ``confirmed`` | ``pending`` (ambiguous, replayable)
+    | ``conflict`` (a known 409, terminal) | ``refused`` (a local guard), with
+    ``code`` naming the reason; no message text ever appears in it.
+    """
+
+    from . import pull as _pull
+    from .store import ACK_CONFIRMED, ACK_CONFLICT, StoreRefused
+
+    try:
+        # Resolve ONCE and pass the pin through pull's exact-owner guard and
+        # the POST. A sign-in switch must never attribute another account's
+        # acknowledgement to this session's enrolled owner.
+        access = await runtime.client.current_access()
+        outcome = await _pull.ack(
+            runtime.owner,
+            message_id,
+            target,
+            None,
+            config_dir=Path(runtime.config_dir),
+            access=access,
+            # Same adapter as pull._client_for: the SDK has narrower
+            # keyword-only signatures than the injectable wire protocol.
+            client=cast(_pull.WireClient, runtime.client),
+        )
+    except (_pull.PullRefused, StoreRefused) as failure:
+        return {"hub_ack": "refused", "code": failure.code}
+    except Exception as failure:
+        return {"hub_ack": "refused", "code": getattr(failure, "code", "ack_failed")}
+    if outcome.state == ACK_CONFIRMED:
+        return {"hub_ack": "confirmed", "code": None}
+    if outcome.state == ACK_CONFLICT:
+        return {"hub_ack": "conflict", "code": outcome.error_code or "conflict"}
+    return {"hub_ack": "pending", "code": outcome.error_code}
+
+
+async def execute_bridge(
+    runtime: BridgeRuntime, args: dict[str, Any], *, session_agent_display: str | None = None
+) -> dict[str, Any]:
     """Run one tool op. Returns a JSON-ish dict; the AgentTool wrapper turns it
     into a ``ToolResult`` (and the honest error shape into ``is_error``)."""
 
@@ -3000,31 +3148,78 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     if params.op == "ack":
         if not params.message_id or params.state is None:
             return _error("ack needs message_id and state (working|done)")
+        if is_conversation_message_id(params.message_id):
+            # Same refusal as take_up: a ``bcmsg_`` id has no pair-lane
+            # delivery row, so the hub would answer "no such message" and the
+            # local claim would guard nothing. Refused before any claim or
+            # POST so a conversation message never leaves a stray intent.
+            return _error(
+                "conversation messages (bcmsg_ ids) carry no working/done state here: "
+                "answer them in the conversation with channel_post or dm",
+                code="conversation_message",
+            )
         import time as _time
 
         from .store import Store, StoreRefused
 
         store = Store(Path(runtime.config_dir))
         if params.state == "working":
-            token = str(uuid.uuid4())
-            try:
-                store.claim(
-                    runtime.owner,
-                    params.message_id,
-                    runtime.session_id,
-                    token,
-                    _time.time() + CLAIM_TTL_S,
-                )
-            except StoreRefused as failure:
-                if failure.code == "claimed":
-                    return _error(
-                        "another session holds this message; do not duplicate the work",
-                        code="claimed",
+            claimed_now = False
+            if params.message_id not in runtime.claims:
+                token = str(uuid.uuid4())
+                try:
+                    store.claim(
+                        runtime.owner,
+                        params.message_id,
+                        runtime.session_id,
+                        token,
+                        _time.time() + CLAIM_TTL_S,
                     )
-                return _error(f"claim refused: {failure}", code=failure.code)
-            runtime.claims[params.message_id] = token
-            return {"ok": True, "state": "working", "message_id": params.message_id}
-        token = runtime.claims.pop(params.message_id, None)
+                except StoreRefused as failure:
+                    if failure.code == "claimed":
+                        return _error(
+                            "another session holds this message; do not duplicate the work",
+                            code="claimed",
+                        )
+                    return _error(f"claim refused: {failure}", code=failure.code)
+                runtime.claims[params.message_id] = token
+                claimed_now = True
+            else:
+                try:
+                    # A remembered token is not proof of a LIVE lease: a
+                    # successor may have claimed it after this turn expired.
+                    store.renew_claim(
+                        runtime.owner,
+                        params.message_id,
+                        runtime.claims[params.message_id],
+                        _time.time() + CLAIM_TTL_S,
+                    )
+                except StoreRefused as failure:
+                    return _error(f"claim refused: {failure}", code=failure.code)
+            # A repeat ``working`` from the claim holder is idempotent: it
+            # skips the claim (the store refuses a second live claim even for
+            # its own session) and replays the SAME stored client_ref, so a
+            # confirmed intent sends nothing and a pending one re-sends the
+            # exact request the hub answers as a no-op repeat.
+            hub = await _post_progress_ack(runtime, params.message_id, "working")
+            if hub["hub_ack"] == "conflict" or hub["hub_ack"] == "refused":
+                if claimed_now:
+                    # The hub definitively refused the move (e.g. the delivery
+                    # is not at ``read``), so this session is not working it as
+                    # far as the audit knows; do not leave a claim that would
+                    # block another session for an hour.
+                    token = runtime.claims[params.message_id]
+                    try:
+                        store.release_claim(runtime.owner, params.message_id, token)
+                    except StoreRefused as failure:
+                        return _error(f"release refused: {failure}", code=failure.code)
+                    runtime.claims.pop(params.message_id, None)
+                return _error(
+                    f"the hub refused 'working' ({hub['code']}); nothing was claimed",
+                    code=str(hub["code"]),
+                )
+            return {"ok": True, "state": "working", "message_id": params.message_id, **hub}
+        token = runtime.claims.get(params.message_id)
         if token is None:
             return _error(
                 "no claim held by this session for that message; 'done' releases only "
@@ -3032,10 +3227,46 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 code="not_holder",
             )
         try:
+            # Fence a stale token BEFORE posting done, not only at release:
+            # otherwise an expired session could finish a successor's work.
+            store.renew_claim(runtime.owner, params.message_id, token, _time.time() + CLAIM_TTL_S)
+        except StoreRefused as failure:
+            return _error(f"claim refused: {failure}", code=failure.code)
+        # The hub's machine is single-step (read→working→done): if this
+        # session's ``working`` never reached it (transport failure), replay
+        # that exact intent first, or ``done`` would be an illegal jump.
+        working = await _post_progress_ack(runtime, params.message_id, "working")
+        if working["hub_ack"] == "pending":
+            return _error(
+                "'working' has not reached the hub yet, so 'done' was not sent; the claim "
+                "is still held — retry ack done",
+                code=str(working["code"] or "hub_ack_pending"),
+            )
+        hub = (
+            await _post_progress_ack(runtime, params.message_id, "done")
+            if working["hub_ack"] == "confirmed"
+            else working
+        )
+        if hub["hub_ack"] == "pending":
+            # Ambiguous: keep the claim so a retry replays the same ref.
+            return _error(
+                "'done' has not reached the hub yet; the claim is still held — retry ack done",
+                code=str(hub["code"] or "hub_ack_pending"),
+            )
+        # Confirmed, or a definite refusal that replaying can never converge:
+        # either way the local work is over, so the claim is released (claim
+        # releases on ack done, §13.6/N2) and a refusal surfaces typed.
+        try:
             store.release_claim(runtime.owner, params.message_id, token)
         except StoreRefused as failure:
             return _error(f"release refused: {failure}", code=failure.code)
-        return {"ok": True, "state": "done", "message_id": params.message_id}
+        runtime.claims.pop(params.message_id, None)
+        if hub["hub_ack"] != "confirmed":
+            return _error(
+                f"the hub refused 'done' ({hub['code']}); the local claim was released",
+                code=str(hub["code"]),
+            )
+        return {"ok": True, "state": "done", "message_id": params.message_id, **hub}
 
     if params.op in ("send", "reply"):
         if not params.text.strip():
@@ -3179,7 +3410,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         return await _directory(runtime, params)
 
     if params.op == "dm":
-        return await _direct_message(runtime, params, endpoint_id)
+        return await _direct_message(runtime, params, endpoint_id, session_agent_display)
 
     if params.op == "shared_conversations":
         return await _shared_conversations(runtime, params, endpoint_id)
@@ -3447,6 +3678,9 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         landed = False
         try:
             try:
+                display_kwargs = await _session_display_send_kwargs(
+                    runtime, session_agent_display, pre_http_guard
+                )
                 sender = file_batch.send if file_batch else runtime.client.conversation_send
                 result = await sender(
                     channel_id,
@@ -3457,7 +3691,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                     origin_session_id=runtime.session_id,
                     thread_root_id=thread_root_id or None,
                     mentions=mentions or None,
-                    pre_http_guard=pre_http_guard,
+                    **({"pre_http_guard": pre_http_guard} | display_kwargs),
                     **agent_attachments.send_kwargs(staged_images),
                 )
             except DispatchRefused as failure:
@@ -4245,11 +4479,17 @@ async def _history_files(
             continue
         if not descriptors:
             if count > 0:
+                # This history/thread projection supplies only a count, not the
+                # provenance of missing descriptors: capability off, a pending or
+                # refused screen, and a missing file-set grant look alike here.
+                # State availability, never invent a screening verdict or infer
+                # BODY admission (reported separately by body_state). A count
+                # grants no authority to fetch; keep this branch metadata-only.
                 blocks.append(
                     _file_provenance(
                         channel_id,
                         message,
-                        [f"[{count} file(s) withheld: not admitted by screening]"],
+                        [f"[{count} file(s) withheld: unavailable for agent context]"],
                         [],
                     )
                 )
@@ -4496,7 +4736,10 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
             # enabled, and they talk to ``/community/v1``, never the private hub.
             outcome = await execute_community_op(args, context, config_dir=runtime.config_dir)
         else:
-            outcome = await execute_bridge(runtime, args)
+            # Freeze host attribution before the first await; a later profile
+            # switch cannot rename an already running send.
+            display = context.bridge_session_agent_display
+            outcome = await execute_bridge(runtime, args, session_agent_display=display)
         # Bytes never ride ``details`` (persisted with the transcript row).
         images = outcome.pop(_IMAGES_KEY, None) or []
         # The model gets the page with inline data URIs withheld; ``details`` keeps

@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "tui.model_persistence",
+  "history_sha256": "9ba20a1ba1843d950047cdc57169f13c20bfcbbd1a9f800956582002240e1732",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "tui.model_persistence",
+      "source_sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff",
+      "context_sha256": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc",
+      "target_sha256": "2d31f57fd8a19eb9c82b71b135fc0cd76c0056d80a0ab846a744da2467e7c002",
+      "translator": {
+        "agent": "i18n-translator",
+        "task": "model-notice-fr-author",
+        "session": "1ca940cf73ba",
+        "model": "openai/gpt-6.1-sol",
+        "primary_model": "anthropic/claude-opus-5-5",
+        "fallback_used": true,
+        "fallback_reason": "provider failure: quota",
+        "actual_model_source": "Explicit user model-switch event before authoring"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "task": "model-notice-fr-audit-A",
+        "session": "0ecda03ab969",
+        "model": "openai/gpt-6.1-sol",
+        "primary_model": "anthropic/claude-opus-5-5",
+        "fallback_used": true,
+        "fallback_reason": "provider failure: quota",
+        "actual_model_source": "Explicit runtime model-switch user event in this auditor transcript before substantive audit",
+        "independent_from_translator_session": "1ca940cf73ba",
+        "independent_from_source_author_session": "a97c7f76d5ee",
+        "date": "2026-11-22",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "finding_ids": []
+      },
+      "status": "passed",
+      "note": "A pass 4/4; 0 unresolved blocker/major. Record: i18n/audits/evidence/fr/tui.model_persistence/a-0ecda03/record.json. Plain width controls only; B/integration pending."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.model_persistence",
+      "source_sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "1ca940cf73ba",
+        "model": null,
+        "date": null,
+        "provenance_note": "Session supplied by task; actual translator model/date not supplied; manager to retain verified translator provenance."
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "1bf2a3e4c433",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": "1ca940cf73ba",
+        "independent_from_A_auditor_session": "0ecda03",
+        "independent_from_source_author_session": "a97c7f76d5ee",
+        "actual_model_source": "Host [model switch] message before copy assessment: provider failure: quota; switched from anthropic/claude-opus-5-5 to openai/gpt-6.1-sol",
+        "fallback": {
+          "used": true,
+          "from": "anthropic/claude-opus-5-5",
+          "to": "openai/gpt-6.1-sol",
+          "reason": "provider failure: quota"
+        },
+        "date": "2026-11-22",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent French B audit, 4/4 keys, 0 unresolved blocker/major. Record: i18n/audits/evidence/fr/tui.model_persistence/b-1bf2/record.json. Plain-Rich only; native integration pending."
+    }
+  ]
+}

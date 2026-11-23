@@ -15,5 +15,7 @@
   "tui.transcript.group.steered": "{count, plural, other {{label}项引导}}",
   "tui.transcript.hub.reply_requested": "请求回复",
   "tui.transcript.hub.steered": "已引导",
-  "tui.transcript.hub.from": "来自{identity}"
+  "tui.transcript.hub.from": "来自{identity}",
+  "tui.transcript.jump_to_latest": "跳到最新",
+  "tui.transcript.jump_to_latest.short": "最新"
 }

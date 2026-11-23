@@ -157,6 +157,14 @@ WORK_ARM_EXEMPT_KINDS: frozenset[str] = frozenset(
     {"tool", "peer", "hub", "wake", "monitor", "inside"}
 )
 
+#: Whether a run of owned TOOL rows with no receipt trigger may fold under a
+#: ``work`` bar. Off, and kept as a knob so a revert is one line (drop it and
+#: restore ``or contextual`` in the admission test). The transcript's own tool
+#: fold now owns consecutive tool runs; a second fold over the same rows only
+#: fought it for the screen. Receipt groups are untouched: they are admitted
+#: through ``triggers``, with or without tools inside, and never read this.
+TOOL_ONLY_WORK_BAR = False
+
 
 def quiet_family_of(record: QuietGroupRecord) -> QuietGroupFamily | None:
     """The family this row contributes when it is a trigger, or null.
@@ -340,7 +348,10 @@ def quiet_group_of_segment(
     )
     # Contextual user work has the existing action threshold; standalone quiet
     # groups keep their exact receipt-only / mixed-work admission vocabulary.
-    if len(triggers) < 2 and not ((triggers or contextual) and real_actions >= 3):
+    # A tool-only owned stretch has no trigger, and is admitted only by the
+    # opt-in knob above (see TOOL_ONLY_WORK_BAR).
+    contextual_bar = TOOL_ONLY_WORK_BAR and contextual
+    if len(triggers) < 2 and not ((triggers or contextual_bar) and real_actions >= 3):
         return None
     first = records[span_from] if contextual else triggers[0]
     last = triggers[-1] if triggers else records[span_to]

@@ -1,0 +1,100 @@
+{
+  "schema": 1,
+  "pr": "https://github.com/damianvtran/local-operator/pull/4407",
+  "implementer": "coder session 6d8090029926",
+  "actual_model": "openai/gpt-6.1-sol",
+  "fallback": "Host switched from anthropic/claude-opus-5-5 due to provider quota before substantive remediation",
+  "base_head": "ef755778506501ae81b87d6411ff91686738e732",
+  "findings": {
+    "R1/Q1": "Tests drive isolated language config through real settings store and assert resolve_language() in each en/fr phase; real shipped catalogues and all five consumers retained.",
+    "R2/Q2": "Subscribe before watcher.start(), then follow latest watcher snapshot synchronously; absent/non-string maps to auto. Failed attachment removes only its listener, preserving shared watcher."
+  },
+  "regressions": [
+    "boot en -> config fr before watcher creation",
+    "change between watcher construction and start",
+    "change during start",
+    "change during subscribe",
+    "absent language and explicit auto resolve LOP_LANG=fr",
+    "start failure logged, listener removed, shared watcher survives, retry attaches exactly once",
+    "subsequent language change and unrelated config update remain correct"
+  ],
+  "real_path_probe": {
+    "script": "import asyncio, json, os\nfrom pathlib import Path\nimport local_operator\nfrom local_operator import settings_io\nfrom local_operator.config import ConfigManager\nfrom local_operator.config_watch import process_watcher\nfrom local_operator.i18n.boot import activate_resolved_locale\nfrom local_operator.i18n.text import active_locale\nfrom local_operator.session.runtime.serving import attach_language_config_watch\n\nasync def main():\n    directory = Path(os.environ['LOCAL_OPERATOR_CONFIG_DIR'])\n    setting = settings_io.resolve_key('language')\n    assert setting is not None\n    def store(value):\n        settings_io._store(ConfigManager(directory), setting.path, value)\n    store('en')\n    activate_resolved_locale()\n    assert active_locale() == 'en'\n    store('fr')\n    try:\n        attach_language_config_watch(directory)\n        watcher = process_watcher(directory)\n        assert watcher.poll_now() is None\n        result = {'source': local_operator.__file__, 'snapshot': watcher.values.get('language'), 'active': active_locale()}\n        print(json.dumps(result))\n        assert result['active'] == 'fr', 'boot-en/write-fr-before-attach leaves active locale stale'\n        store('en')\n        watcher.poll_now()\n        assert active_locale() == 'en'\n        print('subsequent English negative control: PASS')\n    finally:\n        await process_watcher(directory).stop()\n        print('watcher.stop awaited')\n\nasyncio.run(main())\n",
+    "before": {
+      "returncode": 1,
+      "output": "{\"source\": \"/Users/damian/local-operator/.worktrees/i18n-backend-english/local_operator/__init__.py\", \"snapshot\": \"fr\", \"active\": \"en\"}\nwatcher.stop awaited\nTraceback (most recent call last):\n  File \"/Users/damian/.local-operator/sessions/6d8090029926/scratchpad/pr4407-race.py\", line 36, in <module>\n    asyncio.run(main())\n  File \"/Users/damian/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/asyncio/runners.py\", line 195, in run\n    return runner.run(main)\n           ^^^^^^^^^^^^^^^^\n  File \"/Users/damian/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/asyncio/runners.py\", line 118, in run\n    return self._loop.run_until_complete(task)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/damian/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/asyncio/base_events.py\", line 691, in run_until_complete\n    return future.result()\n           ^^^^^^^^^^^^^^^\n  File \"/Users/damian/.local-operator/sessions/6d8090029926/scratchpad/pr4407-race.py\", line 27, in main\n    assert result['active'] == 'fr', 'boot-en/write-fr-before-attach leaves active locale stale'\n           ^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: boot-en/write-fr-before-attach leaves active locale stale\n"
+    },
+    "after": {
+      "returncode": 0,
+      "output": "{\"source\": \"/Users/damian/local-operator/.worktrees/i18n-backend-english/local_operator/__init__.py\", \"snapshot\": \"fr\", \"active\": \"fr\"}\nsubsequent English negative control: PASS\nwatcher.stop awaited\n"
+    }
+  },
+  "targeted_tests": {
+    "files": [
+      "tests/unit/session/runtime/test_runtime_locale.py",
+      "tests/unit/providers/test_key_check.py",
+      "tests/unit/model/test_suggested_model_copy.py",
+      "tests/unit/i18n/test_providers_connect_shipped.py",
+      "tests/unit/i18n/test_catalogues.py",
+      "tests/unit/i18n/test_cli_boot_locale.py",
+      "tests/unit/i18n/test_tui_notices_slice.py"
+    ],
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "/Users/damian/local-operator/.worktrees/i18n-backend-english/scripts/run_bounded.py",
+      "--contract=command-status",
+      "--timeout",
+      "240",
+      "--",
+      "/Users/damian/local-operator/.venv/bin/python",
+      "-m",
+      "pytest",
+      "-n",
+      "0",
+      "-q",
+      "/Users/damian/local-operator/.worktrees/i18n-backend-english/tests/unit/session/runtime/test_runtime_locale.py",
+      "/Users/damian/local-operator/.worktrees/i18n-backend-english/tests/unit/providers/test_key_check.py",
+      "/Users/damian/local-operator/.worktrees/i18n-backend-english/tests/unit/model/test_suggested_model_copy.py",
+      "/Users/damian/local-operator/.worktrees/i18n-backend-english/tests/unit/i18n/test_providers_connect_shipped.py",
+      "/Users/damian/local-operator/.worktrees/i18n-backend-english/tests/unit/i18n/test_catalogues.py",
+      "/Users/damian/local-operator/.worktrees/i18n-backend-english/tests/unit/i18n/test_cli_boot_locale.py",
+      "/Users/damian/local-operator/.worktrees/i18n-backend-english/tests/unit/i18n/test_tui_notices_slice.py"
+    ],
+    "isolation": "scratch HOME/config and cwd; inherited CMUX_* and LOP_* stripped; primary .venv interpreter with PYTHONPATH worktree; no installs",
+    "returncode": 0,
+    "wall_seconds": 22.04,
+    "output": "........................................................................ [ 68%]\n.................................                                        [100%]\n105 passed in 19.10s\n[run_bounded] memory budget 4519 MiB (auto); sampled owned child group and escaped descendants\nlocal stall report: ON (900s of no completed test), reporting only. Silence the report with LOCAL_OPERATOR_LOCAL_STALL_SECONDS=0 (a per-test bound survives that).\n[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=20518f7b434447e5ae4ca280357f4b7a completion=/Users/damian/.local-operator/sessions/6d8090029926/scratchpad/run-bounded-runs/20518f7b434447e5ae4ca280357f4b7a.completion.json\n",
+    "completion": {
+      "cleanup_reason": "command-status never certifies descendant or owned-group cleanup",
+      "cleanup_scope": "owned-process-group",
+      "cleanup_status": "unknown",
+      "command_exit_code": 0,
+      "deadline_guarantee": "none: cooperative observation and signal attempts only",
+      "descendant_cleanup": "unknown",
+      "escaped_residuals": [],
+      "finalization_errors": [],
+      "finalization_status": "complete",
+      "invocation_id": "20518f7b434447e5ae4ca280357f4b7a",
+      "memory_budget_source": "auto",
+      "memory_ceiling_mb": 4519,
+      "memory_guarantee": "sampled owned-group policy, not a hard allocation bound",
+      "record_phase": "complete",
+      "requested_contract": "command-status",
+      "run_id": "run-6203f1749061",
+      "schema": "run-bounded-completion/v1",
+      "signal_scope": "reserved-leader-group",
+      "supervision_error": null,
+      "terminal_observer": "darwin-sysctl-zombie",
+      "termination_cause": "child-exit",
+      "wrapper_exit_code": 0
+    },
+    "post_run_delta": "Only formatting after execution: multiline layout of the checkpoint parametrization decorator; no AST/behavior change."
+  },
+  "cleanup": "All probe watchers stopped with awaited stop; subprocesses waited/reaped. No server/browser launched. Subsequent ps query showed no matching probe, targeted pytest or bounded wrapper. command-status cleanup remains UNKNOWN by contract; no descendant cleanup certification claimed.",
+  "limits": [
+    "No full suite or native/browser lane.",
+    "No real socket runtime regression rerun in this coder lane; independent QA must exercise changed runtime seam.",
+    "Local style tools unavailable: primary venv has neither ruff nor black; chained isort/flake8 command was not reached after black import failure. No installs attempted; CI owns style verification.",
+    "No translation, generated catalogue, baseline, version or product resolution changes."
+  ]
+}

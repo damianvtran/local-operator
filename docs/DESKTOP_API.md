@@ -802,7 +802,7 @@ readings.
 | GET `.../{id}/user-attachments` | — | `{state:ready\|unsupported\|unavailable,items,truncated}` — every document and picture the USER attached, oldest first, metadata only (`session_attachments`); see §"The user-attachment inventory" |
 | POST `.../{id}/user-attachments/{digest}/materialise` | — | `{path,name,size_bytes,created}`; copies a user attachment's retained bytes to `<session scratchpad>/generated/` so open/reveal/copy-path have a real, correctly named file (`session_attachments`) |
 | POST `.../{id}/files/{file_id}/materialise` | — | `{path,name,size_bytes,created}`; copies a digest-only artifact to `<session scratchpad>/generated/` (`session_files`) |
-| GET `.../{id}/bridge-cards/{entry_id}/body` | — | `{v:1,items:[{message_id,conversation_id,state:admitted\|pending\|held\|refused\|not_admitted\|unavailable,body?,source?:local\|hub,hold?:{class:awaiting_review\|transient,held_for_s},reason?:signed_out\|other_account\|not_member\|deleted\|hub_unsupported\|offline}],more}` (**read envelope**) — what one inbound Team Bridge card's messages are to THIS viewer (`team_bridge_card_body`; relay twin `/api/sessions/{id}/bridge-cards/{entry_id}/body`). Keyed by a `team_bridge_message` row (404 otherwise); `body` is UNTRUSTED markdown; ≤20 items, rest counted in `more`. Sources: the local display store, local hold/reservation state, then the hub's admitted-only history read — never the classification fetch |
+| GET `.../{id}/bridge-cards/{entry_id}/body` | — | `{v:1,items:[{message_id,conversation_id,state:admitted\|pending\|held\|refused\|not_admitted\|unavailable,body?,source?:local\|hub,hold?:{class:awaiting_review\|transient,held_for_s},reason?:signed_out\|other_account\|not_member\|deleted\|hub_unsupported\|offline}],more,card?:{received_at?:ISO-8601 UTC,thread_reply:bool}}` (**read envelope**) — what one inbound Team Bridge card's messages are to THIS viewer (`team_bridge_card_body`; relay twin `/api/sessions/{id}/bridge-cards/{entry_id}/body`). Keyed by a `team_bridge_message` row (404 otherwise); `body` is UNTRUSTED markdown; ≤20 items, rest counted in `more`. Sources: the local display store, local hold/reservation state, then the hub's admitted-only history read — never the classification fetch |
 | GET `.../{id}/files/{file_id}/content` | optional `Range` | raw bytes (200, or 206 for a `Range`) of one row of a PEER's conversation, fetched from the owner on miss and streamed; local sessions answer 404 (`remote_files`); see §"Remote files" |
 | POST `.../{id}/files/{file_id}/download` | — | `{path,name,bytes,sha256,created,origin_device}`; lands one row of a PEER's conversation on THIS device (`remote_files`); see §"Remote files" |
 | POST `.../{id}/messages` | `{request_id,text,images?,mode?:prompt|steer}` | `{status:admitted,command_id,duplicate,detail,replayed?}` |
@@ -3821,7 +3821,7 @@ client supplied: it re-resolves every source itself.
 | `GET /v1/desktop/voice` | | `{active: {session_id, enabled_at} \| null, settings: {max_spoken_chars}, provider, providers: {radient, elevenlabs: {ready, reason}}, byok}` | |
 | `POST /v1/desktop/voice` | `{op: "enable" \| "disable", session_id}` | `{active, replaced}`; a `disable` for a session that does not hold the slot changes nothing | 404 `unknown_session`; 409 `voice_store_busy` |
 | `POST /v1/desktop/voice/utterance` | form: `session_id`, `request_id` (dashed UUID), EXACTLY ONE of `file` (a recording) or `text`; `text_origin?` (`qwen_s2s`, text door only) | `{text, path, admission}`; the words are admitted as a `dictated` prompt, or a steer while the turn is streaming | 402 `stt_unavailable` (an out-of-credit provider); 409 `voice_not_enabled`, `voice_provider_unset`, `approval_pending`, `session_syncing`, `stt_unavailable`; 413 `voice_upload_too_large`; 422 `invalid_voice_request`, `empty_transcript`; 429 `voice_rate_limited`; 502 `stt_unavailable` (every rung failed) |
-| `POST /v1/desktop/voice/text` | `{session_id, source}` where `source` is `{kind: "message", message_id}` or `{kind: "gate", request_id}` | `{text, spoken_chars, truncated, segments}` | 404 `unknown_source`; 409 `voice_not_enabled` |
+| `POST /v1/desktop/voice/text` | `{session_id, source}` where `source` is `{kind: "message", message_id}` or `{kind: "gate", request_id}` | `{text, spoken_chars, truncated, segments, full_text, spoken_source}` | 404 `unknown_source`; 409 `voice_not_enabled` |
 | `POST /v1/desktop/voice/speech` | `{session_id, source, segment}`; `source` adds `{kind: "phrase", key}` (one fixed phrase, `segment` 0) | `audio/mpeg` or `audio/wav`; headers `X-Voice-Path`, `X-Voice-Spoken-Chars`, and `X-Voice-Cache: hit` for a cached phrase | 404 `unknown_source`, `unknown_segment`; 409 `voice_not_enabled`, `voice_provider_unset`, `voice_unavailable`; 402 `voice_credit_low`; 429 `voice_rate_limited`; 502 `voice_provider_rejected`, `voice_upstream_failed`; 503 `voice_temporarily_unavailable` |
 
 - **The provider is the user's choice.** `speech.provider` is `radient` or
@@ -3848,6 +3848,39 @@ client supplied: it re-resolves every source itself.
 - **`segments`** are what `/voice/speech` addresses: each is one paid synthesis,
   capped at `settings.max_spoken_chars` (the cap includes the closing sentence
   when a reply is cut, `truncated: true`). Code blocks and links are never spoken.
+- **`full_text`** is the reply cleaned for DISPLAY, never capped, for a screen that
+  shows the whole reply (the desktop History panel) while the audio stays capped.
+  It is NOT the flat spoken string: the line structure is kept (single newlines
+  stay, three or more become one blank line); a bullet keeps its marker as written
+  (`-`, `*`, `+`, `1.`, `2)`); a table row is one line with its cells joined by
+  ` · ` (empty cells are dropped, the `|---|` rule row vanishes, and so does a
+  `---` rule line); an escaped `\|` stays a literal pipe in its cell; and a web
+  address stays as written. As in `text`, a fenced code block (backticks, or `~~~`
+  opening its own line) is the spoken placeholder, links keep their text, and
+  emphasis, inline-code, heading and quote markers are removed. Identifiers survive:
+  the text inside backticks is left exactly as written, and an `_` or `*` inside a
+  word (`my_var_name`, `a*b*c`, `__init__`) is not emphasis. A line over 2,000
+  characters is not emphasis-unwrapped. `full_text` never includes the spoken
+  closing sentence, and it generally differs from `text` even when `truncated` is
+  false (newlines, URLs). It is non-empty for any reply that has something to
+  speak: a reply with nothing to speak is 404 `unknown_source`, as before.
+  Additive and optional for a client: an older server omits it, so fall back to
+  `text`. `text`, `spoken_chars`, `truncated`, `segments` and `/voice/speech` are
+  unchanged, and the `voice` capability stays `2`.
+- **`spoken_source`** is `"summary"` when `text` is the agent's own `Spoken:`
+  paragraph and `"reply"` when it is the whole reply (today's behaviour, and the
+  fallback). While the voice slot is held, the request for a dictated prompt carries
+  a model-facing note (sent to the model, never stored in the row) asking the agent
+  to end with a short paragraph opening with the label `Spoken:`; the server selects the LAST such paragraph of a MESSAGE source (case
+  and `**bold**` tolerant, paragraph start only, never inside a code fence), with
+  the label removed, then cleans and caps it like any reply. No paragraph, an
+  empty one or an unfinished streaming message falls back to the whole reply; a
+  gate source is never narrowed. `truncated` then reports a cut of whichever was
+  spoken, and `max_spoken_chars` guards both. `full_text` is still the whole
+  reply, label included. Additive: read a missing field as `"reply"`. Selection is
+  a pure function of the message text, so every `/voice/speech` segment agrees
+  with `/voice/text`. The per-message Speak button path is untouched. See
+  `docs/design/voice-spoken-summary.md`.
 - **The feed frame.** `GET /v1/desktop/events` publishes `{"type": "voice",
   "payload": {"active": {session_id, enabled_at} | null}}` whenever the slot
   moves, as a level (the slot as it is now, not an edge). The open snapshot's
