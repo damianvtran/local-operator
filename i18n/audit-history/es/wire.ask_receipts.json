@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "wire.ask_receipts",
+  "history_sha256": "ff12a6dc867073a9e4f3705860d2345d48e79e6459e31366578863095529cd70",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "wire.ask_receipts",
+      "source_sha256": "1ae74bc10135dee17828f58af819fc521bd1e15024b3ce466cca20e49e102507",
+      "context_sha256": "48222d4c8f3d776444973f6e4b1bfc5052552dada49708c06c7faa0e53e78dfa",
+      "target_sha256": "9524e689c54103f6d0fbea5149bbeb89ded339d833232004f80122789348dfba",
+      "translator": {
+        "agent": "coding agent (translator role, this lane's earlier session); session id not supplied in the audit brief, not independently verified",
+        "model": "radient/auto (as stated in the brief; underlying served model not disclosed)",
+        "fallback": "none (as stated in the brief; not independently verified)",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev task subagent, lane ask-id-harness); not the translator, did not author these keys",
+        "session": "c4e600431e1c",
+        "model": "anthropic/claude-sonnet-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-23",
+        "result": "clean-with-findings",
+        "findings": 4,
+        "unresolved_blocker_major": 0,
+        "minor": 2,
+        "nit": 2,
+        "finding_detail": "0 blocker, 0 major, 2 minor (1 fixed, 1 deferred), 2 nit",
+        "independent_from_translator": true,
+        "scope": "full audit of every key of the namespace"
+      },
+      "status": "passed",
+      "note": "Independent audit 2026-11-23 of all 6 keys of wire.ask_receipts in es against en source 1ae74bc10135dee17828f58af819fc521bd1e15024b3ce466cca20e49e102507 and sidecar 48222d4c8f3d776444973f6e4b1bfc5052552dada49708c06c7faa0e53e78dfa; target 9524e689c54103f6d0fbea5149bbeb89ded339d833232004f80122789348dfba recomputed from the file after the audit edits. Method: read docs/I18N.md, glossary, the locale style guide and the sidecar; compared with the shipped relay.ask / relay.asks sibling renderings of the same states; rendered every key with local_operator.i18n.messages.render for surface remote/tui/chat/desktop/other x reason answered_in_chat/moot/absent/unknown and waited 45s/3h/42m; checked placeholder and ICU select arm parity, NFC, no manual bidi controls, no English word inside a translated sentence, and cell widths against maxCells. Edits by the auditor (translator of record unchanged): timeout.timed_out: `el agente sigue sin tu respuesta` -> `el agente continúa sin tu respuesta`. Pre-audit target sha256 163d2d854037d93bf6267223d729ee1440edd76ba3e70ee3729877e454bd5fd1. Findings: [minor, fixed] timeout.timed_out said `sigue sin tu respuesta` ('still has no answer from you'), which can be read as still waiting; the sidecar requires that the agent proceeds WITHOUT the answer. Changed to `continúa sin`. The shipped relay.asks.status.timed_out carries the same weaker wording; left untouched (outside this namespace). | [minor, open/deferred] response.dismissed worst case 68/64 cells (desktop + answered_in_chat); every other key is within its sidecar maxCells. Advisory budget (check.py does not enforce it for locales); the line wraps rather than clips. No shorter rendering keeps the shipped relay.ask/relay.asks vocabulary. Recorded here rather than in the style guide so no guide hash changes. | [nit, open/deferred] Gender: answered/declined/late use the impersonal masculine participle while dismissed uses the feminine (ask = question), exactly as the shipped relay.ask / relay.asks siblings do; harmless on a status line, not unified here to avoid diverging from the shipped surfaces. | [nit, open/deferred] `secret question` label calques the English, which in fr/es/ru/vi is also the idiom for a password-recovery security question; the source sidecar asks for 'a question that asks for a secret'. Inherited from the English label and matched by the shipped relay.asks vocabulary, so kept; context sidecar and the card name the real meaning beside it. Evidence is this auditor's own command output in the lane session, not an external report."
+    }
+  ]
+}

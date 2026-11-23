@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "wire.ask_receipts",
+  "history_sha256": "89fd9d38cbfac9f97addea843d80e3adbb566c328fae4d48c57f3529743299ad",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.ask_receipts",
+      "source_sha256": "1ae74bc10135dee17828f58af819fc521bd1e15024b3ce466cca20e49e102507",
+      "context_sha256": "48222d4c8f3d776444973f6e4b1bfc5052552dada49708c06c7faa0e53e78dfa",
+      "target_sha256": "a0177717f0ce4fbf20f3b310020c9df6c1931c0530dfab1c070dbe4c01cbf1a1",
+      "translator": {
+        "agent": "coding agent (translator role, this lane's earlier session); session id not supplied in the audit brief, not independently verified",
+        "model": "radient/auto (as stated in the brief; underlying served model not disclosed)",
+        "fallback": "none (as stated in the brief; not independently verified)",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev task subagent, lane ask-id-harness); not the translator, did not author these keys",
+        "session": "c4e600431e1c",
+        "model": "anthropic/claude-sonnet-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-23",
+        "result": "clean-with-findings",
+        "findings": 2,
+        "unresolved_blocker_major": 0,
+        "minor": 2,
+        "nit": 0,
+        "finding_detail": "0 blocker, 0 major, 2 minor (both fixed), 0 nit",
+        "independent_from_translator": true,
+        "scope": "full audit of every key of the namespace"
+      },
+      "status": "passed",
+      "note": "Independent audit 2026-11-23 of all 6 keys of wire.ask_receipts in zh-CN against en source 1ae74bc10135dee17828f58af819fc521bd1e15024b3ce466cca20e49e102507 and sidecar 48222d4c8f3d776444973f6e4b1bfc5052552dada49708c06c7faa0e53e78dfa; target a0177717f0ce4fbf20f3b310020c9df6c1931c0530dfab1c070dbe4c01cbf1a1 recomputed from the file after the audit edits. Method: read docs/I18N.md, glossary, the locale style guide and the sidecar; compared with the shipped relay.ask / relay.asks sibling renderings of the same states; rendered every key with local_operator.i18n.messages.render for surface remote/tui/chat/desktop/other x reason answered_in_chat/moot/absent/unknown and waited 45s/3h/42m; checked placeholder and ICU select arm parity, NFC, no manual bidi controls, no English word inside a translated sentence, and cell widths against maxCells. Edits by the auditor (translator of record unchanged): response.dismissed: ASCII `, ` between the two select groups -> full-width `，`; timeout.timed_out: `{waited} 后` -> `{waited}后` (no space between Latin token and CJK). Pre-audit target sha256 6e91f615c3381d7d7cf4f955751680b897f22a7a674bbd205b54bf4659bbe967. Findings: [minor, fixed] response.dismissed joined the surface and reason clauses with an ASCII comma+space; zh-CN style guide requires full-width ，and no space beside CJK in prose. Changed to `，`. | [minor, fixed] timeout.timed_out put a space between the Latin/digit {waited} token and 后; the style guide forbids spaces between CJK and Latin/digit runs. Removed. Evidence is this auditor's own command output in the lane session, not an external report."
+    }
+  ]
+}
