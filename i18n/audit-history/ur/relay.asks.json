@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "relay.asks",
-  "history_sha256": "5b9ae12c0dad3719b1deac6529ce9448b17662b7df0a03802942cfde595baafa",
+  "history_sha256": "9c43f542794161ef5cc3d884040065fa32b9756bc07ff474f3e53efac72961a0",
   "entries": [
     {
       "locale": "ur",
@@ -28,6 +28,31 @@
       },
       "status": "passed",
       "note": "PR #3926 suggested-command delta, independent audit 2026-11-13 by reviewer 0f77a9c3b23c (anthropic/claude-opus-5-5, no fallback): 4 added relay.asks.card.command.* keys passed; 78 unchanged keys carried by byte proof from the passed aeae7917 row. Source ebd750dd732723096fbbe195a25f314a4137ba765829b9def0c61787ac2634ad and target babac6129101af3fd7d8939d1f240f96b66fe9cd313feed57a89fec7184a3ddb recomputed from the files. Evidence: i18n/audits/evidence/ur/relay.asks/askcmd-r1-0f77a9c3b23c/record.json"
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.asks",
+      "source_sha256": "e19bac73afbfde9abac76d79c60bf7d1e2d8b2b621b49f2770a41d56749bc0ef",
+      "translator": {
+        "agent": "lopdev coder (PR #4495 commits bc826fc62..0e439855a); identity and model as stated in the lopdev manager's audit brief, not recorded in the commits",
+        "model": "anthropic/claude-sonnet-5-5",
+        "fallback": "unknown (not recorded in the commits)",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev reviewer role, session b7ef3c226fc6; not the translator)",
+        "session": "b7ef3c226fc6",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "minor": 1,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "PR #4495 relay ask-panel parity delta, independent audit 2026-11-23 by reviewer b7ef3c226fc6 (anthropic/claude-opus-5-5, no fallback): 38 changed/new key(s) passed; 49 unchanged key(s) carried by byte proof from the passed ebd750dd row. Source e19bac73afbfde9abac76d79c60bf7d1e2d8b2b621b49f2770a41d56749bc0ef and target c9578dba6a4ffe386bdf5324c41983e6c86877fd733e1204a6be8e1d6907113e recomputed from the files. Evidence: i18n/audits/evidence/ur/relay.asks/askparity-r1-b7ef3c226fc6/record.json"
     }
   ]
 }
