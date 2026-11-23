@@ -1200,6 +1200,14 @@ HOST_OWNED_LIVE_SECTIONS = {
     "speech",
     "static",
     "mesh_updates",
+    # ``composer`` is host-owned: its one key, ``delivery.busy_default``, decides
+    # how the TUI composer and the desktop app deliver a message sent to a BUSY
+    # session. Both read config.yml at SUBMIT time (``OperatorApp._busy_delivery_mode``
+    # -> ``_config_values``), not a ``Session``, so a probe here could watch
+    # nothing move. The live half is proven where it lives:
+    # ``tests/unit/tui/test_busy_delivery.py`` drives ``_busy_delivery_mode`` off
+    # the config values for each mode and a hand-edited bad value.
+    "composer",
     # ``updates`` is host-owned in the ``mesh_updates`` shape: its two keys decide
     # what an UPDATE does to older install generations, not what a session does.
     # ``update.auto_prune_policy`` re-reads config.yml at every promotion tail, so

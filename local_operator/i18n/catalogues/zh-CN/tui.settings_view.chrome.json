@@ -1,7 +1,9 @@
 {
+  "tui.settings_view.chrome.capture.chord_grammar": "alt+<letter>随处可用，ctrl+enter需要增强按键",
   "tui.settings_view.chrome.capture.contract_cancel": "{cancel_key}取消",
   "tui.settings_view.chrome.capture.contract_confirm": "{save_key}确认 · {cancel_key}取消",
   "tui.settings_view.chrome.capture.listening": "正在等待按键",
+  "tui.settings_view.chrome.capture.needs_enhanced_keys": "需要增强按键",
   "tui.settings_view.chrome.capture.press_another": "请换一个键",
   "tui.settings_view.chrome.capture.saved": "{shortcut}已保存",
   "tui.settings_view.chrome.capture.takes_from": "{shortcut}将从“{victim}”改绑到此处",

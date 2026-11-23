@@ -543,7 +543,7 @@ class RetryEnded(SessionEvent):
 class SteeringDelivered(SessionEvent):
     """Queued mid-turn messages reached the model's context.
 
-    The receipt the ``queued — sends when this step finishes`` row was missing:
+    The receipt the ``steering — may stop a running tool`` row was missing:
     the app settles that row against this instead of leaving a promise about the
     future standing after the future arrived. ``count`` is how many messages
     went in at the one boundary.

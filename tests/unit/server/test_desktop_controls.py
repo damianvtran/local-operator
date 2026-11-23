@@ -927,6 +927,9 @@ async def test_settings_projection_carries_the_derived_hotkey_scope(desktop):
         "keymap.transcript_down": "app",
         "keymap.transcript_half_up": "app",
         "keymap.transcript_half_down": "app",
+        "keymap.send_steer": "composer",
+        "keymap.send_queue": "composer",
+        "keymap.send_both": "composer",
     }
     assert not any(
         row["hotkey_scope"] for key, row in rows.items() if not key.startswith("keymap.")
@@ -955,6 +958,9 @@ async def test_settings_projection_carries_the_derived_hotkey_scope(desktop):
         "keymap.transcript_down": False,
         "keymap.transcript_half_up": False,
         "keymap.transcript_half_down": False,
+        "keymap.send_steer": False,
+        "keymap.send_queue": False,
+        "keymap.send_both": False,
     }
     assert not any(
         row["clearable"] for key, row in rows.items() if not key.startswith("keymap.")

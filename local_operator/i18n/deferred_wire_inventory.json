@@ -11,7 +11,7 @@
         }
       ],
       "references": {
-        "settings_io.py": 884,
+        "settings_io.py": 894,
         "tui/app.py": 1
       }
     },
@@ -303,10 +303,16 @@
           "path": "local_operator/settings_io.py",
           "symbol": "settings_io._keymap_copy -> settings_io._t",
           "note": "hotkey row label/help merged into the settings registry as plain strings; /v1/settings carries the strings, never a code"
+        },
+        {
+          "path": "local_operator/keymap.py",
+          "symbol": "keymap._apply_send_copy -> keymap._keymap_t",
+          "note": "send-row label/help resolved into the registry so group_conflict names the other row in-process as a plain string; no code leaves the process"
         }
       ],
       "references": {
-        "settings_io.py": 46
+        "keymap.py": 8,
+        "settings_io.py": 52
       }
     },
     "wire.settings.transcript_display": {

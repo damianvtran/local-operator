@@ -42,5 +42,11 @@
   "wire.settings.keymap.transcript_half_up.label": "Nửa trang lên",
   "wire.settings.keymap.transcript_half_up.help": "Cuộn cuộc trò chuyện lên nửa màn hình; con trỏ giữ nguyên.",
   "wire.settings.keymap.transcript_half_down.label": "Nửa trang xuống",
-  "wire.settings.keymap.transcript_half_down.help": "Cuộn cuộc trò chuyện xuống nửa màn hình; con trỏ giữ nguyên."
+  "wire.settings.keymap.transcript_half_down.help": "Cuộn cuộc trò chuyện xuống nửa màn hình; con trỏ giữ nguyên.",
+  "wire.settings.keymap.send_steer.label": "Gửi dạng định hướng",
+  "wire.settings.keymap.send_steer.help": "Gửi ngay, ngắt bước đang chạy. Ghi đè “Cách gửi khi bận”.",
+  "wire.settings.keymap.send_queue.label": "Gửi dạng hàng đợi",
+  "wire.settings.keymap.send_queue.help": "Chờ bước xong, không ngắt công cụ. Ghi đè “Cách gửi khi bận”.",
+  "wire.settings.keymap.send_both.label": "Gửi hàng đợi, rồi định hướng",
+  "wire.settings.keymap.send_both.help": "Chờ, rồi định hướng nếu chậm. Ghi đè “Cách gửi khi bận”."
 }

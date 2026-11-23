@@ -4456,6 +4456,7 @@ class ServingSessionHandle(SessionHandle):
         input_path: str | None = None,
         audio: list[dict[str, str]] | list["AudioContent"] | None = None,
         files: list[dict[str, Any]] | None = None,
+        delivery: str | None = None,
         *,
         wait_complete: bool = False,
         harness_injected: bool = False,
@@ -4503,6 +4504,15 @@ class ServingSessionHandle(SessionHandle):
         a detached failure. A session whose ``prompt`` predates the
         ``documents`` keyword is refused (``DocumentCarriageUnsupported``),
         never forwarded without its files.
+
+        ``delivery`` is the busy-send mode (``steer``/``queue``/``both``),
+        accepted so this handle advertises ``busy-delivery-v1`` (see
+        ``_takes_delivery``) and ignored on the ``prompt`` op; the ``steer``
+        op is where the mode applies. An IDLE prompt opens its own turn, so
+        the mode is ignored there. The wire client already refused
+        ``queue``/``both`` against an owner whose record lacked
+        ``busy-delivery-v1``, so reaching here with a mode is the claim that
+        the handle honours it.
 
         ``wait_for_turn`` makes an accepted prompt WAIT for a turn this queue
         did not open instead of failing after admission (see
@@ -5883,6 +5893,7 @@ class ServingSessionHandle(SessionHandle):
         files: list[dict[str, Any]] | None = None,
         harness_injected: bool = False,
         owner_typed: bool = True,
+        delivery: str | None = None,
         mesh_origin: Mapping[str, Any] | None = None,
         _file_admission: Any = None,
         input_surface: str | None = None,
@@ -5954,6 +5965,7 @@ class ServingSessionHandle(SessionHandle):
                     carries_attachments=carries_attachments,
                     harness_injected=harness_injected,
                     owner_typed=owner_typed,
+                    delivery=delivery,
                     mesh_origin=mesh_origin,
                     _file_admission=_file_admission,
                     input_surface=input_surface,
@@ -6035,6 +6047,7 @@ class ServingSessionHandle(SessionHandle):
         carries_attachments: bool,
         harness_injected: bool,
         owner_typed: bool = True,
+        delivery: str | None = None,
         mesh_origin: Mapping[str, Any] | None = None,
         _file_admission: Any = None,
         input_surface: str | None = None,
@@ -6173,6 +6186,11 @@ class ServingSessionHandle(SessionHandle):
             fields["harness_injected"] = harness_injected
         if "owner_typed" in parameters and not owner_typed:
             fields["owner_typed"] = False
+        # The busy-send delivery mode: probed like the fields above, so a
+        # session that predates the keyword never receives it. Added only
+        # when the wire carried one, so a legacy steer stays byte-identical.
+        if "delivery" in parameters and delivery is not None:
+            fields["delivery"] = delivery
         if "mesh_origin" in parameters and mesh_origin is not None:
             fields["mesh_origin"] = dict(mesh_origin)
         if "_file_capture" in parameters:

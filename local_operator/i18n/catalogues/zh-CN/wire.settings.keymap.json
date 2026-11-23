@@ -42,5 +42,11 @@
   "wire.settings.keymap.transcript_half_up.label": "向上滚动半屏",
   "wire.settings.keymap.transcript_half_up.help": "将对话向上滚动半屏，光标留在输入框。",
   "wire.settings.keymap.transcript_half_down.label": "向下滚动半屏",
-  "wire.settings.keymap.transcript_half_down.help": "将对话向下滚动半屏，光标留在输入框。"
+  "wire.settings.keymap.transcript_half_down.help": "将对话向下滚动半屏，光标留在输入框。",
+  "wire.settings.keymap.send_steer.label": "引导发送",
+  "wire.settings.keymap.send_steer.help": "立即发送并打断当前步骤。覆盖“忙碌时的发送方式”。",
+  "wire.settings.keymap.send_queue.label": "排队发送",
+  "wire.settings.keymap.send_queue.help": "等待当前步骤，绝不打断工具。覆盖“忙碌时的发送方式”。",
+  "wire.settings.keymap.send_both.label": "排队后引导发送",
+  "wire.settings.keymap.send_both.help": "先等待，过慢再引导。覆盖“忙碌时的发送方式”。"
 }

@@ -9,6 +9,10 @@ from __future__ import annotations
 from ..messages import Msg
 
 
+def capture_chord_grammar() -> Msg:
+    return Msg("tui.settings_view.chrome.capture.chord_grammar", {})
+
+
 def capture_contract_cancel(*, cancel_key: str) -> Msg:
     return Msg("tui.settings_view.chrome.capture.contract_cancel", {"cancel_key": cancel_key})
 
@@ -22,6 +26,10 @@ def capture_contract_confirm(*, save_key: str, cancel_key: str) -> Msg:
 
 def capture_listening() -> Msg:
     return Msg("tui.settings_view.chrome.capture.listening", {})
+
+
+def capture_needs_enhanced_keys() -> Msg:
+    return Msg("tui.settings_view.chrome.capture.needs_enhanced_keys", {})
 
 
 def capture_press_another() -> Msg:

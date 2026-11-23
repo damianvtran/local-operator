@@ -214,7 +214,11 @@ ENGLISH_PARITY: list[tuple[str, Msg, str]] = [
 ]
 
 #: The hotkey rows' copy: ``(action id, label, help)`` exactly as
-#: ``keymap.KEY_ACTIONS`` (and so origin/main's settings rows) carried them.
+#: ``keymap.KEY_ACTIONS`` (and so origin/main's settings rows for all but
+#: the three send rows) carried them. The three send rows are the composer-scope batch:
+#: their English is the `wire.settings.keymap` catalogue, which is also
+#: what the settings rows paint, so registry and settings agree by
+#: construction.
 KEYMAP_ENGLISH = {
     "keymap.new_session": ("New session", "Starts a fresh conversation, the same as /new."),
     "keymap.resume": (
@@ -285,6 +289,18 @@ KEYMAP_ENGLISH = {
     "keymap.transcript_half_down": (
         "Half-page transcript down",
         "Scrolls the conversation down half a screen; the caret stays in the composer.",
+    ),
+    "keymap.send_steer": (
+        "Send as steer",
+        "Send now, interrupting the step. Overrides Delivery when busy.",
+    ),
+    "keymap.send_queue": (
+        "Send as queue",
+        "Wait for the step; never interrupt tools. Overrides Delivery when busy.",
+    ),
+    "keymap.send_both": (
+        "Send as queue, then steer",
+        "Wait, then steer if slow. Overrides Delivery when busy.",
     ),
 }
 

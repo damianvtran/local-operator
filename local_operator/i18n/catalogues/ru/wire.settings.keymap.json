@@ -42,5 +42,11 @@
   "wire.settings.keymap.transcript_half_up.label": "Полстраницы вверх",
   "wire.settings.keymap.transcript_half_up.help": "Прокручивает беседу на полэкрана вверх; курсор остаётся в поле ввода.",
   "wire.settings.keymap.transcript_half_down.label": "Полстраницы вниз",
-  "wire.settings.keymap.transcript_half_down.help": "Прокручивает беседу на полэкрана вниз; курсор остаётся в поле ввода."
+  "wire.settings.keymap.transcript_half_down.help": "Прокручивает беседу на полэкрана вниз; курсор остаётся в поле ввода.",
+  "wire.settings.keymap.send_steer.label": "Отправить: направить",
+  "wire.settings.keymap.send_steer.help": "Отправить сразу, прервав шаг. Имеет приоритет над настройкой «Доставка, когда агент занят».",
+  "wire.settings.keymap.send_queue.label": "Отправить: очередь",
+  "wire.settings.keymap.send_queue.help": "Ждать завершения шага, не прерывая инструменты. Имеет приоритет над настройкой «Доставка, когда агент занят».",
+  "wire.settings.keymap.send_both.label": "Отправить: очередь→направить",
+  "wire.settings.keymap.send_both.help": "Ждать, затем направить при долгом ожидании. Имеет приоритет над настройкой «Доставка, когда агент занят»."
 }
