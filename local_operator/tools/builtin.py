@@ -20889,7 +20889,7 @@ def _sessions_peek_mesh_journal(
         # Fail closed: only an owner's explicit "zero steps" counts as empty.
         peeked = digest.get("steps_seen") != 0
     else:
-        window = window_from_wire(payload.get("window") or {})
+        window = window_from_wire(payload.get("window") or {}, mode=mode)
         details.update(
             steps_shown=len(window.steps),
             has_older=window.has_older,
@@ -20899,7 +20899,7 @@ def _sessions_peek_mesh_journal(
             details["scanned_bytes"] = window.scanned_bytes
         if window.match_id:
             details["match_id"] = window.match_id
-        if window.match_count is not None:
+        if mode == "search":
             details.update(
                 match_count=window.match_count, match_count_complete=window.match_count_complete
             )

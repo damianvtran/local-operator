@@ -767,6 +767,11 @@ def _decode_lifecycle_json(text: str) -> Any:
     return frame
 
 
+def encode_peer_payload(frame: dict[str, Any]) -> bytes:
+    """The uncompressed JSON payload that sender-side budgets measure."""
+    return json.dumps(frame, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
 class LinkCrypto:
     """Seals and opens the records of ONE link, one codec per side.
 
@@ -836,9 +841,7 @@ class LinkCrypto:
         """
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-        plaintext = json.dumps(
-            frame, sort_keys=False, separators=(",", ":"), ensure_ascii=False
-        ).encode("utf-8")
+        plaintext = encode_peer_payload(frame)
         if len(plaintext) > MAX_RECORD_BYTES:
             raise LinkCryptoError(
                 f"a frame of {len(plaintext)} bytes exceeds the {MAX_RECORD_BYTES}-byte record "

@@ -115,7 +115,7 @@ def test_head_and_digest_stay_small_and_oversize_names_a_route(
     rows = path.read_text().splitlines()
     # Use the real cap for the source journal; a smaller test cap lets us
     # exercise the reply refusal without weakening production's body clipping.
-    pad = "x" * net_peek.SESSION_PEEK_REPLY_BUDGET_BYTES
+    pad = "你好é" * net_peek.SESSION_PEEK_REPLY_BUDGET_BYTES
     for i in range(len(rows) - 8, len(rows)):
         row = json.loads(rows[i])
         row["payload"]["content"][0]["text"] = pad if i == len(rows) - 1 else pad[:1_000]
@@ -146,8 +146,12 @@ def test_head_and_digest_stay_small_and_oversize_names_a_route(
     assert len(json.dumps(digest).encode()) < budget
     print(fold)
     tail = net_peek.serve(tmp_path, base, own_label="b")
-    size = len(json.dumps(tail).encode())
+    # Uncompressed authenticated records add a four-byte length and a 16-byte
+    # GCM tag. Measure the sender's actual encoding independently of the guard.
+    keys = wire.LinkKeys(b"l" * 16, b"k" * 32, b"j" * 32, b"i" * 4, b"h" * 4)
+    size = len(wire.LinkCrypto(keys, role="dialer").seal(tail)) - 4 - 16
     assert size > budget
+    assert len(json.dumps(tail).encode()) != size
     monkeypatch.setattr(net_peek, "SESSION_PEEK_REPLY_BUDGET_BYTES", budget)
     with pytest.raises(MeshRefusal) as caught:
         net_peek.serve(tmp_path, base, own_label="b")
@@ -179,6 +183,86 @@ def test_a_bounded_query_reports_only_a_lower_bound_and_ignores_hidden_rows(
     assert window["match_count"] == 1 and window["match_count_complete"] is False
     assert "count is a lower bound" in window["note"]
     assert [step["body"] for step in window["steps"]] == ["row 1"]
+
+
+@pytest.mark.parametrize("visible", ["你好", 'quoted "text" with \\path\nand a new line'])
+def test_peer_query_matches_visible_text(tmp_path: Path, visible: str) -> None:
+    directory = _journal(tmp_path)
+    _row(directory, visible)
+    answer = net_peek.serve(tmp_path, {"session_id": SESSION, "query": visible}, own_label="b")
+    window = answer["window"]
+    assert window["match_count"] == 1
+    assert window["match_count_complete"] is True
+    assert window["steps"][-1]["body"] == visible
+
+
+def test_peer_query_counts_a_match_before_display_elision(tmp_path: Path) -> None:
+    from local_operator.harness.comms import PEEK_STEP_CHARS
+
+    directory = _journal(tmp_path)
+    pad = "x" * PEEK_STEP_CHARS
+    _row(directory, f"{pad}你好{pad}")
+    reply = net_peek.serve(tmp_path, {"session_id": SESSION, "query": "你好"}, own_label="b")
+    assert reply["window"]["match_count"] == 1
+    assert "chars elided" in reply["window"]["steps"][-1]["body"]
+    assert "你好" not in reply["window"]["steps"][-1]["body"]
+
+
+def test_peer_query_receipt_discloses_a_legacy_owner_without_count(tmp_path: Path) -> None:
+    from local_operator.network.cli import _peek_journal_receipt
+    from local_operator.session.peek import _peek_search, window_to_wire
+    from local_operator.tools.builtin import _sessions_peek_mesh_journal
+
+    directory = _journal(tmp_path)
+    answer = net_peek.serve(tmp_path, {"session_id": SESSION, "query": "row"}, own_label="b")
+    _, lines = _peek_journal_receipt(answer, SESSION, "b")
+    assert "match count: 4 (whole transcript); first match" in "\n".join(lines)
+    assert answer["window"]["match_id"] == f"{1:032x}"
+
+    # V1 used the same newest-first reader the local tool still uses today.
+    legacy = _peek_search(directory, needle="row", pattern=None, need=5)
+    assert not isinstance(legacy, str) and legacy.match_id == f"{4:032x}"
+    legacy_window = window_to_wire(legacy)
+    del legacy_window["match_count"], legacy_window["match_count_complete"]
+    payload, lines = _peek_journal_receipt(dict(answer, window=legacy_window), SESSION, "b")
+    text = "\n".join(lines)
+    diagnostic = "match count unavailable: the owner may be running an older build"
+    assert "row 4" in text
+    assert diagnostic in text
+    assert "whole transcript" not in text and "first match" not in text
+    assert payload["window"]["match_count"] is None
+    assert payload["window"]["match_count_complete"] is False
+
+    tool = _sessions_peek_mesh_journal("peek", payload, SESSION, "b", None)
+    assert not tool.is_error and tool.text.count(diagnostic) == 1
+    assert tool.details["match_count"] is None and tool.details["match_count_complete"] is False
+
+
+def test_peer_digest_uses_only_structural_failures(tmp_path: Path) -> None:
+    path = _journal(tmp_path, rows=2) / "transcript.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    for row, name, body, is_error in (
+        (rows[0], "read", "We cannot use the words error and failed here.", False),
+        (rows[1], "edit", "Could not write the file.", True),
+    ):
+        row["payload"].update(
+            role="tool", tool_name=name, content=[{"text": body}], is_error=is_error
+        )
+    path.write_text("\n".join(map(json.dumps, rows)) + "\n", encoding="utf-8")
+    reply = net_peek.serve(tmp_path, {"session_id": SESSION, "digest": True}, own_label="b")
+    text = reply["digest"]["text"]
+    assert "tools: read, edit" in text
+    assert "refusals/errors: edit: Could not write the file." in text
+    assert "We cannot" not in text
+
+
+def test_peer_digest_distinguishes_source_rows_from_folding(tmp_path: Path) -> None:
+    _journal(tmp_path, rows=12)
+    reply = net_peek.serve(tmp_path, {"session_id": SESSION, "digest": True}, own_label="b")
+    digest = reply["digest"]
+    assert digest["has_older"] is False
+    assert "no older rows" in digest["text"]
+    assert "3 earlier turns folded out" in digest["text"]
 
 
 def test_a_session_with_no_transcript_is_a_named_refusal(tmp_path: Path) -> None:

@@ -213,9 +213,8 @@ def serve(root: Path, frame: dict[str, Any], *, own_label: str) -> dict[str, Any
     same directory a local peek reads. Refusals raise :class:`MeshRefusal` so
     the relay answers in the family's shape.
     """
-    import json
-
     from local_operator.network.store import safe_component
+    from local_operator.network.wire import encode_peer_payload
     from local_operator.session import peek
 
     session_id = str(frame.get("session_id") or "")
@@ -272,7 +271,9 @@ def serve(root: Path, frame: dict[str, Any], *, own_label: str) -> dict[str, Any
     answer["request"] = peek.wire_request(request, request.given)
     live_name = getattr(record, "conversation_name", "") if record is not _UNRESOLVED else ""
     answer["name"] = live_name or session_name(directory) or f"session {session_id}"
-    reply_bytes = len(json.dumps(answer).encode("utf-8"))
+    # Budget the actual encoded payload, before the relay adds its envelope
+    # and optional compression. Escaping multilingual text inflates an estimate.
+    reply_bytes = len(encode_peer_payload(answer))
     if reply_bytes > SESSION_PEEK_REPLY_BUDGET_BYTES:
         # Report the serialized window we refused, not the size of the journal.
         # This is a protocol diagnostic for coordinators; keep selectors literal.

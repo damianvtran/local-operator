@@ -1,3 +1,3 @@
 {
-  "session.remote_peek.display_too_large": "Prueba `head=20` para ver los primeros pasos o `digest` para ver un resumen.\nEl historial más reciente superó el límite de la página de visualización o el del socket de ejecución.\nLímites de la página: {bytes} bytes o {messages} mensajes.\nPara ver el historial exacto, abre la conversación en el dispositivo donde se ejecuta."
+  "session.remote_peek.display_too_large": "Prueba `head=20` para ver los primeros pasos o `digest` para ver un resumen.\nEl historial más reciente superó el límite de la página de visualización o el del socket de ejecución.\nLímites de la página: en bytes ({bytes}) o en mensajes ({messages}).\nPara ver el historial exacto, abre la conversación en el dispositivo donde se ejecuta."
 }

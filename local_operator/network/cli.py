@@ -8386,8 +8386,19 @@ def _peek_journal_receipt(
         digest: dict[str, Any] = raw_digest if isinstance(raw_digest, dict) else {}
         payload["digest"] = digest
         return payload, [str(digest.get("text") or "")]
-    window = window_from_wire(answer.get("window") or {})
-    payload["window"] = answer.get("window") or {}
+    raw_window = answer.get("window") or {}
+    window = window_from_wire(raw_window, mode=mode)
+    if mode == "search" and window.match_count is None:
+        # JSON consumers (including the sessions tool) need the same notice
+        # as the human-readable receipt, not a raw legacy match on its own.
+        raw_window = dict(
+            raw_window,
+            match_count=None,
+            match_count_complete=False,
+            note=window.note,
+            miss=window.miss,
+        )
+    payload["window"] = raw_window
     if window.miss:
         return payload, [window.miss]
     raw_request = answer.get("request")

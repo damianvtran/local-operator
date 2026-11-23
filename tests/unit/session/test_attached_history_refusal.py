@@ -131,6 +131,31 @@ def _local_viewer(tmp_path: Path) -> AttachedSession:
     return viewer
 
 
+@pytest.mark.parametrize(
+    ("locale", "units"),
+    [
+        ("es", "Límites de la página: en bytes ({bytes}) o en mensajes ({messages})."),
+        ("fr", "Limites de la page\u00a0: en octets ({bytes}) ou en messages ({messages})."),
+        ("ru", "Лимиты страницы: в байтах — {bytes} или в сообщениях — {messages}."),
+        ("ur", "صفحے پر دکھانے کی حد: بائٹس میں {bytes} یا پیغامات میں {messages}۔"),
+    ],
+)
+def test_size_refusal_audited_units_are_count_neutral(locale: str, units: str) -> None:
+    from local_operator.i18n.catalogues import load_catalogue
+    from local_operator.i18n.runtime import render_message
+
+    # Held locales deliberately cannot be activated; exercise the ICU renderer
+    # on their candidate source directly without bypassing the shipping guard.
+    source = load_catalogue(locale, "session.remote_peek")["session.remote_peek.display_too_large"]
+    assert source.count("{bytes}") == source.count("{messages}") == 1
+    assert source.count("`head=20`") == source.count("`digest`") == 1
+    for params in ({"bytes": "1", "messages": "1"}, {"bytes": "1,000,000", "messages": "21"}):
+        remedies, _, limit, owning_device = render_message(source, params, locale).splitlines()
+        assert limit == units.format(**params)
+        assert "`head=20`" in remedies and "`digest`" in remedies
+        assert owning_device and "`" not in owning_device
+
+
 @pytest.mark.asyncio
 async def test_a_size_verdict_names_the_size_and_never_the_build(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch

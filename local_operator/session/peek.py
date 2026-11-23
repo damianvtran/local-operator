@@ -581,7 +581,7 @@ def _peer_peek_search(
     for the first chronological hit and a count, so retain its neighbours as
     we walk forward; re-locating by id would price a second read from the tail.
     """
-    from local_operator.harness.comms import is_peek_step_entry
+    from local_operator.harness.comms import _render_message_step, is_peek_step_entry
     from local_operator.session import compression
     from local_operator.session.transcript import (
         TranscriptEntry,
@@ -609,8 +609,7 @@ def _peer_peek_search(
             if not complete and consumed > scanned:
                 # The byte bound may bisect a row. Never count its prefix.
                 break
-            text = raw.decode("utf-8", errors="replace")
-            entry = TranscriptEntry.from_json(text)
+            entry = TranscriptEntry.from_json(raw.decode("utf-8", errors="replace"))
             if entry is None or not is_peek_step_entry(entry):
                 continue
             if hit_id:
@@ -619,6 +618,11 @@ def _peer_peek_search(
                     after -= 1
                 else:
                     newer = True
+            # Match the decoded view, not the JSON syntax or unseen metadata.
+            # Search each row before display elision so it cannot hide matches
+            # from the count. Only the selected, clipped window is sent.
+            step = _render_message_step(0, entry.payload, body_limit=None)
+            text = f"{step.heading}\n{step.body}"
             found = pattern.search(text) is not None if pattern is not None else needle in text
             if found:
                 count += 1
@@ -762,10 +766,6 @@ _DIGEST_REFERENCE = re.compile(
     r"^\[[^\]\n]+ [0-9a-f]{7,40}\]",
     re.IGNORECASE | re.MULTILINE,
 )
-_DIGEST_REFUSAL = re.compile(
-    r"\b(?:refus(?:al|ed)|denied|not authorized|not permitted|blocked|cannot|can't)\b",
-    re.IGNORECASE,
-)
 
 
 def _peer_peek_digest(directory: Path, *, live_state: str) -> _PeekDigest:
@@ -803,17 +803,20 @@ def _peer_peek_digest(directory: Path, *, live_state: str) -> _PeekDigest:
         elif step.kind == "tool":
             name = str(payload.get("tool_name") or "tool")[:PEEK_STEP_CHARS]
             turn["tools"].append(name)
-            if payload.get("is_error") or _DIGEST_REFUSAL.search(step.body):
+            # Success output and assistant prose can discuss failures without
+            # being failures. Only the recorded tool result can make that claim.
+            if payload.get("is_error") is True:
                 turn["refusals/errors"].append(f"{name}: {_fold_line(step.body, 60)}")
-        if step.kind == "assistant" and _DIGEST_REFUSAL.search(step.body):
-            turn["refusals/errors"].append(f"assistant: {_fold_line(step.body, 60)}")
         turn["commits/PRs"].extend(match[0] for match in _DIGEST_REFERENCE.finditer(step.body))
 
     # Reuse the existing digest's ten-line and tail-row budgets. Even the
     # longest identifiers fit a step-sized line; an ellipsis marks omitted
     # references, and older turns are named but never transferred.
     first = max(0, len(turns) - 9)
-    scope = "older rows or turns omitted" if page.has_more or first else "no older rows"
+    # has_older describes the source read, not the independent turn cap.
+    scope = "older rows omitted" if page.has_more else "no older rows"
+    if first:
+        scope += f"; {first} earlier turns folded out"
     lines = [
         f"digest fold (not the full transcript): {len(steps)} steps in the newest "
         f"{_PEEK_DIGEST_ROWS} rows; showing {len(turns) - first} turn(s) — {live_state}; {scope}"
@@ -1148,8 +1151,8 @@ def window_to_wire(window: _PeekWindow) -> dict[str, Any]:
     return out
 
 
-def window_from_wire(raw: Mapping[str, Any]) -> _PeekWindow:
-    """The inverse of :func:`window_to_wire` (tolerant of absent optional keys)."""
+def window_from_wire(raw: Mapping[str, Any], *, mode: str = "") -> _PeekWindow:
+    """Decode a peer window without upgrading an old search to a counted one."""
 
     from local_operator.harness.comms import PeekStep
 
@@ -1167,6 +1170,21 @@ def window_from_wire(raw: Mapping[str, Any]) -> _PeekWindow:
     fields["steps"] = steps
     fields["miss"] = str(fields.get("miss") or "")
     fields["note"] = str(fields.get("note") or "")
+    if mode == "search" and type(fields.get("match_count")) is not int:
+        # V1 could return a useful newest-match window or a miss, but has no
+        # count and makes no first-chronological-match guarantee.
+        diagnostic = (
+            "match count unavailable: the owner may be running an older build; "
+            "first chronological match not guaranteed"
+        )
+        fields["match_count"] = None
+        fields["match_count_complete"] = False
+        # The CLI emits a qualified JSON receipt that the sessions tool may
+        # decode again. Re-reading the receipt must not repeat the diagnostic.
+        if fields["miss"] and not fields["miss"].endswith(f"({diagnostic})"):
+            fields["miss"] += f" ({diagnostic})"
+        elif not fields["miss"] and not fields["note"].endswith(diagnostic):
+            fields["note"] = "; ".join(filter(None, (fields["note"], diagnostic)))
     return _PeekWindow(**fields)
 
 
