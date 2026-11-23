@@ -67,7 +67,7 @@
   "relay.asks.card.secret_notice_persisted": {
     "role": "reassurance above a secret answer field that is also saved",
     "tone": "Sentence case (capital first letter). A label or clause: no final full stop; no em or en dash as a separator.",
-    "note": "Owned relay SPA asks copy. Same fact as the sibling key plus the credential-store write; used only when the question sets persist. 'Credential store' is the agent computer's long-term store (the question's persist flag), not the browser: the relay never keeps a typed secret in the browser."
+    "note": "Owned relay SPA asks copy. Same fact as the sibling key plus the write to the agent computer's long-term store; used only when the question sets persist. 'On the computer' means that store, not the browser: the relay never keeps a typed secret in the browser. Same wording as the native app's mobile.asks.secret_notice_saved."
   },
   "relay.asks.card.placeholder_secret": {
     "role": "secret answer input placeholder",

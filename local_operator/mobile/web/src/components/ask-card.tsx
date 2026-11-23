@@ -1338,8 +1338,12 @@ export function AskCard({
 					    steps aside while the on-screen keyboard is up, which is when the
 					    question needs the room. */}
 					{progressLine || (reason_needed && !keyboardUp) ? (
-						<div className="flex items-center gap-x-3">
-							<p className="min-w-0 flex-1 text-start text-meta text-ink-dim">{progressLine}</p>
+						<div className="flex flex-wrap items-center gap-x-3">
+							{/* `flex-auto` sizes the sentence to its own one-line width, so the
+							    link shares its row when both fit and wraps onto a row of its
+							    own, start-aligned, when the sentence would need two lines (a
+							    narrow phone or large text), never truncating either. */}
+							<p className="min-w-0 flex-auto text-start text-meta text-ink-dim">{progressLine}</p>
 							{reason_needed && !keyboardUp ? (
 								<button
 									type="button"

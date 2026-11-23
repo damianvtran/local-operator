@@ -1399,6 +1399,9 @@ describe("the panel's final look (native parity)", () => {
 		const dismiss = screen.getByRole("button", { name: /^Dismiss…$/ });
 		const progress = screen.getByText("Pick an option or type your own answer to send.");
 		expect(progress.parentElement).toBe(dismiss.parentElement);
+		// Wrapping lets Dismiss… drop to its own row when the sentence fills this one.
+		expect(progress.parentElement?.className).toContain("flex-wrap");
+		expect(progress.className).toContain("flex-auto");
 		expect(dismiss.className).toContain("text-ink-muted");
 		expect(dismiss.className).not.toContain("font-medium");
 		expect(dismiss.className.split(" ")).not.toContain("bg-accent");
