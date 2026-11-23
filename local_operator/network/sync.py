@@ -535,6 +535,7 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # and that unlink can leave one behind, and ``mobility``'s recovery removes it
     # rather than treating it as content.
     "ready.json": "the move's own boot marker, not session content",
+    ".skill-pin-original": "an adopter's rollback copy of the verified attachment, never content",
     # An UPDATE WINDOW's marker (``session/runtime/inbox.UPDATE_WINDOW_NAME``): a live
     # process's note to its successor that it is moving to a new build. On the
     # destination it would tell an unrelated runtime that an update it never ran was

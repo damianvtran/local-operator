@@ -10806,7 +10806,10 @@ class RelayServer:
         if stale:
             raise MeshRefusal("definition_stale", stale)
 
-        from local_operator.skills.manifest import parse_skill_manifest
+        from local_operator.skills.manifest import (
+            parse_skill_manifest,
+            skill_transfer_receipt,
+        )
 
         skill_manifest = parse_skill_manifest(frame.get("skill_manifest"))
         if "skill_manifest" in frame and skill_manifest is None:
@@ -10962,8 +10965,12 @@ class RelayServer:
         # reported in the reply instead — silence about it is the one thing the
         # requirement rules out.
         attachment_agent = identity.agent_name if identity.instructions_attachable else ""
+        pinned = False
         if attachment_agent or identity.team_name or skill_manifest is not None:
-            from local_operator.resume import write_session_attachment
+            from local_operator.resume import (
+                read_session_attachment,
+                write_session_attachment,
+            )
 
             write_session_attachment(
                 session_dir,
@@ -10973,6 +10980,15 @@ class RelayServer:
                 skill_manifest=skill_manifest,
                 skill_manifest_pinned=True,
             )
+            # The general attachment writer is best effort. Do not attest to a
+            # pin just because it was offered in the frame: confirm it on disk.
+            if skill_manifest is not None:
+                stored = read_session_attachment(session_dir)
+                pinned = bool(
+                    stored
+                    and stored.skill_manifest_pinned
+                    and stored.skill_manifest == skill_manifest
+                )
         if name:
             # THROUGH ``resume.write_session_title``, never a hand-rolled
             # ``title.json`` of our own. This write used to build the payload
@@ -11030,6 +11046,7 @@ class RelayServer:
         # from its own registries — a claim about a store that does not hold this
         # session (the desktop route already makes that argument for its local half).
         identity_blocks: dict[str, Any] = {
+            "skill_selection": skill_transfer_receipt("pinned" if pinned else "local_routing"),
             "agent": (
                 {
                     "name": identity.agent_name,
@@ -16778,7 +16795,21 @@ class RelayServer:
                 # half); ``message`` is the wire frame's name for it, not the exception's.
                 raise MeshRefusal(refusal.code, f"{refusal.sentence} ({push_reason})") from None
             raise
-        extra: dict[str, Any] = {}
+        from local_operator.skills.manifest import (
+            skill_transfer_receipt,
+            skill_transfer_status,
+        )
+
+        # An older owner ignores the request field and sends no acknowledgement.
+        # A lost/replayed reply can instead mean the pin landed but was not observed.
+        reported = skill_transfer_status(detail.get("skill_selection"))
+        if reported is None:
+            reported = (
+                "unconfirmed"
+                if detail.get("create_unconfirmed") or detail.get("replayed")
+                else "local_routing"
+            )
+        extra: dict[str, Any] = {"skill_selection": skill_transfer_receipt(reported)}
         if instructions_notice:
             extra["custom_instructions_notice"] = instructions_notice
         if reconciliation:

@@ -21829,6 +21829,10 @@ async def _sessions_spawn_mesh(
     argv, problem = _mesh_create_argv(peer, params)
     if problem:
         return _error(tool_call_id, "sessions", problem)
+    # Pass only the host-owned source directory name to this create command.
+    # _sessions_open_env must still clear the audit id for every child.
+    if context is not None and context.session_dir:
+        argv += ["--source-session", Path(context.session_dir).name]
     early, payload = await _mesh_op(
         tool_call_id, "sessions", argv, _MESH_CREATE_ENGAGE_TIMEOUT_S, context
     )
@@ -21854,6 +21858,13 @@ async def _sessions_spawn_mesh(
     elif str(params.prompt or ""):
         admitted = bool(payload.get("admitted"))
         lines.append("the prompt was admitted there" if admitted else "the prompt was not admitted")
+    from local_operator.skills.manifest import (
+        skill_transfer_receipt,
+        skill_transfer_status,
+    )
+
+    if status := skill_transfer_status(payload.get("skill_selection")):
+        lines.append(skill_transfer_receipt(status)["message"])
     notice = str(payload.get("unattended_notice") or "")
     if notice:
         lines.append(notice)

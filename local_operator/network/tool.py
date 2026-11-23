@@ -1306,7 +1306,17 @@ def _render(action: str, payload: dict[str, Any], *, show_removed: bool = False)
             # of it (the CLI renders the owner's words verbatim, and a second
             # vocabulary for "did it stop" is the thing that gets out of step).
             sentence = str(payload.get("detail") or payload.get("message") or "").strip()
-            return [sentence] if sentence else [json.dumps(payload, sort_keys=True)]
+            lines = [sentence] if sentence else [json.dumps(payload, sort_keys=True)]
+            from local_operator.skills.manifest import (
+                skill_transfer_receipt,
+                skill_transfer_status,
+            )
+
+            if sentence and (status := skill_transfer_status(payload.get("skill_selection"))):
+                # The structured payload does not reach the model. A create's
+                # admission sentence alone says nothing about its skill pin.
+                lines.append(skill_transfer_receipt(status)["message"])
+            return lines
         from local_operator.resume import peer_reason_words, session_state_words
 
         lines = [

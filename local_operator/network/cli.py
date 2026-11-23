@@ -559,6 +559,9 @@ def add_parser(
         "--all-peers", action="store_true", help="list every peer's sessions, merged"
     )
     net_sessions.add_argument("--create", action="store_true", help="create a session on --peer")
+    # Internal metadata input used by the sessions tool. Unlike audit attribution,
+    # it is read only for create and never inherited by any newly launched runtime.
+    net_sessions.add_argument("--source-session", default="", help=argparse.SUPPRESS)
     # IDEMPOTENCY FOR A RETRY (``network/create_keys.py``). Every create carries a
     # key the relay mints; this flag lets a retry of a create whose reply was LOST
     # send the key it was told, so the owner answers with the session it already
@@ -9855,11 +9858,15 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         explicit_yolo = bool(getattr(args, "yolo", False))
         implied_yolo = (not explicit_yolo) and saved_tool_approval_is_auto()
 
-        from local_operator.network.relay import CREATE_CLIENT_BOUND_S
-
         # Shell/tool attribution is only a local metadata lookup for this verb.
         # A standalone operator create has no source conversation to pin.
-        source_session = _env_filing_session()
+        from local_operator.network.approvals import filing_session
+        from local_operator.network.relay import CREATE_CLIENT_BOUND_S
+
+        explicit_source = getattr(args, "source_session", "")
+        source_session = (
+            filing_session(explicit_source) if explicit_source else _env_filing_session()
+        )
         source_fields = {"source_session": source_session} if source_session else {}
 
         def _create(yolo: bool) -> dict[str, Any]:
@@ -9938,6 +9945,18 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # moment ago and have already scrolled past. The machine-readable
         # ``admitted`` key is unchanged — a ``--json`` consumer branches on it.
         lines = [f"session: {minted or '-'}", f"created on {peer}"]
+        from local_operator.skills.manifest import (
+            skill_transfer_receipt,
+            skill_transfer_status,
+        )
+
+        status = skill_transfer_status(detail.get("skill_selection"))
+        if status is None:
+            # A new CLI can also be talking to an older local relay. It cannot
+            # attest to a pin that the relay did not report.
+            status = "unconfirmed" if detail.get("create_unconfirmed") else "local_routing"
+        detail["skill_selection"] = skill_transfer_receipt(status)
+        lines.append(detail["skill_selection"]["message"])
         if (detail.get("create_unconfirmed") or detail.get("replayed")) and not prompt:
             # THE CREATE'S OWN REPLY WAS NOT THE ANSWER: either it was lost and the
             # owner confirmed the id by key, or this was a retry the owner matched

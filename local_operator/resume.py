@@ -16,6 +16,7 @@ transcript-directory decision, so the rule has one definition.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -973,24 +974,22 @@ def write_session_attachment(
     goal: str,
     skill_manifest: dict[str, str] | None = None,
     skill_manifest_pinned: bool = False,
+    strict: bool = False,
 ) -> None:
     """Journal the session's attached identity so a resume can rebuild it.
 
-    Called on CHANGE (attach, detach, goal set/clear), never per turn: the
-    attachment moves a handful of times in a session's life, and a per-turn
-    write would be pure I/O for a value that did not move.
+    Called on attachment or goal changes and when a routed turn changes the
+    skill snapshot. The snapshot recorder deduplicates unchanged selections.
 
-    Best-effort by contract, exactly like :func:`write_session_title` and
-    :func:`mark_session_origin`. An attachment that cannot be journalled
-    (read-only volume, full disk) must never fail the turn that changed it: the
-    cost is one resume that opens unattached, which is the behaviour every
-    session had before this file existed.
+    Local journaling is best effort: an unavailable disk must not fail the
+    turn that changed the attachment. A move uses ``strict`` instead: a failed
+    pin write must be visible to the adopter before it publishes the session.
 
-    The write is ATOMIC (pid-named temp + ``replace``) because two processes
+    The write is ATOMIC (temp file + ``replace``) because two processes
     can hold the same session directory — a live owner and a ``/resume`` that
     is about to be refused both touch it — and a reader hitting a half-written
     document would parse as "no attachment" and silently drop the persona. The
-    PID in the temp name keeps two concurrent writers from ``replace``-ing a
+    PID in the local temp name keeps concurrent writers from ``replace``-ing a
     document the other is still filling, the same hazard ``write_session_title``
     and ``search_index._save`` document.
 
@@ -1026,24 +1025,37 @@ def write_session_attachment(
         payload["skill_manifest"] = skill_manifest
         if skill_manifest_pinned:
             payload["skill_manifest_pinned"] = True
+    sidecar = session_dir / ATTACHMENT_SIDECAR_NAME
+    # Staging has a single adopter. A stable name lets recovery replace a
+    # partial temp file left by an interrupted pin rather than publish it.
+    tmp = sidecar.with_suffix(".transfer.tmp" if strict else f".{os.getpid()}.tmp")
     try:
         try:
             previous = session_dir.stat().st_mtime
         except OSError:
             previous = None
         session_dir.mkdir(parents=True, exist_ok=True)
-        sidecar = session_dir / ATTACHMENT_SIDECAR_NAME
-        tmp = sidecar.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        with tmp.open("w", encoding="utf-8") as stream:
+            stream.write(json.dumps(payload))
+            if strict:
+                stream.flush()
+                os.fsync(stream.fileno())
         tmp.replace(sidecar)
-        if previous is not None:
-            os.utime(session_dir, (previous, previous))
     except (OSError, TypeError, ValueError):
+        if strict:
+            # A failed pre-publish pin must leave the verified sidecar intact,
+            # and must not leave a temporary member in the staged session.
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
+            raise
         return
+    if previous is not None:
+        with contextlib.suppress(OSError):
+            os.utime(session_dir, (previous, previous))
 
 
 def record_session_skill_manifest(
-    session_dir: Path, manifest: dict[str, str], *, pinned: bool = False
+    session_dir: Path, manifest: dict[str, str], *, pinned: bool = False, strict: bool = False
 ) -> None:
     """Update only skill metadata; local snapshots are not local routing pins."""
     stored = read_session_attachment(session_dir) or SessionAttachment("", "", "")
@@ -1056,6 +1068,7 @@ def record_session_skill_manifest(
         goal=stored.goal,
         skill_manifest=manifest,
         skill_manifest_pinned=pinned,
+        strict=strict,
     )
 
 

@@ -15,6 +15,7 @@ for a session that is mid-handoff.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import uuid
 from pathlib import Path
@@ -183,27 +184,73 @@ def test_a_move_is_allowed_and_does_not_carry_the_approval_choice(
     ).exists(), "the copy inherited the source conversation's approval choice"
 
 
+@pytest.mark.parametrize("case", ["pinned", "legacy", "write_failure", "interrupted_publish"])
 def test_move_promotes_and_pins_the_skill_manifest(
-    pair: Devices, monkeypatch: pytest.MonkeyPatch
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
+    from local_operator.cli import _carry_lines
     from local_operator.resume import read_session_attachment, write_session_attachment
 
     server_a, server_b, _host, _port = pair
     _pair_settled(pair, monkeypatch, role="admin")
     source = _owned_session(server_a)
     manifest = {"carry-alpha": "a" * 64, "carry-beta": "b" * 64}
-    write_session_attachment(source, team="", agent="", goal="Keep this", skill_manifest=manifest)
+    expected = None if case == "legacy" else manifest
+    write_session_attachment(source, team="", agent="", goal="Keep this", skill_manifest=expected)
     before = read_session_attachment(source)
     assert before is not None and not before.skill_manifest_pinned
+    target = server_b.root / "sessions" / SESSION
+    if case == "write_failure":
+        replace = Path.replace
+        original_sidecar = (source / "attachment.json").read_bytes()
+
+        def fail_pin(self: Path, to: Path) -> Path:
+            if to.name == "attachment.json" and to.is_relative_to(server_b.root):
+                raise OSError("injected attachment replace failure")
+            return replace(self, to)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, "replace", fail_pin)
+            refused = _move(server_b, SESSION, monkeypatch=patch)
+        assert refused["ok"] is False and "was not published" in refused["message"]
+        assert not target.exists()
+        stage = sync.staging_dir(server_b.root, SESSION)
+        assert (stage / "attachment.json").read_bytes() == original_sidecar
+        ready = json.loads((stage / "ready.json").read_text())
+        assert mobility._staging_content_digest(server_b, SESSION, stage) == ready["content_digest"]
+    elif case == "interrupted_publish":
+        replace_directory = os.replace
+        observed: list[bool] = []
+
+        def stop_before_publish(src: Any, dst: Any, **kwargs: Any) -> None:
+            if dst == str(target):
+                attachment = read_session_attachment(Path(src))
+                observed.append(bool(attachment and attachment.skill_manifest_pinned))
+                raise OSError("injected interruption before publication")
+            replace_directory(src, dst, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "replace", stop_before_publish)
+            refused = _move(server_b, SESSION, monkeypatch=patch)
+        assert refused["ok"] is False and not target.exists()
+        assert observed == [True], "the single publish boundary must already contain the pin"
 
     result = _move(server_b, SESSION, monkeypatch=monkeypatch)
 
     assert result["ok"] is True, result
-    stored = read_session_attachment(server_b.root / "sessions" / SESSION)
+    stored = read_session_attachment(target)
     assert stored is not None
-    assert stored.skill_manifest == manifest
-    assert stored.skill_manifest_pinned is True
+    assert stored.skill_manifest == expected
+    assert stored.skill_manifest_pinned is (expected is not None)
     assert stored.goal == "Keep this"
+    assert not (target / mobility._SKILL_PIN_ORIGINAL).exists()
+
+    status = "local_routing" if expected is None else "pinned"
+    assert result["carry"]["skill_selection"]["status"] == status
+    phrase = (
+        "will select skills locally" if expected is None else "pinned the source's skill selection"
+    )
+    assert any(phrase in line for line in _carry_lines(result))
 
 
 def test_a_recall_moves_the_session_and_leaves_a_tombstone(

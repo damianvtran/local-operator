@@ -841,96 +841,183 @@ def test_a_peer_can_create_a_session_on_this_device_and_prompt_it(
         _stop_all(served)
 
 
-@pytest.mark.parametrize("receiver_missing", [False, True])
+@pytest.mark.parametrize(
+    "case", ["exact", "missing", "empty", "legacy", "old_sender", "old_receiver"]
+)
 def test_peer_spawn_pins_exact_source_skills_and_names_omissions(
     peer_pair: Devices,
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    receiver_missing: bool,
+    request: pytest.FixtureRequest,
+    case: str,
 ) -> None:
-    """Drive CLI → control → authenticated mesh → sidecar → session prompt."""
+    """Source turn → real sessions tool/subprocess → mesh → receiving turn.
+
+    A CLI test that sets the process audit ID cannot catch the tool clearing
+    it. Keep that audit ID wrong on purpose and let the real factory, not a
+    test sidecar, derive the source snapshot from its rendered prompt.
+    """
     import hashlib
+    import re
 
     from local_operator.agents import AgentRegistry
+    from local_operator.analytics.recorder import reset_recorder_for_test
+    from local_operator.analytics.store import AnalyticsStore
     from local_operator.config import ConfigManager
-    from local_operator.network import cli
-    from local_operator.session_factory import build_initial_blocks
+    from local_operator.harness.types import ToolContext
+    from local_operator.resume import read_session_attachment
+    from local_operator.session_factory import create_session
     from local_operator.skills import api as skills_api
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+    from local_operator.tools.builtin import execute_sessions
 
     source, receiver, _host, _port = peer_pair
+    recorder = reset_recorder_for_test(AnalyticsStore(source.root / "analytics-test.db"))
+    request.addfinalizer(recorder.close)
+    # Keep real filesystem discovery and routing, without a bundled skill
+    # whose presence changes the explicitly empty selection control.
+    monkeypatch.setattr(skills_api, "PACKAGED_SKILL_ROOT", source.root / "no-packaged-skills")
     record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
     host, port = _listen(receiver)
+    # Keep the real runtime RPC admission seam, then use the actual factory
+    # to render the admitted prompt in the peer-minted session directory.
     served = _serve(monkeypatch, receiver.root)
-    descriptions = {"carry-alpha": "Alpha source skill.", "carry-beta": "Beta source skill."}
-    manifest = {
-        name: hashlib.sha256(text.encode()).hexdigest() for name, text in descriptions.items()
-    }
-    source_dir = source.root / "sessions" / SESSION
-    source_dir.mkdir(parents=True)
-    # A previous source turn wrote this selection, not its entire catalogue.
-    (source_dir / "attachment.json").write_text(json.dumps({"skill_manifest": manifest}))
-    for name, text in {**descriptions, "receiver-only": "A local extra skill."}.items():
-        if receiver_missing and name == "carry-beta":
-            continue
-        directory = receiver.root / ".local-operator" / "skills" / name
-        directory.mkdir(parents=True)
-        (directory / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {text}\n---\nBody\n")
+    query = "Use the alpha and beta source skills or a local extra skill."
+    team_name = "skill-parity"
+    team_brief = "Use the transfer team's release checklist."
+    source_skills = (
+        {}
+        if case == "empty"
+        else {
+            "carry-alpha": "Alpha source skill.",
+            "carry-beta": "Beta source skill.",
+        }
+    )
+    dest_skills = {**source_skills, "receiver-only": "A local extra skill."}
+    if case == "missing":
+        del dest_skills["carry-beta"]
+    # Define the team only on the origin so create reconciles that exact row
+    # instead of silently testing two unrelated locally installed definitions.
+    TeamRegistry(source.root).create_team(
+        TeamEditFields(
+            name=team_name,
+            description="Transfer regression fixture.",
+            manager="manager",
+            members=[TeamMember(role="coder")],
+            instructions=team_brief,
+        )
+    )
+    for device, inventory in ((source, source_skills), (receiver, dest_skills)):
+        for name, text in inventory.items():
+            directory = device.root / ".local-operator" / "skills" / name
+            directory.mkdir(parents=True)
+            (directory / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: {text}\n---\nBody\n"
+            )
+
+    async def turn(device: relay.RelayServer, sid: str, *, origin: bool) -> str:
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(device.root))
+        monkeypatch.setenv("LOP_RUNTIME_ADOPT_SESSION", "1")
+        session = await create_session(
+            argparse.Namespace(resume=sid, hosting="test", model="test"),
+            ConfigManager(device.root),
+            AgentRegistry(device.root),
+            cwd=str(device.root),
+            world_root=device.root,
+        )
+        try:
+            if origin:
+                session.attach_team(TeamRegistry(device.root).get_team_by_name(team_name))
+                if case == "legacy":
+                    # A conversation attached before skill snapshots existed.
+                    return ""
+            await session.prompt(query)
+            assert session.active_team_name == team_name
+            return "\n".join(session._last_system_blocks)
+        finally:
+            await session.dispose()
+
+    def rows(prompt: str) -> dict[str, str]:
+        # Packaged guides share this prompt block but are not transferable
+        # skills. Compare all fixture skills, including the receiver-only canary.
+        block = re.search(r"<skills>(.*?)</skills>", prompt, re.S)
+        if block is None:
+            return {}
+        return {
+            name: text
+            for name, text in re.findall(r"^- ([\w-]+): (.+)$", block[1], re.M)
+            if name in source_skills or name in dest_skills
+        }
 
     link = _dial_to(source, record, host, port)
-    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(source.root))
-    monkeypatch.setenv("LOCAL_OPERATOR_SESSION_ID", SESSION)
-    capsys.readouterr()  # Pairing printed its own JSON before the create receipt.
+    source_dir = source.root / "sessions" / SESSION
     try:
-        rc = cli._cmd_sessions(
-            argparse.Namespace(
-                peer=receiver.identity.device_id,
-                create=True,
-                json=True,
-                cwd=str(receiver.root),
-                prompt="test mesh skill selection",
+        source_prompt = asyncio.run(turn(source, SESSION, origin=True))
+        expected = {
+            name: hashlib.sha256(text.encode()).hexdigest() for name, text in source_skills.items()
+        }
+        if case != "legacy":
+            assert rows(source_prompt) == source_skills
+            assert "<team>" in source_prompt and team_brief in source_prompt
+            original = read_session_attachment(source_dir)
+            assert original is not None and original.skill_manifest == expected
+        if case == "old_receiver":
+            owner_create = receiver._op_session_create
+
+            def legacy_create(link: Any, frame: dict[str, Any]) -> dict[str, Any]:
+                # The base owner's behavior at the wire boundary: ignores the
+                # new manifest field and has no pin acknowledgement to return.
+                assert frame.get("skill_manifest") == expected
+                detail = owner_create(
+                    link, {k: v for k, v in frame.items() if k != "skill_manifest"}
+                )
+                return {k: v for k, v in detail.items() if k != "skill_selection"}
+
+            monkeypatch.setitem(receiver._handlers, "net_session_create", legacy_create)
+        monkeypatch.setenv("LOCAL_OPERATOR_SESSION_ID", "badbadbadbad")
+        # Omitting attribution reproduces the pre-feature sender's wire shape.
+        context = ToolContext(
+            cwd=str(source.root), session_dir=("" if case == "old_sender" else str(source_dir))
+        )
+        result = asyncio.run(
+            execute_sessions(
+                "skill-parity",
+                {
+                    "op": "spawn",
+                    "peer": receiver.identity.device_id,
+                    "team": team_name,
+                    "prompt": query,
+                },
+                context=context,
             )
         )
-        output = capsys.readouterr()
-        assert rc == 0, output
-        session_id = json.loads(output.out)["session_id"]
-        sidecar = receiver.root / "sessions" / session_id / "attachment.json"
-        delivered = json.loads(sidecar.read_text()) if sidecar.exists() else {}
-        assert delivered.get("skill_manifest") == manifest
-        assert delivered["skill_manifest_pinned"] is True
-    finally:
-        link.close("test")
-        _stop_all(served)
+        assert not result.is_error and result.details, result
+        minted = result.details["session_id"]
+        assert served[minted].handle.prompts() == [query]
+        delivered = read_session_attachment(receiver.root / "sessions" / minted)
+        assert delivered is not None and delivered.team == team_name
+        pinned = case not in {"legacy", "old_sender", "old_receiver"}
+        assert delivered.skill_manifest == (expected if pinned else None)
+        assert delivered.skill_manifest_pinned is pinned
+        receipt = result.details["mesh"]["skill_selection"]
+        assert receipt["status"] == ("pinned" if pinned else "local_routing")
+        phrase = "pinned the source's skill selection" if pinned else "will select skills locally"
+        assert phrase in receipt["message"]
+        assert any(phrase in getattr(block, "text", "") for block in result.content)
 
-    # The receiving factory (not the relay fixture) must turn the sidecar
-    # into an actual prompt, using the normal receiver-local discovery roots.
-    _seed_journal(receiver.root, session_id, ["A local extra skill."])
-    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(receiver.root))
-    monkeypatch.chdir(receiver.root)
-    # The scratch directory itself lives beneath the operator's config. Use the
-    # real discovery walk with its world boundary so only fixture roots are read.
-    roots = skills_api.default_skill_roots
-    monkeypatch.setattr(
-        skills_api, "default_skill_roots", lambda cwd, **_: roots(cwd, boundary=receiver.root)
-    )
-    blocks = asyncio.run(
-        build_initial_blocks(
-            argparse.Namespace(resume=session_id, hosting="test", model="test"),
-            ConfigManager(receiver.root),
-            AgentRegistry(receiver.root),
-        )
-    )
-    skills_block = "\n".join(blocks).split("\n<skills>\n", 1)[1].split("\n</skills>", 1)[0]
-    available = {
-        line.split(":", 1)[0][2:]
-        for line in skills_block.splitlines()
-        if line.startswith("- ") and not line.startswith("- Unavailable on this device:")
-    }
-    if receiver_missing:
-        assert available == {"carry-alpha"}
-        assert "- Unavailable on this device: carry-beta" in skills_block
-    else:
-        assert available == set(manifest)
-    assert "receiver-only" not in skills_block
+        _stop_all(served)
+        served.clear()
+        dest_prompt = asyncio.run(turn(receiver, minted, origin=False))
+        assert "<team>" in dest_prompt and team_brief in dest_prompt
+        if case == "missing":
+            assert rows(dest_prompt) == {"carry-alpha": rows(source_prompt)["carry-alpha"]}
+            assert "- Unavailable on this device: carry-beta" in dest_prompt
+        elif pinned:
+            assert rows(dest_prompt) == rows(source_prompt)
+        else:
+            assert rows(dest_prompt) == dest_skills
+    finally:
+        _stop_all(served)
+        link.close("test")
 
 
 def test_a_promptless_create_is_still_a_row_on_both_devices(

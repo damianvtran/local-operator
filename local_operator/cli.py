@@ -7674,15 +7674,15 @@ def sessions_resume_command(args: argparse.Namespace) -> int:
 def _carry_lines(result: dict[str, Any]) -> list[str]:
     """The scheduled-state lines a move reports when it carried any (§ ``MoveCarryBlock``).
 
-    Up to three sentences, each a fact about a different half, and the wake half
+    Each sentence is a distinct fact, and the wake half
     is BOTH-OR (design round 1, D4): the quiet ``running_notice`` confirms a
     carried wake whose supervisor was verified running, so a live schedule is not
     indistinguishable from no schedule; the loud ``notice`` is its complement —
     wakes arrived and the supervisor that would fire them is not running, so the
     line names the command and the device it must run on ('lop wake install' on
     the named device). The monitor line says what does not travel (the state) and
-    what happens instead (its checks start fresh on the destination). Absent keys
-    print nothing: a move that carried nothing new prints exactly as before.
+    what happens instead (its checks start fresh on the destination). The skill
+    receipt separately says whether the destination pinned a source selection.
     """
     carry = result.get("carry")
     if not isinstance(carry, dict):
@@ -7698,6 +7698,13 @@ def _carry_lines(result: dict[str, Any]) -> list[str]:
         text = carry.get(key)
         if isinstance(text, str) and text:
             lines.append(text)
+    from local_operator.skills.manifest import (
+        skill_transfer_receipt,
+        skill_transfer_status,
+    )
+
+    if status := skill_transfer_status(carry.get("skill_selection")):
+        lines.append(skill_transfer_receipt(status)["message"])
     return lines
 
 

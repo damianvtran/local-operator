@@ -5,12 +5,44 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Iterable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, TypedDict
 
 if TYPE_CHECKING:
     from local_operator.skills.discovery import Skill
 
 SkillManifest = dict[str, str]
+SkillTransferStatus = Literal["pinned", "local_routing", "unconfirmed"]
+
+
+class SkillTransferReceipt(TypedDict):
+    status: SkillTransferStatus
+    message: str
+
+
+def skill_transfer_receipt(status: SkillTransferStatus) -> SkillTransferReceipt:
+    # A missing acknowledgement is never a positive claim. The receipt also
+    # distinguishes a durable empty pin from no pin, without listing skill names.
+    from local_operator.i18n.keys import network_skill_transfer as keys
+    from local_operator.i18n.text import tr
+
+    messages = {
+        "pinned": keys.receipt_pinned,
+        "local_routing": keys.receipt_local_routing,
+        "unconfirmed": keys.receipt_unconfirmed,
+    }
+    return {"status": status, "message": tr("network.skill_transfer")(messages[status]())}
+
+
+def skill_transfer_status(value: object) -> SkillTransferStatus | None:
+    if isinstance(value, dict):
+        match value.get("status"):
+            case "pinned":
+                return "pinned"
+            case "local_routing":
+                return "local_routing"
+            case "unconfirmed":
+                return "unconfirmed"
+    return None
 
 
 def description_fingerprint(skill: Skill) -> str:
