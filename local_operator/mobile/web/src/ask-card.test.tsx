@@ -1052,3 +1052,72 @@ describe("a multi-question card stays bounded as a whole", () => {
 		expect(screen.queryByTestId("ask-question-list")).toBeNull();
 	});
 });
+
+describe("a secret question's answer is never persisted", () => {
+	/* The draft cell lives in localStorage, in plaintext, across reloads. A secret
+	   is a credential the agent asked for by name, so what the reader types is kept
+	   in the card's memory only, as on the native app. */
+	const SECRET = "SENTINEL-secret-123";
+	const KEY = "lo-mobile-draft:ask:ask-1";
+	const stored = () => localStorage.getItem(KEY) ?? "";
+	const mixed = () =>
+		ask({
+			questions: [
+				question({ id: "q1", question: "token?", options: [], secret: true }),
+				question({ id: "q2", question: "ship it?" }),
+			],
+		});
+	beforeEach(() => localStorage.clear());
+
+	it("keeps a typed secret out of storage while the card still uses it, and keeps other answers", async () => {
+		renderCard(mixed());
+		fireEvent.change(screen.getByPlaceholderText("paste secret"), { target: { value: SECRET } });
+		// Alone, a secret leaves no cell at all.
+		expect(localStorage.getItem(KEY)).toBeNull();
+		fireEvent.click(screen.getByRole("button", { name: /yes/ }));
+		expect(stored()).not.toContain(SECRET);
+		expect(JSON.parse(stored()).answers).toEqual({ q2: ["yes"] });
+		// The card itself still sends what was typed.
+		fireEvent.click(screen.getByRole("button", { name: /send answers/ }));
+		await waitFor(() =>
+			expect(sendCommand).toHaveBeenCalledWith("s1", {
+				op: "ask_respond",
+				ask_id: "ask-1",
+				answers: { q1: [SECRET], q2: ["yes"] },
+			}),
+		);
+	});
+
+	it("does not bring a secret back after the card is closed and reopened", () => {
+		const first = renderCard(mixed());
+		fireEvent.change(screen.getByPlaceholderText("paste secret"), { target: { value: SECRET } });
+		fireEvent.click(screen.getByRole("button", { name: /yes/ }));
+		first.unmount();
+		renderCard(mixed());
+		expect((screen.getByPlaceholderText("paste secret") as HTMLInputElement).value).toBe("");
+		expect(screen.getByRole("button", { name: /yes/ }).getAttribute("aria-pressed")).toBe("true");
+	});
+
+	it("strips a secret an older build already stored, and rewrites the cell", () => {
+		localStorage.setItem(
+			KEY,
+			JSON.stringify({ answers: { q1: [SECRET], q2: ["yes"] }, skipped: ["q3"] }),
+		);
+		renderCard(mixed());
+		expect((screen.getByPlaceholderText("paste secret") as HTMLInputElement).value).toBe("");
+		expect(stored()).not.toContain(SECRET);
+		expect(JSON.parse(stored())).toEqual({ answers: { q2: ["yes"] }, skipped: ["q3"] });
+	});
+
+	it("removes the cell outright when the stored draft held nothing but a secret", () => {
+		localStorage.setItem(KEY, JSON.stringify({ answers: { q1: [SECRET] }, skipped: [] }));
+		renderCard(mixed());
+		expect(localStorage.getItem(KEY)).toBeNull();
+	});
+
+	it("still persists a non-secret free-text answer", () => {
+		renderCard(ask({ questions: [question({ options: [] })] }));
+		fireEvent.change(screen.getByRole("textbox"), { target: { value: "plain text" } });
+		expect(JSON.parse(stored()).answers).toEqual({ q1: ["plain text"] });
+	});
+});
