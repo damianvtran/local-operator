@@ -4500,7 +4500,10 @@ class TestEmptyPickNamesThePoolCauseTheSelectorProves:
     ) -> None:
         """Seed one row's usage the way the message-boundary preflight does."""
         from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
-        from local_operator.providers.usage_cache import UsageCacheStore, account_preflight_key
+        from local_operator.providers.usage_cache import (
+            UsageCacheStore,
+            account_preflight_key,
+        )
 
         now = store._now_ms()
         report = UsageReport(
