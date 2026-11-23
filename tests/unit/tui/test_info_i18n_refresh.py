@@ -97,11 +97,7 @@ async def _scroll_request_landed(
         await pilot.pause()
     # The last permitted pause can itself satisfy the condition; re-read once so a
     # slow-but-correct screen is not reported as a request that never landed.
-    landed = (
-        scroll.scroll_y >= scroll.max_scroll_y
-        if target is None
-        else scroll.scroll_y >= target
-    )
+    landed = scroll.scroll_y >= scroll.max_scroll_y if target is None else scroll.scroll_y >= target
     if landed:
         return
     raise AssertionError(
