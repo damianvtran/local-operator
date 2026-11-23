@@ -89,6 +89,11 @@ ALLOWED_BODY_KEYS = frozenset(
 #: Betas that are first-party-only and must never reach Bedrock.
 _DROPPED_BETAS = frozenset({"oauth-2025-04-20"})
 
+# Request-local sidecar: the first selected block's native anchor belongs to
+# this render, not to the client, a retry, or Bedrock's wire. The explicit
+# allow-list in transform_body excludes it; the encoder rehashes actual blocks.
+_NATIVE_SEED = "_bedrock_native_seed"
+
 EVENTSTREAM_CONTENT_TYPE = "application/vnd.amazon.eventstream"
 
 
@@ -272,6 +277,9 @@ class BedrockAnthropicClient(AnthropicClient):
         # each, read 2026-11-18). An unknown/discovered id stays on 5m.
         from local_operator.model.registry import bedrock_supports_1h_cache
 
+        # The transport sidecar is not part of the fallback's wire-size input.
+        if _NATIVE_SEED in body:
+            body = {key: value for key, value in body.items() if key != _NATIVE_SEED}
         ttl = super()._cache_ttl_for(request, body, oauth=oauth, account=account)
         if ttl and not bedrock_supports_1h_cache(request.model.model_id):
             return None
@@ -325,27 +333,24 @@ class BedrockAnthropicClient(AnthropicClient):
                 kept = []
                 for index, block in enumerate(message["content"]):
                     expected = row_proof.get(str(index))
-                    drop = False
-                    if expected is not None and block.get("type") in THINKING:
-                        exact, portable = prefix.witness()
-                        # A fresh block can match the post-splice prefix. An
-                        # unknown legacy block has no witness; don't equate
-                        # absence with a match or a proved dependency.
-                        drop = exact != expected[0] and (
-                            portable != expected[1]
-                            or (original is not None and original.witness()[0] == expected[0])
-                        )
+                    drop = (
+                        expected is not None
+                        and block.get("type") in THINKING
+                        and prefix.invalidates(expected, original)
+                    )
                     if drop and original is None:
                         original = prefix.fork()
                     if original is not None:
-                        original.block(block)
+                        original.block(block, expected)
                     if not drop:
                         kept.append(block)
-                        prefix.block(block)
+                        prefix.block(block, expected)
                 message["content"] = kept
                 prefix.end()
                 if original is not None:
                     original.end()
+            if prefix.native_seed is not None:
+                body[_NATIVE_SEED] = prefix.native_seed
         # Use these very blocks for admission, not the pre-filter payload.
         selected = {id(message): messages[row]["content"] for row, message in native_rows.items()}
         return [selected.get(id(message)) for message in request.messages]
@@ -369,9 +374,11 @@ class BedrockAnthropicClient(AnthropicClient):
         content = _encode_json_body(wire_body)
         commit = None
         if proof_scope is not None and prefix_bound:
-            # Freeze the actual transformed prefix at encoding; only two
-            # incremental hash states outlive this attempt's encode.
-            prefix = Prefix(self._binding_route(url), proof_scope, wire_body)
+            # Freeze the actual transformed prefix (including its native tip)
+            # before auth awaits; rejected attempts never mint a witness.
+            prefix = Prefix(
+                self._binding_route(url), proof_scope, wire_body, native_seed=body.get(_NATIVE_SEED)
+            )
             for message in wire_body["messages"]:
                 prefix.message(message)
             commit = prefix.bind_assistant

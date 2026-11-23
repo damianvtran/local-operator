@@ -6163,7 +6163,7 @@ class AnthropicClient:
                         index = event.get("index")
                         native_proven = isinstance(index, int) and index in native_open
                         if native_proven and event_type == "content_block_stop":
-                            native_open.remove(index)
+                            native_open.discard(index)
                         elif native_proven:
                             target = native_blocks[index]["type"]
                             native_proven = (event.get("delta") or {}).get("type") in {

@@ -94,7 +94,13 @@ def wire(monkeypatch):
 def _client(wire, answer: Callable[[int], httpx.Response]):
     def handler(request: httpx.Request):
         assert request.url.path.endswith("/invoke-with-response-stream")
-        wire.append((str(request.url), request.content, json.loads(request.content)))
+        assert request.headers["x-amzn-bedrock-accept"] == "application/json"
+        assert request.headers["authorization"].partition(" ")[0] == "Bearer"
+        assert "anthropic-beta" not in request.headers
+        body = json.loads(request.content)
+        assert body.keys() <= bedrock.ALLOWED_BODY_KEYS
+        assert "block_binding" not in body.get("thinking", {})
+        wire.append((str(request.url), request.content, body))
         return answer(len(wire))
 
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -147,6 +153,7 @@ def _portable(body):
         ("region", 0),
         ("scope", 0),
         ("model", 0),
+        ("v1", 0),
         ("legacy", 2),
     ],
 )
@@ -165,6 +172,10 @@ async def test_prefix_splices_only_native_blocks(wire, monkeypatch, mode, thinki
         assert list(replay[FIELD]) == ["0", "2"]
         if mode == "legacy":
             del replay[FIELD]
+        elif mode == "v1":
+            replay["bedrock_messages_prefix_v1"] = {
+                index: proof[:2] for index, proof in replay.pop(FIELD).items()
+            }
         call = ToolCall(id="c-read", name="read", arguments={"path": "tool://library"})
         assistant = Message.assistant(
             "portable output", tool_calls=[call], provider_payload=produced.provider_payload
@@ -205,7 +216,7 @@ async def test_prefix_splices_only_native_blocks(wire, monkeypatch, mode, thinki
             ]
         elif mode == "system":
             options["system_blocks"] = ["changed"]
-        elif mode in {"history", "legacy"}:
+        elif mode in {"history", "v1", "legacy"}:
             options["messages"] = [Message.user("changed"), *followup.messages[1:]]
         elif mode == "endpoint":
             monkeypatch.setenv("LOP_BEDROCK_ENDPOINT_URL", "http://127.0.0.1:9")
@@ -391,6 +402,100 @@ async def test_later_block_proved_dependent_on_an_omission(wire):
         visible = stale.model_copy(update={"provider_payload": None})
         await _send(client, _request([user, visible, next_user, dependent, third], tools=tools))
     assert [block["signature"] for block in _native(wire[-1][2])] == ["inert-2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("omit", "expected"),
+    [(None, ["A", "B", "C"]), ("A", ["B", "C"]), ("B", ["A"]), ("C", ["A", "B"])],
+)
+async def test_cold_replay_with_prior_native_omission(wire, tmp_path, omit, expected):
+    statuses = []
+
+    def answer(n):
+        signatures = [part["signature"] for part in _native(wire[-1][2])]
+        # C was minted on [A, B]. Model the documented default error only
+        # for the specific interior gap under test, not leading/trailing cuts.
+        if signatures == ["A", "C"]:
+            statuses.append(400)
+            return httpx.Response(
+                400,
+                json={"message": "fixture: B missing inside C's native prefix"},
+                headers={"x-amzn-errortype": "ValidationException"},
+            )
+        statuses.append(200)
+        return _response(tag={1: "A", 2: "B", 3: "C"}.get(n, "reply"))
+
+    transcript = Transcript(tmp_path / "session")
+    rows = [Message.user("first")]
+    async with _client(wire, answer) as http:
+        mint = bedrock.BedrockAnthropicClient(http_client=http)
+        for label in ("A", "B", "C"):
+            event = await _send(mint, _request(rows))
+            assert event.provider_payload is not None
+            rows.extend(
+                [
+                    Message.assistant("portable output", provider_payload=event.provider_payload),
+                    Message.user(f"after {label}"),
+                ]
+            )
+        assert [part["signature"] for part in _native(wire[-1][2])] == ["A", "B"]
+        for index, row in enumerate(rows):
+            if omit is not None and index == ("ABC".index(omit) * 2 + 1):
+                # Preserve the transcript identity and visible evidence; only
+                # the native envelope is already absent when the selector runs.
+                row = row.model_copy(update={"provider_payload": None})
+            await transcript.append_message(row)
+        cold = _default_convert_to_llm(Transcript(transcript.directory).build_llm_history())
+        assert [row.id for row in cold] == [row.id for row in rows]
+        replay = bedrock.BedrockAnthropicClient(http_client=http)
+        try:
+            await _send(replay, _request(cold))
+        finally:
+            body = wire[-1][2]
+            assert _portable(body) == _portable(wire[-2][2]) + [
+                ("assistant", [{"type": "text", "text": "portable output"}]),
+                ("user", [{"type": "text", "text": "after C"}]),
+            ]
+            actual = [part["signature"] for part in _native(body)]
+            assert (actual, statuses[-1]) == (expected, 200)
+
+
+@pytest.mark.asyncio
+async def test_remint_after_leading_cut_counts_only_actual_native_prefix(wire):
+    def without(rows, *labels):
+        omitted = {"ABCD".index(label) * 2 + 1 for label in labels}
+        return [
+            row.model_copy(update={"provider_payload": None}) if index in omitted else row
+            for index, row in enumerate(rows)
+        ]
+
+    def actual():
+        return [part["signature"] for part in _native(wire[-1][2])]
+
+    rows = [Message.user("first")]
+    async with _client(wire, lambda n: _response(tag="ABCD"[n - 1] if n <= 4 else "reply")) as http:
+        client = bedrock.BedrockAnthropicClient(http_client=http)
+        for label in "ABCD":
+            mint = without(rows, "A") if label == "D" else rows
+            event = await _send(client, _request(mint))
+            rows.extend(
+                [
+                    Message.assistant("portable output", provider_payload=event.provider_payload),
+                    Message.user(f"after {label}"),
+                ]
+            )
+        assert actual() == ["B", "C"]
+        for omissions, expected in (
+            (("A",), ["B", "C", "D"]),
+            (("A", "B"), ["C", "D"]),
+            (("A", "C"), ["B"]),
+            ((), ["A", "B", "C"]),
+        ):
+            # In the last case the normalized tip includes A, but the attempt
+            # that minted D did not send it. Equal tips alone are insufficient.
+            await _send(client, _request(without(rows, *omissions)))
+            assert actual() == expected
 
 
 @pytest.mark.asyncio
