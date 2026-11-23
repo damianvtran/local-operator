@@ -63,6 +63,12 @@ from .cutpoint import (
     replay_preserved_turns,
     task_boundary_floor,
 )
+from .economics import (
+    COMPACTION_ECONOMIC_DECLINED_TYPE,
+    COMPACTION_ECONOMIC_PASS_TYPE,
+    EconomicDecision,
+    economic_compaction_due,
+)
 from .idle import (
     COMPACTION_IDLE_DECLINED_TYPE,
     COMPACTION_IDLE_PASS_TYPE,
@@ -93,6 +99,7 @@ from .thresholds import (
     DEFAULT_WIRE_BYTES_BUDGET,
     DEFAULT_WIRE_BYTES_TRIGGER,
     RECOVERY_BAND,
+    WIRE_LANDING_BAND,
     WIRE_RECOVERY_BAND,
     CompactionSettings,
     cleared_headroom,
@@ -105,6 +112,7 @@ from .thresholds import (
     resolve_wire_bytes_budget,
     resolve_wire_bytes_trigger,
     should_compact,
+    wire_landing_bytes,
 )
 from .tokens import (
     IMAGE_TOKEN_ESTIMATE,
@@ -152,6 +160,7 @@ __all__ = [
     "preserved_turn_payload",
     "replay_preserved_turns",
     "RECOVERY_BAND",
+    "WIRE_LANDING_BAND",
     "WIRE_RECOVERY_BAND",
     "DEFAULT_WIRE_BYTES_BUDGET",
     "DEFAULT_WIRE_BYTES_TRIGGER",
@@ -163,6 +172,10 @@ __all__ = [
     "TOOL_RESULT_TAIL_CHARS",
     "USELESS_NOTICE",
     "build_advisor_prompt",
+    "COMPACTION_ECONOMIC_DECLINED_TYPE",
+    "COMPACTION_ECONOMIC_PASS_TYPE",
+    "EconomicDecision",
+    "economic_compaction_due",
     "COMPACTION_IDLE_DECLINED_TYPE",
     "COMPACTION_IDLE_PASS_TYPE",
     "IdleDecision",
@@ -212,6 +225,7 @@ __all__ = [
     "task_boundary_floor",
     "upsert_file_operations",
     "validate_hint",
+    "wire_landing_bytes",
 ]
 
 #: Tool results in the serialized transcript are truncated to this many

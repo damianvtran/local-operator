@@ -1,0 +1,70 @@
+{
+  "locale": "hi",
+  "namespace": "wire.session_status",
+  "date": "2026-11-20",
+  "agent": "translation-auditor",
+  "model": "openai/gpt-6.1-sol",
+  "instance": "85d0fab713d3",
+  "source_commit": "74b05c6a2aee6b6ed6a03e0332fa25611773041d",
+  "files": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-status-duration/local_operator/i18n/catalogues/en/wire.session_status.json",
+      "sha256": "278176623adafbc48fc544cd08cbeae6fc15591aa4fe914bfdf258453aed0b6d"
+    },
+    "hi": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-status-duration/local_operator/i18n/catalogues/hi/wire.session_status.json",
+      "sha256": "803db6ac0027a7912d79f14111150f0028bc93a6652bf6045739eefae90604f1"
+    }
+  },
+  "findings": {
+    "blocker": [],
+    "major": [],
+    "minor": [
+      {
+        "id": "HI-DUR-1",
+        "keys": [
+          "wire.session_status.duration_seconds",
+          "wire.session_status.duration_minutes",
+          "wire.session_status.duration_hours_minutes",
+          "wire.session_status.duration_days_hours"
+        ],
+        "current": "{count, number} सेकंड; {count, number} मि; {hours, number} घं {minutes, number} मि; {days} दिन {hours, number} घं",
+        "proposed": "Retain idiomatic units; verify rendered narrow-row fit (especially seconds). If needed shorten सेकंड to सेकं only after glossary agreement.",
+        "reason": "English compact duration widths increase (42s: 3 to 6 Rich cells; 2d 4h: 5 to 8); no rendered row evidence in this audit, so flag for rendered check rather than asserting clipping."
+      }
+    ],
+    "nit": []
+  },
+  "verdict": "clean-with-findings",
+  "keys_read": 35,
+  "scope": "4 additions plus heartbeat integration; read all 35 namespace entries; 31 old values and byte-lines unchanged apart from structural trailing comma",
+  "checks": {
+    "argument_parity": "passed: all four additions and heartbeat; days is simple string",
+    "plural_categories": [
+      "one",
+      "other"
+    ],
+    "plural_note": "New messages have no plural nodes: सेकंड, दिन and abbreviations are count-invariant; no branches or # dropped. Existing plural branches read with one/other and #.",
+    "runtime": "10 requested durations and all 10 heartbeat compositions passed",
+    "consistency": "घं/मि match relay.shell.usage.countdown_hours/minutes/days; दिन matches relay.asks.duration.days. मिनट/घंटा/घंटे in relay.asks.duration.minutes/hours are full-form register, not contradictory terminology.",
+    "latin_unit_letters": "none in new rendered values",
+    "rendered_ui": "not performed; cell lengths measured with rich.cells.cell_len",
+    "rtl": "not applicable: Hindi LTR"
+  },
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "provenance": "delegator-supplied"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "85d0fab713d3",
+    "date": "2026-11-20",
+    "result": "passed",
+    "findings": 0
+  },
+  "status": "passed",
+  "note": "One non-blocking rendered-fit check; compact/full mixed units idiomatic and consistent with existing relay catalogue. No repository edits.",
+  "source_sha256": "278176623adafbc48fc544cd08cbeae6fc15591aa4fe914bfdf258453aed0b6d"
+}

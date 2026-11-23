@@ -1,0 +1,138 @@
+{
+  "locale": "fr",
+  "namespace": "tui.info",
+  "source_sha256": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+  "context_sha256": "aee21715fca769227b3bda5b500a5e81e51763cf86817f741baff8b1a5ef0ae7",
+  "target_sha256": "f27b54408cc8b9efbe08aabdc341544f7853196f029dd9f2a03e0f81c57898fe",
+  "status": "passed",
+  "translator": {
+    "agent": "info-translate-fr",
+    "model": "openai/gpt-6.1-sol",
+    "session": "90155d1f61b8",
+    "date": "2026-11-21",
+    "fallback_from": "anthropic/claude-opus-5-5 quota failure",
+    "note": "Original author of the 266 unchanged values only; the 11 remediation keys have separate author attribution below. Attribution copied from sealed candidate manifest, not inferred from current auditor identity."
+  },
+  "auditor": {
+    "agent": "info-r2-cache-B-fr / translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "session": "74b5dead1da3",
+    "date": "2026-11-21",
+    "result": "clean with non-gating fit follow-up; terminal semantic/safety audit",
+    "findings": 0,
+    "minor_findings": 1,
+    "nit_findings": 0,
+    "fallback_from": "anthropic/claude-opus-5-5",
+    "model_evidence": "Host model-switch message: You are now running as openai/gpt-6.1-sol (was anthropic/claude-opus-5-5). Reason: provider failure: quota. Parent must independently verify fresh-run model metadata; not inferred from requested role header."
+  },
+  "commit": "2c282261f27b66390061563359f9cf72f2520538",
+  "round": 2,
+  "scope": "e9e6c3711149..2c282261f27b",
+  "lane": "B first full independent read",
+  "keys_read": 277,
+  "fresh_semantic_keys": 277,
+  "retained_semantic_keys": 0,
+  "context_keys_covered": 277,
+  "context_read_method": "Current sidecar parsed losslessly after hash verification; shared notes/role/width policy read in de-duplicated groups, exceptional notes and all 12 changed context entries read explicitly. English and French values read side by side for all 277 keys across four segments. No current partner A/B reports read.",
+  "retained_result_authority": null,
+  "input_provenance": {
+    "manifest": "i18n/audits/evidence/pr4420-audited-input-cache/manifest.json",
+    "method": "Explicitly authorized reuse of already-audited read_public_copy captures. Both cache-byte and canonical-map digests independently verified; manifest head matched sealed candidate; original catalogue bytes accessed only to hash, never to read prose.",
+    "english_cache_sha256": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+    "english_canonical_map_sha256": "c06de4b6d6b19d71ff4fc20128937f72d6d18fc7757854f493e8e3834bb1423c",
+    "french_cache_sha256": "f88c7e4a925a07dc07fe2ba4143f0266f90f97239eaa856786bdc983909d4f18",
+    "french_canonical_map_sha256": "ac0862cb0995399c326a74841a8424eacc379669926c74e4e239c6ca673feb92",
+    "binding_verified": true,
+    "no_machine_translation": true
+  },
+  "per_key_authors": {
+    "authority": "i18n/audits/evidence/pr4420-candidate-pin.json locales.fr",
+    "encoding": "default applies to every current key except the 11 explicit remediation_key_ids; the remediation actor applies exactly to those IDs. This preserves original per-key actors without attributing all 277 to the remediator.",
+    "default": {
+      "agent": "info-translate-fr",
+      "session": "90155d1f61b8",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "fallback_from": "anthropic/claude-opus-5-5 quota failure",
+      "key_count": 266
+    },
+    "remediation_actor": {
+      "agent": "info-remediate-fr",
+      "session": "4c438522c145",
+      "model": "openai/gpt-6.1-sol",
+      "key_count": 11
+    },
+    "remediation_key_ids": [
+      "tui.info.fleet_caveats.lower_bound",
+      "tui.info.agents.retained_full",
+      "tui.info.agents.tree_counts",
+      "tui.info.not_answering_clause.no_rows",
+      "tui.info.not_answering_clause.full",
+      "tui.info.tree_lines.deeper",
+      "tui.info.export.build_age",
+      "tui.info.export.uptime",
+      "tui.info.export.session_counts",
+      "tui.info.export.tree_counts",
+      "tui.info.state.stale"
+    ]
+  },
+  "semantic_checks": {
+    "held": "seuil atteint, laissé actif states a reached bound and continued liveness, not a diagnosed hang. Does not itself grant stop/force authorization; separate not-answering remedies retain their silence/heartbeat condition.",
+    "stale": "processus disparu names OS-process absence, not old heartbeat or stale data; no guessed intentional exit.",
+    "lower_bound": "The caveat explicitly says total des trajectoires, not runtime count. Running trajectory sums exclude queued work; retained finished jobs are bounded roster history, not active jobs or all-time totals.",
+    "hidden_nodes": "+ # masqué/masqués counts hidden nodes, not extra depth levels or just the last visible row's children.",
+    "answering": "Répond is a compact label identifying the answering/effective model, not a translated machine state; export explicitly labels modèle effectif.",
+    "credentials": "défini/définis in the credentials row means set/configured, not appointed. none stored is aucun enregistré. Technical credential names remain arguments.",
+    "unknown_durations": "âge de la compilation inconnu and durée d’activité inconnue agree with the field nouns; unknown is distinct from 0 s. Other branches preserve existing string interpolation. This audit tests injected localized unit strings, not the native application duration integration.",
+    "register_and_glossary": "Vous imperatives and neutral diagnostic fragments are consistent. runtime is the named legitimate kept-English exception in the French guide; technical identifiers, Python, PyPI, Git, command tokens and placeholders are not untranslated product prose. No additional English leakage found.",
+    "prior_findings": "R1 FR1 grammar and FR2 idiom proposals now present; FR3 hidden-node ambiguity replaced by masqué. R1 FR4 fit risk remains a non-gating unrendered follow-up. No prior semantic PASS retained as a substitute for this read."
+  },
+  "mechanical": {
+    "script": "scratchpad://audit_fr_b.py",
+    "command": "python3 $LOCAL_OPERATOR_SCRATCHPAD/audit_fr_b.py",
+    "exit_code": 0,
+    "parsed_source_and_target_keys": 277,
+    "argument_name_kind_skeleton_signatures_equal": true,
+    "select_arm_sets_equal": true,
+    "french_plural_nodes": 47,
+    "french_select_nodes": 25,
+    "all_french_plural_nodes_have_one_many_other": true,
+    "render_cases": 5540,
+    "cldr_samples": {"0":"one","1":"one","2":"other","5":"other","11":"other","21":"other","1000":"other","1000000":"many","1500000":"other","1.5":"one"},
+    "missing_argument_negative": "MessageFormatError raised for count.session without count",
+    "whole_missing_duration_fields": {
+      "build_age": ["  âge de la compilation  inconnu", "  âge de la compilation  0 s", "  âge de la compilation  2 min"],
+      "uptime": ["  durée d’activité  inconnue", "  durée d’activité  0 s", "  durée d’activité  2 min"]
+    },
+    "stop_commands": "Quoted command strings byte-identical to English in both remedy_one and remedy_many; never executed.",
+    "authored_bidi_controls": 0,
+    "rtl": "French is LTR; no native RTL or Urdu clearance claimed.",
+    "pseudo": "All literal AST nodes, recursively including every select/plural arm, expanded for all 11 changed values; all argument signatures and select/plural branches preserved. This is expansion/structure evidence only, not rendered-fit proof.",
+    "compiled_source_sha256": {
+      "local_operator/i18n/format.py": "dd15c8fefaeddc121a8f7722fb179ef82e0b0e44e19d0c2dcb99d78ec49f5bc7",
+      "local_operator/i18n/runtime.py": "fe6ca993affb666d802b8c6a7a05fdfd21070a64a57e2f2d3f51eec7b651a367"
+    },
+    "isolation": "Only stdlib-loaded pure formatter/parser source and their formatting data; no product catalogue fallback imports, app, server, config mutation, API or live sessions. No repo writes."
+  },
+  "findings_detail": [
+    {
+      "id": "B-FR-FIT1",
+      "severity": "minor",
+      "key": "tui.info.status.bound_held",
+      "current": "seuil atteint, laissé actif",
+      "proposed": "seuil atteint · actif",
+      "reason": "Correct conservative meaning, but 27 characters versus English 10 is a material expansion in a compact lifecycle token; retain the existing rendered-narrow-row follow-up rather than claiming observed clipping or requiring a style-only remediation wave.",
+      "evidence": "Fresh string lengths 27/10; historical R1 FR4 also flagged this same fit-only concern. Current task prohibits native rendering.",
+      "gating": false
+    }
+  ],
+  "additional_width_checks_required": [
+    {"key":"tui.info.label.install_path","current":"Chemin d’installation","english_chars":12,"french_chars":21,"proposed":"Check rendered row; preserve meaning if retained."},
+    {"key":"tui.info.label.log_dir","current":"Dossier des journaux","english_chars":7,"french_chars":20,"proposed":"Check rendered row; preserve meaning if retained."},
+    {"key":"tui.info.status.moving_to_a_new_build","current":"passage à une nouvelle compilation","english_chars":21,"french_chars":34,"proposed":"Check rendered row; preserve the new-build distinction."}
+  ],
+  "namespace_verdicts": {"tui.info":{"status":"clean with non-gating fit follow-up","keys_read":277,"unresolved_blocker_major":0}},
+  "overall_verdict": "passed independent French semantic/safety namespace audit; terminal, not whole-interface/native-renderer clearance",
+  "not_run": ["native application or clipboard integration", "terminal rendered fit", "browser", "native RTL", "tests or whole-suite checks", "generation or ledger commands", "actual kill/stop commands", "commit/push/ref movement"],
+  "note": "This receipt is B's independent current full namespace audit only, not a fabricated second approval and not a formal PR comment. Failed/blocked historical receipts are preserved. Candidate identity is bound by the supplied sealed manifest and hash checks; no Git prose reads or ref changes performed."
+}

@@ -846,7 +846,12 @@ def test_the_owner_is_resolved_from_the_federated_listing(
     server_a, server_b, host, port = pair
     record, _host, _port = _pair_settled(pair, monkeypatch, role="admin")
     _owned_session(server_a)
-    link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link is not None, reason
 
     owner, name = mobility.resolve_remote_owner(server_b, SESSION)

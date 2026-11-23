@@ -1,0 +1,11 @@
+{
+  "wire.teams.effective.team_missing": "Không tìm thấy nhóm có tên {role}.",
+  "wire.teams.effective.registry_unreadable": "Không thể đọc danh mục tác nhân. Kiểm tra các định nghĩa tác nhân rồi thử lại.",
+  "wire.teams.effective.config_unreadable": "Không thể đọc cấu hình mô hình. Kiểm tra cấu hình rồi thử lại.",
+  "wire.teams.effective.tier_invalid_value": "Giá trị tại subagents.models.{tier} không hợp lệ. Đặt thành chuỗi định danh dạng provider/model hoặc đối tượng cấu hình mô hình.",
+  "wire.teams.effective.tier_invalid_mapping": "Đối tượng cấu hình tại subagents.models.{tier} không hợp lệ. Đặt model thành chuỗi định danh dạng provider/model; có thể đặt thêm effort thành mức suy luận được hỗ trợ.",
+  "wire.teams.effective.tier_unconfigured": "Chưa cấu hình mô hình tại subagents.models.{tier}.",
+  "wire.teams.effective.tier_invalid_selector": "Chuỗi định danh mô hình tại subagents.models.{tier} không hợp lệ. Dùng định dạng provider/model.",
+  "wire.teams.effective.model_unresolvable": "Không xác định được mô hình {selector}. Kiểm tra chuỗi định danh mô hình và cấu hình nhà cung cấp.",
+  "wire.teams.effective.unavailable": "Thành viên nhóm này hiện không khả dụng. Kiểm tra cấu hình mô hình và định nghĩa tác nhân của thành viên này."
+}

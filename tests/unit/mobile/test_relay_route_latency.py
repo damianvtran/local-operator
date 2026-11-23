@@ -196,9 +196,9 @@ def test_models_route_builds_once_for_the_apps_duplicate_requests(
 ) -> None:
     calls: list[int] = []
 
-    def list_models() -> list[dict[str, object]]:
+    def list_models() -> tuple[list[dict[str, object]], dict[str, object]]:
         calls.append(1)
-        return [{"selector": "p/m"}]
+        return [{"selector": "p/m"}], {}
 
     monkeypatch.setattr(daemon_module, "_list_models", list_models)
     monkeypatch.setattr(daemon_module, "_configured_default", lambda: None)
@@ -213,7 +213,7 @@ def test_models_route_builds_once_for_the_apps_duplicate_requests(
 def test_models_route_still_answers_a_failed_build_with_502(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def broken() -> list[dict[str, object]]:
+    def broken() -> tuple[list[dict[str, object]], dict[str, object]]:
         raise RuntimeError("Model catalogue unavailable for OpenAI; retry or log in again")
 
     monkeypatch.setattr(daemon_module, "_list_models", broken)

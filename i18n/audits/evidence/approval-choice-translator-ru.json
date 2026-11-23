@@ -1,0 +1,61 @@
+{
+  "locale": "ru",
+  "role": "translator",
+  "agent": "approval-labels-author-ru",
+  "session_id": "a3eb1f43777c",
+  "actual_authoring_model": "openai/gpt-6.1-sol",
+  "host_reported_fallback": "anthropic/claude-opus-5-5 to openai/gpt-6.1-sol; provider failure: quota; before translation authoring",
+  "head": "69b7e09c9b56924a7fefe561e283a73045b0a845",
+  "target": "local_operator/i18n/catalogues/ru/wire.settings.json",
+  "scope": [
+    "wire.settings.tool_approval_mode.choice.ask.label",
+    "wire.settings.tool_approval_mode.choice.auto.label"
+  ],
+  "input": {
+    "capture": "i18n/audits/evidence/approval-choice-input-cache.json",
+    "pin": "i18n/audits/evidence/approval-choice-source-pin.json",
+    "source_sha256": "298fc1100cb10bfa34909aa245307a735dad318f456e5bbfb5337fbcdb1e8962",
+    "context_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+    "verification": "Checked frozen HEAD, exact English/source-context file hashes, Russian original full-file hash against capture and source pin, EN/RU selected canonical map digests, and both context object digests. Only approved capture supplied catalogue prose."
+  },
+  "before_file_sha256": "68a0809d4356416703208d407734abe6433ec1b7b6796d61b7a2706691b3a624",
+  "after_file_sha256": "87ac6464c94f359c7ba6a045fe0e8d0ed1297c653d036d47da0aaedf3b90f4f8",
+  "before_selected_canonical_sha256": "c6e9ee9ae8e23027e2e29588154c7e71e142a05f202428bc4da93a19d07c9bba",
+  "after_selected_canonical_sha256": "3a4ecc144843136ae0cd58eb5385b3d88644a236ebecbf343ff0f72dc2b0eaa3",
+  "choices": {
+    "wire.settings.tool_approval_mode.choice.ask.label": {
+      "value": "спрашивать",
+      "status": "RETAINED unchanged",
+      "original_actor": "unknown; existing frozen catalogue bytes, not authored by this translator",
+      "backtranslation": "ask (habitual infinitive)",
+      "rationale": "Existing native infinitive naturally names the prompting behavior. Retained established lowercase catalogue register and action-label infinitive from ru style guide; adds no always/every-tool promise. Not a notification or confirmation label."
+    },
+    "wire.settings.tool_approval_mode.choice.auto.label": {
+      "before": "auto",
+      "value": "автоматически",
+      "status": "CHANGED; newly authored by this session's actual model",
+      "backtranslation": "automatically",
+      "rationale": "Conventional Russian mode adverb; concise and idiomatic without borrowed Latin config code. Lowercase matches the retained neighboring choice. Avoids an adjective requiring an implied noun's gender, and adds neither permission nor unconditional approval semantics. Glossary approvals remains одобрения; no extra term invented."
+    }
+  },
+  "authoring_controls": {
+    "catalogue_key_count_before": 895,
+    "catalogue_key_count_after": 895,
+    "scope_key_count": 2,
+    "changed_key_count": 1,
+    "retained_scope_key_count": 1,
+    "other_keys_unchanged": 893,
+    "exact_byte_scope": "Single literal value replacement; reversing it reproduces the pinned original full-file SHA. All other bytes, formatting and key order preserved.",
+    "icu": "Both source and target choices are plain messages: zero arguments, zero selectors; plural/select branches and skeletons N/A. No brace, markup or escape characters. Placeholders unchanged (empty set).",
+    "unicode": "NFC checked; no authored bidi controls; no added punctuation.",
+    "wire_values": "No source code or wire enum values edited.",
+    "synthetic_only": [
+      {"key": "wire.settings.tool_approval_mode.choice.ask.label", "english_cells": 3, "russian_cells": 10, "literal_pseudo": "⟦спрашивать~~~~⟧", "pseudo_cells": 16},
+      {"key": "wire.settings.tool_approval_mode.choice.auto.label", "english_cells": 9, "russian_cells": 13, "literal_pseudo": "⟦автоматически~~~~~⟧", "pseudo_cells": 20}
+    ],
+    "width_method": "Synthetic Unicode cell count: combining marks zero, W/F two, other characters one; no rendered or native fit claim.",
+    "overflow_risk": "Both exceed English cell lengths; ask is 10 vs 3, automatic 13 vs 9. No pinned maxCells present in the two captured contexts. Retained natural ask and chose full natural automatic rather than shortening to ambiguous or borrowed config codes. Actual fit unverified."
+  },
+  "review_state": "Translation authoring only. No native-speaker approval, independent safety audit or self-audit approval claimed. Parent must run two independent safety auditors on common committed candidate.",
+  "execution_note": "Verification eval initially lost variables after kernel eviction; reconstructed the exact original via single-value reversal, verified its pinned SHA and reran the authoring-control checks successfully. No dependency installs, tests, app/browser runs, staging, commits or pushes."
+}

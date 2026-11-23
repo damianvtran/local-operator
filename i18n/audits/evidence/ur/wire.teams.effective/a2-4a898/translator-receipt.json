@@ -1,0 +1,72 @@
+{
+  "locale": "ur",
+  "namespace": "wire.teams.effective",
+  "source_sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501",
+  "status": "translated",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "8dce6c4d11c0",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Session host Model declaration",
+    "date": "2026-11-19",
+    "fallback": "none used"
+  },
+  "auditor": {
+    "agent": null,
+    "model": null
+  },
+  "key_count": 9,
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "ur": {
+      "path": "/Users/damian/.local-operator/sessions/8dce6c4d11c0/scratchpad/ur/wire.teams.effective.json",
+      "sha256": "c43b87b8f9cc396da817e7c20da28c3b2a3b00668e6003ba4a4f0872c7ef345a"
+    }
+  },
+  "note": "Scratch translation only; mechanical validator passed. No independent audit or visual proof. Requires two independent audit instances for high-visibility configuration remedies.",
+  "constraints": {
+    "rtl": "Logical storage order; zero hardcoded bidi controls. Token isolation is runtime responsibility, not proven here.",
+    "placeholders": "Exact ordered {role}, {tier}, {selector}; no plural/select introduced.",
+    "technical_tokens": "Preserved subagents.models.{tier}, provider/model, model and effort (configuration keys only). Ordinary model/effort prose translated.",
+    "width": "Context explicitly allows natural wrapping; no maxCells/maxChars."
+  },
+  "glossary_proposals": {
+    "agent registry": "ایجنٹ رجسٹری",
+    "model selector": "ماڈل منتخب کرنے کی عبارت",
+    "model mapping": "ماڈل کی میپنگ",
+    "provider": "فراہم کنندہ",
+    "reasoning effort": "استدلال کی سطح"
+  },
+  "linguistic_notes": [
+    "team_missing: {role} names a team, not a member role; نام کی کوئی ٹیم preserves this distinction.",
+    "Mapping means a configuration object, rendered میپنگ rather than map/cartography. model remains required; effort is explicitly optional (اگر چاہیں).",
+    "Resolution failure uses تعین نہیں ہو سکا rather than claiming a particular missing file or corrupt provider.",
+    "Respectful دیکھیں، درج کریں، استعمال کریں; feminine ترتیبات agrees with پڑھی نہیں جا سکیں.",
+    "Technical Latin model and effort are preserved only as config keys, not English prose."
+  ],
+  "evidence_limits": {
+    "semantic_independent_audit": "not performed",
+    "second_independent_audit": "not performed",
+    "pseudo": "not performed",
+    "bidi_runtime": "not performed",
+    "rendered_visual": "not performed",
+    "shipped": "not claimed"
+  },
+  "validation": {
+    "entrypoint": "scripts.i18n.check.main([\"--catalogues-only\"])",
+    "catalogue_root": "/Users/damian/.local-operator/sessions/8dce6c4d11c0/scratchpad/ur/catalogue-fixture",
+    "exit_code": 0,
+    "scope": "scratch fixture, namespace only"
+  },
+  "process_notes": [
+    "guide://i18n/current was unavailable; read guide://i18n and frozen-checkout docs/I18N.md instead.",
+    "Initial scratch token checks incorrectly treated ordinary English model/reasoning effort prose as literal keys; corrected checker scope using context notes. Catalogue bytes were unchanged."
+  ]
+}

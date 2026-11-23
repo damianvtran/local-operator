@@ -1,0 +1,18 @@
+interpreter: /Users/damian/local-operator/.venv/bin/python
+module: /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/scripts/i18n/check.py
+module: /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/i18n/catalogues.py
+module: /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/i18n/runtime.py
+isolated HOME: /Users/damian/.local-operator/sessions/6640da3c0b72/scratchpad/vi-a-home.YMcsXu
+input local_operator/i18n/catalogues/en/tui.provider_state.json 113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912
+input local_operator/i18n/catalogues/en/tui.provider_state.context.json 67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be
+input local_operator/i18n/catalogues/vi/tui.provider_state.json 74e6607520947d1910479a85be916e8fa3e0efa6104230d19cef8d74a3aa4867
+official check_catalogues initial: []
+{"key": "tui.provider_state.logged_in", "en": "logged in", "vi": "đã đăng nhập", "en_cells": 9, "vi_cells": 12, "vi_chars": 12, "pseudo_cells": 19, "maxCells": null, "arguments": [], "plural_select_branches": 0, "NFC": true}
+{"key": "tui.provider_state.env_key", "en": "env key", "vi": "khóa từ biến môi trường", "en_cells": 7, "vi_cells": 23, "vi_chars": 23, "pseudo_cells": 34, "maxCells": null, "arguments": [], "plural_select_branches": 0, "NFC": true}
+{"key": "tui.provider_state.needs_login", "en": "needs login", "vi": "cần đăng nhập", "en_cells": 11, "vi_cells": 13, "vi_chars": 13, "pseudo_cells": 21, "maxCells": null, "arguments": [], "plural_select_branches": 0, "NFC": true}
+{"key": "tui.provider_state.local_ready", "en": "configured server", "vi": "máy chủ đã cấu hình", "en_cells": 17, "vi_cells": 19, "vi_chars": 19, "pseudo_cells": 29, "maxCells": null, "arguments": [], "plural_select_branches": 0, "NFC": true}
+{"key": "tui.provider_state.local_unconfigured", "en": "configure server", "vi": "cấu hình máy chủ", "en_cells": 16, "vi_cells": 16, "vi_chars": 16, "pseudo_cells": 25, "maxCells": null, "arguments": [], "plural_select_branches": 0, "NFC": true}
+negative missing key: ["vi/tui.provider_state: missing key 'tui.provider_state.logged_in'"]
+negative added argument: ["vi/tui.provider_state: tui.provider_state.logged_in: arguments (('unexpected', 'simple'),) != en's (): en has 0 argument(s), translation has 1"]
+official check_catalogues restored: []
+PASS: five keys; scoped official validation and negative controls; zero arguments/plural/select; NFC/protected tokens/plain Rich/English controls

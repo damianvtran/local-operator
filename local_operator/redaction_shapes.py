@@ -910,6 +910,13 @@ _VENDOR_FIXED_PREFIXES: tuple[str, ...] = (
     "syt_",
     "doo_v1",
     "pat_",
+    # Radient Team Integrations show-once credentials (RFC §4.1): app tokens,
+    # automation bearer secrets and Grafana signing secrets. Sealed straight
+    # into the secret store by the ``integrations`` tool; listed here so a copy
+    # that escapes by any other route is still masked by shape.
+    "rdi_at_",
+    "rdi_hk_",
+    "rdi_whs_",
 )
 
 #: The token-tail grammar, shared by every vendor prefix: a run of at least 8

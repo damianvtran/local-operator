@@ -1,0 +1,89 @@
+{
+  "locale": "fr",
+  "namespace": "tui.provider_state",
+  "audit_date": "2026-11-22",
+  "key_count": 5,
+  "audit_pass": "A",
+  "source_audit_revision": "a54ec02de48a94b68d6c3dc92e1307c97ea776ad",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "25fe1758fc50",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-22",
+    "independent_from_translator_session": "e0c1b7382197",
+    "actual_model_source": "Host model-switch notice: quota fallback before audit execution and linguistic assessment",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "result": "passed",
+    "findings": 0
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "e0c1b7382197",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host model-switch notice before authoring: temporary fallback from anthropic/claude-opus-5-5 due to provider failure: quota",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.json",
+      "sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.context.json",
+      "sha256": "67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be"
+    },
+    "fr": {
+      "path": "local_operator/i18n/catalogues/fr/tui.provider_state.json",
+      "sha256": "87cf1654daed989e12d9f431395f4f731c07de5d3204aeb3f0cb0705e92719f8"
+    }
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "F-A1"
+    ],
+    "minor_count": 1
+  },
+  "current_bytes_match_audited_hashes": true,
+  "report_kind": "audit_notes_not_execution_log",
+  "scope_limitations": [
+    "Not second independent pass",
+    "Not styled/native UI fit proof",
+    "Not release or global French coverage certification"
+  ],
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/fr/tui.provider_state/fa25/report.md",
+      "sha256": "a5e2dfd2b0f7eba26ac90e605cd417df6d7a3ccadbad5397a6bcb3079a49aead"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.provider_state/fa25/script.py.txt",
+      "sha256": "e50e1c369849dbcf21db70ddadacc9aaeaf981cb280169a7938dc693938444e5"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.provider_state/fa25/audit.log",
+      "sha256": "32997fb5e84e2da7eb7631f66a63ac3eba5b3112b0e31a32a145d67c72d5c0eb"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.provider_state/fa25/harness-failure.log",
+      "sha256": "0d7eb5fb2eb3aac0692e250fe5ab408840bee6035e1f9f9cb79065cec9c2281f"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.provider_state/fa25/ledger-receipt.json",
+      "sha256": "fb16b83becaeb05b51d357346bb19386afc2fa487ba82b9557eb1a84ffa8b2e1"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.provider_state/fa25/ledger-dry-run.log",
+      "sha256": "742c7afcce132829aa4fa722b60b97012cf0c652281098059b500f58defed4e6"
+    }
+  ]
+}

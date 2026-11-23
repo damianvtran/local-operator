@@ -1,0 +1,104 @@
+{
+  "locale": "ur",
+  "namespace": "wire.teams.effective",
+  "audit_date": "2026-11-19",
+  "audit_pass": "first independent instance",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "da45f1eea614",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "8dce6c4d11c0",
+    "actual_model_source": "Host session-state Model declaration: openai/gpt-6.1-sol",
+    "fallback": "none used",
+    "date": "2026-11-19"
+  },
+  "source_revision": "e70bc818b8553dca1fad007705257817be49ee37",
+  "report_kind": "audit_notes_not_execution_log",
+  "per_key": [
+    {
+      "key": "wire.teams.effective.team_missing",
+      "current_text": "{role} نام کی کوئی ٹیم نہیں ملی۔",
+      "source_text": "No team named {role} was found.",
+      "status": "passed",
+      "reasoning": "The opaque {role} is a team name, not a role noun. نام کی کوئی ٹیم is natural feminine agreement and preserves missing-team meaning.",
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.registry_unreadable",
+      "current_text": "ایجنٹ رجسٹری پڑھی نہیں جا سکی۔ ایجنٹ کی تعریفیں دیکھیں اور دوبارہ کوشش کریں۔",
+      "source_text": "The agent registry could not be read. Check the agent definitions and try again.",
+      "status": "passed",
+      "reasoning": "Neutral inability-to-read plus respectful check-and-retry remedy retained. ایجنٹ کی تعریفیں is software definitions, not a claim that a named file is corrupt.",
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.config_unreadable",
+      "current_text": "ماڈل کی ترتیبات پڑھی نہیں جا سکیں۔ اپنی ترتیبات دیکھیں اور دوبارہ کوشش کریں۔",
+      "source_text": "The model configuration could not be read. Check your configuration and try again.",
+      "status": "passed",
+      "reasoning": "ماڈل کی ترتیبات is the configured model settings. Feminine plural پڑھی نہیں جا سکیں agrees; own-configuration check-and-retry remedy retained.",
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_value",
+      "current_text": "subagents.models.{tier} میں درج قدر درست نہیں۔ اسے provider/model کی شکل میں ماڈل منتخب کرنے کی عبارت یا ماڈل کی میپنگ پر سیٹ کریں۔",
+      "source_text": "The value at subagents.models.{tier} is invalid. Set it to a provider/model selector or a model mapping.",
+      "status": "passed",
+      "reasoning": "Invalid value at literal tier path retained. Either provider/model selector text OR model mapping is a clear alternative. میپنگ is recognizable configuration-object terminology, not cartography; سیٹ کریں is normal technical Urdu.",
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_mapping",
+      "current_text": "subagents.models.{tier} میں درج میپنگ درست نہیں۔ model میں provider/model کی شکل میں ماڈل منتخب کرنے کی عبارت درج کریں اور، اگر چاہیں، effort میں استدلال کی کوئی معاونت یافتہ سطح درج کریں۔",
+      "source_text": "The mapping at subagents.models.{tier} is invalid. Set model to a provider/model selector and, optionally, effort to a supported reasoning effort.",
+      "status": "passed",
+      "reasoning": "Invalid mapping retained. Required model assignment appears as unconditional درج کریں; only effort is conditional اگر چاہیں. معاونت یافتہ سطح conveys supported reasoning effort rather than arbitrary effort. Technical keys remain Latin. Prose is longer but grammatical and actionable.",
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.tier_unconfigured",
+      "current_text": "subagents.models.{tier} میں کوئی ماڈل مقرر نہیں ہے۔",
+      "source_text": "No model is configured at subagents.models.{tier}.",
+      "status": "passed",
+      "reasoning": "No configured model is not confused with an invalid model. Literal path retained and ماڈل مقرر نہیں ہے reads naturally.",
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_selector",
+      "current_text": "subagents.models.{tier} میں ماڈل منتخب کرنے کی عبارت درست نہیں۔ provider/model کی شکل استعمال کریں۔",
+      "source_text": "The model selector at subagents.models.{tier} is invalid. Use the provider/model format.",
+      "status": "passed",
+      "reasoning": "Invalid selector and provider/model-format remedy both retained. منتخب کرنے کی عبارت is a descriptive selector term consistent across this group, with no untrusted raw value added.",
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.model_unresolvable",
+      "current_text": "ماڈل {selector} کا تعین نہیں ہو سکا۔ ماڈل منتخب کرنے کی عبارت اور فراہم کنندہ کی ترتیبات دیکھیں۔",
+      "source_text": "The model {selector} could not be resolved. Check the model selector and provider configuration.",
+      "status": "passed",
+      "reasoning": "کا تعین نہیں ہو سکا preserves inability to resolve a model, without asserting model absence or provider outage. Both selector and provider-configuration checks retained; opaque {selector} untouched.",
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.unavailable",
+      "current_text": "ٹیم کا یہ رکن دستیاب نہیں۔ اس کے ماڈل کی ترتیبات اور ایجنٹ کی تعریف دیکھیں۔",
+      "source_text": "This team member is unavailable. Check its model configuration and agent definition.",
+      "status": "passed",
+      "reasoning": "Unavailable team member is رکن, distinct from team name. Model configuration AND agent definition remedy retained. No launched/failed-launch claim introduced.",
+      "findings": []
+    }
+  ],
+  "findings": [],
+  "verdict": "passed",
+  "unresolved_blocker_major_count": 0,
+  "second_independent_audit": "pending; this receipt is one independent instance only",
+  "fit": "No maxCells/maxChars constraint. Sidecar requires natural wrapping. Mapping remedy is longest (188 stored characters); client layout/visual proof remains separate. Combining marks and shaping require actual client testing, not code-point counts.",
+  "rtl": "Logical Urdu syntax and punctuation reviewed. No manual directional controls. Config paths and Latin selectors preserved. Scoped formatter exercised mixed-script team name and Latin tier/selector; no bidi display, mirroring or visual claim.",
+  "limits": [
+    "No machine translation/translation SDK/service used",
+    "No catalogue/repo/generated edits",
+    "No ledger apply/build/install/server/PR",
+    "No runtime pseudo/fallback/bidi/rendered-client completion claimed",
+    "Scratch originals require manager import to canonical tracked evidence root; not claimed on main"
+  ]
+}

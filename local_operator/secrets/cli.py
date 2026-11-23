@@ -226,7 +226,11 @@ def add_parser(subparsers: Any, *, help_locale: str | None = None) -> None:
     broker_actions.add_parser("stop", help="Stop the running broker")
     broker_actions.add_parser(
         "restart",
-        help="Stop the running broker and start a fresh one (use after `lop-update`)",
+        # QA minor: this is a roll now, not stop-then-start, and it can refuse.
+        help=(
+            "Replace the running broker with one from this build without dropping "
+            "sessions; refuses when a session could not re-register"
+        ),
     )
     broker_actions.add_parser(
         "run", help="Run a broker in the foreground (for debugging; normally started on demand)"

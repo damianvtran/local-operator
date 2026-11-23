@@ -95,7 +95,9 @@ class _FakeViewer:
         self.slashes: list[tuple[str, str]] = []
         self.waited: list[str] = []
 
-    async def bind_runtime(self, *, deadline: float | None = None) -> None:
+    async def bind_runtime(
+        self, *, deadline: float | None = None, wait_for_publication: Any = None
+    ) -> None:
         self.bound = True
 
     async def dispose(self) -> None:
@@ -486,7 +488,9 @@ class _BlindViewer(_FakeViewer):
         super().__init__()
         self.rung = rung
 
-    async def bind_runtime(self, *, deadline: float | None = None) -> None:
+    async def bind_runtime(
+        self, *, deadline: float | None = None, wait_for_publication: Any = None
+    ) -> None:
         if self.rung == "bind":
             raise ConnectionError("the remote owner did not send its state")
         self.bound = True
@@ -762,19 +766,95 @@ def test_a_mailbox_send_whose_dial_fails_reports_nothing_delivered(
     assert [client.detached for client in opened.owner.clients] == [True]
 
 
-def test_a_mailbox_send_retries_locate_while_a_spawned_runtime_publishes(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def _persist_mailbox_at_receiver(
+    viewer: _FakeViewer, monkeypatch: pytest.MonkeyPatch, session_dir: Path
 ) -> None:
-    """A stored session is engaged by the send (a write warms it), and its record
-    appears a moment later — the bind loop's short locate retry, kept here."""
+    from local_operator.session.runtime.inbox import InboxLine, append_inbox
+
+    session_dir.mkdir(parents=True)
+    acknowledge = viewer.send_peer_message
+
+    async def receive(text: str, **kwargs: Any) -> dict[str, Any]:
+        assert append_inbox(session_dir, InboxLine(text=text, sender={}))
+        return await acknowledge(text, **kwargs)
+
+    monkeypatch.setattr(viewer, "send_peer_message", receive)
+
+
+def test_a_mailbox_send_retries_locate_while_a_spawned_runtime_publishes(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Inside the budget a stored send still writes exactly once, after publish."""
+    from local_operator.session.runtime.inbox import peek_inbox
+
     viewer = _FakeViewer()
     viewer.mailbox = True
+    mailbox_dir = tmp_path / "owner-mailbox"
+    _persist_mailbox_at_receiver(viewer, monkeypatch, mailbox_dir)
     opened = _patch(monkeypatch, viewer, _remote_row(live_state=""))
     assert opened.owner is not None
     opened.owner.records_after = 2
     assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION, "--mailbox", "hi"]) == 0
     assert ok(capsys.readouterr().out)["outcome"] == "delivered"
-    assert opened.owner.locates == 3 and opened.calls == 0
+    assert opened.owner.engaged == 1 and opened.owner.locates == 3 and opened.calls == 0
+    assert [row.text for row in peek_inbox(mailbox_dir)] == ["hi"]
+
+
+def _use_real_cold_bind(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake: _FakeOwner) -> None:
+    from local_operator.session.attached import AttachedSession
+    from local_operator.session.owner import LocalOwner
+
+    # Keep the real bind-under-lock path; isolate the peer's answers and fail
+    # the test if a refusal ever crosses from readiness into plain delivery.
+    owner = LocalOwner(tmp_path, SESSION)
+    monkeypatch.setattr(owner, "engage", fake.engage)
+    monkeypatch.setattr(owner, "locate", fake.locate)
+
+    async def never() -> Any:
+        raise AssertionError("a pilot viewer never takes over")
+
+    async def open_viewer(_session_id: str, **_kwargs: Any) -> AttachedSession:
+        return await AttachedSession.cold(
+            SESSION, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=never, owner=owner
+        )
+
+    async def reject_unready_prompt(*_args: Any, **_kwargs: Any) -> None:
+        pytest.fail("plain send reached delivery without a runtime record")
+
+    monkeypatch.setattr("local_operator.session.remote_open.open_remote_viewer", open_viewer)
+    monkeypatch.setattr(AttachedSession, "prompt_and_wait", reject_unready_prompt)
+
+
+@pytest.mark.parametrize("mailbox", [True, False], ids=["mailbox", "plain"])
+def test_a_send_past_the_cold_boot_deadline_is_not_queued(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+    mailbox: bool,
+) -> None:
+    from local_operator.session.runtime.inbox import peek_inbox
+
+    viewer = _FakeViewer()
+    viewer.mailbox = True
+    mailbox_dir = tmp_path / "owner-mailbox"
+    _persist_mailbox_at_receiver(viewer, monkeypatch, mailbox_dir)
+    opened = _patch(monkeypatch, viewer, _remote_row(live_state=""))
+    assert opened.owner is not None
+    opened.owner.records_after = 99
+    if not mailbox:
+        _use_real_cold_bind(monkeypatch, tmp_path, opened.owner)
+    monkeypatch.setattr(net_cli, "PILOT_COLD_BOOT_BUDGET_S", 0.02, raising=False)
+    monkeypatch.setattr("local_operator.network.store.find_own_relay", lambda _root: object())
+    args = ["sessions", "--json", "--peer", PEER, "--send", SESSION]
+    if mailbox:
+        args.append("--mailbox")
+    assert _run([*args, "hi"]) == 1
+    payload = ok(capsys.readouterr().out)
+    assert f"still starting on {PEER}; message NOT queued" in payload["message"]
+    assert opened.owner.engaged == 1 and opened.owner.connects == []
+    assert viewer.peer_messages == [] and peek_inbox(mailbox_dir) == []
+    assert "blocked_s=" in caplog.text and "deadline_s=0.020" in caplog.text
 
 
 def test_a_mailbox_send_with_no_runtime_after_engage_is_refused(
@@ -793,20 +873,30 @@ def test_a_mailbox_send_with_no_runtime_after_engage_is_refused(
     assert opened.owner.connects == [] and viewer.peer_messages == []
 
 
-def test_a_mailbox_send_whose_engage_is_refused_keeps_the_peer_code(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("mailbox", [True, False], ids=["mailbox", "plain"])
+def test_a_send_whose_engage_is_refused_keeps_the_peer_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    mailbox: bool,
 ) -> None:
     from local_operator.network.projection import ProjectionRefusal
 
     viewer = _FakeViewer()
     viewer.mailbox = True
-    opened = _patch(monkeypatch, viewer, _remote_row())
+    opened = _patch(monkeypatch, viewer, _remote_row(live_state=""))
     assert opened.owner is not None
-    opened.owner.engage_error = ProjectionRefusal("peer_refused", "the peer said no")
-    assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION, "--mailbox", "hi"]) == 1
+    opened.owner.engage_error = ProjectionRefusal("peer_refused", "runtime executable is missing")
+    args = ["sessions", "--json", "--peer", PEER, "--send", SESSION]
+    if mailbox:
+        args.append("--mailbox")
+    else:
+        _use_real_cold_bind(monkeypatch, tmp_path, opened.owner)
+    assert _run([*args, "hi"]) == 1
     payload = ok(capsys.readouterr().out)
-    assert payload["code"] == "peer_refused" and payload["message"] == "the peer said no"
-    assert opened.owner.connects == [] and opened.calls == 0
+    assert payload["code"] == "peer_refused"
+    assert payload["message"] == "runtime executable is missing"
+    assert opened.owner.locates == 0 and opened.owner.connects == []
 
 
 def test_no_wake_without_mailbox_is_a_usage_error(

@@ -29,7 +29,11 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Container, Sequence
 
-from local_operator.harness.rows import is_harness_injection, is_harness_notice_text
+from local_operator.harness.rows import (
+    is_harness_chrome,
+    is_harness_injection,
+    is_harness_notice_text,
+)
 from local_operator.harness.types import (
     AgentMessage,
     CustomMessage,
@@ -817,10 +821,10 @@ def advance_cut_to_wire_band(
     with ~0.4 frame of headroom and fired again one or two tool groups later
     (measured bursts of consecutive passes, each rewriting the prompt prefix,
     so the request after a pass read 27.5% cache-read against ~80% in steady
-    state). The auto-continue gate already defines "real headroom" as
-    ``WIRE_RECOVERY_BAND`` x trigger; this applies that same definition to the
-    cut itself, so a byte-fired pass lands inside the band, not beside the
-    trigger.
+    state). The caller passes its landing target as ``band_bytes``
+    (``thresholds.wire_landing_bytes``: ``WIRE_LANDING_BAND`` x trigger, never
+    above the ``WIRE_RECOVERY_BAND`` line the auto-continue gate accepts), so
+    a byte-fired pass lands with real room under the trigger, not beside it.
 
     ``kept_bytes(i)`` is the CALLER's ruler for what the request would weigh
     if the cut were ``i``. It is a callable, not a ruler imported here,
@@ -1152,7 +1156,8 @@ def elision_notice_text(genuine_dropped: int, injections_dropped: int) -> str | 
             f"{genuine_dropped} older user message(s) you wrote were dropped here to "
             "bound the context. They are still in the session transcript but are no "
             "longer in the model's context. If an earlier instruction seems to be "
-            "missing, ask rather than assuming it was never given."
+            "missing, search them with sessions(op='peek', query=...) on this "
+            "session, or ask, rather than assuming it was never given."
         )
     if injections_dropped > 0:
         parts.append(
@@ -1448,10 +1453,20 @@ def cap_preserved_user_turns(
     # it re-seats the harness's words as a user row. Text is sound evidence at
     # THIS site in a way it is not on a live fold: these are stored copies
     # inside a compaction block, never a row the operator typed in this process.
+    #
+    # Harness CHROME prompts (``harness_chrome_prompts`` / ``is_harness_chrome``:
+    # the "Harness recovery notice: ..." re-asks and the "[system] Your
+    # previous response was cut off ..." connectivity continuation, all minted
+    # in ``harness/chrome_prompts.py``) are shed here too. They stay in the
+    # LIVE context by design (rows.py), but a stored copy inside the preserved
+    # block is the harness's words re-seated as an operator turn on every pass
+    # forever; measured 8 such copies in the chief of staff's 1,297-turn block.
+    # Exact/recogniser match only, never a prefix guess.
     def _is_injection_turn(turn: Mapping[str, object]) -> bool:
         if injection_ids is not None and str(turn.get("id", "")) in injection_ids:
             return True
-        return is_harness_notice_text(str(turn.get("text", "")))
+        text = str(turn.get("text", ""))
+        return is_harness_notice_text(text) or is_harness_chrome(text)
 
     kept_turns = [turn for turn in real_turns if not _is_injection_turn(turn)]
     injections_dropped += len(real_turns) - len(kept_turns)

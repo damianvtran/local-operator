@@ -1,0 +1,6600 @@
+{
+  "locale": "ur",
+  "namespace": "tui.info",
+  "source_sha256": "909a00c7f98b291863ae6508648ede30b3edddf868e5c0d84a23999666e3cdaf",
+  "context_sha256": "905690aae095d0ec8fe0b36f6dfe92db05e9c6e3bfdbc0fe87577a37002b9d11",
+  "target_sha256": "87aa9c70a1f3e8bd55454f4ca4fa304a88846f35c5d129fc47a6fef4db8b692d",
+  "commit": "e9e6c3711149cba6899083eab019342d98d5fa55",
+  "scope": "ea92d3c2faa7..e9e6c3711149",
+  "round": 1,
+  "translator": {
+    "agent": "info-translate-ur / translator",
+    "session": "54dba55779e0",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "fallback_from": "anthropic/claude-opus-5-5",
+    "fallback_reason": "provider quota failure",
+    "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+  },
+  "auditor": {
+    "agent": "info-audit-ur / translation-auditor",
+    "session": "128c8c14edfa",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "fallback_from": "anthropic/claude-opus-5-5",
+    "fallback_reason": "provider quota failure (explicit harness model-switch notice)",
+    "result": "failed",
+    "findings": 1
+  },
+  "status": "failed",
+  "note": "Independent full 277-key Urdu audit on e9e6c3711149cba6899083eab019342d98d5fa55. FAILED: UR1 major remains unresolved; UR2/UR3 minor. English and Urdu product prose were read through read_public_copy. The 282066-byte public English context sidecar exceeded that reader 200000-character cap; parent explicitly authorized metadata-only local parsing of this exact sidecar. Every one of its 277 entries and placeholder contracts was read via a lossless sentence-pool representation; decoding equals the original parsed object and canonical SHA-256 is bc9693e1f6a11f0d55fff0cf103846b24ce4bbe27fa61472104557168615342e for both. No other product-copy read fallback. All 792 ICU cases resolved from actual Urdu via production tr_record. No repo writes, ledger append, generation or app/native/browser execution. Mechanics do not establish shaping, pixels, actual screen fit, or shipping clearance.",
+  "keys_read": 277,
+  "context_keys_read": 277,
+  "semantic_clean_keys": 274,
+  "findings_detail": [
+    {
+      "id": "UR1",
+      "severity": "major",
+      "message_id": "tui.info.fleet_caveats.lower_bound",
+      "current": "{count, plural, one {# سیشن پرانی بلڈ چلا رہا ہے اور ذیلی ایجنٹس کی تعداد نہیں بتاتا — تمام رن ٹائمز کا مجموعہ کم از کم معلوم تعداد ہے۔} other {# سیشنز پرانی بلڈ چلا رہے ہیں اور ذیلی ایجنٹس کی تعداد نہیں بتاتے — تمام رن ٹائمز کا مجموعہ کم از کم معلوم تعداد ہے۔}}",
+      "proposed": "{count, plural, one {# سیشن پرانی بلڈ چلا رہا ہے اور ذیلی ایجنٹس کی تعداد نہیں بتاتا — ٹریجیکٹریز کا مجموعہ کم از کم معلوم تعداد ہے۔} other {# سیشنز پرانی بلڈ چلا رہے ہیں اور ذیلی ایجنٹس کی تعداد نہیں بتاتے — ٹریجیکٹریز کا مجموعہ کم از کم معلوم تعداد ہے۔}}",
+      "reason": "The Urdu explicitly calls the runtime/process total a lower bound, whereas the missing old-build subagent reports make the active-trajectory total incomplete; runtime and trajectory counts are separate facts.",
+      "evidence": "info_panel.py:1265-1286 and 1342-1358: bound is based on subagents_unreported and applied to fleet_trajectories; metadata contexts agents.summary_full / agents.trajectories_total confirm active session turns plus RUNNING subagents. Counterfactual: 4 known runtimes and ≥7 trajectories, with one old-build reporter; the Urdu currently describes the wrong denominator as incomplete."
+    },
+    {
+      "id": "UR2",
+      "severity": "minor",
+      "message_id": "tui.info.label.answering",
+      "current": "جواب دہی",
+      "proposed": "مؤثر ماڈل",
+      "reason": "جواب دہی means accountability/answerability, not the model currently producing the answer; مؤثر ماڈل also agrees with the existing export.effective_model terminology.",
+      "evidence": "info_panel.py:929-935 only emits this row when effective_model differs from selected model. The model ID and failover note remain visible, so this is a non-blocking label defect, not a failed routing claim."
+    },
+    {
+      "id": "UR3",
+      "severity": "minor",
+      "message_id": "tui.info.env.credentials_set",
+      "current": "{count, plural, one {# مقرر} other {# مقرر}}",
+      "proposed": "{count, plural, one {# محفوظ} other {# محفوظ}}",
+      "reason": "مقرر reads appointed/designated in this count fragment; محفوظ is idiomatic for the stored credential keys being counted and matches credentials_empty.",
+      "evidence": "info_panel.py:1805-1826 uses len(names) and chooses this count as a narrow note after the individual stored credential names no longer fit."
+    }
+  ],
+  "subgroup_verdicts": [
+    {
+      "prefix": "tui.info.heading",
+      "keys_read": 7,
+      "verdict": "semantically_clean",
+      "finding_ids": [],
+      "width_flags": 0
+    },
+    {
+      "prefix": "tui.info.label",
+      "keys_read": 35,
+      "verdict": "minor_findings",
+      "finding_ids": [
+        "UR2"
+      ],
+      "width_flags": 2
+    },
+    {
+      "prefix": "tui.info.status",
+      "keys_read": 9,
+      "verdict": "semantically_clean",
+      "finding_ids": [],
+      "width_flags": 4
+    },
+    {
+      "prefix": "tui.info.install",
+      "keys_read": 17,
+      "verdict": "semantically_clean",
+      "finding_ids": [],
+      "width_flags": 0
+    },
+    {
+      "prefix": "tui.info.latest",
+      "keys_read": 10,
+      "verdict": "semantically_clean",
+      "finding_ids": [],
+      "width_flags": 1
+    },
+    {
+      "prefix": "tui.info.kind_of_runtime",
+      "keys_read": 8,
+      "verdict": "semantically_clean",
+      "finding_ids": [],
+      "width_flags": 3
+    },
+    {
+      "prefix": "tui.info.import_path",
+      "keys_read": 6,
+      "verdict": "semantically_clean",
+      "finding_ids": [],
+      "width_flags": 0
+    },
+    {
+      "prefix": "tui.info.kind",
+      "keys_read": 7,
+      "verdict": "semantically_clean",
+      "finding_ids": [],
+      "width_flags": 0
+    },
+    {
+      "prefix": "tui.info.session",
+      "keys_read": 6,
+      "verdict": "semantically_clean",
+      "finding_ids": [],
+      "width_flags": 1
+    },
+    {
+      "prefix": "tui.info.approval",
+      "keys_read": 4,
+      "verdict": "semantically_clean",
+      "finding_ids": [],
+      "width_flags": 0
+    },
+    {
+      "prefix": "tui.info.redirect",
+      "keys_read": 3,
+      "verdict": "semantically_clean",
+      "finding_ids": [],
+      "width_flags": 1
+    },
+    {
+      "prefix": "tui.info.sessions",
+      "keys_read": 11,
+      "verdict": "semantically_clean",
+      "finding_ids": [],
+      "width_flags": 0
+    },
+    {
+      "prefix": "tui.info.fleet_caveats",
+      "keys_read": 1,
+      "verdict": "failed",
+      "finding_ids": [
+        "UR1"
+      ],
+      "width_flags": 1
+    },
+    {
+      "prefix": "tui.info.agents",
+      "keys_read": 38,
+      "verdict": "semantically_clean",
+      "finding_ids": [],
+      "width_flags": 3
+    },
+    {
+      "prefix": "tui.info.env",
+      "keys_read": 18,
+      "verdict": "minor_findings",
+      "finding_ids": [
+        "UR3"
+      ],
+      "width_flags": 4
+    },
+    {
+      "prefix": "tui.info.report",
+      "keys_read": 3,
+      "verdict": "semantically_clean",
+      "finding_ids": [],
+      "width_flags": 0
+    },
+    {
+      "prefix": "tui.info.info_hint",
+      "keys_read": 2,
+      "verdict": "semantically_clean",
+      "finding_ids": [],
+      "width_flags": 0
+    },
+    {
+      "prefix": "tui.info.action_copy_report",
+      "keys_read": 2,
+      "verdict": "semantically_clean",
+      "finding_ids": [],
+      "width_flags": 0
+    },
+    {
+      "prefix": "tui.info.latest_line",
+      "keys_read": 3,
+      "verdict": "semantically_clean",
+      "finding_ids": [],
+      "width_flags": 0
+    },
+    {
+      "prefix": "tui.info.not_answering_clause",
+      "keys_read": 5,
+      "verdict": "semantically_clean",
+      "finding_ids": [],
+      "width_flags": 2
+    },
+    {
+      "prefix": "tui.info.tree_lines",
+      "keys_read": 1,
+      "verdict": "semantically_clean",
+      "finding_ids": [],
+      "width_flags": 1
+    },
+    {
+      "prefix": "tui.info.export",
+      "keys_read": 60,
+      "verdict": "semantically_clean",
+      "finding_ids": [],
+      "width_flags": 2
+    },
+    {
+      "prefix": "tui.info.count",
+      "keys_read": 4,
+      "verdict": "semantically_clean",
+      "finding_ids": [],
+      "width_flags": 0
+    },
+    {
+      "prefix": "tui.info.state",
+      "keys_read": 12,
+      "verdict": "semantically_clean",
+      "finding_ids": [],
+      "width_flags": 2
+    },
+    {
+      "prefix": "tui.info.leaving",
+      "keys_read": 3,
+      "verdict": "semantically_clean",
+      "finding_ids": [],
+      "width_flags": 0
+    },
+    {
+      "prefix": "tui.info.update",
+      "keys_read": 2,
+      "verdict": "semantically_clean",
+      "finding_ids": [],
+      "width_flags": 0
+    }
+  ],
+  "key_results": [
+    {
+      "message_id": "tui.info.heading.install",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.version",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.install_kind",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.install_path",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.interpreter",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.running_code",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.source",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.built",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.python",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.platform",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.heading.this_session",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.session_id",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.kind",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.model",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.working_dir",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.answering",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "minor",
+      "finding_ids": [
+        "UR2"
+      ],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "finding",
+        "idiom": "finding",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.started",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.config_dir",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.label.config_dir",
+        "ur_cells": 20,
+        "en_cells": 10,
+        "delta": 10
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.cache_dir",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.agent_home",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.log_dir",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.label.log_dir",
+        "ur_cells": 13,
+        "en_cells": 7,
+        "delta": 6
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.control_port",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.heading.sessions_on_this_machine",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.heading.sessions_unavailable",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.heading.agents_and_subagents",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.runtimes",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.trajectories",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.agent_profiles",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.teams",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.subagent_capacity",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.heading.environment",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.terminal",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.theme",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.approvals",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.mcp_servers",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.browser",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.mobile_relay",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.multiplexer",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.guides",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.skills",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.label.credentials",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.heading.could_not_read",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.status.leaving_silent",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.status.leaving_for_build",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.status.no_movement",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.status.leaving",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.status.leaving",
+        "ur_cells": 11,
+        "en_cells": 7,
+        "delta": 4
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.status.bound_held",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.status.bound_held",
+        "ur_cells": 24,
+        "en_cells": 10,
+        "delta": 14
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.status.updating",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.status.updating",
+        "ur_cells": 13,
+        "en_cells": 8,
+        "delta": 5
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.status.updated",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.status.updated",
+        "ur_cells": 13,
+        "en_cells": 7,
+        "delta": 6
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.status.update_failed",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.status.moving_to_a_new_build",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.install.description",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.install.full_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.install.loading",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.install.unavailable",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.install.shadow_label_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.install.shadow_label_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.install.shadow_label_terse",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.install.shadow_meta_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.install.shadow_meta_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.install.shadow_meta_terse",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.install.source_snapshot",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.install.source_snapshot_unknown",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.install.snapshot_note_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.install.snapshot_note_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.install.source_wheel",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.install.build_age",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.install.shadow_explanation",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.latest.installed_unreadable",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.latest.full_unknown",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.latest.unknown",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.latest.never_checked",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.latest.behind_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.latest.behind_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.latest.current",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.latest.stale",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.latest.stale",
+        "ur_cells": 13,
+        "en_cells": 8,
+        "delta": 5
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.latest.checked_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.latest.checked_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.kind_of_runtime.daemon_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.kind_of_runtime.daemon_full",
+        "ur_cells": 56,
+        "en_cells": 41,
+        "delta": 15
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.kind_of_runtime.daemon_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.kind_of_runtime.daemon_short",
+        "ur_cells": 24,
+        "en_cells": 15,
+        "delta": 9
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.kind_of_runtime.daemon_terse",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.kind_of_runtime.daemon_terse",
+        "ur_cells": 12,
+        "en_cells": 7,
+        "delta": 5
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.kind_of_runtime.attached_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.kind_of_runtime.attached_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.kind_of_runtime.exec_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.kind_of_runtime.exec_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.kind_of_runtime.exec_terse",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.import_path.editable_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.import_path.editable_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.import_path.editable_terse",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.import_path.shadowed_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.import_path.shadowed_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.import_path.shadowed_terse",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.kind.editable_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.kind.editable_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.kind.uv_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.kind.uv_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.kind.non_editable",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.kind.pip_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.kind.pip_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.session.description",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.session.description_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.session.failover_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.session.failover_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.session.failover_short",
+        "ur_cells": 16,
+        "en_cells": 8,
+        "delta": 8
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.session.started",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.session.protocol",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.approval.ask_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.approval.ask_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.approval.auto_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.approval.auto_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.redirect.full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.redirect.short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.redirect.short",
+        "ur_cells": 29,
+        "en_cells": 17,
+        "delta": 12
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.redirect.terse",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.sessions.loading",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.sessions.registry_loading",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.sessions.registry_unavailable",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.sessions.summary_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.sessions.not_answering_clause",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.sessions.summary_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.sessions.empty",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.sessions.self",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.sessions.pid",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.sessions.build_skew",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.sessions.memory_unavailable",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.fleet_caveats.lower_bound",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "failed",
+      "finding_ids": [
+        "UR1"
+      ],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.fleet_caveats.lower_bound",
+        "ur_cells": 116,
+        "en_cells": 93,
+        "delta": 23
+      },
+      "dimensions": {
+        "accuracy": "finding",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "finding",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.loading_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.loading_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.loading_mid",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.loading_terse",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.summary_terse",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.unknown_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.unknown_terse",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.queued_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.queued_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.queued_terse",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.quiet_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.quiet_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.runtimes",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.unreported_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.unreported_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.unreported_terse",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.queued_suffix",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.queued_count",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.queued_count_terse",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.agents.queued_count_terse",
+        "ur_cells": 11,
+        "en_cells": 7,
+        "delta": 4
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.trajectories_total",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.unreported_suffix",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.roster_unreadable",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.session_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.session_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.session_terse",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.retained_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.retained_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.retained_terse",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.capacity",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.capacity_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.capacity_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.roster_failure",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.empty",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.waiting",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.tree_counts",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.agents.tree_counts",
+        "ur_cells": 116,
+        "en_cells": 99,
+        "delta": 17
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.tree_legacy",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.agents.tree_legacy",
+        "ur_cells": 143,
+        "en_cells": 119,
+        "delta": 24
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.env.description",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.env.description_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.env.mcp_connected",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.env.mcp_connecting_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.env.mcp_connecting_full",
+        "ur_cells": 25,
+        "en_cells": 16,
+        "delta": 9
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.env.mcp_connecting_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.env.mcp_failed_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.env.mcp_failed_short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.env.mcp_empty",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.env.none",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.env.none",
+        "ur_cells": 9,
+        "en_cells": 4,
+        "delta": 5
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.env.mobile_installed",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.env.mobile_absent",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.env.mobile_healthy",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.env.mobile_healthy",
+        "ur_cells": 15,
+        "en_cells": 7,
+        "delta": 8
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.env.mobile_up",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.env.mobile_up",
+        "ur_cells": 6,
+        "en_cells": 2,
+        "delta": 4
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.env.credentials_unreadable",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.env.credential_count",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.env.credentials_more",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.env.credentials_set",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "minor",
+      "finding_ids": [
+        "UR3"
+      ],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "finding",
+        "idiom": "finding",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.env.credentials_empty",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.report.degraded_count",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.report.degraded",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.report.captured",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.info_hint.short",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.info_hint.full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.action_copy_report.loading",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.action_copy_report.redacted",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.latest_line.installed_unreadable",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.latest_line.never_checked",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.latest_line.checked",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.not_answering_clause.no_rows",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.not_answering_clause.more",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.not_answering_clause.remedy_one",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.not_answering_clause.remedy_one",
+        "ur_cells": 287,
+        "en_cells": 263,
+        "delta": 24
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.not_answering_clause.remedy_many",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.not_answering_clause.remedy_many",
+        "ur_cells": 302,
+        "en_cells": 271,
+        "delta": 31
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.not_answering_clause.full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.tree_lines.deeper",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.tree_lines.deeper",
+        "ur_cells": 21,
+        "en_cells": 12,
+        "delta": 9
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.heading_install",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.version",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.latest_known",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.install_kind",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.install_path",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.interpreter",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.running_code",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.source",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.build_age",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.python",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.platform",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.heading_session",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.session_id",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.kind",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.pid",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.model",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.effective_model",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.uptime",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.working_dir",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.config_dir",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.cache_dir",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.agent_home",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.log_dir",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.control_port",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.protocol",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.heading_sessions",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.sessions_unavailable",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.sessions_empty",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.export.sessions_empty",
+        "ur_cells": 11,
+        "en_cells": 6,
+        "delta": 5
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.sessions_summary",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.pid_fallback",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.heading_agents",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.runtimes",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.trajectories_unreported",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.queued_suffix",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.trajectories",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.profiles",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.teams",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.roster_unreadable",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.session_counts",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.capacity",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.tree_heading",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.tree_unreadable",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.tree_empty",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.tree_counts",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.tree_legacy",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.lower_bound",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.export.lower_bound",
+        "ur_cells": 88,
+        "en_cells": 71,
+        "delta": 17
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.heading_environment",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.terminal",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.multiplexer",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.tty",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.theme",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.approvals",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.browser",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.mobile",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.mcp",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.guides",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.skills",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.credentials",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.heading_degraded",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.count.session",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.count.runtime",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.count.trajectory",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.count.subagent",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.state.running",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.state.starting",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.state.queued",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.state.pausing",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.state.pausing",
+        "ur_cells": 12,
+        "en_cells": 7,
+        "delta": 5
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.state.paused",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.state.completed",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.state.failed",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.state.cancelled",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.state.gone",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "rendered_check_required_minor_risk",
+      "width": {
+        "message_id": "tui.info.state.gone",
+        "ur_cells": 13,
+        "en_cells": 4,
+        "delta": 9
+      },
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.state.live",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.state.stale",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.state.unknown",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.leaving.signal",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.leaving.build",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.leaving.overdue",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.update.target",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.update.done_target",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.summary_full",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.agents.addends",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    },
+    {
+      "message_id": "tui.info.export.summary",
+      "read": true,
+      "english_read": true,
+      "context_read": true,
+      "urdu_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "passed",
+      "width_result": "no_material_expansion_in_probe",
+      "width": null,
+      "dimensions": {
+        "accuracy": "passed",
+        "idiom": "passed",
+        "register": "passed",
+        "glossary": "passed",
+        "placeholders": "passed",
+        "plurals": "passed",
+        "logical_rtl": "passed"
+      }
+    }
+  ],
+  "mechanical": {
+    "locale": "ur",
+    "namespace": "tui.info",
+    "hashes": {
+      "en": "909a00c7f98b291863ae6508648ede30b3edddf868e5c0d84a23999666e3cdaf",
+      "ur": "87aa9c70a1f3e8bd55454f4ca4fa304a88846f35c5d129fc47a6fef4db8b692d",
+      "context": "905690aae095d0ec8fe0b36f6dfe92db05e9c6e3bfdbc0fe87577a37002b9d11"
+    },
+    "keys": 277,
+    "missing": [],
+    "extra": [],
+    "plural_nodes": 47,
+    "plural_arms": 94,
+    "select_nodes": 23,
+    "select_arms": 46,
+    "render_cases": 792,
+    "failures": [],
+    "bidi_controls": [],
+    "negative_controls": [
+      {
+        "control": "renamed",
+        "detected": true
+      },
+      {
+        "control": "dropped",
+        "detected": true
+      },
+      {
+        "control": "lost_other",
+        "detected": true
+      }
+    ],
+    "missing_key": "RenderedMessage(text='tui.info.nonexistent_audit_control', source_locale=None)",
+    "bad_args": "RenderedMessage(text='tui.info.install.build_age', source_locale=None)",
+    "width_growth_keys": [
+      "tui.info.agents.tree_counts",
+      "tui.info.agents.tree_legacy",
+      "tui.info.export.lower_bound",
+      "tui.info.fleet_caveats.lower_bound",
+      "tui.info.kind_of_runtime.daemon_full",
+      "tui.info.not_answering_clause.remedy_many",
+      "tui.info.not_answering_clause.remedy_one",
+      "tui.info.status.bound_held"
+    ],
+    "NOT_RUN": [
+      "App/native/browser",
+      "font/shaping/screen-fit",
+      "full suite",
+      "generation/check/guard",
+      "repo edits/commits"
+    ]
+  },
+  "extra_checks": {
+    "ast_occurrence_skeleton_failures": [],
+    "latin_islands": {
+      "tui.info.label.python": [
+        "Python"
+      ],
+      "tui.info.label.session_id": [
+        "ID"
+      ],
+      "tui.info.label.mcp_servers": [
+        "MCP"
+      ],
+      "tui.info.install.description": [
+        "lop"
+      ],
+      "tui.info.install.source_snapshot": [
+        "git"
+      ],
+      "tui.info.install.source_snapshot_unknown": [
+        "git"
+      ],
+      "tui.info.install.snapshot_note_full": [
+        "lop-update",
+        "PyPI"
+      ],
+      "tui.info.install.snapshot_note_short": [
+        "lop-update"
+      ],
+      "tui.info.install.source_wheel": [
+        "PyPI"
+      ],
+      "tui.info.install.shadow_explanation": [
+        "reload"
+      ],
+      "tui.info.import_path.shadowed_full": [
+        "sys.path"
+      ],
+      "tui.info.kind.uv_full": [
+        "lop-update"
+      ],
+      "tui.info.kind.uv_short": [
+        "lop-update"
+      ],
+      "tui.info.session.protocol": [
+        "v"
+      ],
+      "tui.info.sessions.registry_unavailable": [
+        "r"
+      ],
+      "tui.info.sessions.empty": [
+        "lop"
+      ],
+      "tui.info.sessions.pid": [
+        "pid"
+      ],
+      "tui.info.info_hint.short": [
+        "esc"
+      ],
+      "tui.info.info_hint.full": [
+        "esc",
+        "q",
+        "r"
+      ],
+      "tui.info.action_copy_report.loading": [
+        "ctrl+r"
+      ],
+      "tui.info.action_copy_report.redacted": [
+        "info"
+      ],
+      "tui.info.not_answering_clause.remedy_one": [
+        "lop",
+        "stop",
+        "pid",
+        "stop",
+        "lop",
+        "stop",
+        "pid",
+        "force"
+      ],
+      "tui.info.not_answering_clause.remedy_many": [
+        "pid",
+        "lop",
+        "stop",
+        "pid",
+        "N",
+        "stop",
+        "N",
+        "lop",
+        "stop",
+        "pid",
+        "N",
+        "force"
+      ],
+      "tui.info.not_answering_clause.full": [
+        "pid",
+        "pid"
+      ],
+      "tui.info.export.source": [
+        "git",
+        "PyPI"
+      ],
+      "tui.info.export.python": [
+        "Python"
+      ],
+      "tui.info.export.session_id": [
+        "ID"
+      ],
+      "tui.info.export.pid": [
+        "pid"
+      ],
+      "tui.info.export.pid_fallback": [
+        "pid"
+      ],
+      "tui.info.export.terminal": [
+        "x"
+      ],
+      "tui.info.export.tty": [
+        "tty"
+      ],
+      "tui.info.export.mcp": [
+        "MCP"
+      ],
+      "tui.info.export.summary": [
+        "info"
+      ]
+    },
+    "fallback": {
+      "text": "2 sessions",
+      "source_locale": "en"
+    }
+  },
+  "width_risks": [
+    {
+      "message_id": "tui.info.label.config_dir",
+      "ur_cells": 20,
+      "en_cells": 10,
+      "delta": 10
+    },
+    {
+      "message_id": "tui.info.label.log_dir",
+      "ur_cells": 13,
+      "en_cells": 7,
+      "delta": 6
+    },
+    {
+      "message_id": "tui.info.status.leaving",
+      "ur_cells": 11,
+      "en_cells": 7,
+      "delta": 4
+    },
+    {
+      "message_id": "tui.info.status.bound_held",
+      "ur_cells": 24,
+      "en_cells": 10,
+      "delta": 14
+    },
+    {
+      "message_id": "tui.info.status.updating",
+      "ur_cells": 13,
+      "en_cells": 8,
+      "delta": 5
+    },
+    {
+      "message_id": "tui.info.status.updated",
+      "ur_cells": 13,
+      "en_cells": 7,
+      "delta": 6
+    },
+    {
+      "message_id": "tui.info.latest.stale",
+      "ur_cells": 13,
+      "en_cells": 8,
+      "delta": 5
+    },
+    {
+      "message_id": "tui.info.kind_of_runtime.daemon_full",
+      "ur_cells": 56,
+      "en_cells": 41,
+      "delta": 15
+    },
+    {
+      "message_id": "tui.info.kind_of_runtime.daemon_short",
+      "ur_cells": 24,
+      "en_cells": 15,
+      "delta": 9
+    },
+    {
+      "message_id": "tui.info.kind_of_runtime.daemon_terse",
+      "ur_cells": 12,
+      "en_cells": 7,
+      "delta": 5
+    },
+    {
+      "message_id": "tui.info.session.failover_short",
+      "ur_cells": 16,
+      "en_cells": 8,
+      "delta": 8
+    },
+    {
+      "message_id": "tui.info.redirect.short",
+      "ur_cells": 29,
+      "en_cells": 17,
+      "delta": 12
+    },
+    {
+      "message_id": "tui.info.fleet_caveats.lower_bound",
+      "ur_cells": 116,
+      "en_cells": 93,
+      "delta": 23
+    },
+    {
+      "message_id": "tui.info.agents.queued_count_terse",
+      "ur_cells": 11,
+      "en_cells": 7,
+      "delta": 4
+    },
+    {
+      "message_id": "tui.info.agents.tree_counts",
+      "ur_cells": 116,
+      "en_cells": 99,
+      "delta": 17
+    },
+    {
+      "message_id": "tui.info.agents.tree_legacy",
+      "ur_cells": 143,
+      "en_cells": 119,
+      "delta": 24
+    },
+    {
+      "message_id": "tui.info.env.mcp_connecting_full",
+      "ur_cells": 25,
+      "en_cells": 16,
+      "delta": 9
+    },
+    {
+      "message_id": "tui.info.env.none",
+      "ur_cells": 9,
+      "en_cells": 4,
+      "delta": 5
+    },
+    {
+      "message_id": "tui.info.env.mobile_healthy",
+      "ur_cells": 15,
+      "en_cells": 7,
+      "delta": 8
+    },
+    {
+      "message_id": "tui.info.env.mobile_up",
+      "ur_cells": 6,
+      "en_cells": 2,
+      "delta": 4
+    },
+    {
+      "message_id": "tui.info.not_answering_clause.remedy_one",
+      "ur_cells": 287,
+      "en_cells": 263,
+      "delta": 24
+    },
+    {
+      "message_id": "tui.info.not_answering_clause.remedy_many",
+      "ur_cells": 302,
+      "en_cells": 271,
+      "delta": 31
+    },
+    {
+      "message_id": "tui.info.tree_lines.deeper",
+      "ur_cells": 21,
+      "en_cells": 12,
+      "delta": 9
+    },
+    {
+      "message_id": "tui.info.export.sessions_empty",
+      "ur_cells": 11,
+      "en_cells": 6,
+      "delta": 5
+    },
+    {
+      "message_id": "tui.info.export.lower_bound",
+      "ur_cells": 88,
+      "en_cells": 71,
+      "delta": 17
+    },
+    {
+      "message_id": "tui.info.state.pausing",
+      "ur_cells": 12,
+      "en_cells": 7,
+      "delta": 5
+    },
+    {
+      "message_id": "tui.info.state.gone",
+      "ur_cells": 13,
+      "en_cells": 4,
+      "delta": 9
+    }
+  ],
+  "width_threshold": "At least four additional cells AND at least 1.5x English, OR more than twelve additional cells, using identical representative parameters and max observed per-key growth. These are MINOR fit risks only; each is flagged for a rendered check, not asserted overflow.",
+  "glossary_decisions": {
+    "session": "سیشن / سیشنز",
+    "agent": "ایجنٹ / ایجنٹس",
+    "subagent": "ذیلی ایجنٹ / ذیلی ایجنٹس",
+    "runtime": "رن ٹائم / رن ٹائمز; terse رن",
+    "trajectory": "ٹریجیکٹری / ٹریجیکٹریز; terse ٹریج — accepted consistent technical loan, distinct from runtime and from trace ٹریس",
+    "settled": "اختتام پذیر / ختم with retained محفوظ ریکارڈ — ended historical jobs, not guaranteed success",
+    "unknown": "نامعلوم / —; never zero",
+    "lower_bound": "کم از کم معلوم تعداد / ≥; UR1 assigns the qualified total incorrectly",
+    "address": "آپ and respectful imperative; no تم/تو mismatch"
+  },
+  "technical_islands_note": "Each literal Latin occurrence is enumerated in extra_checks.latin_islands. Accepted only as the concrete proper name, command/chord, acronym, version prefix or machine identifier: Python; git; PyPI; lop; lop-update; sys.path; ID; MCP; pid; tty; v; x terminal-dimension separator; esc/q/r/ctrl+r; /info and /reload; the complete lop stop --pid N [--force] and /stop N command templates. Parameter-supplied paths, model IDs, versions, source refs and bounds remain bytes owned by the caller. No blanket exemption for generic English prose or units.",
+  "evidence_files": [
+    "ur-audit-mechanics.json",
+    "ur-audit-render-cases.json",
+    "ur-audit-key-mechanics.json",
+    "ur-extra-checks.json",
+    "ur-extra-checks.log",
+    "ur-material-width-risks.json",
+    "ur-context-sentences.json"
+  ],
+  "commands": [
+    {
+      "command": "env -i HOME=\"$LOCAL_OPERATOR_SCRATCHPAD/ur-audit-home\" LOCAL_OPERATOR_CONFIG_DIR=\"$LOCAL_OPERATOR_SCRATCHPAD/ur-audit-config\" LOCAL_OPERATOR_SCRATCHPAD=\"$LOCAL_OPERATOR_SCRATCHPAD\" PATH=\"$PATH\" TERM=xterm-256color PYTHONPATH=/Users/damian/local-operator/.worktrees/i18n-info-readout /Users/damian/local-operator/.venv/bin/python \"$LOCAL_OPERATOR_SCRATCHPAD/audit_ur_mechanics.py\"",
+      "exit_code": 0,
+      "actual_output_summary": "keys277, missing[], extra[], plural_nodes47/arms94, select_nodes23/arms46, render_cases792, failures[], bidi_controls[], renamed/dropped/lost_other negatives all detected, missing/bad arguments source_locale=None"
+    },
+    {
+      "command": "env -i HOME=\"$LOCAL_OPERATOR_SCRATCHPAD/ur-audit-home\" LOCAL_OPERATOR_CONFIG_DIR=\"$LOCAL_OPERATOR_SCRATCHPAD/ur-audit-config\" PATH=\"$PATH\" TERM=xterm-256color PYTHONPATH=/Users/damian/local-operator/.worktrees/i18n-info-readout /Users/damian/local-operator/.venv/bin/python \"$LOCAL_OPERATOR_SCRATCHPAD/ur_extra_checks.py\" > \"$LOCAL_OPERATOR_SCRATCHPAD/ur-extra-checks.log\"",
+      "exit_code": 0,
+      "actual_output_summary": "AST occurrence/skeleton parity failures []; English fallback RenderedMessage(text=2 sessions, source_locale=en); literal-Latin keys enumerated;8 >12-cell growth keys"
+    },
+    {
+      "command": "git -C /Users/damian/local-operator/.worktrees/i18n-info-readout status --short; git ... diff --stat ea92d3c2faa7..e9e6c3711149 -- local_operator/i18n/catalogues/en/tui.info.json local_operator/i18n/catalogues/en/tui.info.context.json",
+      "exit_code": 0,
+      "actual_output_summary": "No output: worktree clean, English source/context unchanged in scope"
+    }
+  ],
+  "failed_probe_setup": "Supplemental probe first exited1 on its own width-field name KeyError cells; corrected scratch field lookup to ur/en and re-ran successfully. This was not a catalogue defect. Sequential audited-context attempt timed out after300s with17 entries saved; no completeness claimed from it. eval thread experiment rejected foreground tool calls; no tool concurrency bypass used."
+}

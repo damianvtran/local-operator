@@ -1,0 +1,7 @@
+{
+  "wire.providers.connect.key_invalid_characters": "इस कुंजी में ऐसे वर्ण हैं जो किसी API कुंजी में नहीं हो सकते। इसे फिर से कॉपी करें और दोबारा आज़माएँ।",
+  "wire.providers.connect.key_rejected": "{label} ने इस API कुंजी को अस्वीकार कर दिया। इसे जाँचें और दोबारा आज़माएँ।",
+  "wire.providers.connect.key_unreachable": "इस कुंजी की जाँच के लिए {label} तक नहीं पहुँचा जा सका। इसे बिना सत्यापन के सहेज दिया गया है।",
+  "wire.providers.connect.key_unverified": "{label} अभी इस कुंजी की जाँच नहीं कर सका (HTTP {status})। इसे बिना सत्यापन के सहेज दिया गया है।",
+  "wire.providers.connect.suggested_automatic": "स्वचालित"
+}

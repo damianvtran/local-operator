@@ -1,0 +1,1589 @@
+{
+  "schema": 1,
+  "source_head": "fad3ab5703fc5bb159f48cb43755c8d9e1323b6c",
+  "provenance": "QA session ff0e39d33743; original bytes, not newly executed results",
+  "files": [
+    {
+      "path": "after-capture-result.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-capture-result.json",
+      "bytes": 173092,
+      "sha256": "66f4a6c80081e499a294c1975c4fc710764a8b67f81357e83d6f339b649b33eb",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-es-providers.openrouter.enforce_distillable_text.expanded.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-es-providers.openrouter.enforce_distillable_text.expanded.geometry.json",
+      "bytes": 10564,
+      "sha256": "0935260ca60ff90a40e3555a1092753dddcd380e566de4c4ae938a624a1de7c8",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-es-providers.openrouter.enforce_distillable_text.expanded.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-es-providers.openrouter.enforce_distillable_text.expanded.svg",
+      "bytes": 86219,
+      "sha256": "e2858831c0f8615d514b3a6f1d37ddd1502de98cbdd7e8dce364f4e3a41750fc",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-es-providers.openrouter.enforce_distillable_text.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-es-providers.openrouter.enforce_distillable_text.first.geometry.json",
+      "bytes": 10564,
+      "sha256": "00eb8ed914dc696dec6975b985fbac4d55a168da344704e65992884b97907532",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-es-providers.openrouter.enforce_distillable_text.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-es-providers.openrouter.enforce_distillable_text.first.svg",
+      "bytes": 83785,
+      "sha256": "25645fb2ded26a4f4dc83f1bc7e52023901550c7df06323a3ad433dad138d810",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-es-providers.openrouter.enforce_distillable_text.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-es-providers.openrouter.enforce_distillable_text.settled.geometry.json",
+      "bytes": 10564,
+      "sha256": "00eb8ed914dc696dec6975b985fbac4d55a168da344704e65992884b97907532",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-es-providers.openrouter.enforce_distillable_text.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-es-providers.openrouter.enforce_distillable_text.settled.svg",
+      "bytes": 83785,
+      "sha256": "25645fb2ded26a4f4dc83f1bc7e52023901550c7df06323a3ad433dad138d810",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-es-shell_environment.mode.expanded.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-es-shell_environment.mode.expanded.geometry.json",
+      "bytes": 10191,
+      "sha256": "eb08874c52652d4b314e900eeffaa15045fc510dd1a18985dd84fa183a1f7d69",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-es-shell_environment.mode.expanded.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-es-shell_environment.mode.expanded.svg",
+      "bytes": 95212,
+      "sha256": "83f1b1b744979a64c50eeeb0269f57b06e6b3bd48c083a5f44e5714d966eb36d",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-es-shell_environment.mode.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-es-shell_environment.mode.first.geometry.json",
+      "bytes": 10191,
+      "sha256": "bccb2c0a60619dd30db3970b8cd0901a81a9d8bee8aedc835eb2c62476347678",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-es-shell_environment.mode.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-es-shell_environment.mode.first.svg",
+      "bytes": 94488,
+      "sha256": "ac96b5bac10b13dfb3cf7e64a9372cd39b86639c8f9b2eef633f2c75a605f04f",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-es-shell_environment.mode.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-es-shell_environment.mode.settled.geometry.json",
+      "bytes": 10191,
+      "sha256": "bccb2c0a60619dd30db3970b8cd0901a81a9d8bee8aedc835eb2c62476347678",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-es-shell_environment.mode.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-es-shell_environment.mode.settled.svg",
+      "bytes": 94488,
+      "sha256": "ac96b5bac10b13dfb3cf7e64a9372cd39b86639c8f9b2eef633f2c75a605f04f",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-es-tool_approval_mode.expanded.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-es-tool_approval_mode.expanded.geometry.json",
+      "bytes": 10564,
+      "sha256": "8e70c10ec4608e75d31b2a3ade5634610676edba81762f7ca21c4d509a2294c6",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-es-tool_approval_mode.expanded.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-es-tool_approval_mode.expanded.svg",
+      "bytes": 88317,
+      "sha256": "528744ab75f8baaf6a5669de68e20cbd8ff7d54b5d9e50f0c1624a67ae6de495",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-es-tool_approval_mode.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-es-tool_approval_mode.first.geometry.json",
+      "bytes": 10564,
+      "sha256": "e9dac99a49cb8b8543205ccf06c19c769f53a3644615bb1481897a816382a765",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-es-tool_approval_mode.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-es-tool_approval_mode.first.svg",
+      "bytes": 87094,
+      "sha256": "f5abb54a8fc2f24b13610ba9f038d2db8fe612c2470f3de5049759739589f6ad",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-es-tool_approval_mode.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-es-tool_approval_mode.settled.geometry.json",
+      "bytes": 10564,
+      "sha256": "e9dac99a49cb8b8543205ccf06c19c769f53a3644615bb1481897a816382a765",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-es-tool_approval_mode.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-es-tool_approval_mode.settled.svg",
+      "bytes": 87094,
+      "sha256": "f5abb54a8fc2f24b13610ba9f038d2db8fe612c2470f3de5049759739589f6ad",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-final.log",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-final.log",
+      "bytes": 2005,
+      "sha256": "7ea69e22e8b2e214efe0cfe1b7dbb780c9e4c8309efb6a28067edf0e9022bbd9",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-final.process.log",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-final.process.log",
+      "bytes": 21,
+      "sha256": "716b362dff87b69d3b5d8b45ade646910a1be2b34a052fb8d9f0e23e247fbd04",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-compact-team_bridge.session-100x30.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-compact-team_bridge.session-100x30.first.geometry.json",
+      "bytes": 10142,
+      "sha256": "a3141f86b116e327664ebf331f43841595bf5f8850c394cc39e6fed6583551e6",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-compact-team_bridge.session-100x30.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-compact-team_bridge.session-100x30.first.svg",
+      "bytes": 69676,
+      "sha256": "e6134538a6690f4ba256e8cbc4c58685cc5245994b6fac1fab471dbcd504d914",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-compact-team_bridge.session-100x30.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-compact-team_bridge.session-100x30.settled.geometry.json",
+      "bytes": 10142,
+      "sha256": "a3141f86b116e327664ebf331f43841595bf5f8850c394cc39e6fed6583551e6",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-compact-team_bridge.session-100x30.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-compact-team_bridge.session-100x30.settled.svg",
+      "bytes": 69676,
+      "sha256": "e6134538a6690f4ba256e8cbc4c58685cc5245994b6fac1fab471dbcd504d914",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-compact-team_bridge.session-80x24.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-compact-team_bridge.session-80x24.first.geometry.json",
+      "bytes": 9378,
+      "sha256": "319963f07b18936c4851943fd3909d52cf176ed14129a9bd2073eb50ccdf1df5",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-compact-team_bridge.session-80x24.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-compact-team_bridge.session-80x24.first.svg",
+      "bytes": 45148,
+      "sha256": "53504af3dfbcfb7c2dc886c28d49d0ea5a67c9e1bcb99223c71bba7abf184b8e",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-compact-team_bridge.session-80x24.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-compact-team_bridge.session-80x24.settled.geometry.json",
+      "bytes": 9378,
+      "sha256": "319963f07b18936c4851943fd3909d52cf176ed14129a9bd2073eb50ccdf1df5",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-compact-team_bridge.session-80x24.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-compact-team_bridge.session-80x24.settled.svg",
+      "bytes": 45148,
+      "sha256": "53504af3dfbcfb7c2dc886c28d49d0ea5a67c9e1bcb99223c71bba7abf184b8e",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-providers.openrouter.enforce_distillable_text.expanded.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-providers.openrouter.enforce_distillable_text.expanded.geometry.json",
+      "bytes": 10568,
+      "sha256": "860035f06e3a1ca55879b295c44b7cd5d8c25fe090c62c8e23f91cf8d08d4a3e",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-providers.openrouter.enforce_distillable_text.expanded.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-providers.openrouter.enforce_distillable_text.expanded.svg",
+      "bytes": 85631,
+      "sha256": "8b3464663f3019630d0dc284803e35dfcb3b2c5e2dc88c90b4029e2748e2f29f",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-providers.openrouter.enforce_distillable_text.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-providers.openrouter.enforce_distillable_text.first.geometry.json",
+      "bytes": 10568,
+      "sha256": "3107462deae1354efa63d5154293977cf1d74f08cc959178fd8a5ab7caf34e7e",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-providers.openrouter.enforce_distillable_text.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-providers.openrouter.enforce_distillable_text.first.svg",
+      "bytes": 83194,
+      "sha256": "c2271ed0302b6e1b333e937f9202a06901148f339d22a6836711b23140c90cde",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-providers.openrouter.enforce_distillable_text.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-providers.openrouter.enforce_distillable_text.settled.geometry.json",
+      "bytes": 10568,
+      "sha256": "3107462deae1354efa63d5154293977cf1d74f08cc959178fd8a5ab7caf34e7e",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-providers.openrouter.enforce_distillable_text.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-providers.openrouter.enforce_distillable_text.settled.svg",
+      "bytes": 83194,
+      "sha256": "c2271ed0302b6e1b333e937f9202a06901148f339d22a6836711b23140c90cde",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-shell_environment.mode.expanded.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-shell_environment.mode.expanded.geometry.json",
+      "bytes": 10195,
+      "sha256": "8c8badc80437e9af98710411c657eb9c395bd26b57279996b7e0b72d2358a689",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-shell_environment.mode.expanded.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-shell_environment.mode.expanded.svg",
+      "bytes": 95562,
+      "sha256": "5ae34fa4cf3fb03f1e267e3ef4f5dfadd9dc36ed004ba9ebd804477ae6d45437",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-shell_environment.mode.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-shell_environment.mode.first.geometry.json",
+      "bytes": 10195,
+      "sha256": "f85315520159a158155ac34279a4b80872788d53149a126cfff617faffb520b5",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-shell_environment.mode.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-shell_environment.mode.first.svg",
+      "bytes": 94807,
+      "sha256": "c658dafb4f87e08a9f357ad73adc0890459fc85d020ed5e2d5ac009c63653cc9",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-shell_environment.mode.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-shell_environment.mode.settled.geometry.json",
+      "bytes": 10195,
+      "sha256": "f85315520159a158155ac34279a4b80872788d53149a126cfff617faffb520b5",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-shell_environment.mode.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-shell_environment.mode.settled.svg",
+      "bytes": 94807,
+      "sha256": "c658dafb4f87e08a9f357ad73adc0890459fc85d020ed5e2d5ac009c63653cc9",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-tool_approval_mode.expanded.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-tool_approval_mode.expanded.geometry.json",
+      "bytes": 10568,
+      "sha256": "3157461c38f1964b4f218ab2de235d93d45a0b3eea914511ed73fa2eae28798f",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-tool_approval_mode.expanded.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-tool_approval_mode.expanded.svg",
+      "bytes": 87813,
+      "sha256": "72b9a41c4a489b75d62c2d5e073c88d356681c6cfa7d8c73ab070992deed2f5d",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-tool_approval_mode.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-tool_approval_mode.first.geometry.json",
+      "bytes": 10568,
+      "sha256": "e0612f4761de692170d107e8a36a20b556497ed3d852298bc1fba341dcc760ef",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-tool_approval_mode.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-tool_approval_mode.first.svg",
+      "bytes": 87094,
+      "sha256": "035be4ff3773dab59bd10b3943e8d95354ff0268d29ea1958d6ecf28ab416836",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-tool_approval_mode.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-tool_approval_mode.settled.geometry.json",
+      "bytes": 10568,
+      "sha256": "e0612f4761de692170d107e8a36a20b556497ed3d852298bc1fba341dcc760ef",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-fr-tool_approval_mode.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-fr-tool_approval_mode.settled.svg",
+      "bytes": 87094,
+      "sha256": "035be4ff3773dab59bd10b3943e8d95354ff0268d29ea1958d6ecf28ab416836",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-compact-providers.openrouter.enforce_distillable_text-100x30.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-compact-providers.openrouter.enforce_distillable_text-100x30.first.geometry.json",
+      "bytes": 10511,
+      "sha256": "7aa1929bbce00ad3cf458b8ebdb972ef32a4b75209670275030cc743c042b210",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-compact-providers.openrouter.enforce_distillable_text-100x30.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-compact-providers.openrouter.enforce_distillable_text-100x30.first.svg",
+      "bytes": 68574,
+      "sha256": "3bd48800fc79bf0696b85da0a5f87a0ac072d179a194ba42772d837dfa10c094",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-compact-providers.openrouter.enforce_distillable_text-100x30.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-compact-providers.openrouter.enforce_distillable_text-100x30.settled.geometry.json",
+      "bytes": 10511,
+      "sha256": "7aa1929bbce00ad3cf458b8ebdb972ef32a4b75209670275030cc743c042b210",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-compact-providers.openrouter.enforce_distillable_text-100x30.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-compact-providers.openrouter.enforce_distillable_text-100x30.settled.svg",
+      "bytes": 68574,
+      "sha256": "3bd48800fc79bf0696b85da0a5f87a0ac072d179a194ba42772d837dfa10c094",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-compact-providers.openrouter.enforce_distillable_text-80x24.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-compact-providers.openrouter.enforce_distillable_text-80x24.first.geometry.json",
+      "bytes": 9747,
+      "sha256": "720255822dfd35b5cf22a1e1600178f5f1b267b568d845b683d9872efefe0433",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-compact-providers.openrouter.enforce_distillable_text-80x24.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-compact-providers.openrouter.enforce_distillable_text-80x24.first.svg",
+      "bytes": 43503,
+      "sha256": "9e740bd3116ec02daa5d4cfd9d59ccceb5730a4678a533173c21c33172e4cc3c",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-compact-providers.openrouter.enforce_distillable_text-80x24.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-compact-providers.openrouter.enforce_distillable_text-80x24.settled.geometry.json",
+      "bytes": 9747,
+      "sha256": "720255822dfd35b5cf22a1e1600178f5f1b267b568d845b683d9872efefe0433",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-compact-providers.openrouter.enforce_distillable_text-80x24.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-compact-providers.openrouter.enforce_distillable_text-80x24.settled.svg",
+      "bytes": 43503,
+      "sha256": "9e740bd3116ec02daa5d4cfd9d59ccceb5730a4678a533173c21c33172e4cc3c",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-providers.openrouter.enforce_distillable_text.expanded.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-providers.openrouter.enforce_distillable_text.expanded.geometry.json",
+      "bytes": 10564,
+      "sha256": "48679d3dd3f77cf3f4af3062dc7f806f76a20ef784bbc1a8a5cf51773bfab99c",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-providers.openrouter.enforce_distillable_text.expanded.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-providers.openrouter.enforce_distillable_text.expanded.svg",
+      "bytes": 80785,
+      "sha256": "a7a3947cfc32272f37010db9e212ec66142ea8789cb5bd954ec682d123f33d29",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-providers.openrouter.enforce_distillable_text.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-providers.openrouter.enforce_distillable_text.first.geometry.json",
+      "bytes": 10564,
+      "sha256": "550f8af054676f8dd91fd4d898d9e9a1f517f71688af1f6f7a7cee42726f4cb1",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-providers.openrouter.enforce_distillable_text.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-providers.openrouter.enforce_distillable_text.first.svg",
+      "bytes": 78081,
+      "sha256": "05fcf704b861d8e2a779a13bc8447fc0fd4aec50d58b1555c7e85ebba70a40d5",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-providers.openrouter.enforce_distillable_text.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-providers.openrouter.enforce_distillable_text.settled.geometry.json",
+      "bytes": 10564,
+      "sha256": "550f8af054676f8dd91fd4d898d9e9a1f517f71688af1f6f7a7cee42726f4cb1",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-providers.openrouter.enforce_distillable_text.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-providers.openrouter.enforce_distillable_text.settled.svg",
+      "bytes": 78081,
+      "sha256": "05fcf704b861d8e2a779a13bc8447fc0fd4aec50d58b1555c7e85ebba70a40d5",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-shell_environment.mode.expanded.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-shell_environment.mode.expanded.geometry.json",
+      "bytes": 10191,
+      "sha256": "1295d211eed8880f17fc93ca14a6069ed810cd23b321d67883ec78e8d0baafbb",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-shell_environment.mode.expanded.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-shell_environment.mode.expanded.svg",
+      "bytes": 86040,
+      "sha256": "f240320d4a6a993a1569841c0574acc2d3a3c1bbf241d8e82b872c190d75392d",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-shell_environment.mode.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-shell_environment.mode.first.geometry.json",
+      "bytes": 10191,
+      "sha256": "fc15c47c1b98b367015e9e64933b4343750045902e79f421c06922e19d54cc1e",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-shell_environment.mode.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-shell_environment.mode.first.svg",
+      "bytes": 85786,
+      "sha256": "4c1cb66fa5611340616b1d9573dded67af493799f7a1ced98eb0764951a2927f",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-shell_environment.mode.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-shell_environment.mode.settled.geometry.json",
+      "bytes": 10191,
+      "sha256": "fc15c47c1b98b367015e9e64933b4343750045902e79f421c06922e19d54cc1e",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-shell_environment.mode.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-shell_environment.mode.settled.svg",
+      "bytes": 85786,
+      "sha256": "4c1cb66fa5611340616b1d9573dded67af493799f7a1ced98eb0764951a2927f",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-tool_approval_mode.expanded.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-tool_approval_mode.expanded.geometry.json",
+      "bytes": 10564,
+      "sha256": "790d99d3f55f62c399cf2d12b467ac3944f4498e9efd0f798764336016e8f4dd",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-tool_approval_mode.expanded.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-tool_approval_mode.expanded.svg",
+      "bytes": 79383,
+      "sha256": "12df0ae3d9529b12ca7045722be8bff497907d6089544feb64b138a8c0243629",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-tool_approval_mode.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-tool_approval_mode.first.geometry.json",
+      "bytes": 10564,
+      "sha256": "7b9ce602de7ae0cf7d22a343db26700ecd9432124f6548ed6fea0ab81cf8ba8b",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-tool_approval_mode.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-tool_approval_mode.first.svg",
+      "bytes": 77339,
+      "sha256": "8d9ac31bddfb8fe80d8fd49acb2a4af59583643c89d9a3b175155d491e58785f",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-tool_approval_mode.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-tool_approval_mode.settled.geometry.json",
+      "bytes": 10564,
+      "sha256": "7b9ce602de7ae0cf7d22a343db26700ecd9432124f6548ed6fea0ab81cf8ba8b",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-hi-tool_approval_mode.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-hi-tool_approval_mode.settled.svg",
+      "bytes": 77339,
+      "sha256": "8d9ac31bddfb8fe80d8fd49acb2a4af59583643c89d9a3b175155d491e58785f",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ru-providers.openrouter.enforce_distillable_text.expanded.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ru-providers.openrouter.enforce_distillable_text.expanded.geometry.json",
+      "bytes": 10568,
+      "sha256": "2a14c53578b5b1b8680e9b6d77956be5797ac1d9d5bd760f25a41d714cf75e38",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ru-providers.openrouter.enforce_distillable_text.expanded.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ru-providers.openrouter.enforce_distillable_text.expanded.svg",
+      "bytes": 94131,
+      "sha256": "4f1662931b6872ac9901c192cb01fba0783b99ea01857d137f8334dc741cc151",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ru-providers.openrouter.enforce_distillable_text.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ru-providers.openrouter.enforce_distillable_text.first.geometry.json",
+      "bytes": 10568,
+      "sha256": "048cef525a4bd07ab1d7435d0f8dc6b9a9072cb05f525419ab063d133ab93ff1",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ru-providers.openrouter.enforce_distillable_text.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ru-providers.openrouter.enforce_distillable_text.first.svg",
+      "bytes": 91271,
+      "sha256": "9eae03220e724ee230f2f515b4ad00797dc3d47fdd69e7a7642c99c0179359a9",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ru-providers.openrouter.enforce_distillable_text.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ru-providers.openrouter.enforce_distillable_text.settled.geometry.json",
+      "bytes": 10568,
+      "sha256": "048cef525a4bd07ab1d7435d0f8dc6b9a9072cb05f525419ab063d133ab93ff1",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ru-providers.openrouter.enforce_distillable_text.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ru-providers.openrouter.enforce_distillable_text.settled.svg",
+      "bytes": 91271,
+      "sha256": "9eae03220e724ee230f2f515b4ad00797dc3d47fdd69e7a7642c99c0179359a9",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ru-shell_environment.mode.expanded.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ru-shell_environment.mode.expanded.geometry.json",
+      "bytes": 10195,
+      "sha256": "038c4252ab556edd8beb4d738207a74a685d5ece7c2ed2c0377cf184d544af65",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ru-shell_environment.mode.expanded.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ru-shell_environment.mode.expanded.svg",
+      "bytes": 85378,
+      "sha256": "61ae9b03c823f8f9351e707994567379931b2abf5b72e3f9e2f55349a6d74221",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ru-shell_environment.mode.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ru-shell_environment.mode.first.geometry.json",
+      "bytes": 10195,
+      "sha256": "245965795d9576ebb4c1db1f8c51bd0c229e8b6c4e9cb415d77a43c95625af7f",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ru-shell_environment.mode.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ru-shell_environment.mode.first.svg",
+      "bytes": 84536,
+      "sha256": "4be6a331c021519d9d0281ce516e6cde5a76c58aabe7001d44ac96c0768383ef",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ru-shell_environment.mode.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ru-shell_environment.mode.settled.geometry.json",
+      "bytes": 10195,
+      "sha256": "245965795d9576ebb4c1db1f8c51bd0c229e8b6c4e9cb415d77a43c95625af7f",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ru-shell_environment.mode.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ru-shell_environment.mode.settled.svg",
+      "bytes": 84536,
+      "sha256": "4be6a331c021519d9d0281ce516e6cde5a76c58aabe7001d44ac96c0768383ef",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ru-tool_approval_mode.expanded.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ru-tool_approval_mode.expanded.geometry.json",
+      "bytes": 10568,
+      "sha256": "ca535af483499100675b4f89567814045fd923aff112a7740f02587a50d643e5",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ru-tool_approval_mode.expanded.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ru-tool_approval_mode.expanded.svg",
+      "bytes": 95174,
+      "sha256": "4a16e5e1846cb79013bd21ce40426ae4ea4217ce79dc3b8ff1f11541f326f9e3",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ru-tool_approval_mode.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ru-tool_approval_mode.first.geometry.json",
+      "bytes": 10568,
+      "sha256": "9b10840a73a92c0fbba1782cd167c0c90699446c72a28ff1d3bf0c990bf37258",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ru-tool_approval_mode.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ru-tool_approval_mode.first.svg",
+      "bytes": 93414,
+      "sha256": "25f43e88511b24991714fe9d909cd7bc7b2bdf07297dc287f26e0d188aafc9c9",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ru-tool_approval_mode.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ru-tool_approval_mode.settled.geometry.json",
+      "bytes": 10568,
+      "sha256": "9b10840a73a92c0fbba1782cd167c0c90699446c72a28ff1d3bf0c990bf37258",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ru-tool_approval_mode.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ru-tool_approval_mode.settled.svg",
+      "bytes": 93414,
+      "sha256": "25f43e88511b24991714fe9d909cd7bc7b2bdf07297dc287f26e0d188aafc9c9",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-compact-shell_environment.mode-100x30.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-compact-shell_environment.mode-100x30.first.geometry.json",
+      "bytes": 10138,
+      "sha256": "a996fcc232db5ac01cddb865abae4a627c6952c0e9b892c533bcc7f08ec47893",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-compact-shell_environment.mode-100x30.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-compact-shell_environment.mode-100x30.first.svg",
+      "bytes": 69943,
+      "sha256": "1e24cc470e5dd9ea4df55a4cfa47782cb522341ae470dd83171edc33693c8802",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-compact-shell_environment.mode-100x30.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-compact-shell_environment.mode-100x30.settled.geometry.json",
+      "bytes": 10138,
+      "sha256": "a996fcc232db5ac01cddb865abae4a627c6952c0e9b892c533bcc7f08ec47893",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-compact-shell_environment.mode-100x30.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-compact-shell_environment.mode-100x30.settled.svg",
+      "bytes": 69943,
+      "sha256": "1e24cc470e5dd9ea4df55a4cfa47782cb522341ae470dd83171edc33693c8802",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-compact-shell_environment.mode-80x24.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-compact-shell_environment.mode-80x24.first.geometry.json",
+      "bytes": 9374,
+      "sha256": "a182cfff77cb3458709b2d9c3626f03ffa96808226e5cee5bb747097add6fa2f",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-compact-shell_environment.mode-80x24.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-compact-shell_environment.mode-80x24.first.svg",
+      "bytes": 44287,
+      "sha256": "450122f63cbc91df68fdb68bc8bcdff71faafa673f28865b96c75789236fba76",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-compact-shell_environment.mode-80x24.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-compact-shell_environment.mode-80x24.settled.geometry.json",
+      "bytes": 9374,
+      "sha256": "a182cfff77cb3458709b2d9c3626f03ffa96808226e5cee5bb747097add6fa2f",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-compact-shell_environment.mode-80x24.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-compact-shell_environment.mode-80x24.settled.svg",
+      "bytes": 44287,
+      "sha256": "450122f63cbc91df68fdb68bc8bcdff71faafa673f28865b96c75789236fba76",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-providers.openrouter.enforce_distillable_text.expanded.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-providers.openrouter.enforce_distillable_text.expanded.geometry.json",
+      "bytes": 10564,
+      "sha256": "68641c34cd332fdfe30c9b6c5d519a66b91881fb9797edbbf419c5d952de3d95",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-providers.openrouter.enforce_distillable_text.expanded.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-providers.openrouter.enforce_distillable_text.expanded.svg",
+      "bytes": 93779,
+      "sha256": "efb61bdcb225c992f12396358b2050c0c9debe292ab91a7081b52bb054181379",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-providers.openrouter.enforce_distillable_text.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-providers.openrouter.enforce_distillable_text.first.geometry.json",
+      "bytes": 10564,
+      "sha256": "ccdd6f75c2eb3b87cf5dff38326e305a642c865f33e7fbdc2b74e162368d9a69",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-providers.openrouter.enforce_distillable_text.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-providers.openrouter.enforce_distillable_text.first.svg",
+      "bytes": 91026,
+      "sha256": "162da278cf0525aac83d7639fc425a5f6529328da3b946dc07cc4a26f0d470d7",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-providers.openrouter.enforce_distillable_text.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-providers.openrouter.enforce_distillable_text.settled.geometry.json",
+      "bytes": 10564,
+      "sha256": "ccdd6f75c2eb3b87cf5dff38326e305a642c865f33e7fbdc2b74e162368d9a69",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-providers.openrouter.enforce_distillable_text.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-providers.openrouter.enforce_distillable_text.settled.svg",
+      "bytes": 91026,
+      "sha256": "162da278cf0525aac83d7639fc425a5f6529328da3b946dc07cc4a26f0d470d7",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-shell_environment.mode.expanded.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-shell_environment.mode.expanded.geometry.json",
+      "bytes": 10191,
+      "sha256": "4ee7c1a7f49c4a3f4d8bbc24a82ce6a6d3f1bf8e652460222374f8eb16f2c5d7",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-shell_environment.mode.expanded.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-shell_environment.mode.expanded.svg",
+      "bytes": 82305,
+      "sha256": "fada636028daf5a2ba87f71ee6a1e41328eca17da486cee2ab0083765606d945",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-shell_environment.mode.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-shell_environment.mode.first.geometry.json",
+      "bytes": 10191,
+      "sha256": "7360044568146618ce04cfae03836ac4979a0c053301dfdde9d2412e4464ffba",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-shell_environment.mode.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-shell_environment.mode.first.svg",
+      "bytes": 81666,
+      "sha256": "2a6c1f60ce8d0329605a794ea19726cf1bb51e799b9752d6922fcc606c8c96d0",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-shell_environment.mode.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-shell_environment.mode.settled.geometry.json",
+      "bytes": 10191,
+      "sha256": "7360044568146618ce04cfae03836ac4979a0c053301dfdde9d2412e4464ffba",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-shell_environment.mode.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-shell_environment.mode.settled.svg",
+      "bytes": 81666,
+      "sha256": "2a6c1f60ce8d0329605a794ea19726cf1bb51e799b9752d6922fcc606c8c96d0",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-tool_approval_mode.expanded.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-tool_approval_mode.expanded.geometry.json",
+      "bytes": 10564,
+      "sha256": "8de04fa7e43a05b15ea77fd4d45fc9814d13495d6ad47a22f24240bfd7dc2962",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-tool_approval_mode.expanded.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-tool_approval_mode.expanded.svg",
+      "bytes": 92621,
+      "sha256": "18c20dde72194cfaf873550c2e599878115cf4ed59a592457663348213508dde",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-tool_approval_mode.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-tool_approval_mode.first.geometry.json",
+      "bytes": 10564,
+      "sha256": "f988554f36d8ecfd2b0fbbce14c7759adb664c2b105d5724b370cfc4c4d78593",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-tool_approval_mode.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-tool_approval_mode.first.svg",
+      "bytes": 90806,
+      "sha256": "d1f7bc01f3c54673c5648e3e9ad584f556831343716a7b819415f0cba54d59b8",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-tool_approval_mode.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-tool_approval_mode.settled.geometry.json",
+      "bytes": 10564,
+      "sha256": "f988554f36d8ecfd2b0fbbce14c7759adb664c2b105d5724b370cfc4c4d78593",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-ur-tool_approval_mode.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-ur-tool_approval_mode.settled.svg",
+      "bytes": 90806,
+      "sha256": "d1f7bc01f3c54673c5648e3e9ad584f556831343716a7b819415f0cba54d59b8",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-vi-providers.openrouter.enforce_distillable_text.expanded.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-vi-providers.openrouter.enforce_distillable_text.expanded.geometry.json",
+      "bytes": 10568,
+      "sha256": "b96ee403747c47c109b1c4479eed69ee2ed357ce980832bde3f7e52570814961",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-vi-providers.openrouter.enforce_distillable_text.expanded.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-vi-providers.openrouter.enforce_distillable_text.expanded.svg",
+      "bytes": 84542,
+      "sha256": "f05f63184779910db78bef09c4f1c263e0094ee0163280023d44aef0c3afe39b",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-vi-providers.openrouter.enforce_distillable_text.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-vi-providers.openrouter.enforce_distillable_text.first.geometry.json",
+      "bytes": 10568,
+      "sha256": "5db434a596af459a23c92dc3cbe2af642673dc0db80d3127b8ffb0f781b2622e",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-vi-providers.openrouter.enforce_distillable_text.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-vi-providers.openrouter.enforce_distillable_text.first.svg",
+      "bytes": 82367,
+      "sha256": "84236a1de07667b9d8b1a3cb84e1a19f7ce14b09b3c9aeee075acfad09509c4e",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-vi-providers.openrouter.enforce_distillable_text.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-vi-providers.openrouter.enforce_distillable_text.settled.geometry.json",
+      "bytes": 10568,
+      "sha256": "5db434a596af459a23c92dc3cbe2af642673dc0db80d3127b8ffb0f781b2622e",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-vi-providers.openrouter.enforce_distillable_text.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-vi-providers.openrouter.enforce_distillable_text.settled.svg",
+      "bytes": 82367,
+      "sha256": "84236a1de07667b9d8b1a3cb84e1a19f7ce14b09b3c9aeee075acfad09509c4e",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-vi-shell_environment.mode.expanded.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-vi-shell_environment.mode.expanded.geometry.json",
+      "bytes": 10195,
+      "sha256": "f624df41318707a419643bbbede01684172df4e82be6b7bd823fbe09b93f515d",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-vi-shell_environment.mode.expanded.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-vi-shell_environment.mode.expanded.svg",
+      "bytes": 92415,
+      "sha256": "bb6e7faee7c4740d894b4f4c71bfd1b291ddbde0310c1fd968a37b6905b02c8b",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-vi-shell_environment.mode.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-vi-shell_environment.mode.first.geometry.json",
+      "bytes": 10195,
+      "sha256": "b6285d5b2c7951df922dc4cfc3c21dcbdca57eec611c8aa1f3ae74151fb562c0",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-vi-shell_environment.mode.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-vi-shell_environment.mode.first.svg",
+      "bytes": 91772,
+      "sha256": "b73eadf4b4a9a74987b2794e4b4c2a5f873aad50fefca6f5208ea82fb320bf48",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-vi-shell_environment.mode.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-vi-shell_environment.mode.settled.geometry.json",
+      "bytes": 10195,
+      "sha256": "b6285d5b2c7951df922dc4cfc3c21dcbdca57eec611c8aa1f3ae74151fb562c0",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-vi-shell_environment.mode.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-vi-shell_environment.mode.settled.svg",
+      "bytes": 91772,
+      "sha256": "b73eadf4b4a9a74987b2794e4b4c2a5f873aad50fefca6f5208ea82fb320bf48",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-vi-tool_approval_mode.expanded.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-vi-tool_approval_mode.expanded.geometry.json",
+      "bytes": 10568,
+      "sha256": "675b22d758348a912d8fb1d395f68fb1b3d4c72acf4faa53216cea72b4476055",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-vi-tool_approval_mode.expanded.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-vi-tool_approval_mode.expanded.svg",
+      "bytes": 84957,
+      "sha256": "3fdfc6ed3b40f475680fe45c6b72922b83f6a4f90bd9432a3685218f7689069a",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-vi-tool_approval_mode.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-vi-tool_approval_mode.first.geometry.json",
+      "bytes": 10568,
+      "sha256": "a1b21bc4ebd436a21cec9d3f6e2acbf6868d455b6b46bc1cd2e8b01d8a296768",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-vi-tool_approval_mode.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-vi-tool_approval_mode.first.svg",
+      "bytes": 83554,
+      "sha256": "91bdc61919314fd1e7a8c609225034729589d840998df5664aef4b09558744b5",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-vi-tool_approval_mode.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-vi-tool_approval_mode.settled.geometry.json",
+      "bytes": 10568,
+      "sha256": "a1b21bc4ebd436a21cec9d3f6e2acbf6868d455b6b46bc1cd2e8b01d8a296768",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-vi-tool_approval_mode.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-vi-tool_approval_mode.settled.svg",
+      "bytes": 83554,
+      "sha256": "91bdc61919314fd1e7a8c609225034729589d840998df5664aef4b09558744b5",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-zh-CN-providers.openrouter.enforce_distillable_text.expanded.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-zh-CN-providers.openrouter.enforce_distillable_text.expanded.geometry.json",
+      "bytes": 10564,
+      "sha256": "4a72a960ff1142c5084091de90183d2a11ba4daaebd698f7cb69654673783908",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-zh-CN-providers.openrouter.enforce_distillable_text.expanded.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-zh-CN-providers.openrouter.enforce_distillable_text.expanded.svg",
+      "bytes": 83198,
+      "sha256": "d3910a64bc2fb2bffa67f694abcb9c8da8914b7b82a69cd10c8f336861008f50",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-zh-CN-providers.openrouter.enforce_distillable_text.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-zh-CN-providers.openrouter.enforce_distillable_text.first.geometry.json",
+      "bytes": 10564,
+      "sha256": "cb4735d957bf9b171a1dc63c916b983d35403144dbac3eb44a07cd797d99b438",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-zh-CN-providers.openrouter.enforce_distillable_text.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-zh-CN-providers.openrouter.enforce_distillable_text.first.svg",
+      "bytes": 81496,
+      "sha256": "da1164dfeddbc07326317e5395665c26a0e980a509dbc9443a9ed7804d9d105c",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-zh-CN-providers.openrouter.enforce_distillable_text.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-zh-CN-providers.openrouter.enforce_distillable_text.settled.geometry.json",
+      "bytes": 10564,
+      "sha256": "cb4735d957bf9b171a1dc63c916b983d35403144dbac3eb44a07cd797d99b438",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-zh-CN-providers.openrouter.enforce_distillable_text.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-zh-CN-providers.openrouter.enforce_distillable_text.settled.svg",
+      "bytes": 81496,
+      "sha256": "da1164dfeddbc07326317e5395665c26a0e980a509dbc9443a9ed7804d9d105c",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-zh-CN-shell_environment.mode.expanded.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-zh-CN-shell_environment.mode.expanded.geometry.json",
+      "bytes": 10191,
+      "sha256": "1bd12be4c194a7c928b1a5b9292b1ab4d01df8087ae24613a380bfabf199dd2f",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-zh-CN-shell_environment.mode.expanded.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-zh-CN-shell_environment.mode.expanded.svg",
+      "bytes": 72347,
+      "sha256": "66d54dd3ab1e949b6089733fa401d602076ba799ec0d89b3660f0cf66534f6ed",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-zh-CN-shell_environment.mode.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-zh-CN-shell_environment.mode.first.geometry.json",
+      "bytes": 10191,
+      "sha256": "f54257654b6e2a0eeaefdf37c045122b5089f2f9f871ab47fdc663472cb6525c",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-zh-CN-shell_environment.mode.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-zh-CN-shell_environment.mode.first.svg",
+      "bytes": 72122,
+      "sha256": "4d3f81aea56eb598ab7ed9495a74dfcf28169dc8235f70259dcb610c704ae6b9",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-zh-CN-shell_environment.mode.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-zh-CN-shell_environment.mode.settled.geometry.json",
+      "bytes": 10191,
+      "sha256": "f54257654b6e2a0eeaefdf37c045122b5089f2f9f871ab47fdc663472cb6525c",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-zh-CN-shell_environment.mode.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-zh-CN-shell_environment.mode.settled.svg",
+      "bytes": 72122,
+      "sha256": "4d3f81aea56eb598ab7ed9495a74dfcf28169dc8235f70259dcb610c704ae6b9",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-zh-CN-tool_approval_mode.expanded.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-zh-CN-tool_approval_mode.expanded.geometry.json",
+      "bytes": 10564,
+      "sha256": "faba9431bdeb336399b7631373c3ab37cb7fc22efaa106a2fbae32e81c18c699",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-zh-CN-tool_approval_mode.expanded.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-zh-CN-tool_approval_mode.expanded.svg",
+      "bytes": 83758,
+      "sha256": "0afa9640575ef5bb913a044b8c73e43f82ef1420c3f7306010af1de4255225a2",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-zh-CN-tool_approval_mode.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-zh-CN-tool_approval_mode.first.geometry.json",
+      "bytes": 10564,
+      "sha256": "4b8b7f4d0feec86f58735153a4b6d1e84e5c021cb6310d26e2ec29c59133f243",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-zh-CN-tool_approval_mode.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-zh-CN-tool_approval_mode.first.svg",
+      "bytes": 82712,
+      "sha256": "078d35822565a10ae9b25467657f0364cdf1647521d1342de491607381d89ecc",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-zh-CN-tool_approval_mode.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-zh-CN-tool_approval_mode.settled.geometry.json",
+      "bytes": 10564,
+      "sha256": "4b8b7f4d0feec86f58735153a4b6d1e84e5c021cb6310d26e2ec29c59133f243",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-zh-CN-tool_approval_mode.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-zh-CN-tool_approval_mode.settled.svg",
+      "bytes": 82712,
+      "sha256": "078d35822565a10ae9b25467657f0364cdf1647521d1342de491607381d89ecc",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "api-complete.log",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/api-complete.log",
+      "bytes": 28934,
+      "sha256": "b7de83abb2ff330622778fe221877529a9095f2e6d007b6a81f92dc3193e9571",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "api-complete.process.log",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/api-complete.process.log",
+      "bytes": 21,
+      "sha256": "e1228280e376595cea82a385519fc2b86e2d9c31546f4ec9903a6d2376d5677d",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "before-capture-result.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/before-capture-result.json",
+      "bytes": 171476,
+      "sha256": "edd40c340f1828ce8c0919ab043769740a9523da44cc473e9d3a8a8f3f124104",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "candidate-import-prereq.log",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/candidate-import-prereq.log",
+      "bytes": 1648,
+      "sha256": "6fdda13e830e12a4892f401519f5069a68abbd7bc1c99699953867530f2e1aad",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "candidate-import-prereq.py.txt",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/candidate-import-prereq.py",
+      "bytes": 1646,
+      "sha256": "4141f5791083da2700975ca33cde97efad92dd47f3422d0c3e708c02e28f028c",
+      "kind": "inert reproduction driver"
+    },
+    {
+      "path": "catalogue-changes.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/catalogue-changes.json",
+      "bytes": 107160,
+      "sha256": "ff51b1db259f969f90ece1a8cfb3d83fbb2d4c020cebe5f427358945b527f2ea",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "controls.log",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/controls.log",
+      "bytes": 2442,
+      "sha256": "c42346880d7d9be1f00225659c9dd147c8c7b178d3169c71ef9e9bd88fb26dd1",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "controls.process.log",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/controls.process.log",
+      "bytes": 21,
+      "sha256": "2bbf9d6bfc1312ee39b35a711e606aa080b65d7c45ebca95215deaad6542da47",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-es-shell_environment.mode.expanded.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-es-shell_environment.mode.expanded.first.geometry.json",
+      "bytes": 10191,
+      "sha256": "eb08874c52652d4b314e900eeffaa15045fc510dd1a18985dd84fa183a1f7d69",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-es-shell_environment.mode.expanded.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-es-shell_environment.mode.expanded.first.svg",
+      "bytes": 95017,
+      "sha256": "0adba3e9e7de6a851ea732ee2f8dfc67a32993716526d3dc09dfb2df2c819a17",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-es-shell_environment.mode.expanded.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-es-shell_environment.mode.expanded.settled.geometry.json",
+      "bytes": 10191,
+      "sha256": "eb08874c52652d4b314e900eeffaa15045fc510dd1a18985dd84fa183a1f7d69",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-es-shell_environment.mode.expanded.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-es-shell_environment.mode.expanded.settled.svg",
+      "bytes": 95017,
+      "sha256": "0adba3e9e7de6a851ea732ee2f8dfc67a32993716526d3dc09dfb2df2c819a17",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-fr-compact-team_bridge.session-100x30.settled.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-fr-compact-team_bridge.session-100x30.settled.first.geometry.json",
+      "bytes": 10142,
+      "sha256": "a3141f86b116e327664ebf331f43841595bf5f8850c394cc39e6fed6583551e6",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-fr-compact-team_bridge.session-100x30.settled.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-fr-compact-team_bridge.session-100x30.settled.first.svg",
+      "bytes": 69263,
+      "sha256": "474ee4c3d2e5a7e2ebb71ccd95cf723e5de62ddd06081c4f9ff1aee80cfe16e8",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-fr-compact-team_bridge.session-100x30.settled.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-fr-compact-team_bridge.session-100x30.settled.settled.geometry.json",
+      "bytes": 10142,
+      "sha256": "a3141f86b116e327664ebf331f43841595bf5f8850c394cc39e6fed6583551e6",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-fr-compact-team_bridge.session-100x30.settled.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-fr-compact-team_bridge.session-100x30.settled.settled.svg",
+      "bytes": 69263,
+      "sha256": "474ee4c3d2e5a7e2ebb71ccd95cf723e5de62ddd06081c4f9ff1aee80cfe16e8",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-fr-shell_environment.mode.expanded.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-fr-shell_environment.mode.expanded.first.geometry.json",
+      "bytes": 10195,
+      "sha256": "8c8badc80437e9af98710411c657eb9c395bd26b57279996b7e0b72d2358a689",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-fr-shell_environment.mode.expanded.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-fr-shell_environment.mode.expanded.first.svg",
+      "bytes": 95128,
+      "sha256": "731a7065298e74131658d8329c76c342bc415213aefb16e21d2578ba1e837eb0",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-fr-shell_environment.mode.expanded.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-fr-shell_environment.mode.expanded.settled.geometry.json",
+      "bytes": 10195,
+      "sha256": "8c8badc80437e9af98710411c657eb9c395bd26b57279996b7e0b72d2358a689",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-fr-shell_environment.mode.expanded.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-fr-shell_environment.mode.expanded.settled.svg",
+      "bytes": 95438,
+      "sha256": "b0b47ad721be7cd2b3bd751c6a80ba77fcb133f2efb10ba1fd6e553bab05da01",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-hi-providers.openrouter.enforce_distillable_text.expanded.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-hi-providers.openrouter.enforce_distillable_text.expanded.first.geometry.json",
+      "bytes": 10564,
+      "sha256": "48679d3dd3f77cf3f4af3062dc7f806f76a20ef784bbc1a8a5cf51773bfab99c",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-hi-providers.openrouter.enforce_distillable_text.expanded.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-hi-providers.openrouter.enforce_distillable_text.expanded.first.svg",
+      "bytes": 80514,
+      "sha256": "c07d5914496ea3d9b9418b5c57f3b5ec0711136b5dd62f5e381d8b2e47640c9b",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-hi-providers.openrouter.enforce_distillable_text.expanded.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-hi-providers.openrouter.enforce_distillable_text.expanded.settled.geometry.json",
+      "bytes": 10564,
+      "sha256": "48679d3dd3f77cf3f4af3062dc7f806f76a20ef784bbc1a8a5cf51773bfab99c",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-hi-providers.openrouter.enforce_distillable_text.expanded.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-hi-providers.openrouter.enforce_distillable_text.expanded.settled.svg",
+      "bytes": 80514,
+      "sha256": "c07d5914496ea3d9b9418b5c57f3b5ec0711136b5dd62f5e381d8b2e47640c9b",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-hi-shell_environment.mode.expanded.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-hi-shell_environment.mode.expanded.first.geometry.json",
+      "bytes": 10191,
+      "sha256": "1295d211eed8880f17fc93ca14a6069ed810cd23b321d67883ec78e8d0baafbb",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-hi-shell_environment.mode.expanded.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-hi-shell_environment.mode.expanded.first.svg",
+      "bytes": 85913,
+      "sha256": "75ee5418112db2cc91d98ce0288207e21082bc54d783daa874bd3a86cbcfe4da",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-hi-shell_environment.mode.expanded.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-hi-shell_environment.mode.expanded.settled.geometry.json",
+      "bytes": 10191,
+      "sha256": "1295d211eed8880f17fc93ca14a6069ed810cd23b321d67883ec78e8d0baafbb",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-hi-shell_environment.mode.expanded.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-hi-shell_environment.mode.expanded.settled.svg",
+      "bytes": 85913,
+      "sha256": "75ee5418112db2cc91d98ce0288207e21082bc54d783daa874bd3a86cbcfe4da",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-only.py.txt",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-only.py",
+      "bytes": 4804,
+      "sha256": "56b7ab72d6731f7593ffb4e1a52ff9fc472e1b85ab0490d1946388775a3399eb",
+      "kind": "inert reproduction driver"
+    },
+    {
+      "path": "p1-before-result.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-result.json",
+      "bytes": 50435,
+      "sha256": "d6e895e1db22443ed93e5c41a548e07158fa9be1a6fa8294244efde7c280f22a",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-ru-shell_environment.mode.expanded.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-ru-shell_environment.mode.expanded.first.geometry.json",
+      "bytes": 10195,
+      "sha256": "038c4252ab556edd8beb4d738207a74a685d5ece7c2ed2c0377cf184d544af65",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-ru-shell_environment.mode.expanded.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-ru-shell_environment.mode.expanded.first.svg",
+      "bytes": 85085,
+      "sha256": "3c59af1f8c21db614026ea3e147d8172e5826335eaad61e6d12d9e56d4163044",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-ru-shell_environment.mode.expanded.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-ru-shell_environment.mode.expanded.settled.geometry.json",
+      "bytes": 10195,
+      "sha256": "038c4252ab556edd8beb4d738207a74a685d5ece7c2ed2c0377cf184d544af65",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-ru-shell_environment.mode.expanded.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-ru-shell_environment.mode.expanded.settled.svg",
+      "bytes": 85085,
+      "sha256": "3c59af1f8c21db614026ea3e147d8172e5826335eaad61e6d12d9e56d4163044",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-ur-shell_environment.mode.expanded.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-ur-shell_environment.mode.expanded.first.geometry.json",
+      "bytes": 10191,
+      "sha256": "4ee7c1a7f49c4a3f4d8bbc24a82ce6a6d3f1bf8e652460222374f8eb16f2c5d7",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-ur-shell_environment.mode.expanded.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-ur-shell_environment.mode.expanded.first.svg",
+      "bytes": 81580,
+      "sha256": "78efa1002a72e31f10098f9feae4ceeaa934e8ad1693654aa9abc4adcbb7e18f",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-ur-shell_environment.mode.expanded.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-ur-shell_environment.mode.expanded.settled.geometry.json",
+      "bytes": 10191,
+      "sha256": "4ee7c1a7f49c4a3f4d8bbc24a82ce6a6d3f1bf8e652460222374f8eb16f2c5d7",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-ur-shell_environment.mode.expanded.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-ur-shell_environment.mode.expanded.settled.svg",
+      "bytes": 81580,
+      "sha256": "78efa1002a72e31f10098f9feae4ceeaa934e8ad1693654aa9abc4adcbb7e18f",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-vi-shell_environment.mode.expanded.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-vi-shell_environment.mode.expanded.first.geometry.json",
+      "bytes": 10195,
+      "sha256": "f624df41318707a419643bbbede01684172df4e82be6b7bd823fbe09b93f515d",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-vi-shell_environment.mode.expanded.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-vi-shell_environment.mode.expanded.first.svg",
+      "bytes": 92548,
+      "sha256": "a2da47222bad579231bfb7c3687a8a25bd4547457e86946b21b1165b6f6f9956",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-vi-shell_environment.mode.expanded.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-vi-shell_environment.mode.expanded.settled.geometry.json",
+      "bytes": 10195,
+      "sha256": "f624df41318707a419643bbbede01684172df4e82be6b7bd823fbe09b93f515d",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-vi-shell_environment.mode.expanded.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-vi-shell_environment.mode.expanded.settled.svg",
+      "bytes": 92548,
+      "sha256": "a2da47222bad579231bfb7c3687a8a25bd4547457e86946b21b1165b6f6f9956",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-zh-CN-shell_environment.mode.expanded.first.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-zh-CN-shell_environment.mode.expanded.first.geometry.json",
+      "bytes": 10191,
+      "sha256": "1bd12be4c194a7c928b1a5b9292b1ab4d01df8087ae24613a380bfabf199dd2f",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-zh-CN-shell_environment.mode.expanded.first.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-zh-CN-shell_environment.mode.expanded.first.svg",
+      "bytes": 72597,
+      "sha256": "967d62e4049c48764f76382f98c8105e9a5cb180b3129d6ae9d3fa1703d25ec0",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-zh-CN-shell_environment.mode.expanded.settled.geometry.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-zh-CN-shell_environment.mode.expanded.settled.geometry.json",
+      "bytes": 10191,
+      "sha256": "1bd12be4c194a7c928b1a5b9292b1ab4d01df8087ae24613a380bfabf199dd2f",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-before-zh-CN-shell_environment.mode.expanded.settled.svg",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-before-zh-CN-shell_environment.mode.expanded.settled.svg",
+      "bytes": 72597,
+      "sha256": "967d62e4049c48764f76382f98c8105e9a5cb180b3129d6ae9d3fa1703d25ec0",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-fixed-before.log",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-fixed-before.log",
+      "bytes": 1193,
+      "sha256": "f48b36f30541f0e2ed58187671e439283cb50622f6ca1e71bbde5904a771048c",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-fixed-before.process.log",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-fixed-before.process.log",
+      "bytes": 21,
+      "sha256": "6169b1780b75f85ea7feed834cf9d0304f6fc3e2bd1e7129dfafc958341d2fde",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-fixture-manifest.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-fixture-manifest.json",
+      "bytes": 483338,
+      "sha256": "5c6ad5ad87daf1b0fb2c83f5d740e15ef93528b0dff9b20aaebd9fcd6643ee06",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-followup-digest.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-followup-digest.json",
+      "bytes": 5360,
+      "sha256": "d4b79d5c8c4de662f044178953aab61252b5581ec5b1a90812cb537481711042",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-followup-report.md",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-followup-report.md",
+      "bytes": 9015,
+      "sha256": "ba9eaf6cf94361390670e7877677ba8ee471a15948aa1fdfc63149b5c9ae000e",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-valid-comparison-1.png",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-valid-comparison-1.png",
+      "bytes": 118937,
+      "sha256": "a9c619ff60fc38a8ff951def7d158b2be2f078cab970e80c298365f489731153",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-valid-comparison-2.png",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-valid-comparison-2.png",
+      "bytes": 100358,
+      "sha256": "60f2e3a358f86c4f28cb87d111c9ad8e5cd13f2de9c87f9335d268031df24b11",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-valid-comparison-3.png",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-valid-comparison-3.png",
+      "bytes": 108741,
+      "sha256": "fed859ab97d5a07fbb201b63639a916dcc9319c5c5c26205d2c57e8cd9643258",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-valid-comparison-4.png",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-valid-comparison-4.png",
+      "bytes": 77706,
+      "sha256": "d62cbdf7f3088cd10a2151e7e9b48a1705176a45656a787bb1642794b4094487",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-valid-comparison-5.png",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-valid-comparison-5.png",
+      "bytes": 119324,
+      "sha256": "43f98c88459d131f86e2597478e1013462109064be375809d18a1d487fd2a5ee",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-valid-comparison-6.png",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-valid-comparison-6.png",
+      "bytes": 104159,
+      "sha256": "b7eb9f7e480d6df6246e63bc1b0b00a91036053ebf9e8f9854c65eb76eb494be",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-valid-comparison-7.png",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-valid-comparison-7.png",
+      "bytes": 116824,
+      "sha256": "c4004ad587ebcd708491bb5a480d6be5d4c14db504090e563881947d38db5d07",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-valid-comparison-8.png",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-valid-comparison-8.png",
+      "bytes": 102112,
+      "sha256": "e45624e8b4ca1120585ebd6534bf7619a6ef6e6cdf6913939fa931ef04800ccf",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "p1-valid-comparison-9.png",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/p1-valid-comparison-9.png",
+      "bytes": 76816,
+      "sha256": "10f906c78fe4c5e6f8c7412b7c730bb7d6cacc75f6be09cbb8003d9e151625fd",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "private-api-result.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/private-api-result.json",
+      "bytes": 27184,
+      "sha256": "21e244f9c2a9fb1d29d749e05635270efdb46dc372b2e8ffa32a000a83294532",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "private-controls-diagnostic.py.txt",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/private-controls-diagnostic.py",
+      "bytes": 1936,
+      "sha256": "77aa5744a669167ff6a8a084b74ee5954c5208beb633b4b522ac75a3396752ca",
+      "kind": "inert reproduction driver"
+    },
+    {
+      "path": "private-controls-result.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/private-controls-result.json",
+      "bytes": 2441,
+      "sha256": "4de10664d326771e3be856a7381e5a8f7fde2fc1ae7ce400ab00464db2d343e6",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "private-qa-digest.json",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/private-qa-digest.json",
+      "bytes": 813,
+      "sha256": "d4c391486322bb5004b8c1fead4eccb74e5fce5c426baa55dca8094faecac01a",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "private-settings-api.py.txt",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/private-settings-api.py",
+      "bytes": 6281,
+      "sha256": "0ec65820aa62f8456e0a991388accdb83dac2ae82f6c76cd6652f6de132d7f69",
+      "kind": "inert reproduction driver"
+    },
+    {
+      "path": "private-settings-capture.py.txt",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/private-settings-capture.py",
+      "bytes": 5619,
+      "sha256": "283c2c57dfa01b743843ebeb9eba61e978bab0be71c9b5011df96627b84e32be",
+      "kind": "inert reproduction driver"
+    },
+    {
+      "path": "private-settings-qa-report.md",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/private-settings-qa-report.md",
+      "bytes": 13043,
+      "sha256": "3f871f53301762a89834ecb8f25ce518180a04c17ffd214348eff084ffd57e73",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "run-private-case.sh.txt",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/run-private-case.sh",
+      "bytes": 1016,
+      "sha256": "6ab2ac644353a251382a5c7779d9c0fc656a48d03da5912628e9a7daf9736e52",
+      "kind": "inert reproduction driver"
+    },
+    {
+      "path": "settings-realpath-preflight.md",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/settings-realpath-preflight.md",
+      "bytes": 16509,
+      "sha256": "c522848a83a7c5e37450e6e27f457dc255434990491cf6c548c8e9c2c708277d",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-complete.log",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-complete.log",
+      "bytes": 697,
+      "sha256": "2cb2899793bf4e5497ce53671d8f3c79174e19d30f87fd0edb73f0a311a44056",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "after-complete.process.log",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/after-complete.process.log",
+      "bytes": 21,
+      "sha256": "dc6dbe0933a1e8e9d8121a92831f90ccbcb5e08ea07d1a02a7605a75ce70d7c1",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "before-complete.log",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/before-complete.log",
+      "bytes": 700,
+      "sha256": "371855317e8a9b20f0b0ce6ac197ab070b24d84ad5ea80891bca66773226a586",
+      "kind": "retained QA evidence"
+    },
+    {
+      "path": "before-complete.process.log",
+      "source_path": "/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad/before-complete.process.log",
+      "bytes": 21,
+      "sha256": "6e3f3918f645d74c22ca2ee15b8a4ae0bb3f8a40961d46122c47526594d1f4c2",
+      "kind": "retained QA evidence"
+    }
+  ]
+}

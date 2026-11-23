@@ -77,6 +77,7 @@ from local_operator.i18n.keys import wire_settings_account_policy as _ap
 from local_operator.i18n.keys import wire_settings_hub_defaults as _hd
 from local_operator.i18n.keys import wire_settings_hub_org as _ho
 from local_operator.i18n.keys import wire_settings_keymap as _wk
+from local_operator.i18n.keys import wire_settings_transcript_display as _td
 from local_operator.i18n.keys import wire_voice as _wv
 from local_operator.i18n.messages import Msg as _Msg
 from local_operator.memory import DEFAULT_EXCLUDED_DEVICES, SCOPES
@@ -128,6 +129,10 @@ _CHILD_SETTINGS_NAMESPACES = (
     "wire.settings.hub_defaults",
     "wire.settings.hub_org",
     "wire.settings.keymap",
+    # The transcript layout switch (`display.transcript_display`): its own child
+    # namespace so its six English keys never move the audited `wire.settings`
+    # source hash — the `hub_org` pattern.
+    "wire.settings.transcript_display",
     "wire.aida_cadence",
     "wire.host_speed",
     "wire.guardrails",
@@ -229,6 +234,29 @@ _KEYMAP_COPY = {
     "keymap.quick_send": (_wk.quick_send_label, _wk.quick_send_help),
     "keymap.push_to_talk": (_wk.push_to_talk_label, _wk.push_to_talk_help),
     "keymap.start_recording": (_wk.start_recording_label, _wk.start_recording_help),
+    "keymap.command_palette": (_wk.command_palette_label, _wk.command_palette_help),
+    "keymap.toggle_sidebar": (_wk.toggle_sidebar_label, _wk.toggle_sidebar_help),
+    "keymap.focus_sidebar": (_wk.focus_sidebar_label, _wk.focus_sidebar_help),
+    "keymap.aside": (_wk.aside_label, _wk.aside_help),
+    "keymap.fork_aside": (_wk.fork_aside_label, _wk.fork_aside_help),
+    "keymap.toggle_todos": (_wk.toggle_todos_label, _wk.toggle_todos_help),
+    "keymap.toggle_subagents": (_wk.toggle_subagents_label, _wk.toggle_subagents_help),
+    "keymap.toggle_pin": (_wk.toggle_pin_label, _wk.toggle_pin_help),
+    "keymap.toggle_asks": (_wk.toggle_asks_label, _wk.toggle_asks_help),
+    "keymap.prev_session": (_wk.prev_session_label, _wk.prev_session_help),
+    "keymap.next_session": (_wk.next_session_label, _wk.next_session_help),
+    "keymap.cycle_effort": (_wk.cycle_effort_label, _wk.cycle_effort_help),
+    "keymap.clear_transcript": (_wk.clear_transcript_label, _wk.clear_transcript_help),
+    "keymap.transcript_up": (_wk.transcript_up_label, _wk.transcript_up_help),
+    "keymap.transcript_down": (_wk.transcript_down_label, _wk.transcript_down_help),
+    "keymap.transcript_half_up": (_wk.transcript_half_up_label, _wk.transcript_half_up_help),
+    "keymap.transcript_half_down": (
+        _wk.transcript_half_down_label,
+        _wk.transcript_half_down_help,
+    ),
+    "keymap.send_steer": (_wk.send_steer_label, _wk.send_steer_help),
+    "keymap.send_queue": (_wk.send_queue_label, _wk.send_queue_help),
+    "keymap.send_both": (_wk.send_both_label, _wk.send_both_help),
 }
 
 
@@ -593,6 +621,18 @@ SECTIONS: tuple[Section, ...] = (
         _t(_ns.title()),
         Scope.LIVE,
         _t(_ns.description()),
+    ),
+    # The busy-send delivery default (``delivery.busy_default``). Its own
+    # section rather than leaving the row under ``appearance``, where it was
+    # born under its old TUI-only name: the row is neutral between the TUI
+    # and the desktop app (one shared config.yml, one LIVE read per send),
+    # and an ``appearance`` header on a ``delivery`` path says nothing. The
+    # section TITLE is the contract's "Message sending" (architect D1).
+    Section(
+        "composer",
+        _t(_ws.composer_title()),
+        Scope.LIVE,
+        _t(_ws.composer_description()),
     ),
     # Its own section rather than a pair of rows under ``appearance``. Scope
     # does not force the split — ``appearance`` is LIVE too — but the section
@@ -984,6 +1024,16 @@ SECTIONS: tuple[Section, ...] = (
         _t(_ws.mesh_updates_title()),
         Scope.LIVE,
         _t(_ws.mesh_updates_description()),
+    ),
+    # How a session MOVE carries its working set (design move-working-set.md §8.4).
+    # LIVE is honest: ``workset.cap_bytes`` re-reads config.yml at every move, on the
+    # owner (the manifest's cap, refusing ``working_set_over_cap`` before anything is
+    # retired) and on the destination (its own cap on what it accepts).
+    Section(
+        "mesh_moves",
+        _t(_ws.mesh_moves_title()),
+        Scope.LIVE,
+        _t(_ws.mesh_moves_description()),
     ),
     # What THIS device's update does with its older install generations
     # (``update.auto_prune`` / ``update.keep_generations``). Its own section, not
@@ -2948,6 +2998,33 @@ SETTINGS: tuple[Setting, ...] = (
             ),
         ),
     ),
+    Setting(
+        key="display.transcript_display",
+        # FLAT-DOTTED like every other ``display.*`` key: the dot is part of a
+        # literal top-level key, which is what ``tui/settings.py`` reads. Written
+        # as a nested tuple this key would be stored where nothing looks for it.
+        path=("display.transcript_display",),
+        section="appearance",
+        label=_t(_td.label()),
+        kind=Kind.ENUM,
+        # A literal, not an import (this module must stay off the consumers'
+        # import path); ``tests/unit/test_settings_io.py``'s ``_consumer_defaults``
+        # pins it to ``tui.settings.DEFAULT_TRANSCRIPT_DISPLAY``.
+        default="by-turn",
+        help=_t(_td.help()),
+        choices=(
+            Choice(
+                "by-turn",
+                _t(_td.choice_by_turn_label()),
+                _t(_td.choice_by_turn_description()),
+            ),
+            Choice(
+                "by-response",
+                _t(_td.choice_by_response_label()),
+                _t(_td.choice_by_response_description()),
+            ),
+        ),
+    ),
     # -- notification sound (notification-sounds design §1.2) ------------------
     # Genuinely NESTED paths (``values.notifications.sound.*``), unlike the
     # flat ``display.*`` keys above: the consumer is
@@ -3324,6 +3401,36 @@ SETTINGS: tuple[Setting, ...] = (
         choices=_bool_choices(
             _t(_ws.tui_sidebar_show_subagents_choice_true_description()),
             _t(_ws.tui_sidebar_show_subagents_choice_false_description()),
+        ),
+    ),
+    Setting(
+        key="delivery.busy_default",
+        path=("delivery", "busy_default"),
+        section="composer",
+        # LIVE: read at submit time (``_busy_delivery_mode``), so a /settings
+        # write changes the next send in this session with no relaunch. The
+        # desktop reads the same row at send time, so a write made in the TUI
+        # reaches it at its next focus.
+        label=_t(_ws.delivery_busy_default_label()),
+        kind=Kind.ENUM,
+        default="steer",
+        help=_t(_ws.delivery_busy_default_help()),
+        choices=(
+            Choice(
+                "steer",
+                _t(_ws.delivery_busy_default_choice_steer_label()),
+                _t(_ws.delivery_busy_default_choice_steer_description()),
+            ),
+            Choice(
+                "queue",
+                _t(_ws.delivery_busy_default_choice_queue_label()),
+                _t(_ws.delivery_busy_default_choice_queue_description()),
+            ),
+            Choice(
+                "both",
+                _t(_ws.delivery_busy_default_choice_both_label()),
+                _t(_ws.delivery_busy_default_choice_both_description()),
+            ),
         ),
     ),
     # -- hotkeys ------------------------------------------------------------
@@ -5687,6 +5794,37 @@ SETTINGS: tuple[Setting, ...] = (
             ),
         ),
     ),
+    # The per-move working-set cap: 256 MiB, ~6x the measured max delta (43.1 MB over
+    # n=60 worktrees, median 0; design §8.4). The default mirrors
+    # ``workset.DEFAULT_CAP_BYTES``, which ``_consumer_defaults()`` pins.
+    Setting(
+        key="mesh.move.working_set_max_bytes",
+        path=("mesh", "move", "working_set_max_bytes"),
+        section="mesh_moves",
+        label=_t(_ws.mesh_move_working_set_max_bytes_label()),
+        kind=Kind.INT,
+        default=268_435_456,
+        minimum=1_048_576,
+        maximum=17_179_869_184,
+        help=_t(_ws.mesh_move_working_set_max_bytes_help()),
+    ),
+    # WHERE a move may create or restore a repository on THIS device (security review
+    # #4245 S1): the destination's own allowlist of ``~``-relative roots, applied to
+    # every path a source's offer names, on top of the fixed path rules (no hidden or
+    # system directories) in ``workset_transfer.primary_path_refusal``. Open list (the
+    # user's own folders). Clearing it restores the default, which ``workset.
+    # restore_roots`` falls back to for an absent key; an entry that is not ``~`` or
+    # ``~/...`` is ignored there, so a typo narrows the policy and never widens it.
+    Setting(
+        key="mesh.move.working_set_roots",
+        path=("mesh", "move", "working_set_roots"),
+        section="mesh_moves",
+        label=_t(_ws.mesh_move_working_set_roots_label()),
+        kind=Kind.LIST,
+        default=["~"],
+        help=_t(_ws.mesh_move_working_set_roots_help()),
+        empty_unsets=True,
+    ),
     # THE RELAY'S OWN LIMIT, and the one an operator needs exactly when a peer
     # cannot connect: §2.1's cap on UNAUTHENTICATED connections in flight. The slot
     # is held only until a handshake resolves, so this bounds neither `max_links`
@@ -6956,6 +7094,16 @@ def coerce(setting: Setting, text: str) -> Any:
         # a desktop value is an accelerator, not a Textual key string.
         if setting.hotkey_scope == "desktop":
             return _keymap.normalize_desktop_key(text, action_id=setting.key)
+        if setting.hotkey_scope == "composer":
+            # The RAW spelling is what the grammar judges: canonicalising
+            # first would collapse a repeated modifier (``ctrl+ctrl+enter``)
+            # before the refusal sees it and store a chord the operator never
+            # asked for (``ctrl+enter``). Validation raises before the
+            # canonical form below is returned, so order matters here.
+            problem = _keymap.validate_key(text, scope="composer", action_id=setting.key)
+            if problem is not None:
+                raise ValueError(problem)
+            return _keymap.normalize_composer_key(text)
         return _keymap.normalize_key(text)
     if setting.kind is Kind.CASCADE:
         # JSON, because the value is a two-level structure and the page's own
@@ -7302,6 +7450,15 @@ def write_setting(
         # Textual key string).
         if setting.hotkey_scope == "desktop":
             value = _keymap.normalize_desktop_key(value, action_id=setting.key)
+        elif setting.hotkey_scope == "composer":
+            # Validated RAW for the same reason as the `coerce` arm: this
+            # writer receives raw JSON straight from the wire, so a
+            # repeated-modifier spelling must be refused here rather than
+            # canonicalised into the chord it spells as its own collapse.
+            problem = _keymap.validate_key(value, scope="composer", action_id=setting.key)
+            if problem is not None:
+                raise ValueError(problem)
+            value = _keymap.normalize_composer_key(value)
         else:
             value = _keymap.normalize_key(value)
     if setting.validate_value is validate_tier_value:

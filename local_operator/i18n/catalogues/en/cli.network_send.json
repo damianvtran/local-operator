@@ -1,0 +1,3 @@
+{
+  "cli.network_send.still_starting": "{session_id} is still starting on {peer}; message NOT queued"
+}

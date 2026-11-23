@@ -1,0 +1,108 @@
+{
+  "locale": "ur",
+  "namespace": "wire.teams.effective",
+  "audit_date": "2026-11-19",
+  "key_count": 9,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "da45f1eea614",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "8dce6c4d11c0",
+    "actual_model_source": "Host session-state Model declaration: openai/gpt-6.1-sol",
+    "fallback": "none used",
+    "date": "2026-11-19"
+  },
+  "source_audit_revision": "e70bc818b8553dca1fad007705257817be49ee37",
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "ur": {
+      "path": "/Users/damian/.local-operator/sessions/8dce6c4d11c0/scratchpad/ur/wire.teams.effective.json",
+      "sha256": "c43b87b8f9cc396da817e7c20da28c3b2a3b00668e6003ba4a4f0872c7ef345a"
+    }
+  },
+  "translator_receipt": {
+    "path": "/Users/damian/.local-operator/sessions/8dce6c4d11c0/scratchpad/ur/translator-receipt.json",
+    "sha256": "72ec0ca8d5a91b36b6d2b94cac4bd73b349657535b56f0e8282d2447a0cdb8ae",
+    "provenance_source": "Translator receipt independently read and hashed; translation authorship is declared by translator receipt/task, not inferred from validator"
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ur/wire.teams.effective/er1/report.json",
+      "scratch_original": "/Users/damian/.local-operator/sessions/da45f1eea614/scratchpad/ur-a1/report.json",
+      "sha256": "9e59cb682307f0dc78ec9de50f868b511d4947d6a021a642f7b0fd5210ac0627"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/wire.teams.effective/er1/audit.log",
+      "scratch_original": "/Users/damian/.local-operator/sessions/da45f1eea614/scratchpad/ur-a1/audit.log",
+      "sha256": "128961467f6c73ca65662897f1147edecbf5f7d64645fa2c61527fe4f5e71e7b"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/wire.teams.effective/er1/receipt.json",
+      "scratch_original": "/Users/damian/.local-operator/sessions/da45f1eea614/scratchpad/ur-a1/receipt.json",
+      "sha256": "c84a8a9af8a656cab16b55bd821ddeef64332d4a3644d48cb5cd8776d721753e"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/wire.teams.effective/er1/translator-receipt.original.json",
+      "scratch_original": "/Users/damian/.local-operator/sessions/da45f1eea614/scratchpad/ur-a1/translator-receipt.original.json",
+      "sha256": "72ec0ca8d5a91b36b6d2b94cac4bd73b349657535b56f0e8282d2447a0cdb8ae"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/wire.teams.effective/er1/validate.py.txt",
+      "scratch_original": "/Users/damian/.local-operator/sessions/da45f1eea614/scratchpad/ur-a1/validate.py.txt",
+      "sha256": "2776e14e977b858d50cabbc93bbd9b4f97cbf13264a9b6c54aa7c841f0b963d2"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/wire.teams.effective/er1/history-sha.txt",
+      "scratch_original": "/Users/damian/.local-operator/sessions/da45f1eea614/scratchpad/ur-a1/history-sha.txt",
+      "sha256": "15fdd87526b71675244c858c912952e26a41888acbbe29ac2814472acce55851"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/wire.teams.effective/er1/ledger-dry-run.log",
+      "scratch_original": "/Users/damian/.local-operator/sessions/da45f1eea614/scratchpad/ur-a1/ledger-dry-run.log",
+      "sha256": "cf1c0f9365b7ef5177a662b624e5c0d87755b670acd6a1c14ae1cf8652c56132"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "independent_audit_instance": 1,
+  "second_independent_audit": "pending",
+  "report": "report.json",
+  "audit_notes_not_execution_log": [
+    "report.json"
+  ],
+  "actual_execution_logs": [
+    "audit.log",
+    "ledger-dry-run.log"
+  ],
+  "ledger_operation": {
+    "mode": "dry-run only",
+    "exit_code": 0,
+    "expected_history_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+  },
+  "retention": {
+    "status": "scratch originals retained for requesting manager to import unchanged",
+    "intended_canonical_record_path": "i18n/audits/evidence/ur/wire.teams.effective/er1/record.json",
+    "tracked_commit": null,
+    "on_main": false
+  },
+  "evidence_limits": {
+    "pseudo": "not performed",
+    "fallback": "not performed",
+    "bidi_runtime": "not performed",
+    "visual": "not performed",
+    "shipping_eligibility": "not claimed"
+  },
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false
+}

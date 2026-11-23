@@ -1,0 +1,8 @@
+{
+  "wire.settings.transcript_display.choice.by_response.description": "chaque réponse terminée",
+  "wire.settings.transcript_display.choice.by_response.label": "Par réponse",
+  "wire.settings.transcript_display.choice.by_turn.description": "une réponse par tour",
+  "wire.settings.transcript_display.choice.by_turn.label": "Par tour",
+  "wire.settings.transcript_display.help": "« Par tour » condense chaque tour en sa réponse. « Par réponse » garde à l’écran chaque réponse terminée, la réponse finale du tour restant signalée.",
+  "wire.settings.transcript_display.label": "Affichage de la transcription"
+}

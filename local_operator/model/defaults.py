@@ -155,7 +155,42 @@ def suggested_model_for(hosting: str, *, oauth: bool = False) -> SuggestedModel 
     canonical = _canonical(hosting)
     if oauth and canonical in OAUTH_SUGGESTED_MODELS:
         return OAUTH_SUGGESTED_MODELS[canonical]
-    return SUGGESTED_MODELS.get(canonical)
+    suggestion = SUGGESTED_MODELS.get(canonical)
+    if suggestion is not None and (canonical, suggestion.id) in _KEYED_NAMES:
+        return suggestion._replace(name=_keyed_name(canonical, suggestion))
+    return suggestion
+
+
+#: Suggestions whose display name is product COPY rather than a model's proper
+#: name, keyed by ``(hosting, id)``. Every other name in the tables above is a
+#: vendor's product name ("Claude Opus 5.5") and stays as written in every
+#: language; Radient's router has no product name, only a description of what it
+#: does ("Automatic"), so a French connect dialog read "Suggère Automatic" (the
+#: desktop fr census, 2026-11). The table keeps that English word as the source
+#: and the fallback; the id (``auto``) is a machine token and never changes.
+#: Values name the generated ``wire.providers.connect`` key function.
+_KEYED_NAMES: dict[tuple[str, str], str] = {("radient", "auto"): "suggested_automatic"}
+
+
+def _keyed_name(canonical: str, suggestion: SuggestedModel) -> str:
+    """The display name in the language the config resolves NOW.
+
+    Rendered here, at the one read every surface goes through (the auth and
+    models routes' ``suggested_model`` and ``login_defaults``' "Default model
+    set to ..." label), because each of them hands the name on as finished text.
+    Lazy imports keep this module importable without the i18n stack, the same
+    constraint the module docstring states for the model registry; a render
+    failure keeps the English name rather than failing the listing.
+    """
+    try:
+        from local_operator.i18n.keys import wire_providers_connect
+        from local_operator.i18n.messages import render_resolved
+
+        key = getattr(wire_providers_connect, _KEYED_NAMES[(canonical, suggestion.id)])
+        return render_resolved(key())
+    except Exception:  # noqa: BLE001 — a label is copy; the suggestion still stands
+        pass
+    return suggestion.name
 
 
 def default_model_for(hosting: str) -> str | None:

@@ -49,6 +49,7 @@ _OWNED = {
         "output_retries_requires_format",
         "output_retries_range",
         "world_root_empty",
+        "mcp_ready_timeout_invalid",
     ],
     sdk.open_session: ["mode_invalid", "attach_resume_required"],
     sdk._refuse_attach_extras: ["attach_output_unsupported", "attach_fields_unsupported"],
@@ -82,6 +83,7 @@ def _cases(tmp_path):
         "output_retries_requires_format": lambda: SessionSpec(output_retries=1),
         "output_retries_range": lambda: SessionSpec(output_format="json", output_retries=True),
         "world_root_empty": lambda: SessionSpec(world_root=" "),
+        "mcp_ready_timeout_invalid": lambda: SessionSpec(mcp_ready_timeout_s=-1.0),
         "approval_declared_tools_empty": lambda: ApprovalPolicy.declared(()),
         "approval_tools_wrong_mode": lambda: ApprovalPolicy(mode="refuse", tools=("read",)),
         "approval_callback_gate_required": lambda: ApprovalPolicy.callback(cast(Any, None)),
@@ -256,7 +258,7 @@ def _owned_raise_keys(source):
     return found
 
 
-def test_exact_owned_scope_has_21_keyed_raises_and_rejects_planted_literal():
+def test_exact_owned_scope_has_22_keyed_raises_and_rejects_planted_literal():
     observed = []
     for owner, expected in _OWNED.items():
         source = textwrap.dedent(inspect.getsource(owner))
@@ -266,11 +268,11 @@ def test_exact_owned_scope_has_21_keyed_raises_and_rejects_planted_literal():
         # Negative control uses the same predicate as the exact-site guard.
         planted = source + '\nraise SessionSpecError("planted unkeyed SDK diagnostic")\n'
         assert _owned_raise_keys(planted)[-1] == []
-    assert len(observed) == len(set(observed)) == 21
+    assert len(observed) == len(set(observed)) == 22
     assert set(observed) == set(_EXPECTED)
 
 
-def test_source_catalogue_and_context_cover_only_the_owned_21_keys():
+def test_source_catalogue_and_context_cover_only_the_owned_22_keys():
     namespace = "wire.errors.sdk_spec"
     source = catalogues.load_catalogue("en", namespace)
     context = catalogues.context("en", namespace)
@@ -290,7 +292,7 @@ def test_source_catalogue_and_context_cover_only_the_owned_21_keys():
 def test_fr_es_render_every_key_as_valid_icu_with_the_guards_own_params(
     locale, case, tmp_path, monkeypatch
 ):
-    """fr/es carry the 21 keys; each renders through the real ``messages.render``
+    """fr/es carry the 22 keys; each renders through the real ``messages.render``
     with the params the real guard passed, so a malformed value (unbalanced
     apostrophe, dropped ``{param}``) fails here rather than in a user's SDK error.
     The guards themselves always render ``en`` (callers parse those bytes), so the

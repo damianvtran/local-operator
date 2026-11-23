@@ -197,6 +197,16 @@ EVENT_MUTE_CAPABILITY = "event-mute-v1"
 #: ``EVENT_MUTE_CAPABILITY`` above; presence of the string is the whole check.
 ATTACH_ACTIVITY_CAPABILITY = "attach-activity-v1"
 
+#: This session reads the Team Bridge inbox through the ROUTED-session lookup
+#: (``COALESCE(routed_session, designated_session)``), so the connector may hand
+#: it a message addressed to the session that asked rather than the designated
+#: one. Advertised because the connector and the session are separate processes
+#: that can run different builds during an upgrade: a session without this string
+#: would never find a row routed to it, and the connector must not route there.
+#: Unconditional like ``EVENT_MUTE_CAPABILITY``: the lookup is the session
+#: runtime's own code, not something a handle implements.
+TEAM_BRIDGE_ROUTED_INBOX_CAPABILITY = "team-bridge-routed-inbox-v1"
+
 #: Additive attach capability: this owner accepts the ``operator_challenge`` op
 #: and will admit an authority-increasing frame that carries a valid
 #: ``operator_sig`` (with ``operator_key_id``, and ``operator_cert`` for a
@@ -234,6 +244,30 @@ OPERATOR_SIGNATURE_CAPABILITY = "operator-signature-v1"
 #: contract revision (the mode axis plus its reserved route slot), so a client
 #: that may send one may send the other.
 INPUT_MODE_CAPABILITY = "input-mode-v1"
+
+#: Additive attach capability: this owner's ``prompt``/``steer`` carry the
+#: ``delivery`` busy-send mode (``steer``/``queue``/``both``; see
+#: ``Session._steer_delivery``) from the attach frame onto the queued steering
+#: item. Advertised only when the handle's ``steer`` AND ``prompt`` take the
+#: keyword (``_takes_delivery``), because a client must never send a mode the
+#: owner would silently drop: for ``queue``/``both`` a silent drop is a silent
+#: downgrade to an urgent steer — the one outcome this string exists to
+#: prevent. The client REFUSES ``queue``/``both`` against an owner without it,
+#: never strips the field and sends anyway. One string for both ops, like
+#: ``input-mode-v1``: the prompt arm is the busy-session fallback that steers
+#: under the same command id, so the mode must ride both or the fallback
+#: would deliver a queued send as an urgent one.
+BUSY_DELIVERY_CAPABILITY = "busy-delivery-v1"
+
+#: The refusal for a ``queue``/``both`` send to an owner that did not advertise
+#: :data:`BUSY_DELIVERY_CAPABILITY`. Worded for the person who pressed send:
+#: what happened, and the one move that still works. ONE constant because the
+#: senders that gate on the same record — the attach client and the desktop
+#: admit path — quote it rather than a copy that could drift.
+BUSY_DELIVERY_UNSUPPORTED = (
+    "this session's runtime predates delivery modes (queue, or queue then steer); "
+    "send it as a steer, or update the runtime"
+)
 
 #: Additive attach capability: this owner's ``prompt``/``steer`` take the
 #: ``files`` keyword and resolve ``Prompt.files`` references against its own

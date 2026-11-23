@@ -1,0 +1,97 @@
+Interpreter: /Users/damian/local-operator/.venv/bin/python
+Module: local_operator.i18n.catalogues /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/catalogues.py
+Module: local_operator.i18n.runtime /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/runtime.py
+Module: scripts.i18n.check /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/scripts/i18n/check.py
+BEFORE hashes: {"context": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc", "en": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff", "ru": "9d08bddeee59461ae1a9f27de2839c39dc7b0cad17b6171e26fd7cde82946940"}
+Official scoped check_catalogues en/ru: []
+Missing-key negative: ["ru/tui.model_persistence: missing key 'tui.model_persistence.saved'"]
+Wrong-arg negative: ["ru/tui.model_persistence: tui.model_persistence.with_model: arguments (('wrong_label', 'simple'), ('routes', 'simple')) != en's (('label', 'simple'), ('routes', 'simple')): argument 1 is 'wrong_label', en's is 'label' (renamed or reordered)"]
+Restored positive: []
+KEY PASS tui.model_persistence.persist args () plural/select=0 cells 65 NFC/protected tokens PASS
+KEY PASS tui.model_persistence.settings args () plural/select=0 cells 41 NFC/protected tokens PASS
+KEY PASS tui.model_persistence.saved args () plural/select=0 cells 71 NFC/protected tokens PASS
+KEY PASS tui.model_persistence.with_model args (('label', 'simple'), ('routes', 'simple')) plural/select=0 cells 26 NFC/protected tokens PASS
+PSEUDO tui.model_persistence.persist /model default ssaavveess tthhiiss ffoorr nneeww sseessssiioonnss
+PSEUDO tui.model_persistence.settings /settings eeddiittss tthhee bboooott ddeeffaauulltt ttoooo
+PSEUDO tui.model_persistence.saved sswwiittcchh ttoo tthhee bboooott ddeeffaauulltt wwiitthh /model saved
+PSEUDO tui.model_persistence.with_model mmooddeell: {label} — {routes}
+WRAP en label=short width 80 lines 2 command_folds []
+|model: p/m — /model default saves this for new sessions · switch to the boot |
+|default with /model saved · /settings edits the boot default too|
+WRAP en label=short width 100 lines 2 command_folds ['/model saved']
+|model: p/m — /model default saves this for new sessions · switch to the boot default with /model |
+|saved · /settings edits the boot default too|
+WRAP en label=short width 120 lines 2 command_folds []
+|model: p/m — /model default saves this for new sessions · switch to the boot default with /model saved · /settings edits|
+|the boot default too|
+WRAP en label=long width 80 lines 3 command_folds []
+|model: provider/very-long-opaque-model-identifier-2026-11-22-experimental-128k —|
+|/model default saves this for new sessions · switch to the boot default with |
+|/model saved · /settings edits the boot default too|
+WRAP en label=long width 100 lines 3 command_folds []
+|model: provider/very-long-opaque-model-identifier-2026-11-22-experimental-128k — /model default |
+|saves this for new sessions · switch to the boot default with /model saved · /settings edits the |
+|boot default too|
+WRAP en label=long width 120 lines 2 command_folds []
+|model: provider/very-long-opaque-model-identifier-2026-11-22-experimental-128k — /model default saves this for new |
+|sessions · switch to the boot default with /model saved · /settings edits the boot default too|
+SOLE ROUTE en 80 ['/settings edits the boot default too']
+SOLE ROUTE en 100 ['/settings edits the boot default too']
+SOLE ROUTE en 120 ['/settings edits the boot default too']
+WRAP ru label=short width 80 lines 3 command_folds []
+|модель: p/m — /model default сохраняет эту модель по умолчанию для новых сессий |
+|· перейти в этой сессии на сохранённую модель по умолчанию — /model saved · |
+|/settings тоже меняет модель по умолчанию|
+WRAP ru label=short width 100 lines 2 command_folds []
+|модель: p/m — /model default сохраняет эту модель по умолчанию для новых сессий · перейти в этой |
+|сессии на сохранённую модель по умолчанию — /model saved · /settings тоже меняет модель по умолчанию|
+WRAP ru label=short width 120 lines 2 command_folds []
+|модель: p/m — /model default сохраняет эту модель по умолчанию для новых сессий · перейти в этой сессии на сохранённую |
+|модель по умолчанию — /model saved · /settings тоже меняет модель по умолчанию|
+WRAP ru label=long width 80 lines 4 command_folds []
+|модель: provider/very-long-opaque-model-identifier-2026-11-22-experimental-128k |
+|— /model default сохраняет эту модель по умолчанию для новых сессий · перейти в |
+|этой сессии на сохранённую модель по умолчанию — /model saved · /settings тоже |
+|меняет модель по умолчанию|
+WRAP ru label=long width 100 lines 3 command_folds []
+|модель: provider/very-long-opaque-model-identifier-2026-11-22-experimental-128k — /model default |
+|сохраняет эту модель по умолчанию для новых сессий · перейти в этой сессии на сохранённую модель по |
+|умолчанию — /model saved · /settings тоже меняет модель по умолчанию|
+WRAP ru label=long width 120 lines 3 command_folds []
+|модель: provider/very-long-opaque-model-identifier-2026-11-22-experimental-128k — /model default сохраняет эту модель по|
+|умолчанию для новых сессий · перейти в этой сессии на сохранённую модель по умолчанию — /model saved · /settings тоже |
+|меняет модель по умолчанию|
+SOLE ROUTE ru 80 ['/settings тоже меняет модель по умолчанию']
+SOLE ROUTE ru 100 ['/settings тоже меняет модель по умолчанию']
+SOLE ROUTE ru 120 ['/settings тоже меняет модель по умолчанию']
+WRAP pseudo label=short width 80 lines 3 command_folds []
+|mmooddeell: p/m — /model default ssaavveess tthhiiss ffoorr nneeww |
+|sseessssiioonnss · sswwiittcchh ttoo tthhee bboooott ddeeffaauulltt wwiitthh |
+|/model saved · /settings eeddiittss tthhee bboooott ddeeffaauulltt ttoooo|
+WRAP pseudo label=short width 100 lines 3 command_folds []
+|mmooddeell: p/m — /model default ssaavveess tthhiiss ffoorr nneeww sseessssiioonnss · sswwiittcchh |
+|ttoo tthhee bboooott ddeeffaauulltt wwiitthh /model saved · /settings eeddiittss tthhee bboooott |
+|ddeeffaauulltt ttoooo|
+WRAP pseudo label=short width 120 lines 2 command_folds []
+|mmooddeell: p/m — /model default ssaavveess tthhiiss ffoorr nneeww sseessssiioonnss · sswwiittcchh ttoo tthhee bboooott |
+|ddeeffaauulltt wwiitthh /model saved · /settings eeddiittss tthhee bboooott ddeeffaauulltt ttoooo|
+WRAP pseudo label=long width 80 lines 5 command_folds ['/model default']
+|mmooddeell: |
+|provider/very-long-opaque-model-identifier-2026-11-22-experimental-128k — /model|
+|default ssaavveess tthhiiss ffoorr nneeww sseessssiioonnss · sswwiittcchh ttoo |
+|tthhee bboooott ddeeffaauulltt wwiitthh /model saved · /settings eeddiittss |
+|tthhee bboooott ddeeffaauulltt ttoooo|
+WRAP pseudo label=long width 100 lines 3 command_folds []
+|mmooddeell: provider/very-long-opaque-model-identifier-2026-11-22-experimental-128k — /model default|
+|ssaavveess tthhiiss ffoorr nneeww sseessssiioonnss · sswwiittcchh ttoo tthhee bboooott |
+|ddeeffaauulltt wwiitthh /model saved · /settings eeddiittss tthhee bboooott ddeeffaauulltt ttoooo|
+WRAP pseudo label=long width 120 lines 3 command_folds []
+|mmooddeell: provider/very-long-opaque-model-identifier-2026-11-22-experimental-128k — /model default ssaavveess tthhiiss|
+|ffoorr nneeww sseessssiioonnss · sswwiittcchh ttoo tthhee bboooott ddeeffaauulltt wwiitthh /model saved · /settings |
+|eeddiittss tthhee bboooott ddeeffaauulltt ttoooo|
+SOLE ROUTE pseudo 80 ['/settings eeddiittss tthhee bboooott ddeeffaauulltt ttoooo']
+SOLE ROUTE pseudo 100 ['/settings eeddiittss tthhee bboooott ddeeffaauulltt ttoooo']
+SOLE ROUTE pseudo 120 ['/settings eeddiittss tthhee bboooott ddeeffaauulltt ttoooo']
+Render cases: 27 (27); plain Rich, not styled/native or transcript-family proof
+AFTER hashes: {"context": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc", "en": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff", "ru": "9d08bddeee59461ae1a9f27de2839c39dc7b0cad17b6171e26fd7cde82946940"}
+PASS: all four keys independently checked; zero plural/select; no catalogue writes

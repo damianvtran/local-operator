@@ -1,0 +1,6 @@
+COMMAND: ['/Users/damian/local-operator/.venv/bin/python', 'scripts/i18n/ledger.py', '--root', '/Users/damian/local-operator/.worktrees/i18n-provider-state-labels', 'history-sha', '--locale', 'ru', '--namespace', 'tui.provider_state']
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+EXIT_CODE: 0
+COMMAND: ['/Users/damian/local-operator/.venv/bin/python', 'scripts/i18n/ledger.py', '--root', '/Users/damian/local-operator/.worktrees/i18n-provider-state-labels', 'append', '--receipt', '/Users/damian/local-operator/.worktrees/i18n-provider-state-labels/i18n/audits/evidence/ru/tui.provider_state/ruA22/directCLIledger-receipt.json', '--expected-history-sha', '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945', '--dry-run']
+i18n/audit-history/ru/tui.provider_state.json
+EXIT_CODE: 0

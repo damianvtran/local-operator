@@ -1,0 +1,171 @@
+{
+  "locale": "vi",
+  "namespace": "tui.session_sidebar",
+  "source_sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a",
+  "target_sha256": "6b2466d96e782ed936dfd7e9817a91b6024158bd1ce41ea5017934ad6658630d",
+  "context_sha256": "698e8f0e151fee53d52a533bc51d7edcc600ce6964d74cdb024888238161f6e0",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "passed",
+    "findings": 0
+  },
+  "status": "passed",
+  "verdict": "clean-with-findings",
+  "round": 2,
+  "scope": {
+    "head": "c8343f3a6087",
+    "catalogues": "uncommitted working-tree bytes",
+    "keys": [
+      "tui.session_sidebar.footer.hub_note",
+      "tui.session_sidebar.footer.asks_note"
+    ],
+    "keys_reaudited": 2,
+    "sidebar_neighbor_keys_read": 19,
+    "additional_context_keys": [
+      "tui.hub_links.detail.title"
+    ]
+  },
+  "findings": [
+    {
+      "id": "VI-R2-1",
+      "severity": "minor",
+      "key": "tui.session_sidebar.footer.hub_note",
+      "current": "{count} l.kết",
+      "proposed": "{count} LK",
+      "reason": "The ad hoc dotted clipping l.kết is decipherable as liên kết beside the shipped Liên kết hub title, but looks editorially compressed rather than idiomatic Vietnamese UI copy; the conventional initials LK are a cleaner compact abbreviation of that same noun.",
+      "proposal_renderings": [
+        {
+          "count": 0,
+          "text": "0 LK",
+          "cells": 4
+        },
+        {
+          "count": 1,
+          "text": "1 LK",
+          "cells": 4
+        },
+        {
+          "count": 9,
+          "text": "9 LK",
+          "cells": 4
+        },
+        {
+          "count": 10,
+          "text": "10 LK",
+          "cells": 5
+        },
+        {
+          "count": 99,
+          "text": "99 LK",
+          "cells": 5
+        }
+      ]
+    }
+  ],
+  "evidence": {
+    "tui.session_sidebar.footer.hub_note": {
+      "source": "hub: {count}",
+      "target": "{count} l.kết",
+      "arguments": [
+        [
+          "count",
+          "simple"
+        ]
+      ],
+      "parity": true,
+      "renders": [
+        {
+          "count": 0,
+          "text": "0 l.kết",
+          "cells": 7,
+          "maxCells": 10,
+          "fits": true
+        },
+        {
+          "count": 1,
+          "text": "1 l.kết",
+          "cells": 7,
+          "maxCells": 10,
+          "fits": true
+        },
+        {
+          "count": 9,
+          "text": "9 l.kết",
+          "cells": 7,
+          "maxCells": 10,
+          "fits": true
+        },
+        {
+          "count": 10,
+          "text": "10 l.kết",
+          "cells": 8,
+          "maxCells": 10,
+          "fits": true
+        },
+        {
+          "count": 99,
+          "text": "99 l.kết",
+          "cells": 8,
+          "maxCells": 10,
+          "fits": true
+        }
+      ]
+    },
+    "tui.session_sidebar.footer.asks_note": {
+      "source": "asks: {count}",
+      "target": "{count} câu hỏi",
+      "arguments": [
+        [
+          "count",
+          "simple"
+        ]
+      ],
+      "parity": true,
+      "renders": [
+        {
+          "count": 0,
+          "text": "0 câu hỏi",
+          "cells": 9,
+          "maxCells": 10,
+          "fits": true
+        },
+        {
+          "count": 1,
+          "text": "1 câu hỏi",
+          "cells": 9,
+          "maxCells": 10,
+          "fits": true
+        },
+        {
+          "count": 9,
+          "text": "9 câu hỏi",
+          "cells": 9,
+          "maxCells": 10,
+          "fits": true
+        },
+        {
+          "count": 10,
+          "text": "10 câu hỏi",
+          "cells": 10,
+          "maxCells": 10,
+          "fits": true
+        },
+        {
+          "count": 99,
+          "text": "99 câu hỏi",
+          "cells": 10,
+          "maxCells": 10,
+          "fits": true
+        }
+      ]
+    }
+  },
+  "note": "Independent delta-only re-audit; 0 unresolved blocker/major findings. Footer asks_note is clean: idiomatic numeral-before-noun order, preserved count, <=10 cells. Hub noun refers to liên kết, not nguồn; earlier nguồn proposal withdrawn under manager ruling. Checked all 21 sidebar keys for neighboring register/context only, with two changed keys re-audited. Read actual _asks_note/_hub_note composition: nonpositive totals suppress notes, so count 0 is formatter evidence only, not visible UI evidence. Runtime formatter and cell widths executed through worktree PYTHONPATH using primary .venv Python; no live TUI or screenshot claimed. Vietnamese requires no plural agreement; both source messages are simple count substitutions. No RTL requirement. Minor abbreviation polish does not impair link identification and does not block. Translator provenance supplied by manager; auditor model is actual, no fallback."
+}

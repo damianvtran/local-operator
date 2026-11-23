@@ -151,7 +151,8 @@ def test_a_linux_step_table_carries_every_installed_unit(
     monkeypatch.setattr(update, "_linux_relay_unit_installed", lambda: False)
     monkeypatch.setattr(update.sys, "platform", "linux")
     names = [name for name, _, _ in update._linux_refresh_steps()]
-    assert names == ["browser bridge", "wakes supervisor"]
+    # The secret broker's roll step is unconditional (it is not a unit).
+    assert names == ["browser bridge", "wakes supervisor", "secret broker"]
     assert update._linux_restart_units_installed() is True
 
 

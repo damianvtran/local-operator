@@ -39,7 +39,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from local_operator.guardrails.classify import Risk, Verdict, classify_bash, link_entry
+from local_operator.guardrails.classify import (
+    HOLD_CHANGES,
+    HOLD_IGNORED_UNREADABLE,
+    HOLD_IGNORED_UNVERIFIED,
+    Risk,
+    Verdict,
+    classify_bash,
+    link_entry,
+)
 from local_operator.guardrails.judge import (
     GUARDRAILS_JUDGE_TIMEOUT_DEFAULT,
     JudgeBrief,
@@ -556,14 +564,64 @@ def builtin_branch(verdict: Verdict, *, critical_override: bool) -> str:
     return BUILTIN_JUDGE
 
 
+#: The general cleanup-hold guidance: right for uncommitted, tracked-deletion,
+#: protected and unverifiable-identity holds, where there is work to save.
+_HOLD_GENERAL = (
+    "Preserve unknown files outside the checkout; commit or stash edits, push commits "
+    "that need to survive, and verify the exact path and Git registration. "
+)
+#: Operator follow-up 2026-11-21 (PR #4359 field case): a clean, merged tree
+#: refused only for ignored files got the general text above and read like the
+#: earlier open-PR/unpushed-work refusal, though there was nothing to commit.
+#: Deliberately no delete recipe: the guard cannot vouch for the payload, so
+#: anything beyond saving what the agent needs is the operator's call.
+_HOLD_IGNORED = (
+    "The worktree holds ignored files (build output, caches, environments) that the "
+    "guard cannot prove are regenerable, so it will not let Git delete them. "
+    "Copy or move anything you still need out of the checkout; whether the rest may "
+    "be deleted is the operator's decision. "
+)
+_HOLD_IGNORED_ONLY = (
+    "This hold is about ignored files only, not an open PR or unpushed work: committing, "
+    "stashing or pushing does not clear it. "
+)
+_HOLD_UNREADABLE = (
+    "The guard could not verify the worktree's ignored files (its Git status could not "
+    "be read), so it cannot show this removal loses nothing; verify the exact path and "
+    "Git registration. "
+)
+_HOLD_TAIL = (
+    "These are preservation steps, not permission to re-issue or reroute this removal. "
+    "The standing two refusal exceptions still apply."
+)
+
+
 def cleanup_hold_text(verdict: Verdict) -> str:
+    """The HIGH cleanup-hold refusal, worded for the condition that failed.
+
+    Wording only: every variant refuses the same call at the same rank, and
+    the open-PR refusal (CRITICAL, ``_critical_text``) is a different branch
+    whose text this never produces. A hold with no recorded condition keeps
+    the general guidance, so a new hold site defaults to the cautious text.
+    """
+    held = [t for t in verdict.targets if t.cleanup_hold] or verdict.targets
+    conditions = [set(t.hold_conditions) for t in held]
+    general = not conditions or any(not c or HOLD_CHANGES in c for c in conditions)
+    ignored = any(HOLD_IGNORED_UNVERIFIED in c for c in conditions)
+    unreadable = any(HOLD_IGNORED_UNREADABLE in c for c in conditions)
+    guidance = ""
+    if ignored:
+        guidance += _HOLD_IGNORED
+    if unreadable:
+        guidance += _HOLD_UNREADABLE
+    if general:
+        guidance += _HOLD_GENERAL
+    elif ignored and not unreadable:
+        guidance += _HOLD_IGNORED_ONLY
     return (
         f"BLOCKED by guardrail {DANGEROUS_DELETE_RULE}: worktree cleanup could not be verified. "
         f"Nothing was run. Targets: {_targets_text(verdict)}. "
-        "Preserve unknown files outside the checkout; commit or stash edits, push commits "
-        "that need to survive, and verify the exact path and Git registration. "
-        "These are preservation steps, not permission to re-issue or reroute this removal. "
-        "The standing two refusal exceptions still apply."
+        f"{guidance}{_HOLD_TAIL}"
     )
 
 

@@ -417,8 +417,9 @@ async def test_an_aside_over_a_live_turn_carries_the_sentence_on_screen() -> Non
         )
         assert panel.turns[-1].state == "done"
         # A mid-turn fork is queued for the turn's boundary (decision D5), so
-        # the card advertises ^f even while the agent works.
-        assert "^f" in panel.render_lines_for_test()[-1]
+        # the card advertises the fork key (its live spelling, `ctrl+f` by
+        # default) even while the agent works.
+        assert "ctrl+f" in panel.render_lines_for_test()[-1]
 
 
 @pytest.mark.asyncio
@@ -875,11 +876,11 @@ def test_the_fork_key_is_advertised_only_when_it_would_work() -> None:
     panel = AsidePanel()
     panel.display = True
     panel._turns = [AsideTurn(question="q?", state="running")]
-    assert "^f" not in panel.render_lines_for_test()[-1]
+    assert "ctrl+f" not in panel.render_lines_for_test()[-1]
 
     panel._turns = [AsideTurn(question="q?", answer="a.", state="done")]
     panel.set_fork_available(True)
-    assert "^f" in panel.render_lines_for_test()[-1]
+    assert "ctrl+f" in panel.render_lines_for_test()[-1]
 
 
 def test_a_failed_aside_is_never_forkable() -> None:
@@ -1239,12 +1240,12 @@ def test_the_footer_advertises_copy_beside_fork() -> None:
     panel.append_answer(generation, "still streaming")
     footer = panel.render_lines_for_test()[-1]
     assert f"{ASIDE_COPY_KEY} copy" in footer
-    assert "^f" not in footer
+    assert "ctrl+f" not in footer
 
     panel.settle_answer(generation, "settled")
     panel.set_fork_available(True)
     footer = panel.render_lines_for_test()[-1]
-    assert footer.index(ASIDE_COPY_KEY) < footer.index("^f")
+    assert footer.index(ASIDE_COPY_KEY) < footer.index("ctrl+f")
     assert footer.startswith("esc discard, back to the chat")
 
 

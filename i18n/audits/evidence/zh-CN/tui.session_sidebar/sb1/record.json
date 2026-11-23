@@ -1,0 +1,380 @@
+{
+  "locale": "zh-CN",
+  "namespace": "tui.session_sidebar",
+  "date": "2026-11-20",
+  "agent": "translation-auditor",
+  "model": "openai/gpt-6.1-sol",
+  "instance": "6b4a8047edc8",
+  "provider_fallback": false,
+  "independent_of_translator": true,
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-tui-sidebar",
+  "head": "c8343f3a608785b5064e61307c7333a2473126ae",
+  "files": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.session_sidebar.json",
+      "sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/tui.session_sidebar.json",
+      "sha256": "8dd7bbdc32a9a48b36c571edf3c0fd831a84811b2ff032b3145091b8a7b47cf8"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.session_sidebar.context.json",
+      "sha256": "698e8f0e151fee53d52a533bc51d7edcc600ce6964d74cdb024888238161f6e0"
+    }
+  },
+  "source_sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a",
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "6b4a8047edc8",
+    "date": "2026-11-20",
+    "result": "failed",
+    "findings": 1
+  },
+  "status": "failed",
+  "findings": {
+    "blocker": [],
+    "major": [
+      {
+        "id": "ZH-1",
+        "key": "tui.session_sidebar.footer.hub_note",
+        "path": "local_operator/i18n/catalogues/zh-CN/tui.session_sidebar.json",
+        "line": 3,
+        "current": "Hub：{count}",
+        "finding": "Untranslated English Hub is not sanctioned by the glossary or zh-CN style guide. Existing Hub links copy is precedent, not a keep-English policy exception. The label reaches the visible footer via SessionSidebar._hub_note().",
+        "proposed": "源链接：{count}",
+        "rationale": "The context defines the counter as Agent Hub source links, not agent count. 源链接 names those source links and remains within budget. Record a glossary decision for this surface rather than silently treating Hub as an approved Latin term.",
+        "citations": [
+          "i18n/glossary.md:19-30 (preserved surface-name list; no Hub)",
+          "i18n/glossary.md:118-127 (kept-English additions; no Hub)",
+          "i18n/style-guides/zh-CN.md:66-83 (Latin exceptions and locale terms; no Hub)",
+          "local_operator/i18n/catalogues/en/tui.session_sidebar.context.json:8-12 (shared agent/skill source links)",
+          "local_operator/i18n/catalogues/zh-CN/tui.hub_links.json:13,55 (existing Hub precedent, not policy authorization)",
+          "local_operator/tui/widgets/session_sidebar.py:3404-3412 (visible counter)"
+        ],
+        "proposed_cells_at_0_9_10_99": [
+          9,
+          9,
+          10,
+          10
+        ]
+      }
+    ],
+    "minor": [
+      {
+        "id": "ZH-2",
+        "key": "tui.session_sidebar.footer.asks_note",
+        "path": "local_operator/i18n/catalogues/zh-CN/tui.session_sidebar.json",
+        "line": 2,
+        "current": "提问：{count}",
+        "finding": "Understandable but action-oriented 提问 loses the awaiting-your-answer cue and differs from the adjacent established 待答问题 hint.",
+        "proposed": "待答：{count}",
+        "citations": [
+          "local_operator/i18n/catalogues/zh-CN/tui.small.json:137 (tui.small.session_sidebar.asks_suffix = · ctrl+f待答问题)",
+          "local_operator/i18n/catalogues/en/tui.session_sidebar.context.json:2-6 (queued questions waiting for user answer)"
+        ],
+        "proposed_cells_at_0_9_10_99": [
+          7,
+          7,
+          8,
+          8
+        ]
+      }
+    ],
+    "nit": []
+  },
+  "findings_by_severity": {
+    "blocker": 0,
+    "major": 1,
+    "minor": 1,
+    "nit": 0
+  },
+  "verdict": "fail",
+  "checks": {
+    "keys": 21,
+    "key_parity": "pass",
+    "argument_name_kind_parity": "pass (runtime.message_arguments, every key)",
+    "cldr_plural_categories": [
+      "other"
+    ],
+    "plural_selectors": "other only, complete; no =N selectors",
+    "render_message": "21 keys x counts 0,9,10,99 = 84 successful renders",
+    "literal_command": "lop stop preserved exactly through {command}; condition remains conditional, no recovery promise",
+    "manual_bidi_controls": 0,
+    "widths_at_counts": [
+      0,
+      9,
+      10,
+      99
+    ],
+    "cells_by_key": {
+      "tui.session_sidebar.footer.asks_note": [
+        7,
+        7,
+        8,
+        8
+      ],
+      "tui.session_sidebar.footer.hub_note": [
+        6,
+        6,
+        7,
+        7
+      ],
+      "tui.session_sidebar.footer.opening": [
+        10,
+        10,
+        10,
+        10
+      ],
+      "tui.session_sidebar.footer.refresh_failed": [
+        8,
+        8,
+        8,
+        8
+      ],
+      "tui.session_sidebar.pinned_overflow": [
+        23,
+        23,
+        24,
+        24
+      ],
+      "tui.session_sidebar.row.untitled": [
+        10,
+        10,
+        10,
+        10
+      ],
+      "tui.session_sidebar.section.active": [
+        8,
+        8,
+        8,
+        8
+      ],
+      "tui.session_sidebar.section.pinned": [
+        6,
+        6,
+        6,
+        6
+      ],
+      "tui.session_sidebar.section.previous": [
+        8,
+        8,
+        8,
+        8
+      ],
+      "tui.session_sidebar.section.subagent": [
+        12,
+        12,
+        12,
+        12
+      ],
+      "tui.session_sidebar.state.empty": [
+        8,
+        8,
+        8,
+        8
+      ],
+      "tui.session_sidebar.state.error": [
+        12,
+        12,
+        12,
+        12
+      ],
+      "tui.session_sidebar.state.loading": [
+        14,
+        14,
+        14,
+        14
+      ],
+      "tui.session_sidebar.title": [
+        4,
+        4,
+        4,
+        4
+      ],
+      "tui.session_sidebar.tooltip.location": [
+        10,
+        10,
+        10,
+        10
+      ],
+      "tui.session_sidebar.tooltip.location_network": [
+        19,
+        19,
+        19,
+        19
+      ],
+      "tui.session_sidebar.tooltip.location_network_stale": [
+        35,
+        35,
+        35,
+        35
+      ],
+      "tui.session_sidebar.tooltip.location_stale": [
+        26,
+        26,
+        26,
+        26
+      ],
+      "tui.session_sidebar.tooltip.status_wedged": [
+        43,
+        43,
+        43,
+        43
+      ],
+      "tui.session_sidebar.tooltip.unnamed_device": [
+        10,
+        10,
+        10,
+        10
+      ],
+      "tui.session_sidebar.tooltip.unreachable": [
+        19,
+        19,
+        19,
+        19
+      ]
+    },
+    "maxCells": "all 14 bounded keys pass their exact sidecar budgets, including narrower row/section budgets",
+    "footer_budget_assessment": "10 cells is realistic for zh-CN; both current counters fit, and fully translated 源链接 fits 9/9/10/10",
+    "rendered_strings_by_key": {
+      "tui.session_sidebar.footer.asks_note": [
+        "提问：0",
+        "提问：9",
+        "提问：10",
+        "提问：99"
+      ],
+      "tui.session_sidebar.footer.hub_note": [
+        "Hub：0",
+        "Hub：9",
+        "Hub：10",
+        "Hub：99"
+      ],
+      "tui.session_sidebar.footer.opening": [
+        "正在打开……",
+        "正在打开……",
+        "正在打开……",
+        "正在打开……"
+      ],
+      "tui.session_sidebar.footer.refresh_failed": [
+        "刷新失败",
+        "刷新失败",
+        "刷新失败",
+        "刷新失败"
+      ],
+      "tui.session_sidebar.pinned_overflow": [
+        "还有0个置顶项，滚动查看",
+        "还有9个置顶项，滚动查看",
+        "还有10个置顶项，滚动查看",
+        "还有99个置顶项，滚动查看"
+      ],
+      "tui.session_sidebar.row.untitled": [
+        "未命名对话",
+        "未命名对话",
+        "未命名对话",
+        "未命名对话"
+      ],
+      "tui.session_sidebar.section.active": [
+        "活跃会话",
+        "活跃会话",
+        "活跃会话",
+        "活跃会话"
+      ],
+      "tui.session_sidebar.section.pinned": [
+        "已置顶",
+        "已置顶",
+        "已置顶",
+        "已置顶"
+      ],
+      "tui.session_sidebar.section.previous": [
+        "历史会话",
+        "历史会话",
+        "历史会话",
+        "历史会话"
+      ],
+      "tui.session_sidebar.section.subagent": [
+        "子智能体运行",
+        "子智能体运行",
+        "子智能体运行",
+        "子智能体运行"
+      ],
+      "tui.session_sidebar.state.empty": [
+        "暂无对话",
+        "暂无对话",
+        "暂无对话",
+        "暂无对话"
+      ],
+      "tui.session_sidebar.state.error": [
+        "无法加载对话",
+        "无法加载对话",
+        "无法加载对话",
+        "无法加载对话"
+      ],
+      "tui.session_sidebar.state.loading": [
+        "正在加载对话……",
+        "正在加载对话……",
+        "正在加载对话……",
+        "正在加载对话……"
+      ],
+      "tui.session_sidebar.title": [
+        "会话",
+        "会话",
+        "会话",
+        "会话"
+      ],
+      "tui.session_sidebar.tooltip.location": [
+        "位于设备甲",
+        "位于设备甲",
+        "位于设备甲",
+        "位于设备甲"
+      ],
+      "tui.session_sidebar.tooltip.location_network": [
+        "位于设备甲 · 网络甲",
+        "位于设备甲 · 网络甲",
+        "位于设备甲 · 网络甲",
+        "位于设备甲 · 网络甲"
+      ],
+      "tui.session_sidebar.tooltip.location_network_stale": [
+        "位于设备甲 · 网络甲（上次已知状态）",
+        "位于设备甲 · 网络甲（上次已知状态）",
+        "位于设备甲 · 网络甲（上次已知状态）",
+        "位于设备甲 · 网络甲（上次已知状态）"
+      ],
+      "tui.session_sidebar.tooltip.location_stale": [
+        "位于设备甲（上次已知状态）",
+        "位于设备甲（上次已知状态）",
+        "位于设备甲（上次已知状态）",
+        "位于设备甲（上次已知状态）"
+      ],
+      "tui.session_sidebar.tooltip.status_wedged": [
+        "等待响应 · 如果一直没有响应，请运行lop stop",
+        "等待响应 · 如果一直没有响应，请运行lop stop",
+        "等待响应 · 如果一直没有响应，请运行lop stop",
+        "等待响应 · 如果一直没有响应，请运行lop stop"
+      ],
+      "tui.session_sidebar.tooltip.unnamed_device": [
+        "未命名设备",
+        "未命名设备",
+        "未命名设备",
+        "未命名设备"
+      ],
+      "tui.session_sidebar.tooltip.unreachable": [
+        "无法连接 · 设备离线",
+        "无法连接 · 设备离线",
+        "无法连接 · 设备离线",
+        "无法连接 · 设备离线"
+      ]
+    },
+    "visual_scope": "Runtime string renders and rich cell geometry only; no full app screenshot or native terminal frame claimed"
+  },
+  "terminology": {
+    "session": "会话 matches relay.shell.list.section.active and relay.shell.list.section.previous",
+    "pinned": "已置顶 matches relay.chrome.list.section.pinned",
+    "subagent": "子智能体 matches tui.small.subagents.title and tui.small.subagent_view.row_name",
+    "loading": "正在加载对话…… matches relay.chrome.session.loading",
+    "last_known": "上次已知 matches relay.shell.usage.last_known",
+    "hub": "Existing Hub in tui.hub_links read as contrary precedent; no glossary/style authorization found."
+  },
+  "note": "Independent audit only. No catalogue or ledger files modified. One major untranslated-English finding and one minor pending-question label consistency finding. Fail until major resolved; no translator identity fabricated."
+}

@@ -1,0 +1,876 @@
+{
+  "schema": "approval-full-repair-author/v1",
+  "locale": "vi",
+  "namespace": "wire.settings",
+  "session": "08046d0f2aac",
+  "agent": "translator settings-major-repair-vi",
+  "actual_model": "openai/gpt-6.1-sol",
+  "model_source": "Explicit host model-switch notification, provider quota fallback from anthropic/claude-opus-5-5. No subsequent switch received.",
+  "head": "90009effa833836ce4471e99d90d3b6438de7f60",
+  "status": "AUTHOR_REPAIR_ONLY_INDEPENDENT_AUDITS_PENDING",
+  "source_before_after": {
+    "local_operator/i18n/catalogues/en/wire.settings.json": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+    "local_operator/i18n/catalogues/en/wire.settings.context.json": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582"
+  },
+  "target_before_sha256": "830fc55bf9a1df0dfb3d915574800b0aa563b83a95a9ed36caf7ebeb9ecbf28b",
+  "target_after_sha256": "29f7b24c09420c3dfb5e54bb0c836f7abed5cda07c128ab22b200cc78c39fcb1",
+  "target_keys": 895,
+  "changed_key_count": 57,
+  "changed_keys": [
+    "wire.settings.bash_memory_mode.choice.auto.label",
+    "wire.settings.bash_memory_mode.choice.manual.label",
+    "wire.settings.bash_memory_mode.help",
+    "wire.settings.classification_vendor.choice.auto.label",
+    "wire.settings.classification_vendor.help",
+    "wire.settings.compaction_strategy.choice.auto.label",
+    "wire.settings.compaction_strategy.help",
+    "wire.settings.display_nerd_icons.choice.none.label",
+    "wire.settings.display_nerd_icons.help",
+    "wire.settings.fork.title",
+    "wire.settings.fork_cmux_placement.choice.surface.description",
+    "wire.settings.fork_cmux_placement.choice.surface.label",
+    "wire.settings.fork_cmux_placement.help",
+    "wire.settings.model_effort.choice.unset.label",
+    "wire.settings.monitor_classifymaxchars.help",
+    "wire.settings.network_rollout_on_update.choice.auto.label",
+    "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+    "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+    "wire.settings.providers_openrouter_allow_fallbacks.help",
+    "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+    "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+    "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+    "wire.settings.providers_openrouter_data_collection.help",
+    "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+    "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+    "wire.settings.providers_openrouter_enforce_distillable_text.help",
+    "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+    "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+    "wire.settings.providers_openrouter_require_parameters.help",
+    "wire.settings.providers_openrouter_sort.choice.unset.label",
+    "wire.settings.providers_openrouter_sort.help",
+    "wire.settings.providers_openrouter_zdr.choice.true.label",
+    "wire.settings.providers_openrouter_zdr.choice.unset.label",
+    "wire.settings.providers_openrouter_zdr.help",
+    "wire.settings.session_scratchpad.description",
+    "wire.settings.session_scratchpad.title",
+    "wire.settings.session_scratchpad_max_bytes.help",
+    "wire.settings.session_scratchpad_max_bytes.label",
+    "wire.settings.shell_environment_mode.choice.allowlist.label",
+    "wire.settings.shell_environment_mode.choice.inherit.label",
+    "wire.settings.shell_environment_mode.help",
+    "wire.settings.speech_transcription_cleanup.choice.auto.label",
+    "wire.settings.speech_transcription_cleanup.choice.client.label",
+    "wire.settings.speech_transcription_cleanup.choice.off.label",
+    "wire.settings.speech_transcription_cleanup.choice.provider.label",
+    "wire.settings.speech_transcription_cleanup.help",
+    "wire.settings.speech_voice_expressiveness.choice.medium.description",
+    "wire.settings.speech_voice_gender.choice.auto.label",
+    "wire.settings.speech_voice_gender.choice.female.label",
+    "wire.settings.speech_voice_gender.choice.male.label",
+    "wire.settings.speech_voice_gender.help",
+    "wire.settings.team_bridge_session.label",
+    "wire.settings.tool_approval_mode.choice.ask.label",
+    "wire.settings.web_fetch_render_backend.choice.auto.label",
+    "wire.settings.web_fetch_render_backend.help",
+    "wire.settings.web_search_strategy.choice.ordered.label",
+    "wire.settings.web_search_strategy.choice.round_robin.label"
+  ],
+  "accepted_major_fixed": [
+    {
+      "id": "I18N-WS-E6C2188A81F3",
+      "key": "wire.settings.bash_memory_mode.choice.auto.label",
+      "backtranslation": "Automatic"
+    },
+    {
+      "id": "I18N-WS-802B8268724D",
+      "key": "wire.settings.bash_memory_mode.choice.manual.label",
+      "backtranslation": "Manual"
+    },
+    {
+      "id": "I18N-WS-803C522C3F62",
+      "key": "wire.settings.classification_vendor.choice.auto.label",
+      "backtranslation": "Automatic"
+    },
+    {
+      "id": "I18N-WS-240C498CA1C1",
+      "key": "wire.settings.compaction_strategy.choice.auto.label",
+      "backtranslation": "Automatic"
+    },
+    {
+      "id": "I18N-WS-CDE402D4ABB5",
+      "key": "wire.settings.display_nerd_icons.choice.none.label",
+      "backtranslation": "Automatic"
+    },
+    {
+      "id": "I18N-WS-3CEF58FC37D2",
+      "key": "wire.settings.fork.title",
+      "backtranslation": "Branch conversation"
+    },
+    {
+      "id": "I18N-WS-93EB04D1BC4D",
+      "key": "wire.settings.fork_cmux_placement.choice.surface.label",
+      "backtranslation": "New tab"
+    },
+    {
+      "id": "I18N-WS-30736341A5D8",
+      "key": "wire.settings.fork_cmux_placement.help",
+      "backtranslation": "In cmux, whether a new branch opens in its own workspace or in a tab here."
+    },
+    {
+      "id": "I18N-WS-C4D3DE320B13",
+      "key": "wire.settings.model_effort.choice.unset.label",
+      "backtranslation": "Automatic"
+    },
+    {
+      "id": "I18N-WS-BDB852BCA5C5",
+      "key": "wire.settings.monitor_classifymaxchars.help",
+      "backtranslation": "Maximum characters from changed lines sent to materiality check; monitor name and purpose have separate length limits."
+    },
+    {
+      "id": "I18N-WS-66D2D9CC6848",
+      "key": "wire.settings.network_rollout_on_update.choice.auto.label",
+      "backtranslation": "Automatic"
+    },
+    {
+      "id": "I18N-WS-513A71CB406C",
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+      "backtranslation": "No"
+    },
+    {
+      "id": "I18N-WS-32DB6C298E5C",
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+      "backtranslation": "Default"
+    },
+    {
+      "id": "I18N-WS-DD21D2852FC7",
+      "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "backtranslation": "Allow"
+    },
+    {
+      "id": "I18N-WS-961F6FF2DA51",
+      "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "backtranslation": "Do not allow"
+    },
+    {
+      "id": "I18N-WS-EAD73985D2C9",
+      "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+      "backtranslation": "Default"
+    },
+    {
+      "id": "I18N-WS-378BA7328B99",
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+      "backtranslation": "Yes"
+    },
+    {
+      "id": "I18N-WS-CD06C73F8E78",
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+      "backtranslation": "Default"
+    },
+    {
+      "id": "I18N-WS-2B7797E9A40D",
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+      "backtranslation": "Yes"
+    },
+    {
+      "id": "I18N-WS-653D8954B431",
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+      "backtranslation": "Default"
+    },
+    {
+      "id": "I18N-WS-8DDA7C4D87CB",
+      "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+      "backtranslation": "Default"
+    },
+    {
+      "id": "I18N-WS-3DE117B6A717",
+      "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+      "backtranslation": "Yes"
+    },
+    {
+      "id": "I18N-WS-A73734B5D1A9",
+      "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+      "backtranslation": "Default"
+    },
+    {
+      "id": "I18N-WS-0C842967FFF2",
+      "key": "wire.settings.session_scratchpad.title",
+      "backtranslation": "Scratch area"
+    },
+    {
+      "id": "I18N-WS-7BB0A888B1A4",
+      "key": "wire.settings.session_scratchpad_max_bytes.help",
+      "backtranslation": "Maximum size of each session’s scratch area: 16 MiB to 8 GiB. Default 256 MiB."
+    },
+    {
+      "id": "I18N-WS-5C534E296CE9",
+      "key": "wire.settings.session_scratchpad_max_bytes.label",
+      "backtranslation": "Scratch-area cap (bytes)"
+    },
+    {
+      "id": "I18N-WS-B7F88E3953BA",
+      "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "backtranslation": "Allowlist"
+    },
+    {
+      "id": "I18N-WS-3CD94E41B2B7",
+      "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+      "backtranslation": "Inherit"
+    },
+    {
+      "id": "I18N-WS-2E0C22F21B6C",
+      "key": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+      "backtranslation": "Automatic"
+    },
+    {
+      "id": "I18N-WS-F8A25CCB46D7",
+      "key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+      "backtranslation": "Client"
+    },
+    {
+      "id": "I18N-WS-B66F879551DE",
+      "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+      "backtranslation": "Off"
+    },
+    {
+      "id": "I18N-WS-9F37CDCBD6ED",
+      "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+      "backtranslation": "Provider"
+    },
+    {
+      "id": "I18N-WS-FA7340FF8D3C",
+      "key": "wire.settings.speech_voice_gender.choice.auto.label",
+      "backtranslation": "Automatic"
+    },
+    {
+      "id": "I18N-WS-C3F93F5552D5",
+      "key": "wire.settings.speech_voice_gender.choice.female.label",
+      "backtranslation": "Female"
+    },
+    {
+      "id": "I18N-WS-6E07BEFC2F49",
+      "key": "wire.settings.speech_voice_gender.choice.male.label",
+      "backtranslation": "Male"
+    },
+    {
+      "id": "I18N-WS-EED64BE5C06E",
+      "key": "wire.settings.team_bridge_session.label",
+      "backtranslation": "Chief-of-staff session"
+    },
+    {
+      "id": "I18N-WS-7AB27EDC4AA9",
+      "key": "wire.settings.web_fetch_render_backend.choice.auto.label",
+      "backtranslation": "Automatic"
+    },
+    {
+      "id": "I18N-WS-21B6A15BD737",
+      "key": "wire.settings.web_search_strategy.choice.ordered.label",
+      "backtranslation": "In order"
+    },
+    {
+      "id": "I18N-WS-3886CD8B7B42",
+      "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+      "backtranslation": "Round robin"
+    }
+  ],
+  "rejected": [],
+  "remaining_major_authoring": [],
+  "additional_changes": [
+    {
+      "key": "wire.settings.bash_memory_mode.help",
+      "backtranslation": "'auto' derives the ceiling from the memory this device has free right now, so it tightens on its own when the machine is busy. 'manual' pins it to the number below."
+    },
+    {
+      "key": "wire.settings.classification_vendor.help",
+      "backtranslation": "Needs recommendations on. Pin one leg; auto prefers Radient."
+    },
+    {
+      "key": "wire.settings.compaction_strategy.help",
+      "backtranslation": "Which mechanism compacts. Auto picks per model."
+    },
+    {
+      "key": "wire.settings.display_nerd_icons.help",
+      "backtranslation": "Expanded tool-row icons. Auto reads the terminal emulator's markers."
+    },
+    {
+      "key": "wire.settings.fork_cmux_placement.choice.surface.description",
+      "backtranslation": "A tab in the current workspace."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.help",
+      "backtranslation": "'default' sends nothing (OpenRouter falls through to another host when the preferred one fails); 'false' fails rather than fall through to a host outside your preferences."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.help",
+      "backtranslation": "'deny' excludes hosts that may train on or retain your prompts. 'default' sends no preference (OpenRouter's default: allow)."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.help",
+      "backtranslation": "'true': restrict to endpoints whose text output may be distilled. 'default': nothing sent."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.help",
+      "backtranslation": "'true' restricts to hosts that support every parameter you send (tools, structured output); 'default' lets OpenRouter silently drop unsupported ones."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.help",
+      "backtranslation": "How OpenRouter ranks hosts for this call. May route away from the host holding your warm prompt cache (a cold start on long conversations); 'default' sends no preference at all."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.help",
+      "backtranslation": "'true': restrict to zero-data-retention endpoints. 'default': nothing sent."
+    },
+    {
+      "key": "wire.settings.session_scratchpad.description",
+      "backtranslation": "What one session's own scratch area may hold. The cap is checked on every write and applies immediately."
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.help",
+      "backtranslation": "'inherit' lets a command the agent runs see your environment (gh, aws, npm keep their tokens). 'allowlist' passes only PATH/HOME/SHELL/TERM/USER/LOGNAME plus the two lists beside this, so the provider key this session launched with is not handed to a command the model writes. Read once per session: changing it takes effect at the next launch."
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.help",
+      "backtranslation": "How dictation strips filler words and non-speech cues. auto uses the provider's native cleanup where available and the conservative client rules elsewhere; provider and client each use only one of the two mechanisms; off keeps the verbatim transcript. A per-request `cleanup` field still wins."
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+      "backtranslation": "Standard vocal delivery."
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.help",
+      "backtranslation": "auto picks per agent; a fixed value overrides the classifier."
+    },
+    {
+      "key": "wire.settings.tool_approval_mode.choice.ask.label",
+      "backtranslation": "Ask first."
+    },
+    {
+      "key": "wire.settings.web_fetch_render_backend.help",
+      "backtranslation": "Auto uses markdownify when the [fetch] extra is installed."
+    }
+  ],
+  "decisions": {
+    "monitor_classifymaxchars": "Characters, not line count: verified len(delta_text) and delta_text[:keep] in local_operator/monitors/classify.py:149-152; Root-approved intent correction.",
+    "medium": "Existing Mức cố định hiện nay means the current fixed level, not standard vocal delivery. Changed to Giọng đọc tiêu chuẩn. New English and unchanged context both support standard vocal delivery.",
+    "surface": "Thẻ = human-visible tab, never serialized cmux surface ID.",
+    "scratchpad": "Vùng nháp = existing khu vực nháp sense, compact within context caps.",
+    "CoS": "Chánh văn phòng per Vietnamese style guide; proper Aida unchanged.",
+    "enum_labels": "Có/Không, Tự động, Thủ công, Mặc định are display labels, never wire values. Paired help names visible choices consistently. Root explicit request overrides historical blanket enum-label exception.",
+    "glossary": "host in OpenRouter context, mesh/token/cache/prompt kept per vi style guide; brands, code, command names, flags, paths and units untouched."
+  },
+  "checks": {
+    "original_manifest_raw_hash": true,
+    "key_order_count": true,
+    "untouched_bytes_restored_exactly": true,
+    "existing_ICU_parser_895_en_before_after": true,
+    "malformed_brace_negative_control": true,
+    "placeholder_branch_skeleton_signatures_unchanged": true,
+    "changed_braced_tokens_and_backtick_spans_unchanged": true,
+    "changed_values_NFC": true,
+    "no_bidi_controls_added": true,
+    "CLDR": "No plural/select changes, vi other-only unaffected.",
+    "RTL": "vi LTR, no bidi controls added; Urdu untouched by this author.",
+    "pseudo": "Not run; no pseudo changes or rendered-fit claim.",
+    "parser_isolation": "AST-selected existing runtime parser definitions plus stdlib imports, no package import, pytest or generation."
+  },
+  "width_method": "Static NFC printable Latin-only strings verified noncombining/nonwide; one cell per code point. No rendered-fit claim.",
+  "widths": [
+    {
+      "key": "wire.settings.bash_memory_mode.choice.auto.label",
+      "english_cells": 4,
+      "vi_cells": 7,
+      "relative_expansion": 1.75,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.bash_memory_mode.choice.manual.label",
+      "english_cells": 6,
+      "vi_cells": 8,
+      "relative_expansion": 1.33,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.bash_memory_mode.help",
+      "english_cells": 164,
+      "vi_cells": 137,
+      "relative_expansion": 0.84,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.classification_vendor.choice.auto.label",
+      "english_cells": 4,
+      "vi_cells": 7,
+      "relative_expansion": 1.75,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.classification_vendor.help",
+      "english_cells": 60,
+      "vi_cells": 67,
+      "relative_expansion": 1.12,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.compaction_strategy.choice.auto.label",
+      "english_cells": 4,
+      "vi_cells": 7,
+      "relative_expansion": 1.75,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.compaction_strategy.help",
+      "english_cells": 47,
+      "vi_cells": 48,
+      "relative_expansion": 1.02,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.display_nerd_icons.choice.none.label",
+      "english_cells": 4,
+      "vi_cells": 7,
+      "relative_expansion": 1.75,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.display_nerd_icons.help",
+      "english_cells": 68,
+      "vi_cells": 92,
+      "relative_expansion": 1.35,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.fork.title",
+      "english_cells": 4,
+      "vi_cells": 10,
+      "relative_expansion": 2.5,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.fork_cmux_placement.choice.surface.description",
+      "english_cells": 30,
+      "vi_cells": 42,
+      "relative_expansion": 1.4,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.fork_cmux_placement.choice.surface.label",
+      "english_cells": 11,
+      "vi_cells": 7,
+      "relative_expansion": 0.64,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.fork_cmux_placement.help",
+      "english_cells": 68,
+      "vi_cells": 84,
+      "relative_expansion": 1.24,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.model_effort.choice.unset.label",
+      "english_cells": 4,
+      "vi_cells": 7,
+      "relative_expansion": 1.75,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.monitor_classifymaxchars.help",
+      "english_cells": 122,
+      "vi_cells": 162,
+      "relative_expansion": 1.33,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.network_rollout_on_update.choice.auto.label",
+      "english_cells": 4,
+      "vi_cells": 7,
+      "relative_expansion": 1.75,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+      "english_cells": 5,
+      "vi_cells": 5,
+      "relative_expansion": 1.0,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+      "english_cells": 7,
+      "vi_cells": 8,
+      "relative_expansion": 1.14,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.help",
+      "english_cells": 171,
+      "vi_cells": 171,
+      "relative_expansion": 1.0,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "english_cells": 5,
+      "vi_cells": 8,
+      "relative_expansion": 1.6,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "english_cells": 4,
+      "vi_cells": 14,
+      "relative_expansion": 3.5,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+      "english_cells": 7,
+      "vi_cells": 8,
+      "relative_expansion": 1.14,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.help",
+      "english_cells": 124,
+      "vi_cells": 169,
+      "relative_expansion": 1.36,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+      "english_cells": 4,
+      "vi_cells": 2,
+      "relative_expansion": 0.5,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+      "english_cells": 7,
+      "vi_cells": 8,
+      "relative_expansion": 1.14,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.help",
+      "english_cells": 90,
+      "vi_cells": 119,
+      "relative_expansion": 1.32,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+      "english_cells": 4,
+      "vi_cells": 2,
+      "relative_expansion": 0.5,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+      "english_cells": 7,
+      "vi_cells": 8,
+      "relative_expansion": 1.14,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.help",
+      "english_cells": 149,
+      "vi_cells": 148,
+      "relative_expansion": 0.99,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+      "english_cells": 7,
+      "vi_cells": 8,
+      "relative_expansion": 1.14,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.help",
+      "english_cells": 177,
+      "vi_cells": 184,
+      "relative_expansion": 1.04,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+      "english_cells": 4,
+      "vi_cells": 2,
+      "relative_expansion": 0.5,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+      "english_cells": 7,
+      "vi_cells": 8,
+      "relative_expansion": 1.14,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.help",
+      "english_cells": 75,
+      "vi_cells": 87,
+      "relative_expansion": 1.16,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.session_scratchpad.description",
+      "english_cells": 104,
+      "vi_cells": 106,
+      "relative_expansion": 1.02,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.session_scratchpad.title",
+      "english_cells": 10,
+      "vi_cells": 9,
+      "relative_expansion": 0.9,
+      "maxCells": 12
+    },
+    {
+      "key": "wire.settings.session_scratchpad_max_bytes.help",
+      "english_cells": 72,
+      "vi_cells": 81,
+      "relative_expansion": 1.12,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.session_scratchpad_max_bytes.label",
+      "english_cells": 27,
+      "vi_cells": 25,
+      "relative_expansion": 0.93,
+      "maxCells": 29
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "english_cells": 9,
+      "vi_cells": 18,
+      "relative_expansion": 2.0,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+      "english_cells": 7,
+      "vi_cells": 7,
+      "relative_expansion": 1.0,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.help",
+      "english_cells": 344,
+      "vi_cells": 376,
+      "relative_expansion": 1.09,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+      "english_cells": 4,
+      "vi_cells": 7,
+      "relative_expansion": 1.75,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+      "english_cells": 6,
+      "vi_cells": 9,
+      "relative_expansion": 1.5,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+      "english_cells": 3,
+      "vi_cells": 3,
+      "relative_expansion": 1.0,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+      "english_cells": 8,
+      "vi_cells": 12,
+      "relative_expansion": 1.5,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.help",
+      "english_cells": 293,
+      "vi_cells": 328,
+      "relative_expansion": 1.12,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+      "english_cells": 24,
+      "vi_cells": 21,
+      "relative_expansion": 0.88,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.auto.label",
+      "english_cells": 4,
+      "vi_cells": 7,
+      "relative_expansion": 1.75,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.female.label",
+      "english_cells": 6,
+      "vi_cells": 2,
+      "relative_expansion": 0.33,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.male.label",
+      "english_cells": 4,
+      "vi_cells": 3,
+      "relative_expansion": 0.75,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.help",
+      "english_cells": 61,
+      "vi_cells": 71,
+      "relative_expansion": 1.16,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.team_bridge_session.label",
+      "english_cells": 11,
+      "vi_cells": 21,
+      "relative_expansion": 1.91,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.tool_approval_mode.choice.ask.label",
+      "english_cells": 3,
+      "vi_cells": 9,
+      "relative_expansion": 3.0,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.web_fetch_render_backend.choice.auto.label",
+      "english_cells": 4,
+      "vi_cells": 7,
+      "relative_expansion": 1.75,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.web_fetch_render_backend.help",
+      "english_cells": 58,
+      "vi_cells": 59,
+      "relative_expansion": 1.02,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.web_search_strategy.choice.ordered.label",
+      "english_cells": 7,
+      "vi_cells": 11,
+      "relative_expansion": 1.57,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+      "english_cells": 11,
+      "vi_cells": 10,
+      "relative_expansion": 0.91,
+      "maxCells": null
+    }
+  ],
+  "width_flags": [],
+  "deferred_minor_width": "Relative expansion recorded; no observed clipping. Explicit maxCells breaches, if any, in width_flags.",
+  "invariants": {
+    "writes_only": [
+      "local_operator/i18n/catalogues/vi/wire.settings.json",
+      "i18n/audits/evidence/approval-full-repair-author-vi.json"
+    ],
+    "english_context_unchanged": true,
+    "head_unchanged": true,
+    "other_locales_code_histories": "No writes by this author; concurrent disjoint author edits allowed. No staging, commit, push, generation, deps, full tests, native or browser work."
+  },
+  "independent_validation": "NOT PERFORMED. Root integration plus independent A/B delta and retained 895 coverage, QA/code/design/UX gates remain. No native clearance or release eligibility claimed.",
+  "approved_inputs": {
+    "english_envelope_sha256": "c17b1262dc76d312cfa21313bd0d1414e2b4132d9900265119d4c1d8d9c237f6",
+    "vi_envelope_sha256": "52e670c402ed50980476898f124309bff68fd2d7fbe290e6fb72f6339fc10791",
+    "vi_original_raw_sha256_manifest": "830fc55bf9a1df0dfb3d915574800b0aa563b83a95a9ed36caf7ebeb9ecbf28b",
+    "raw_formatted_digest_note": "Original raw file digest is manifest records[locale=vi].original_file_sha256. V.details.sha256 7a2862c8... is a distinct approved formatted-text digest, not raw-file provenance; first surprising mismatch was resolved against explicit manifest."
+  },
+  "static_relative_expansion_flags": [
+    {
+      "key": "wire.settings.fork.title",
+      "english_cells": 4,
+      "vi_cells": 10,
+      "relative_expansion": 2.5,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "english_cells": 4,
+      "vi_cells": 14,
+      "relative_expansion": 3.5,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "english_cells": 9,
+      "vi_cells": 18,
+      "relative_expansion": 2.0,
+      "maxCells": null
+    },
+    {
+      "key": "wire.settings.tool_approval_mode.choice.ask.label",
+      "english_cells": 3,
+      "vi_cells": 9,
+      "relative_expansion": 3.0,
+      "maxCells": null
+    }
+  ],
+  "kept_technical_usage": [
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.help",
+      "term": "host",
+      "glossary_source": "i18n/style-guides/vi.md:86-87 (OpenRouter host; server is máy chủ)",
+      "usage_proof": "Approved English key source names the same technology/provider concept; translated surrounding sentence retained in catalogue."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.help",
+      "term": "host",
+      "glossary_source": "i18n/style-guides/vi.md:86-87 (OpenRouter host; server is máy chủ)",
+      "usage_proof": "Approved English key source names the same technology/provider concept; translated surrounding sentence retained in catalogue."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.help",
+      "term": "prompt",
+      "glossary_source": "i18n/style-guides/vi.md:29-31",
+      "usage_proof": "Approved English key source names the same technology/provider concept; translated surrounding sentence retained in catalogue."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.help",
+      "term": "host",
+      "glossary_source": "i18n/style-guides/vi.md:86-87 (OpenRouter host; server is máy chủ)",
+      "usage_proof": "Approved English key source names the same technology/provider concept; translated surrounding sentence retained in catalogue."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.help",
+      "term": "host",
+      "glossary_source": "i18n/style-guides/vi.md:86-87 (OpenRouter host; server is máy chủ)",
+      "usage_proof": "Approved English key source names the same technology/provider concept; translated surrounding sentence retained in catalogue."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.help",
+      "term": "cache",
+      "glossary_source": "i18n/style-guides/vi.md:29-31",
+      "usage_proof": "Approved English key source names the same technology/provider concept; translated surrounding sentence retained in catalogue."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.help",
+      "term": "prompt",
+      "glossary_source": "i18n/style-guides/vi.md:29-31",
+      "usage_proof": "Approved English key source names the same technology/provider concept; translated surrounding sentence retained in catalogue."
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.help",
+      "term": "token",
+      "glossary_source": "i18n/style-guides/vi.md:29-31",
+      "usage_proof": "Approved English key source names the same technology/provider concept; translated surrounding sentence retained in catalogue."
+    }
+  ],
+  "observed_diff": "git diff --numstat -- assigned catalogue: 57 insertions, 57 deletions; git diff --check: exit 0."
+}

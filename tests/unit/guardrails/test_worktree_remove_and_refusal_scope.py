@@ -188,7 +188,7 @@ def test_regenerable_ignored_output_keeps_a_worktree_clean(home: Path, repo: Pat
     # test_plain_exact_own_checkout_accepts_shared_link_witness.
     plain = _verdict(home, f"git -C {repo} worktree remove {wt}")
     assert plain.risk is Risk.HIGH and plain.targets[0].cleanup_hold, plain.reasons
-    assert "preserve unverified ignored files separately" in plain.targets[0].reason
+    assert "the guard cannot prove regenerable" in plain.targets[0].reason
     assert marker.read_text() == "local data with no rebuild witness\n"
     # Still dirty: a non-regenerable ignored file, and an untracked file.
     (wt / ".env").write_text("SECRET=1")

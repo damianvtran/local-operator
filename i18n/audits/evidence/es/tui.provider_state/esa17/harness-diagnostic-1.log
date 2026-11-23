@@ -1,0 +1,21 @@
+UTC 2026-11-22T12:18:12.887551+00:00
+COMMAND env -i HOME=<session-scratch>/home LOCAL_OPERATOR_CONFIG_DIR=<session-scratch>/home/config PATH=<inherited PATH> PYTHONPATH=<worktree> /Users/damian/local-operator/.venv/bin/python <bundle>/script.py.txt
+executable /Users/damian/local-operator/.venv/bin/python worktree /Users/damian/local-operator/.worktrees/i18n-provider-state-labels runtime module /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/i18n/runtime.py catalogues module /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/i18n/catalogues.py
+Isolation HOME /Users/damian/.local-operator/sessions/a17a04a01711/scratchpad/es-a-home config /Users/damian/.local-operator/sessions/a17a04a01711/scratchpad/es-a-home/config
+INPUT en local_operator/i18n/catalogues/en/tui.provider_state.json 113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912
+INPUT context local_operator/i18n/catalogues/en/tui.provider_state.context.json 67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be
+INPUT es local_operator/i18n/catalogues/es/tui.provider_state.json 4567c719cd1492b7edc62ae85ef4769f40a2adc774a1eb49dca072883a36b490
+OFFICIAL check_catalogues en/es namespace-only []
+NEGATIVE missing key ["es/tui.provider_state: missing key 'tui.provider_state.logged_in'"]
+NEGATIVE added argument ["es/tui.provider_state: tui.provider_state.logged_in: arguments (('added_argument', 'simple'),) != en's (): en has 0 argument(s), translation has 1"]
+KEY tui.provider_state.logged_in arguments=0 plural/select=0 NFC=True protected=True widths {'en': 9, 'es': 15, 'pseudo': 16} 17cell_example None
+KEY tui.provider_state.env_key arguments=0 plural/select=0 NFC=True protected=True widths {'en': 7, 'es': 17, 'pseudo': 14} 17cell_example None
+KEY tui.provider_state.needs_login arguments=0 plural/select=0 NFC=True protected=True widths {'en': 11, 'es': 23, 'pseudo': 19} 17cell_example None
+KEY tui.provider_state.local_ready arguments=0 plural/select=0 NFC=True protected=True widths {'en': 17, 'es': 20, 'pseudo': 28} 17cell_example None
+KEY tui.provider_state.local_unconfigured arguments=0 plural/select=0 NFC=True protected=True widths {'en': 16, 'es': 19, 'pseudo': 27} 17cell_example None
+PASS five keys; actual assertions completed; no application/native/font/global eligibility claim
+COMMAND ['/Users/damian/local-operator/.venv/bin/python', 'scripts/i18n/ledger.py', 'history-sha', '--locale', 'es', '--namespace', 'tui.provider_state'] rc 0 stdout 4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+ stderr 
+COMMAND ['/Users/damian/local-operator/.venv/bin/python', 'scripts/i18n/ledger.py', 'append', '--receipt', '/Users/damian/local-operator/.worktrees/i18n-provider-state-labels/i18n/audits/evidence/es/tui.provider_state/esa17/ledger-receipt.json', '--expected-history-sha', '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945', '--dry-run'] rc 0 stdout i18n/audit-history/es/tui.provider_state.json
+ stderr 
+FINAL_RC 0

@@ -1,0 +1,158 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "tui.settings_view",
+  "history_sha256": "aa4eb57e65b388a4ae403ee230a1b4c833d59ad72b0745425d33730f34747aeb",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "tui.settings_view",
+      "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+      "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+      "target_sha256": "59e06a7db2d67505cecd10d5287d6215149309915b17d8561f7f6da9ecbf15bf",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator')",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "bd9ecb974c8d",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-20",
+        "result": "clean-with-findings",
+        "findings": 3,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 3,
+          "nit": 0
+        },
+        "finding_ids": [
+          "F1",
+          "F2",
+          "F3"
+        ],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)"
+      },
+      "status": "passed",
+      "note": "Independent full audit (round 1) of the new tui.settings_view namespace (21 keys), source commit 56781d884f27. Auditor bd9ecb974c8d (openai/gpt-6.1-sol) verdict clean-with-findings: 0 blocker, 0 major, 3 minor, 0 nit (F1, F2, F3). Superseded: target_sha256 is the round-1 file; the translator then revised it and a round-2 audit (row sv2) covers the current bytes. Record: i18n/audits/evidence/fr/tui.settings_view/sv1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/fr/tui.settings_view/sv1/record.json",
+      "round": "sv1"
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.settings_view",
+      "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+      "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+      "target_sha256": "613c1954fbfbee9b15e66372d2ae3d4363a1e6f527ad7e3c1c4b4d73a41d08a5",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator')",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "962a058a71ac",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-20",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)"
+      },
+      "status": "passed",
+      "note": "Independent delta re-audit (round 2, after the round-1 fixes) of the new tui.settings_view namespace (21 keys), source commit 56781d884f27. Auditor 962a058a71ac (openai/gpt-6.1-sol) verdict clean: 0 blocker, 0 major, 0 minor, 0 nit. Record: i18n/audits/evidence/fr/tui.settings_view/sv2/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/fr/tui.settings_view/sv2/record.json",
+      "round": "sv2"
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.settings_view",
+      "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+      "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+      "target_sha256": "a88a7b4dbe53fa5d48529186d141e8ae46a341061e21bcfc926f022b7c84a1ff",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator')",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "4822d80227b0",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-20",
+        "result": "clean-with-findings",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "nit": 0
+        },
+        "finding_ids": [
+          "FR-R2-1"
+        ],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)"
+      },
+      "status": "passed",
+      "note": "Independent delta re-audit (round 3, after the PR #4361 round-1 review remediation: settings hints and overflow counts fitted) of tui.settings_view, source commit 464c2500c7ab. Auditor 4822d80227b0 (openai/gpt-6.1-sol) verdict clean-with-findings: 0 blocker, 0 major, 1 minor, 0 nit (FR-R2-1). Superseded: target_sha256 is the round-3 file; the translator then revised it and a round-4 audit (row sv4) covers the current bytes. Record: i18n/audits/evidence/fr/tui.settings_view/sv3/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/fr/tui.settings_view/sv3/record.json",
+      "round": "sv3"
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.settings_view",
+      "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+      "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+      "target_sha256": "05b324f2411be3e87f9f3ac0ae9596b8c2f139eee6bada3c288182d8a8bc509c",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator')",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "52b434ca406c",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-20",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)"
+      },
+      "status": "passed",
+      "note": "Independent delta re-audit (round 4, after the PR #4361 round-1 review remediation: settings hints and overflow counts fitted) of tui.settings_view, source commit 464c2500c7ab. Auditor 52b434ca406c (openai/gpt-6.1-sol) verdict clean: 0 blocker, 0 major, 0 minor, 0 nit. Record: i18n/audits/evidence/fr/tui.settings_view/sv4/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/fr/tui.settings_view/sv4/record.json",
+      "round": "sv4"
+    }
+  ]
+}

@@ -75,6 +75,7 @@ import unicodedata
 import urllib.parse
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import EllipsisType
 from typing import Any, Callable, Iterable, Literal, Mapping, Sequence, TypedDict
 
 import httpx
@@ -920,6 +921,7 @@ class BridgeRefusal(Exception):
         http_status: int | None = None,
         details: Mapping[str, Any] | None = None,
         retry_after_seconds: int | None = None,
+        server_code_present: bool | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -927,6 +929,9 @@ class BridgeRefusal(Exception):
         self.http_status = http_status
         self.details: dict[str, Any] = dict(details or {})
         self.retry_after_seconds = retry_after_seconds
+        # Preserve parser provenance: an uncoded old-route 404 is not a typed
+        # missing-message/join-floor refusal, even if both normalize to a fallback code.
+        self.server_code_present = server_code_present
 
     @property
     def advice(self) -> str | None:
@@ -1960,6 +1965,7 @@ def _refusal(response: httpx.Response) -> BridgeRefusal:
         http_status=status,
         details=details,
         retry_after_seconds=retry_after,
+        server_code_present=("code" in body) if body is not None else None,
     )
 
 
@@ -2508,6 +2514,7 @@ class TeamBridgeClient:
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
         empty_result: bool = False,
+        refresh_on_401: bool = True,
         content: bytes | None = None,
         pre_http_guard: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
@@ -2531,6 +2538,7 @@ class TeamBridgeClient:
             content=content,
             expected_account_id=expected_account_id,
             pre_http_guard=pre_http_guard,
+            refresh_on_401=refresh_on_401,
         )
         if response.status_code >= 400:
             if response.status_code == 400 and body is not None and _observation.WIRE_KEY in body:
@@ -2616,6 +2624,7 @@ class TeamBridgeClient:
         extra_headers: Mapping[str, str] | None = None,
         oversize_code: str = "attachment_too_large",
         oversize_sentence: str = _OVERSIZE_ATTACHMENT_SENTENCE,
+        refresh_on_401: bool = True,
     ) -> httpx.Response:
         """Resolve, send, refresh-once-on-401: the response, refusals UNMAPPED.
 
@@ -2650,7 +2659,9 @@ class TeamBridgeClient:
             )
         except httpx.HTTPError as failure:
             raise BridgeUnreachable() from failure
-        if response.status_code == 401:
+        # An admission-bound display read must observe the first refusal;
+        # refreshing would erase that authority signal and replay the GET.
+        if response.status_code == 401 and refresh_on_401:
             refreshed = await self._refreshed_access(pinned)
             try:
                 response = await self._dispatch(
@@ -2937,7 +2948,7 @@ class TeamBridgeClient:
         *,
         tenant_id: str,
         state: str,
-        screening: Mapping[str, Any],
+        screening: Mapping[str, Any] | None,
         client_ref: str,
         access: OAuthAccess | None = None,
         screening_observation: ScreeningObservation | None = None,
@@ -2957,7 +2968,12 @@ class TeamBridgeClient:
         the block, so that 400 is about the body (``_send_observed``).
         """
 
-        body = {"state": state, "screening": dict(screening), "client_ref": client_ref}
+        # ``screening=None`` is the working/done progress ack: the key is OMITTED,
+        # not sent as null — the hub gates working on the verdict it stored at
+        # read, and an attached tuple may only repeat that record (§7.2).
+        body: dict[str, Any] = {"state": state, "client_ref": client_ref}
+        if screening is not None:
+            body["screening"] = dict(screening)
         _attach_observation(body, self.base_url, screening_observation)
         return await self._send(
             "POST",
@@ -4151,6 +4167,89 @@ class TeamBridgeClient:
             expected_account_id=expected_account_id,
         )
 
+    async def conversation_rename(
+        self,
+        conversation_id: str,
+        name: str,
+        *,
+        tenant_id: str | None = None,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Rename a channel or group; answers the updated conversation.
+
+        Same authority as archive (the conversation owner or, on a channel, an
+        organization owner/admin) and the server decides it, along with every
+        other rule: name sanitizing (trim, collapse space runs, at most 64 code
+        points; ``400 invalid_request`` with ``details.field=name`` and a
+        ``rule`` such as ``empty``/``too_long``/``control_character``),
+        uniqueness (``409 conversation_name_taken``), archived, built-in or dm
+        (``409 conversation_archived`` / ``invalid_transition``), and the opaque
+        404 for a non-member. Those refusals surface unchanged as
+        ``BridgeRefusal`` so the renderer can show the server's own reason.
+
+        Only ASCII space and tab are trimmed here, the two characters a typed
+        name picks up at its edges; every other character (NBSP included) is
+        the server's to judge, because it is the authority on name rules and
+        answers with a ``rule`` the renderer can show. An empty or
+        whitespace-only name is therefore FORWARDED, not refused locally, so
+        ``""`` and ``"   "`` both come back as the server's
+        ``400 invalid_request`` with ``details.rule=empty`` rather than a
+        local error with no rule. Renaming to the current name is a
+        server-side 200 no-op. The answer carries the server's CANONICAL name,
+        which can differ from what was typed; the renderer displays that one.
+        The target tenant rides in the BODY as ``tenant_id`` (as members-add
+        and consent send it), never the query: the hub's rename handler reads
+        only its strict body ``{name, tenant_id?}``, so a query tenant is
+        ignored and a multi-org caller is refused ``tenant_id required``.
+        Human acts only: no ``actor_endpoint_id`` (an agent act is a server
+        ``400 invalid_request`` with ``details.rule=not_allowed`` in v1).
+        """
+
+        body: dict[str, Any] = {"name": name.strip(" \t")}
+        if tenant_id:
+            body["tenant_id"] = tenant_id
+        return await self._send(
+            "POST",
+            f"/messaging/conversations/{conversation_id}/rename",
+            body=body,
+            access=access,
+            expected_account_id=expected_account_id,
+        )
+
+    async def conversation_update(
+        self,
+        conversation_id: str,
+        *,
+        name: str | None | EllipsisType = ...,
+        topic: str | None | EllipsisType = ...,
+        tenant_id: str | None = None,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically edit supplied metadata, preserving omission and explicit clear.
+
+        Ellipsis is the absent sentinel: None is an explicit JSON null for the
+        upstream validator to refuse, and an empty topic must reach PATCH to
+        clear it. Do not normalize here: unchanged legacy values and canonical
+        name/topic validation belong to the server. The local owner receipt is
+        checked against the exact bearer by _send, never forwarded as metadata.
+        """
+        body: dict[str, Any] = {}
+        if name is not ...:
+            body["name"] = name
+        if topic is not ...:
+            body["topic"] = topic
+        if tenant_id is not None:
+            body["tenant_id"] = tenant_id
+        return await self._send(
+            "PATCH",
+            f"/messaging/conversations/{conversation_id}",
+            body=body,
+            access=access,
+            expected_account_id=expected_account_id,
+        )
+
     async def conversation_delete(
         self,
         conversation_id: str,
@@ -4408,6 +4507,7 @@ class TeamBridgeClient:
         agent_label: str | None = None,
         actor_endpoint_id: str | None = None,
         origin_session_id: str | None = None,
+        agent_session: Mapping[str, str] | None = None,
         thread_root_id: str | None = None,
         attachment_ids: Sequence[str] | None = None,
         mentions: Sequence[Mapping[str, Any]] | None = None,
@@ -4465,6 +4565,13 @@ class TeamBridgeClient:
             body["actor_endpoint_id"] = actor_endpoint_id
         if origin_session_id:
             body["origin_session_id"] = origin_session_id
+        # Negotiated once by the host sender; retry must retain this envelope.
+        if agent_session is not None:
+            if set(agent_session) != {"display_label"} or not isinstance(
+                agent_session.get("display_label"), str
+            ):
+                raise ValueError("invalid agent session display")
+            body["agent_session"] = dict(agent_session)
         if thread_root_id:
             body["thread_root_id"] = thread_root_id
         if mentions:
@@ -4846,8 +4953,11 @@ class TeamBridgeClient:
         tenant_id: str | None = None,
         endpoint_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
+        pre_http_guard: Callable[[], None] | None = None,
+        refresh_on_401: bool = True,
     ) -> dict[str, Any]:
-        """The classification fetch for an agent member: body + binding hash."""
+        """Fetch body + binding hash; post-allow display opts out of 401 replay."""
 
         params: dict[str, Any] = {}
         if tenant_id:
@@ -4858,7 +4968,10 @@ class TeamBridgeClient:
             "GET",
             f"/messaging/conversations/{conversation_id}/messages/{message_id}/body",
             params=params or None,
+            refresh_on_401=refresh_on_401,
             access=access,
+            expected_account_id=expected_account_id,
+            pre_http_guard=pre_http_guard,
         )
 
     async def conversation_admit(

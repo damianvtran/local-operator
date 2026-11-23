@@ -1,0 +1,84 @@
+{
+  "schema": 1,
+  "receipt_kind": "independent-merged-namespace-translation-audit",
+  "instance": "e5b81a89e232",
+  "date": "2026-11-22",
+  "auditor": {
+    "agent": "independent-translation-auditor (lopdev reviewer, audit-es)",
+    "session": "e5b81a89e232",
+    "model": "openai/gpt-6.2-sol",
+    "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.2-sol due to provider quota, before semantic audit",
+    "date": "2026-11-22",
+    "result": "passed",
+    "findings": [],
+    "unresolved_blocker_major": 0
+  },
+  "repository": "local-operator",
+  "pr_url": "https://github.com/damianvtran/local-operator/pull/4408",
+  "head": "9be06fc428a0f5f9617a87d762f59c1b0ffbd8a8",
+  "base": "f815ea7b74fe06e13266bef583e15293fbce7532",
+  "status": "passed",
+  "source_sha256": "bf64e8fc10eb8b4b3ccf29fc05079a0a22192a650c2c034682b7e55f152bf374",
+  "target_sha256": "9470386b474bfecd4351a3f95c4c923b32add8f77b14ed7a7fee574444caddeb",
+  "namespace": "relay.transcript",
+  "locale": "es",
+  "keys_reviewed": [
+    "relay.transcript.bridge.held",
+    "relay.transcript.bridge.offline",
+    "relay.transcript.bridge.thread_reply"
+  ],
+  "unchanged_keys_spotlighted": [
+    "relay.transcript.jump.latest",
+    "relay.transcript.jump.latest_short"
+  ],
+  "semantic_values_read": 43,
+  "checks": {
+    "key_parity": "43/43; no missing, extra, or duplicate keys",
+    "placeholders_and_icu": "Argument names match; existing select branches and Spanish one/many/other plurals preserved; changed values have no placeholders",
+    "direction_and_entities": "NFC; no manual bidi controls, HTML entities or JSON Unicode escapes in locale value tokens",
+    "prior_value_compatibility": "All 40 unchanged Spanish JSON value tokens byte-identical to origin/main, including both jump values",
+    "semantics": "Retenido para revisión distinguishes a review hold from delivery and refusal; reintentando makes retry ongoing without asking the user to act; Respuesta en un hilo marks a non-top-level reply. External/untrusted provenance, pending delivery, unscreened hold, and refusal remain distinct. Ir a lo último / Lo último retain the full jump action and short label."
+  },
+  "scope_note": "Read every English/Spanish pair against the glossary, Spanish style guide, and relevant English context. Newly attest only the three changed Spanish values. All 40 unchanged values (including both jump labels) retain prior audits by raw JSON value-token byte identity to origin/main; no new approval for those values. No native-speaker claim, rendered-fit verification, or activation approval.",
+  "namespaces": {
+    "relay.transcript": {
+      "status": "passed",
+      "sha256": {
+        "en": "bf64e8fc10eb8b4b3ccf29fc05079a0a22192a650c2c034682b7e55f152bf374",
+        "es": "9470386b474bfecd4351a3f95c4c923b32add8f77b14ed7a7fee574444caddeb"
+      },
+      "source_path": "local_operator/i18n/catalogues/en/relay.transcript.json",
+      "context_path": "local_operator/i18n/catalogues/en/relay.transcript.context.json",
+      "context_sha256": "01ff23b016d5ae640c5bf4a3b2050e2abbfd9950078ea60e32c6f95609868c49",
+      "locales": {
+        "es": {
+          "target_path": "local_operator/i18n/catalogues/es/relay.transcript.json",
+          "keys_reviewed": [
+            "relay.transcript.bridge.held",
+            "relay.transcript.bridge.offline",
+            "relay.transcript.bridge.thread_reply"
+          ],
+          "reviewed_values": {
+            "relay.transcript.bridge.held": {
+              "en": "Held for review",
+              "es": "Retenido para revisión"
+            },
+            "relay.transcript.bridge.offline": {
+              "en": "Couldn't reach Radient — retrying",
+              "es": "No se pudo conectar con Radient — reintentando"
+            },
+            "relay.transcript.bridge.thread_reply": {
+              "en": "Thread reply",
+              "es": "Respuesta en un hilo"
+            }
+          }
+        }
+      },
+      "findings": []
+    }
+  },
+  "style_inputs": {
+    "i18n/glossary.md": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "i18n/style-guides/es.md": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6"
+  }
+}

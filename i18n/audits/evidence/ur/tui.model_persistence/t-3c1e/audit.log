@@ -1,0 +1,17 @@
+MODULE local_operator.i18n.catalogues /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/catalogues.py
+MODULE local_operator.i18n.runtime /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/runtime.py
+KEY PASS tui.model_persistence.persist arguments= () plural/select=0 cells= 56
+KEY PASS tui.model_persistence.settings arguments= () plural/select=0 cells= 57
+KEY PASS tui.model_persistence.saved arguments= () plural/select=0 cells= 70
+KEY PASS tui.model_persistence.with_model arguments= (('label', 'simple'), ('routes', 'simple')) plural/select=0 cells= 24
+RENDER 'ماڈل: openai/gpt-6 — /model default اس ماڈل کو نئے سیشنز کے لیے محفوظ کرتا ہے · اس سیشن میں محفوظ ابتدائی ماڈل پر آنے کے لیے /model saved استعمال کریں · /settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+WIDTH_DIAGNOSTIC label_chars= 12 width= 80 line_cells= [80, 73, 57]
+WIDTH_DIAGNOSTIC label_chars= 12 width= 100 line_cells= [98, 97, 15]
+WIDTH_DIAGNOSTIC label_chars= 12 width= 120 line_cells= [120, 89]
+RENDER 'ماڈل: anthropic/claude-opus-5-5-20261122-opaque-provider-model-identity-long-0123456789 — /model default اس ماڈل کو نئے سیشنز کے لیے محفوظ کرتا ہے · اس سیشن میں محفوظ ابتدائی ماڈل پر آنے کے لیے /model saved استعمال کریں · /settings سے نئے سیشن کا ابتدائی ماڈل بھی بدلا جا سکتا ہے'
+WIDTH_DIAGNOSTIC label_chars= 81 width= 80 line_cells= [6, 80, 80, 80, 32]
+WIDTH_DIAGNOSTIC label_chars= 81 width= 100 line_cells= [97, 97, 85]
+WIDTH_DIAGNOSTIC label_chars= 81 width= 120 line_cells= [120, 119, 40]
+HASHES {"context": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc", "en": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff", "ur": "0e00e1ee1715d3ec8ad8d07440984da33fcb05336a35ceefbd32a87180a3e5f9"}
+PASS: four ordered keys; official catalogue/context/ICU/argument APIs; exact commands; opaque arguments once; zero plural/select arms; NFC; no bidi controls; short/long labels; frozen inputs unchanged
+NOT PROVEN: native shaping/fonts, styled NoticeBlock geometry, live integration, independent linguistic audit, eligibility or release clearance

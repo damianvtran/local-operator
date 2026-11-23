@@ -1,0 +1,38 @@
+{
+  "locale": "hi",
+  "namespace": "tui.provider_state",
+  "source_sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912",
+  "status": "passed",
+  "date": "2026-11-22",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "520071768802",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Fresh served-response transcript payload.usage.provider/model_id, extracted during this task; see provenance.json",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota; model-switch notice before authoring"
+    },
+    "independent_from_translator_session": false
+  },
+  "auditor": {
+    "agent": "i18n-auditor (Hindi A)",
+    "session": "57ba373043b9",
+    "model": "openai/gpt-6.1-sol",
+    "configured_model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": true,
+    "independentFromAuthor": true,
+    "translator_session": "520071768802",
+    "actual_model_source": "Host model-switch message in this session: openai/gpt-6.1-sol, provider failure: quota. Per-response served-provider metadata not available/independently verified; configured Claude is not asserted as served.",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota",
+      "per_response_identity_verified": false
+    }
+  },
+  "auditor_result": "passed",
+  "unresolved_blocker_major_count": 0,
+  "note": "Audit A only; i18n/audits/evidence/hi/tui.provider_state/a57ba/record.json; 5/5, 0 B/M; host GPT fallback, per-response unverified; B/UI/admission not covered."
+}

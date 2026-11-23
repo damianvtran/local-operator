@@ -269,7 +269,10 @@ def test_a_peer_without_the_feature_string_is_never_asked(
     server_a, server_b, record = _rig(devices, monkeypatch)
     _grant(server_a, record, server_b.identity.device_id)
     link, reason = server_b.dial(
-        record.network_id, host=f"{devices[2]}:{devices[3]}", epoch=record.epoch
+        record.network_id,
+        host=f"{devices[2]}:{devices[3]}",
+        epoch=record.epoch,
+        expected_device=devices[0].identity.device_id,
     )
     assert link is not None, reason
     try:

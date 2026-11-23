@@ -1,0 +1,96 @@
+{
+  "schema": 1,
+  "note": "Byte-identical originals; original provenance and verdict unchanged. Retention mapping is not an audit.",
+  "files": [
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-second-6fa3219b/record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/6fa3219bb25e/scratchpad/ru-second-audit/record.json",
+      "sha256": "f3b500280d9e21bfd59c5258a1effe1daa40ea9d81957e627352d75c242120fa"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-second-6fa3219b/report.json",
+      "original_path": "/Users/damian/.local-operator/sessions/6fa3219bb25e/scratchpad/ru-second-audit/report.json",
+      "sha256": "f7a8d6e5240f144d5b6d1bdac9f0e3a5dcc88966eeb592d9c452c92668591df3"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-second-6fa3219b/en.original.json",
+      "original_path": "/Users/damian/.local-operator/sessions/6fa3219bb25e/scratchpad/ru-second-audit/en.original.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-second-6fa3219b/ru.original.json",
+      "original_path": "/Users/damian/.local-operator/sessions/6fa3219bb25e/scratchpad/ru-second-audit/ru.original.json",
+      "sha256": "82486a592ce66624c8d7b1c0b45e05ba5f1b49d811d652f65f1ac6d784dc02e1"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-second-6fa3219b/audit.log",
+      "original_path": "/Users/damian/.local-operator/sessions/6fa3219bb25e/scratchpad/ru-second-audit/audit.log",
+      "sha256": "eb6a22ab77ea94c1e1bc5798dceb0fdf6d7fa15329bcc45b74fe02dcc7f8ad2c"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-second-6fa3219b/validate.py",
+      "original_path": "/Users/damian/.local-operator/sessions/6fa3219bb25e/scratchpad/ru-second-audit/validate.py",
+      "sha256": "187b73901938bbdb5138979728ca67a0b73f01e275792721b7ae4ff6b4aa52fd"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-second-6fa3219b/context.original.json",
+      "original_path": "/Users/damian/.local-operator/sessions/6fa3219bb25e/scratchpad/ru-second-audit/context.original.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-second-6fa3219b/receipt-validation.log",
+      "original_path": "/Users/damian/.local-operator/sessions/6fa3219bb25e/scratchpad/ru-second-audit/receipt-validation.log",
+      "sha256": "57e204eeb41bca80741044a0cbd6181534fb764c73d55754bddde474ec824443"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-second-6fa3219b/receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/6fa3219bb25e/scratchpad/ru-second-audit/receipt.json",
+      "sha256": "79e9d3b923aeea0f7dc805e6f2a9d4fd3fec0967d7f0291e65a12a248acc525f"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-second-6fa3219b/translator-receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/9588c120c894/scratchpad/ru/translator-receipt.json",
+      "sha256": "71261e4589b0bbacce7d1605a841f5a7fe5f1fed54c64f5ca413b89eb5cfb35b"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-second-6fa3219b/wire.teams.effective.json",
+      "original_path": "/Users/damian/.local-operator/sessions/9588c120c894/scratchpad/ru/wire.teams.effective.json",
+      "sha256": "82486a592ce66624c8d7b1c0b45e05ba5f1b49d811d652f65f1ac6d784dc02e1"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-second-6fa3219b/translator/validation.log",
+      "original_path": "/Users/damian/.local-operator/sessions/9588c120c894/scratchpad/ru/validation.log",
+      "sha256": "aff3292f1cd226af2ff3e4a216bf36845f4adde52be2188fb9f77a99629fdb28"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-second-6fa3219b/translator/translator-receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/9588c120c894/scratchpad/ru/translator-receipt.json",
+      "sha256": "71261e4589b0bbacce7d1605a841f5a7fe5f1fed54c64f5ca413b89eb5cfb35b"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-second-6fa3219b/translator/wire.teams.effective.json",
+      "original_path": "/Users/damian/.local-operator/sessions/9588c120c894/scratchpad/ru/wire.teams.effective.json",
+      "sha256": "82486a592ce66624c8d7b1c0b45e05ba5f1b49d811d652f65f1ac6d784dc02e1"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-second-6fa3219b/translator/validate-package.py",
+      "original_path": "/Users/damian/.local-operator/sessions/9588c120c894/scratchpad/ru/validate-package.py",
+      "sha256": "872e4a562cceed080ee5a000263dee76268973fb5fa35994b9ca165436081749"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-second-6fa3219b/translator/catalogues/ru/wire.teams.effective.json",
+      "original_path": "/Users/damian/.local-operator/sessions/9588c120c894/scratchpad/ru/catalogues/ru/wire.teams.effective.json",
+      "sha256": "82486a592ce66624c8d7b1c0b45e05ba5f1b49d811d652f65f1ac6d784dc02e1"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-second-6fa3219b/translator/catalogues/en/wire.teams.effective.context.json",
+      "original_path": "/Users/damian/.local-operator/sessions/9588c120c894/scratchpad/ru/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/ru/wire.teams.effective/ru-second-6fa3219b/translator/catalogues/en/wire.teams.effective.json",
+      "original_path": "/Users/damian/.local-operator/sessions/9588c120c894/scratchpad/ru/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    }
+  ]
+}

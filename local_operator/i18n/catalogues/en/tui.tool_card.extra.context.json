@@ -1,0 +1,91 @@
+{
+  "tui.tool_card.extra.compose.composed": {
+    "maxCells": 24,
+    "role": "size fact",
+    "tone": "plain, terse, lower-case",
+    "note": "The size record on a tool row whose call the model was still writing (dictating) when it stopped. {size} is a pre-formatted byte size such as '12.4 KB' — insert it unchanged. This fact is what survives when the row narrows: the leading 'never sent' label is shed whole first, so keep it short."
+  },
+  "tui.tool_card.extra.compose.composing": {
+    "role": "live row label",
+    "tone": "plain, terse, lower-case",
+    "note": "Summary of a tool row while the model is still writing the call's arguments. {facts} is a pre-formatted size and/or clock such as '12.4 KB · 0:42' — insert it unchanged. The leading word is shed whole at narrow widths so only {facts} remain; keep the ellipsis glyph (…) or the locale's own equivalent. 'composing', not 'writing': 'write' is a tool name in this app."
+  },
+  "tui.tool_card.extra.compose.never_sent": {
+    "role": "settled row label",
+    "tone": "plain, terse, lower-case",
+    "note": "Summary of a tool row whose call was never sent to the tool (the turn ended while the model was still writing it). {facts} is tui.tool_card.extra.compose.composed or .nothing_composed, already translated — insert it unchanged. The ' · ' separator is the row's field separator; keep it. Shed whole at narrow widths, leaving only {facts}."
+  },
+  "tui.tool_card.extra.compose.nothing_composed": {
+    "maxCells": 24,
+    "role": "size fact",
+    "tone": "plain, terse, lower-case",
+    "note": "The size record of a never-sent tool call when no argument bytes had arrived yet. Replaces '{size} composed' in that case, so it should read as the same kind of fact with no size."
+  },
+  "tui.tool_card.extra.fetch.attempts": {
+    "maxCells": 16,
+    "role": "metadata count",
+    "tone": "plain, terse, lower-case",
+    "note": "On a web-fetch card's 'Rendered:' row: the page took this many tries (only shown for 2 or more). {count} selects the plural; {shown} is the same number as raw digits — insert {shown}, do not localise digits. Painted in the highlight colour because it explains why a slow fetch succeeded."
+  },
+  "tui.tool_card.extra.fetch.attempts_profiles": {
+    "role": "metadata count",
+    "tone": "plain, terse, lower-case",
+    "note": "Same as tui.tool_card.extra.fetch.attempts, plus the sequence of browser identities the fetch used. {profiles} is a comma-separated list of technical identity names such as 'default, browser-profile' — insert it unchanged. Use the locale's own parentheses if they differ."
+  },
+  "tui.tool_card.extra.fetch.lines": {
+    "maxCells": 16,
+    "role": "metadata count",
+    "tone": "plain, terse, lower-case",
+    "note": "On a web-fetch card's 'Rendered:' row: the rendered page is this many lines long. {count} selects the plural; {shown} is the same number as raw digits — insert {shown}, do not localise digits."
+  },
+  "tui.tool_card.extra.search.provider": {
+    "role": "metadata row",
+    "tone": "plain, terse",
+    "note": "First row of an expanded web-search card. {provider} is the search provider's technical name (e.g. 'brave', 'tavily') — insert unchanged. Label then value, like tui.tool_card.fetch.fetched; use the locale's own colon."
+  },
+  "tui.tool_card.extra.search.provider_auth": {
+    "role": "metadata row",
+    "tone": "plain, terse",
+    "note": "Same as tui.tool_card.extra.search.provider when the provider reports how it authenticated. {auth_mode} is a technical token (e.g. 'api_key') — insert unchanged. Use the locale's own parentheses if they differ."
+  },
+  "tui.tool_card.extra.search.sources": {
+    "maxCells": 20,
+    "role": "section label",
+    "tone": "plain, terse",
+    "note": "Second row of an expanded web-search card, heading the numbered list of result pages below it. Use the locale's own colon."
+  },
+  "tui.tool_card.extra.search.untitled": {
+    "role": "placeholder title",
+    "tone": "plain, terse",
+    "note": "Stands in for a web-search result's page title when the provider returned none. Shown in the numbered results list in place of a page title."
+  },
+  "tui.tool_card.extra.send.failed_reason": {
+    "role": "reason pattern",
+    "tone": "plain, terse",
+    "note": "Status slot of a FAILED `send` row. {word} is tui.tool_card.status.send.not_delivered, already translated; {cause} is the delivery failure cause from the harness (English technical text) — insert both unchanged. When the slot is narrow the cause is cut first and the word kept whole, so keep {word} first. The pattern exists so a locale can use its own separator (e.g. a full-width colon '：' in Chinese)."
+  },
+  "tui.tool_card.extra.send.mode.now": {
+    "maxCells": 8,
+    "role": "mode marker",
+    "tone": "plain, terse, lower-case",
+    "note": "Leads the collapsed row of a `send` (message to another agent session) that STEERS the peer mid-turn: the message is injected into the turn it is running now. Followed by ' · ' and the target. The row truncates from the right, so keep it one short word. Distinct from .wake and .quiet."
+  },
+  "tui.tool_card.extra.send.mode.quiet": {
+    "maxCells": 8,
+    "role": "mode marker",
+    "tone": "plain, terse, lower-case",
+    "note": "Leads the collapsed row of a `send` that drops the message in the peer's mailbox WITHOUT starting a turn: the peer reads it on its next turn. Followed by ' · ' and the target. Keep it one short word. Distinct from .wake and .now."
+  },
+  "tui.tool_card.extra.send.mode.wake": {
+    "maxCells": 8,
+    "role": "mode marker",
+    "tone": "plain, terse, lower-case",
+    "note": "Leads the collapsed row of a `send` that WAKES an idle peer session so it answers right away (the default). Followed by ' · ' and the target. Keep it one short word, and keep it consistent with tui.tool_card.status.send.wake_unconfirmed. Distinct from .quiet and .now."
+  },
+  "tui.tool_card.extra.send.model": {
+    "maxCells": 8,
+    "role": "mode marker",
+    "tone": "plain, terse, lower-case",
+    "note": "Leads the collapsed row of a `send` that SWITCHES another session's model (instead of a delivery-mode marker), followed by ' · <target> · → <model id>'. Replaced by the outcome word (tui.tool_card.status.switch.*) once the call settles. Means the AI model, not a template."
+  }
+}

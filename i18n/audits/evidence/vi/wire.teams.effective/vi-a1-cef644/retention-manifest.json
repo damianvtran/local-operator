@@ -1,0 +1,91 @@
+{
+  "schema": 1,
+  "note": "Byte-identical originals; original provenance and verdict unchanged. Retention mapping is not an audit.",
+  "files": [
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.teams.effective/vi-a1-cef644/record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/cef644ceab2f/scratchpad/effective-reasons-vi-a1/record.json",
+      "sha256": "bd8b826429376c4126106952c436d5cdc4919f3e3408ff57f0dad777cf1a5c41"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.teams.effective/vi-a1-cef644/report.md",
+      "original_path": "/Users/damian/.local-operator/sessions/cef644ceab2f/scratchpad/effective-reasons-vi-a1/report.md",
+      "sha256": "cfd4a80cdce4ca68a4a0ffa7a8657c6752d9dc034efe4f465889459539ee4f12"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.teams.effective/vi-a1-cef644/mechanical.json",
+      "original_path": "/Users/damian/.local-operator/sessions/cef644ceab2f/scratchpad/effective-reasons-vi-a1/mechanical.json",
+      "sha256": "ffc641049322c86fba4a84877c734b0b03ed3733a50f498d50e51782cd7ad32c"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.teams.effective/vi-a1-cef644/audit.log",
+      "original_path": "/Users/damian/.local-operator/sessions/cef644ceab2f/scratchpad/effective-reasons-vi-a1/audit.log",
+      "sha256": "ade51bd06c612dbcd1cc23138dc38eb47489f18b8414d6dffd54b9a66426e521"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.teams.effective/vi-a1-cef644/validate.py",
+      "original_path": "/Users/damian/.local-operator/sessions/cef644ceab2f/scratchpad/effective-reasons-vi-a1/validate.py",
+      "sha256": "030723e8eaeb294040822652516e4d99f2ca4bb27b8d24d892f16f40b14c16da"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.teams.effective/vi-a1-cef644/receipt-validation.log",
+      "original_path": "/Users/damian/.local-operator/sessions/cef644ceab2f/scratchpad/effective-reasons-vi-a1/receipt-validation.log",
+      "sha256": "123c9bf0b294f23180e37c756cfb7ef4b568e94fbd56e2c56fe7aa8a91bebb9c"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.teams.effective/vi-a1-cef644/receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/cef644ceab2f/scratchpad/effective-reasons-vi-a1/receipt.json",
+      "sha256": "f46d08f797296e2ec02284e415e95232c49901d5a1456e631a1ede45c370780b"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.teams.effective/vi-a1-cef644/translator-receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/bdce0d00e792/scratchpad/effective-reasons-vi/translator-receipt.json",
+      "sha256": "ff505f4a6c875eba2bd2a75eeab0e1f64001790bdbddaae62866329e7beca6fd"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.teams.effective/vi-a1-cef644/wire.teams.effective.json",
+      "original_path": "/Users/damian/.local-operator/sessions/bdce0d00e792/scratchpad/effective-reasons-vi/wire.teams.effective.json",
+      "sha256": "4d510633cda89708fa842a0812dc9fff2836383e93e1322c6a6d532cf52cc057"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.teams.effective/vi-a1-cef644/translator/translator-receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/bdce0d00e792/scratchpad/effective-reasons-vi/translator-receipt.json",
+      "sha256": "ff505f4a6c875eba2bd2a75eeab0e1f64001790bdbddaae62866329e7beca6fd"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.teams.effective/vi-a1-cef644/translator/wire.teams.effective.json",
+      "original_path": "/Users/damian/.local-operator/sessions/bdce0d00e792/scratchpad/effective-reasons-vi/wire.teams.effective.json",
+      "sha256": "4d510633cda89708fa842a0812dc9fff2836383e93e1322c6a6d532cf52cc057"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.teams.effective/vi-a1-cef644/translator/validate.py",
+      "original_path": "/Users/damian/.local-operator/sessions/bdce0d00e792/scratchpad/effective-reasons-vi/validate.py",
+      "sha256": "bd075639ed8a6009d71e3501bca2335681915ee1113a2b30ae3b0e2b74179a84"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.teams.effective/vi-a1-cef644/translator/mechanical-checks.json",
+      "original_path": "/Users/damian/.local-operator/sessions/bdce0d00e792/scratchpad/effective-reasons-vi/mechanical-checks.json",
+      "sha256": "f86802f318c71a7fdd8eca4d3289fa8c6dd1b9980a0568f27295696618abdec7"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.teams.effective/vi-a1-cef644/translator/validator.log",
+      "original_path": "/Users/damian/.local-operator/sessions/bdce0d00e792/scratchpad/effective-reasons-vi/validator.log",
+      "sha256": "8b7430e77bf6c890acaaf27d0eb61905165cd42eb5b0b8a7dc60ba2efa5e1041"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.teams.effective/vi-a1-cef644/translator/catalogue-fixture/vi/wire.teams.effective.json",
+      "original_path": "/Users/damian/.local-operator/sessions/bdce0d00e792/scratchpad/effective-reasons-vi/catalogue-fixture/vi/wire.teams.effective.json",
+      "sha256": "4d510633cda89708fa842a0812dc9fff2836383e93e1322c6a6d532cf52cc057"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.teams.effective/vi-a1-cef644/translator/catalogue-fixture/en/wire.teams.effective.context.json",
+      "original_path": "/Users/damian/.local-operator/sessions/bdce0d00e792/scratchpad/effective-reasons-vi/catalogue-fixture/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/vi/wire.teams.effective/vi-a1-cef644/translator/catalogue-fixture/en/wire.teams.effective.json",
+      "original_path": "/Users/damian/.local-operator/sessions/bdce0d00e792/scratchpad/effective-reasons-vi/catalogue-fixture/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    }
+  ]
+}

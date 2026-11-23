@@ -813,6 +813,13 @@ def test_inventory_block_matches_default_tool_order(monkeypatch: pytest.MonkeyPa
             # The music trio also needs the session's ``music_job_v1`` journal
             # door — presence-only, never called by an ordering test.
             journal_music_job=_music_journal_for_blocks,
+            # ``integrations`` is createIf-gated on ``ask_user`` (above), the
+            # session's consent seam, and a Team Integrations client door (or a
+            # persisted bridge login a bare CI host does not hold) — both
+            # presence-only here (the factory field is typed Callable, hence the
+            # lambda), never called by an ordering test.
+            integration_consent=object(),
+            integrations_client_factory=lambda: object(),
         )
     )
     blocks = build_system_blocks(tools, "", ENV, DATE)
@@ -2087,10 +2094,16 @@ _GATED_TOOL_NAMES = sorted(
 
 
 def _gated_blocks(names: list[str], **kwargs: Any) -> list[str]:
+    from local_operator.harness.intent import apply_intent_schema
     from local_operator.prompts_api import build_system_blocks
 
+    tools = [_tool(name, f"{name} tool") for name in names]
+    for tool in tools:
+        # The production shape (``apply_intent_schema`` runs on every tool), so
+        # the schema-derived ``has_intent`` keeps the ``i`` rule like a session.
+        tool.parameters = apply_intent_schema(tool.parameters)
     return build_system_blocks(
-        [_tool(name, f"{name} tool") for name in names],
+        tools,
         skills_block="",
         env_details="env",
         date_str="2026-01-01",
@@ -2123,8 +2136,9 @@ def test_a_session_holding_every_gated_tool_renders_the_ungated_bytes() -> None:
     )
     assert plain == stated
     # build_system_blocks appends its own sections AFTER the template render, so
-    # the gated session's head must begin with the whole ungated render.
-    assert gated.startswith(plain)
+    # the gated session's head must begin with the whole ungated render (its
+    # trailing blank lines normalised to the one before the state section).
+    assert gated.startswith(plain.rstrip("\n") + "\n\n## Session state updates")
     for marker in (
         "## Library",
         "Keep the todo list honest",

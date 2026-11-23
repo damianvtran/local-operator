@@ -1,0 +1,7 @@
+{
+  "tui.transcript_display.save_failed": "Не удалось сохранить отображение транскрипта: {reason}",
+  "tui.transcript_display.set": "Транскрипт: {mode}",
+  "tui.transcript_display.slash": "Свернуть транскрипт по ходам или по ответам",
+  "tui.transcript_display.unknown": "Неизвестный режим {echo} · выберите by-turn или by-response",
+  "tui.transcript_display.usage": "Транскрипт: {mode} · выберите by-turn или by-response"
+}

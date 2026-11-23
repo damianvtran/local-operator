@@ -35,7 +35,10 @@ import uvicorn
 from local_operator.server.app import app
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
-from local_operator.session.runtime.types import INPUT_MODE_CAPABILITY
+from local_operator.session.runtime.types import (
+    BUSY_DELIVERY_CAPABILITY,
+    INPUT_MODE_CAPABILITY,
+)
 from tests.e2e.harness import ScriptedStream, build_session, text_turn
 
 pytestmark = pytest.mark.e2e
@@ -180,6 +183,10 @@ async def _running_app(root: Path, workspace: Path, stream: ScriptedStream, toke
             # argue the gate's four answers, and this asserts the build the
             # desktop actually runs carries it.
             assert INPUT_MODE_CAPABILITY in runtime._record.capabilities
+            # Same pin for the delivery token: QA round 1 measured real
+            # handles advertising neither because only ``steer`` carried the
+            # keyword. The token must follow the real handle, not the double.
+            assert BUSY_DELIVERY_CAPABILITY in runtime._record.capabilities
             (root / "sessions" / sid / ".session.pid").write_text(str(os.getpid()))
             yield client, target, session, sid
     finally:

@@ -96,6 +96,10 @@ async def test_one_goal_command_executes_and_persists_a_real_tool(headless_tui_e
                 assert isinstance(chrome, TextContent)
                 assert is_harness_chrome(chrome.text)
                 assert users[1].provider_payload == {"harness_injected": True}
+                # The continuation cannot supply an owner-prompt witness for
+                # an account profile write, even without the remote marker.
+                assert session._run_owner_texts == []
+                assert session._run_untrusted_input
                 assert session.goal_status == "done", "the judge's second verdict settles"
                 assert any(message.role == "tool" for message in history)
                 records = _transcript_records(directory)

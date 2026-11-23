@@ -1,0 +1,18 @@
+INPUT /Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501
+INPUT /Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json 01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417
+INPUT /Users/damian/.local-operator/sessions/8dce6c4d11c0/scratchpad/ur/wire.teams.effective.json c43b87b8f9cc396da817e7c20da28c3b2a3b00668e6003ba4a4f0872c7ef345a
+TRANSLATOR_RECEIPT_SHA256 72ec0ca8d5a91b36b6d2b94cac4bd73b349657535b56f0e8282d2447a0cdb8ae
+SCOPED_NORMAL_VALIDATOR scripts.i18n.check.main([--catalogues-only]); catalogue root: /Users/damian/.local-operator/sessions/da45f1eea614/scratchpad/ur-a1/catalogue-fixture
+check.py: catalogue checks: 0 problem(s)
+NEGATIVE_TYPE_CONTROL_REJECTED ["ur/wire.teams.effective: wire.teams.effective.team_missing: arguments (('role', 'number'),) != en's (('role', 'simple'),): argument 'role' changed kind 'simple' -> 'number'"]
+check.py: catalogue checks: 0 problem(s)
+KEY_PASS wire.teams.effective.team_missing ARGS (('role', 'simple'),) CHARS 32 FORMATTED_LOGICAL_ORDER "QA-ٹیم-7 نام کی کوئی ٹیم نہیں ملی۔"
+KEY_PASS wire.teams.effective.registry_unreadable ARGS () CHARS 76 FORMATTED_LOGICAL_ORDER "ایجنٹ رجسٹری پڑھی نہیں جا سکی۔ ایجنٹ کی تعریفیں دیکھیں اور دوبارہ کوشش کریں۔"
+KEY_PASS wire.teams.effective.config_unreadable ARGS () CHARS 76 FORMATTED_LOGICAL_ORDER "ماڈل کی ترتیبات پڑھی نہیں جا سکیں۔ اپنی ترتیبات دیکھیں اور دوبارہ کوشش کریں۔"
+KEY_PASS wire.teams.effective.tier_invalid_value ARGS (('tier', 'simple'),) CHARS 131 FORMATTED_LOGICAL_ORDER "subagents.models.med میں درج قدر درست نہیں۔ اسے provider/model کی شکل میں ماڈل منتخب کرنے کی عبارت یا ماڈل کی میپنگ پر سیٹ کریں۔"
+KEY_PASS wire.teams.effective.tier_invalid_mapping ARGS (('tier', 'simple'),) CHARS 188 FORMATTED_LOGICAL_ORDER "subagents.models.med میں درج میپنگ درست نہیں۔ model میں provider/model کی شکل میں ماڈل منتخب کرنے کی عبارت درج کریں اور، اگر چاہیں، effort میں استدلال کی کوئی معاونت یافتہ سطح درج کریں۔"
+KEY_PASS wire.teams.effective.tier_unconfigured ARGS (('tier', 'simple'),) CHARS 51 FORMATTED_LOGICAL_ORDER "subagents.models.med میں کوئی ماڈل مقرر نہیں ہے۔"
+KEY_PASS wire.teams.effective.tier_invalid_selector ARGS (('tier', 'simple'),) CHARS 99 FORMATTED_LOGICAL_ORDER "subagents.models.med میں ماڈل منتخب کرنے کی عبارت درست نہیں۔ provider/model کی شکل استعمال کریں۔"
+KEY_PASS wire.teams.effective.model_unresolvable ARGS (('selector', 'simple'),) CHARS 96 FORMATTED_LOGICAL_ORDER "ماڈل openai/gpt-6.1-sol کا تعین نہیں ہو سکا۔ ماڈل منتخب کرنے کی عبارت اور فراہم کنندہ کی ترتیبات دیکھیں۔"
+KEY_PASS wire.teams.effective.unavailable ARGS () CHARS 75 FORMATTED_LOGICAL_ORDER "ٹیم کا یہ رکن دستیاب نہیں۔ اس کے ماڈل کی ترتیبات اور ایجنٹ کی تعریف دیکھیں۔"
+PASS 9/9 keys; exact name/type/order parity; no plural/select messages; no manual direction controls; config literals retained; logical mixed-direction formatting only, no visual/bidi/fallback/pseudo evidence

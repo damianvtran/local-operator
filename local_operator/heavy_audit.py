@@ -13,7 +13,9 @@ event so that question is answered by reading a file:
 * ``timeout``       a waiter gave up when its queue bound ran out (no slot);
 * ``stale-reclaim`` a slot was taken over from a holder that died without
                     releasing (its record was still on disk when the flock was
-                    free, so the kernel, not the holder, dropped the lock).
+                    free, so the kernel, not the holder, dropped the lock);
+* ``nested``        a descendant of a holder ran under the holder's slot
+                    (``holder`` = its pid) instead of queueing behind it.
 
 Two intervals serialized iff, for each slot, every ``take`` is followed by its
 ``release`` (or a ``stale-reclaim``) before the next ``take``.
@@ -82,9 +84,13 @@ AUDIT_GENERATIONS = 3
 #: --start-by`` refusing a run whose window passed while it queued (PR #4279);
 #: hyphenated like ``stale-reclaim`` and like run_bounded's
 #: ``termination_cause=late-start`` for the same breach, so one grep for
-#: ``late-start`` finds it on either trail. Event names are trail VALUES that
+#: ``late-start`` finds it on either trail. ``nested`` is a descendant of a
+#: holder running under that holder's slot instead of queueing behind it
+#: (``heavy_lease.inherited_lease``, the 2026-11-20 self-deadlock); ``holder``
+#: names the ancestor pid whose ``take`` covers it, and there is no ``release``
+#: for it because no slot changed hands. Event names are trail VALUES that
 #: readers match on, so they change only with every reader.
-EVENTS = ("take", "release", "timeout", "stale-reclaim", "late-start")
+EVENTS = ("take", "release", "timeout", "stale-reclaim", "late-start", "nested")
 
 #: The longest label part kept. Subcommands are short words; a long token in
 #: subcommand position is far more likely to be an identifier or a secret.
@@ -126,24 +132,34 @@ _SECRET_PREFIXES = (
 )
 #: Leading words that are setup, not the program the lease is for.
 _SETUP_WORDS = frozenset({"cd", "export", "set", "source", ".", "pushd", "unset"})
+#: How many nested ``bash -c '…'`` strings a label looks into.
+_MAX_LABEL_DEPTH = 3
 
 
 def audit_path(directory: Path) -> Path:
     return directory / AUDIT_FILENAME
 
 
-def command_label(command: str) -> str:
+def command_label(command: str, _depth: int = 0) -> str:
     """``argv[0]`` basename plus one subcommand word, from a shell command line.
 
     ``env GITHUB_TOKEN=x make test`` → ``make test``; ``cd web && pnpm build``
-    → ``pnpm build``; ``tool --token SECRET deploy`` → ``tool`` (an uppercase
+    → ``pnpm build``; ``tool --token [redacted] deploy`` → ``tool`` (an uppercase
     word is never a subcommand);
     ``curl https://u:p@host`` → ``curl``. Anything unparsable yields ``?``.
+
+    The label names the HEAVY part of a line: ``grep -v x f | pytest tests/unit``
+    is ``pytest``, and ``bash -c '<script>'`` is labelled by what its script
+    runs. ``$(…)``/backtick bodies are masked first, so a substitution's inner
+    commands never name the line. A line with no heavy segment keeps the first
+    non-setup command.
     """
     from local_operator import heavy_lease
 
     try:
-        segments = heavy_lease._segments(command)
+        # Top-level commands only: a `$(grep … | tr …)` body is not what runs.
+        masked, _ = heavy_lease._mask_substitutions(command)
+        segments = heavy_lease._segments(masked)
     except Exception:  # noqa: BLE001 - a label must never fail the lease
         segments = []
     if not segments:
@@ -151,27 +167,73 @@ def command_label(command: str) -> str:
             segments = [shlex.split(command)]
         except ValueError:
             return "?"
+    heavy_at = _first_heavy_segment(segments)
+    if heavy_at is not None:
+        label = _heavy_segment_label(segments[heavy_at], _depth)
+        if label is not None:
+            return label
     for tokens in segments:
-        try:
-            tokens = heavy_lease._strip_wrappers(list(tokens))
-        except Exception:  # noqa: BLE001
-            pass
-        # Drop leading KEY=VALUE assignments the wrapper stripper left behind:
-        # they are exactly where env secrets sit.
-        while tokens and "=" in tokens[0] and not tokens[0].startswith(("-", "/", ".")):
-            tokens = tokens[1:]
-        if not tokens or tokens[0] in _SETUP_WORDS:
-            continue
-        head = os.path.basename(tokens[0])
-        if not head or "=" in head or len(head) > _LABEL_PART_MAX:
-            return "?"
-        # Only argv[1], and only when it is word-shaped: the first non-flag
-        # word anywhere would pick up a flag's VALUE (``--token abc deploy``).
-        sub = tokens[1] if len(tokens) > 1 else ""
-        if _is_subcommand(sub):
-            return f"{head} {sub}"
-        return head
+        label = _segment_label(tokens)
+        if label is not None:
+            return label
     return "?"
+
+
+def _first_heavy_segment(segments: list[list[str]]) -> int | None:
+    """Index of the first segment the lease classifier calls heavy (or long-lived)."""
+    from local_operator import heavy_lease
+
+    for index, tokens in enumerate(segments):
+        try:
+            if heavy_lease._classify_segment(list(tokens), None) is not None:
+                return index
+        except Exception:  # noqa: BLE001 - a label must never fail the lease
+            continue
+    return None
+
+
+def _heavy_segment_label(tokens: list[str], depth: int) -> str | None:
+    """The label of a heavy segment; a shell ``-c`` string is labelled by its script."""
+    from local_operator import heavy_lease
+
+    try:
+        stripped = heavy_lease._strip_wrappers(list(tokens))
+        if (
+            depth < _MAX_LABEL_DEPTH
+            and stripped
+            and os.path.basename(stripped[0]) in heavy_lease._SHELLS
+        ):
+            script = heavy_lease._shell_c_string(stripped[1:])
+            if script is not None:
+                return command_label(script, depth + 1)
+    except Exception:  # noqa: BLE001
+        pass
+    return _segment_label(tokens)
+
+
+def _segment_label(tokens: list[str]) -> str | None:
+    """One segment's label; None for an empty or setup segment (skip it)."""
+    from local_operator import heavy_lease
+
+    try:
+        tokens = heavy_lease._strip_wrappers(list(tokens))
+    except Exception:  # noqa: BLE001
+        pass
+    # Drop leading KEY=VALUE assignments the wrapper stripper left behind:
+    # they are exactly where env secrets sit.
+    while tokens and "=" in tokens[0] and not tokens[0].startswith(("-", "/", ".")):
+        tokens = tokens[1:]
+    if not tokens or tokens[0] in _SETUP_WORDS:
+        return None
+    head = os.path.basename(tokens[0])
+    if not head or "=" in head or len(head) > _LABEL_PART_MAX:
+        return "?"
+    # Only argv[1], and only when it is word-shaped: the first non-flag
+    # word anywhere would pick up a flag's VALUE (``--token [redacted] deploy``).
+    sub = tokens[1] if len(tokens) > 1 else ""
+    if _is_subcommand(sub):
+        return f"{head} {sub}"
+    return head
 
 
 def _is_subcommand(word: str) -> bool:

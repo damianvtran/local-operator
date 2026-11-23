@@ -1,0 +1,360 @@
+{
+  "locale": "hi",
+  "namespace": "tui.session_sidebar",
+  "date": "2026-11-20",
+  "source_commit": "c8343f3a608785b5064e61307c7333a2473126ae",
+  "source_sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a",
+  "files": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-tui-sidebar/local_operator/i18n/catalogues/en/tui.session_sidebar.json",
+      "sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a"
+    },
+    "target": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-tui-sidebar/local_operator/i18n/catalogues/hi/tui.session_sidebar.json",
+      "sha256": "1c500f171037e1a37c07d997a67d5ac1fe1a6721aea4efa4d4725ac3c973ee3a"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-tui-sidebar/local_operator/i18n/catalogues/en/tui.session_sidebar.context.json",
+      "sha256": "698e8f0e151fee53d52a533bc51d7edcc600ce6964d74cdb024888238161f6e0"
+    }
+  },
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "provenance": "Identity supplied by delegating manager; independent translator not this auditor."
+  },
+  "auditor": {
+    "agent": "translation-auditor/sidebar-audit-hi",
+    "model": "openai/gpt-6.1-sol",
+    "instance": "3aa33693f9a6",
+    "date": "2026-11-20",
+    "result": "passed",
+    "findings": 0,
+    "fallback_used": false
+  },
+  "verdict": "clean-with-findings",
+  "status": "passed",
+  "keys_read": 21,
+  "findings_by_severity": {
+    "blocker": [],
+    "major": [],
+    "minor": [
+      {
+        "id": "HI-1",
+        "severity": "minor",
+        "key": "tui.session_sidebar.tooltip.unnamed_device",
+        "current": "बिना नाम का डिवाइस",
+        "proposed": "अनाम डिवाइस",
+        "reason": "The fallback is inserted before पर by tooltip.location and its network/stale variants, producing बिना नाम का डिवाइस पर; the postposition requires oblique agreement (बिना नाम के डिवाइस पर). अनाम is invariant and works both alone and in all composed tooltips.",
+        "evidence": "बिना नाम का डिवाइस पर",
+        "related_keys": [
+          "tui.session_sidebar.tooltip.location",
+          "tui.session_sidebar.tooltip.location_network",
+          "tui.session_sidebar.tooltip.location_stale",
+          "tui.session_sidebar.tooltip.location_network_stale"
+        ]
+      }
+    ],
+    "nit": []
+  },
+  "checks": {
+    "key_parity": true,
+    "argument_kind_parity": true,
+    "plural_categories": [
+      "one",
+      "other"
+    ],
+    "plural_selectors_complete": true,
+    "exact_numeric_selectors": false,
+    "raw_shown_digits_preserved": true,
+    "literal_command_via_placeholder": "lop stop",
+    "render_cases": 105,
+    "width_overflow_keys": [],
+    "width_measurements": {
+      "tui.session_sidebar.footer.asks_note": {
+        "maxCells": 10,
+        "counts": [
+          0,
+          1,
+          9,
+          10,
+          99
+        ],
+        "cells": [
+          6,
+          6,
+          6,
+          7,
+          7
+        ]
+      },
+      "tui.session_sidebar.footer.hub_note": {
+        "maxCells": 10,
+        "counts": [
+          0,
+          1,
+          9,
+          10,
+          99
+        ],
+        "cells": [
+          5,
+          5,
+          5,
+          6,
+          6
+        ]
+      },
+      "tui.session_sidebar.footer.opening": {
+        "maxCells": 29,
+        "counts": [
+          0,
+          1,
+          9,
+          10,
+          99
+        ],
+        "cells": [
+          8,
+          8,
+          8,
+          8,
+          8
+        ]
+      },
+      "tui.session_sidebar.footer.refresh_failed": {
+        "maxCells": 29,
+        "counts": [
+          0,
+          1,
+          9,
+          10,
+          99
+        ],
+        "cells": [
+          8,
+          8,
+          8,
+          8,
+          8
+        ]
+      },
+      "tui.session_sidebar.pinned_overflow": {
+        "maxCells": 29,
+        "counts": [
+          0,
+          1,
+          9,
+          10,
+          99
+        ],
+        "cells": [
+          21,
+          21,
+          21,
+          22,
+          22
+        ]
+      },
+      "tui.session_sidebar.row.untitled": {
+        "maxCells": 20,
+        "counts": [
+          0,
+          1,
+          9,
+          10,
+          99
+        ],
+        "cells": [
+          12,
+          12,
+          12,
+          12,
+          12
+        ]
+      },
+      "tui.session_sidebar.section.active": {
+        "maxCells": 29,
+        "counts": [
+          0,
+          1,
+          9,
+          10,
+          99
+        ],
+        "cells": [
+          8,
+          8,
+          8,
+          8,
+          8
+        ]
+      },
+      "tui.session_sidebar.section.pinned": {
+        "maxCells": 27,
+        "counts": [
+          0,
+          1,
+          9,
+          10,
+          99
+        ],
+        "cells": [
+          8,
+          8,
+          8,
+          8,
+          8
+        ]
+      },
+      "tui.session_sidebar.section.previous": {
+        "maxCells": 29,
+        "counts": [
+          0,
+          1,
+          9,
+          10,
+          99
+        ],
+        "cells": [
+          7,
+          7,
+          7,
+          7,
+          7
+        ]
+      },
+      "tui.session_sidebar.section.subagent": {
+        "maxCells": 27,
+        "counts": [
+          0,
+          1,
+          9,
+          10,
+          99
+        ],
+        "cells": [
+          9,
+          9,
+          9,
+          9,
+          9
+        ]
+      },
+      "tui.session_sidebar.state.empty": {
+        "maxCells": 29,
+        "counts": [
+          0,
+          1,
+          9,
+          10,
+          99
+        ],
+        "cells": [
+          13,
+          13,
+          13,
+          13,
+          13
+        ]
+      },
+      "tui.session_sidebar.state.error": {
+        "maxCells": 29,
+        "counts": [
+          0,
+          1,
+          9,
+          10,
+          99
+        ],
+        "cells": [
+          15,
+          15,
+          15,
+          15,
+          15
+        ]
+      },
+      "tui.session_sidebar.state.loading": {
+        "maxCells": 27,
+        "counts": [
+          0,
+          1,
+          9,
+          10,
+          99
+        ],
+        "cells": [
+          15,
+          15,
+          15,
+          15,
+          15
+        ]
+      },
+      "tui.session_sidebar.title": {
+        "maxCells": 29,
+        "counts": [
+          0,
+          1,
+          9,
+          10,
+          99
+        ],
+        "cells": [
+          3,
+          3,
+          3,
+          3,
+          3
+        ]
+      }
+    },
+    "manual_bidi_controls": false,
+    "rtl": "Not applicable: hi is LTR. No manual bidi controls found.",
+    "visual_validation": "Not performed; only ICU runtime rendering and rich.cells.cell_len measurement, not terminal shaping/screenshots."
+  },
+  "terminology_evidence": [
+    {
+      "source": "i18n/glossary.md:56,60-61,79",
+      "decision": "सत्र / एजेंट / उप-एजेंट / डिवाइस agree."
+    },
+    {
+      "source": "i18n/style-guides/hi.md:8-18,22-28",
+      "decision": "Polite आप-register imperatives; established Devanagari loans permitted. हब is a Hindi-script computing loan, not retained Latin hub; neither guide nor glossary explicitly lists hub as a protected product name."
+    },
+    {
+      "source": "i18n/style-guides/hi.md:51-52,64-68",
+      "decision": "one/other includes zero in one; cell_len within all budgets."
+    },
+    {
+      "source": "local_operator/i18n/catalogues/hi/tui.small.json",
+      "keys": [
+        "tui.small.ask_queue.question_waiting",
+        "tui.small.subagent_view.row_name",
+        "tui.small.goal_panel.judge_run",
+        "tui.small.panels.scroll_hint",
+        "tui.small.session_sidebar.asks_suffix"
+      ],
+      "decision": "सवाल / उप-एजेंट / रन / स्क्रॉल consistent."
+    },
+    {
+      "source": "local_operator/i18n/catalogues/hi/relay.shell.json",
+      "keys": [
+        "relay.shell.usage.refresh",
+        "relay.shell.usage.refresh_failed"
+      ],
+      "decision": "रीफ़्रेश and अंतिम ज्ञात consistent."
+    },
+    {
+      "source": "local_operator/i18n/catalogues/hi/relay.chrome.json",
+      "keys": [
+        "relay.chrome.drawer.conversations",
+        "relay.chrome.list.section.pinned",
+        "relay.chrome.session.tray.questions"
+      ],
+      "decision": "बातचीत / पिन किए गए / सवाल consistent."
+    }
+  ],
+  "note": "All 21 English/target/context keys read. No blocker/major. HI-1 minor grammatical composition finding; read-only audit, no repository changes. Hindi footer counters fit the existing ten-cell budget: asks 6/6/7/7, hub 5/5/6/6 at 0/9/10/99; no budget relaxation or shortening needed. In-list strings fit; pinned overflow maximum 22/29. No materially longer constrained target requiring rendered overflow escalation; unconstrained tooltip wraps by contract."
+}

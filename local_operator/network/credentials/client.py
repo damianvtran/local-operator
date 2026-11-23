@@ -1016,12 +1016,19 @@ class MeshCredentialClient:
         provider: str = "",
         affinity: tuple[int, int] | None = None,
         demote_credential_ids: Collection[int] = (),
+        hold_fallback_session_ids: tuple[str, ...] = (),
     ) -> Grant | BrokerError:
         """One bounded GitHub recovery retry, never a wider/longer permission.
 
+        ``hold_fallback_session_ids`` are the asking session's ANCESTORS in the
+        harness's own task tree (nearest first), used only to bridge an owner
+        outage for a GitHub key (:meth:`_bridge_ancestor_hold`); see there.
+
         A source deadline is transient, unlike an answered deny. During the
         proactive re-ask margin a CURRENT lease may still serve; after its actual
-        expiry it may not. A second miss returns truthfully, with no retry loop.
+        expiry this rescue never serves it as a plain lease (inside its hold
+        ``_held_or`` may already have served it, marked held). A second miss returns
+        truthfully, with no retry loop.
         """
         from local_operator.network.credentials.github import is_github_key
 
@@ -1036,6 +1043,7 @@ class MeshCredentialClient:
             provider=provider,
             affinity=affinity,
             demote_credential_ids=demote_credential_ids,
+            hold_fallback_session_ids=hold_fallback_session_ids,
         )
         if not (
             is_github_key(key)
@@ -1049,7 +1057,7 @@ class MeshCredentialClient:
         # as the plain lease it is, not marked held. An expired lease inside its hold
         # was already served by ``_held_or`` and never reaches this line.
         if not force_refresh:
-            held = self._current_lease(key, session_id)
+            held = self._current_lease(key, session_id, hold_fallback_session_ids)
             if held is not None:
                 from local_operator.network.credentials.effective import note_resolution
 
@@ -1074,6 +1082,7 @@ class MeshCredentialClient:
             provider=provider,
             affinity=affinity,
             demote_credential_ids=demote_credential_ids,
+            hold_fallback_session_ids=hold_fallback_session_ids,
         )
 
     def _github_membership_denial(self, key: str) -> BrokerError | None:
@@ -1094,12 +1103,32 @@ class MeshCredentialClient:
             self._retire_held(None, "member_not_active")
             return self._policy_error(key, "not_a_holder")
 
-    def _current_lease(self, key: str, session_id: str) -> Grant | None:
-        """Serve only an unexpired owner lease behind the existing policy fence."""
-        from local_operator.network.credentials.held_policy import PolicyUnknown
+    def _current_lease(
+        self, key: str, session_id: str, hold_fallback_session_ids: tuple[str, ...] = ()
+    ) -> Grant | None:
+        """Serve only an unexpired owner lease behind the existing policy fence.
 
+        A subagent with no lease of its own may take its ancestor's
+        (:meth:`_bridge_ancestor_hold`) BEFORE the fence below, so the copy is
+        admitted, generation-checked and refused exactly like a lease it fetched.
+        """
         if not self.should_borrow(key) or not self._self_membership_active():
             return None
+        bridged_from = self._bridge_ancestor_hold(key, session_id, hold_fallback_session_ids)
+        served = self._admitted_lease(key, session_id)
+        if bridged_from:
+            if served is None:
+                self._drop_unserved_bridge(key, session_id, bridged_from)
+            else:
+                self._note_bridged(
+                    key, session_id, bridged_from, served, cause=_audit_cause("owner_busy")
+                )
+        return served
+
+    def _admitted_lease(self, key: str, session_id: str) -> Grant | None:
+        """``session_id``'s unexpired lease if the held-policy admission passes it."""
+        from local_operator.network.credentials.held_policy import PolicyUnknown
+
         held = self.grants.peek(key, session_id)
         if (
             held is None
@@ -1119,6 +1148,123 @@ class MeshCredentialClient:
         except PolicyUnknown:
             return None
 
+    def _ancestor_lease(
+        self, key: str, session_id: str, hold_fallback_session_ids: tuple[str, ...]
+    ) -> Grant | None:
+        """A read-only look at the nearest ancestor's lease, for routing only.
+
+        ``_held_or`` leaves an unexpired GitHub lease to ``_current_lease`` so it is
+        served as the plain lease it is; a child whose lease lives in an ancestor's
+        slot must route the same way, so the bridge happens there. Copies nothing.
+        """
+        from local_operator.network.credentials.github import is_github_key
+
+        if not (hold_fallback_session_ids and session_id and is_github_key(key)):
+            return None
+        owner = self.owner_of(key)
+        for ancestor in hold_fallback_session_ids:
+            if not ancestor or ancestor == session_id:
+                continue
+            held = self.grants.peek(key, str(ancestor))
+            if held is not None and held.credential_ref.owner_device == owner:
+                return held
+        return None
+
+    def _bridge_ancestor_hold(
+        self, key: str, session_id: str, hold_fallback_session_ids: tuple[str, ...]
+    ) -> str:
+        """Copy an ancestor session's held GitHub grant into ``session_id``'s empty slot.
+
+        Returns the ancestor id the grant came from, or ``""`` when nothing was copied.
+
+        WHY (2026-11-21, remote review/QA subagents losing ``GH_TOKEN``): the grant
+        cache is keyed per ``(key, session_id)``, and while the owner is offline
+        only a grant the ASKING session already holds may serve. A subagent is a
+        new session id, so the parent's admitted, still-held grant was invisible
+        to it and its ``gh``/``git`` ran with no login. GitHub lending is
+        DEVICE-scoped by construction (``github.py``: the session id is
+        attribution and cache keying only), so the child using the grant this
+        device already holds widens nothing the owner granted.
+
+        CONSTRAINTS, each load-bearing:
+
+        * GitHub keys only. A model or MCP grant is not bridged: their policy,
+          renewal and refusal paths were not designed around a shared slot.
+        * The ancestors come only from the harness's task tree
+          (``ToolContext.ancestor_session_ids``, set at spawn from the parent
+          Session objects); no env var, tool argument or peer message reaches
+          this parameter, so a forged id cannot borrow another session's slot.
+        * Same owner as the key's current owner, still inside its hold, and the
+          copy KEEPS the ancestor's receipt clocks (``received_wall`` /
+          ``received_boot``): ``GrantCache.put`` only stamps a grant with no
+          stamp, so the copy's hold can never end later than the ancestor's.
+          A grant with no stamp is skipped for exactly that reason.
+        * Nothing is dialled under the ancestor's id; the copy carries the
+          ancestor's policy fence so the caller's existing admission,
+          ``invalidate_policy`` generation check, hold-end check and cooldowns
+          decide it unchanged (and a withdrawn share or panic drops both slots).
+        """
+        from local_operator.network.credentials import offline_hold_s
+        from local_operator.network.credentials.github import is_github_key
+
+        if not (hold_fallback_session_ids and session_id and is_github_key(key)):
+            return ""
+        if self.grants.peek(key, session_id) is not None:
+            return ""
+        owner = self.owner_of(key)
+        cap = offline_hold_s(self.root)
+        for ancestor in hold_fallback_session_ids:
+            ancestor = str(ancestor or "")
+            if not ancestor or ancestor == session_id:
+                continue
+            held = self.grants.peek(key, ancestor)
+            if (
+                held is None
+                or not (held.received_wall and held.received_boot)
+                or held.credential_ref.owner_device != owner
+            ):
+                continue
+            if time.time() * 1000.0 >= held.hold_end_ms(cap, _sleep_inclusive_clock()):
+                continue
+            # ``dataclasses.replace`` copies the compare=False receipt fields too.
+            copy = dataclasses.replace(held)
+            self.grants.put(
+                key,
+                session_id,
+                copy,
+                policy_fence=self.grants.policy_stamp(key, ancestor),
+            )
+            return ancestor
+        return ""
+
+    def _drop_unserved_bridge(self, key: str, session_id: str, bridged_from: str) -> None:
+        """Remove a bridged copy the admission did not serve, without revoking it.
+
+        The token is still the ancestor's held grant, so this is a plain slot drop
+        (never ``_revoke_dropped_github``); a later ask re-bridges and re-audits.
+        """
+        if bridged_from:
+            self.grants.drop(key, session_id)
+
+    def _note_bridged(
+        self, key: str, session_id: str, bridged_from: str, grant: Grant, *, cause: str
+    ) -> None:
+        """Write who used a bridged grant: the CHILD as consumer, the ancestor as source.
+
+        Honest attribution (lane 79 condition b): without this row every serve of the
+        copy would read as the ancestor's grant on this device's audit log.
+        """
+        self._held_audit(
+            "credential.held_bridged",
+            key,
+            grant.credential_ref.owner_device,
+            cause=cause,
+            grant_id=grant.grant_id,
+            consumer=session_id,
+            bridged_from=bridged_from,
+            hold_until=int(grant.held_until_ms or 0),
+        )
+
     def _request_grant_once(
         self,
         key: str,
@@ -1129,6 +1275,7 @@ class MeshCredentialClient:
         provider: str = "",
         affinity: tuple[int, int] | None = None,
         demote_credential_ids: Collection[int] = (),
+        hold_fallback_session_ids: tuple[str, ...] = (),
     ) -> Grant | BrokerError:
         """Borrow a bearer for ``key``. Blocking; call from a thread.
 
@@ -1230,6 +1377,7 @@ class MeshCredentialClient:
                         prior_status=prior_status,
                         label=label,
                         resting=resting,
+                        hold_fallback_session_ids=hold_fallback_session_ids,
                     ),
                     key,
                     label,
@@ -1305,6 +1453,7 @@ class MeshCredentialClient:
                     label=label,
                     resting=resting,
                     renewal=_renewal_from_reply(reply),
+                    hold_fallback_session_ids=hold_fallback_session_ids,
                 ),
                 key,
                 label,
@@ -1769,8 +1918,13 @@ class MeshCredentialClient:
         label: str = "",
         resting: list[dict[str, Any]] | None = None,
         renewal: tuple[Grant, Any] | None = None,
+        hold_fallback_session_ids: tuple[str, ...] = (),
     ) -> Grant | BrokerError:
         """A CURRENT immutable stamp + the owner's stated hold, never a retry-cache vote.
+
+        ``hold_fallback_session_ids``: a subagent with an empty slot may serve its
+        ancestor's held GitHub grant (:meth:`_bridge_ancestor_hold`), copied in
+        before the admitted branch's fence and checked by it unchanged.
 
         ``renewal`` is the grant this device's RELAY fetched when the owner last
         returned (``renew_push``), attached to the relay's owner-unreachable answer.
@@ -1824,7 +1978,9 @@ class MeshCredentialClient:
         if refusal.code in _BUSY_REFUSALS and not force_refresh:
             from local_operator.network.credentials.github import is_github_key
 
-            current = self.grants.peek(key, session_id)
+            current = self.grants.peek(key, session_id) or self._ancestor_lease(
+                key, session_id, hold_fallback_session_ids
+            )
             if is_github_key(key) and current is not None and current.usable_at():
                 # An UNEXPIRED GitHub lease is ``request_grant_sync``'s current-lease
                 # rescue, which serves it as the plain lease (no held marking, no
@@ -1836,6 +1992,7 @@ class MeshCredentialClient:
         outcome: Grant | BrokerError = refusal
         lapsed: Grant | None = None
         lapsed_bound = ""
+        bridged_from = ""
         #: Set on every arm that DROPS the held grant without a lapse, so its pending
         #: offline serves are written (``_flush_held_receipts``) rather than lost with
         #: the slot (review R1-m2): the receipt promises every offline serve is counted.
@@ -1868,6 +2025,12 @@ class MeshCredentialClient:
                     else:
                         if renewal is not None and not force_refresh:
                             self._adopt_renewal(key, session_id, renewal, stamp)
+                        if not force_refresh:
+                            # Before the generation fence, so a stale ancestor grant
+                            # is fenced out of the copy exactly as out of the slot.
+                            bridged_from = self._bridge_ancestor_hold(
+                                key, session_id, hold_fallback_session_ids
+                            )
                         invalidated: list[Grant] = []
                         stale = self.grants.invalidate_policy(
                             key, session_id, stamp, dropped=invalidated
@@ -1923,9 +2086,15 @@ class MeshCredentialClient:
             outcome = self._policy_error(key, "consent_unverifiable")
         if dropped and self._held_receipts:
             self._flush_held_receipts(key)
+        if bridged_from and not isinstance(outcome, Grant):
+            self._drop_unserved_bridge(key, session_id, bridged_from)
         if isinstance(outcome, Grant):
             # The receipt is written OUTSIDE the policy lock: an audit append is
             # disk I/O, and the decision it records is already final.
+            if bridged_from:
+                self._note_bridged(
+                    key, session_id, bridged_from, outcome, cause=_audit_cause(refusal.code)
+                )
             self._note_held_serve(key, outcome, cause=_audit_cause(refusal.code))
             from local_operator.network.credentials.github import is_github_key
 
@@ -3778,6 +3947,17 @@ class MeshCredentialClient:
             dropped.append(key)
         return dropped
 
+    def invalidate_membership(self) -> None:
+        """Run the membership-loss drop NOW, for a caller that has just learned of it.
+
+        The relay calls this when a current member proved on a live handshake that
+        this device was removed while offline (G9-B): the same persistent deny,
+        borrowed-cache drop, GitHub revoke and held-row retirement every serve path
+        runs lazily once ``_self_membership_active`` reads False, so the offline hold
+        ends at once instead of at its expiry. Only reduces authority.
+        """
+        self._invalidate_membership_scope("")
+
     def self_membership_active(self) -> bool:
         """Public read of :meth:`_self_membership_active`, for the owner-wait hint."""
         return self._self_membership_active()
@@ -4104,8 +4284,10 @@ def _audit_cause(code: str) -> str:
     """The closed ``audit.CAUSES`` word for a refusal that reached the borrower.
 
     A busy owner is ``busy`` (its remedy is time), an absent one ``owner_offline``;
-    any other code is spelled out in the row's ``code`` detail, so the cause is
-    left empty rather than guessed.
+    any other code returns ``""`` rather than a guess. ``""`` is itself a member of
+    ``audit.CAUSES``, so ``AuditLog.record`` writes it unchanged (only a word
+    outside ``CAUSES`` becomes ``"internal"``): those rows READ ``cause: ""``, and
+    the row's ``code`` detail, not the cause, is the authoritative reason for them.
     """
     if code in _BUSY_REFUSALS:
         return "busy"

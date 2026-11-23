@@ -390,13 +390,13 @@ async def test_a_metadata_only_change_is_rebuilt_once_by_prewarm(
     assert calls == [FRONTEND_CHECKPOINT_CUSTOM_TYPE]  # refused: falls back to the walk
 
     builds: list[object] = []
-    real_build = index_prewarm.build_anchor
+    real_build = index_prewarm.build_anchor_settled
 
     def counted_build(target):  # type: ignore[no-untyped-def]
         builds.append(target)
         return real_build(target)
 
-    monkeypatch.setattr(index_prewarm, "build_anchor", counted_build)
+    monkeypatch.setattr(index_prewarm, "build_anchor_settled", counted_build)
     assert not index_prewarm._anchor_current(directory)
     assert index_prewarm.write_tail_anchor(root, SESSION_ID)
     assert len(builds) == 1

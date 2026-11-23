@@ -1,0 +1,82 @@
+"""Independent A mechanical evidence, not a styled/native visual certificate.
+Scope only official enumeration to en/vi and this namespace; never alter inputs.
+"""
+import hashlib, json, os, re, sys, unicodedata
+from pathlib import Path
+from unittest.mock import patch
+from rich.console import Console
+from rich.text import Text
+from rich.cells import cell_len
+from local_operator.i18n import catalogues, runtime, messages
+from scripts.i18n import check
+ROOT=Path('/Users/damian/local-operator/.worktrees/i18n-model-persist-notice')
+NS='tui.model_persistence'
+BASE=ROOT/'local_operator/i18n/catalogues'
+EXPECTED={'en/tui.model_persistence.json':'4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff','en/tui.model_persistence.context.json':'b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc','vi/tui.model_persistence.json':'d6b5f00ab0a25ea2596879299e5cda07b5b5bb66bf8ea8bc9081f503719cf505'}
+def frozen(phase):
+ for path,want in EXPECTED.items():
+  got=hashlib.sha256((BASE/path).read_bytes()).hexdigest()
+  assert got==want,(path,got)
+  print(phase,path,got)
+frozen('BEFORE')
+print('INTERPRETER',sys.executable)
+for module in (catalogues,runtime,messages,check):
+ assert Path(module.__file__).resolve().is_relative_to(ROOT)
+ print('MODULE',module.__name__,module.__file__)
+assert not any(k.startswith('CMUX_') for k in os.environ)
+assert Path(os.environ['HOME']).is_relative_to(Path('/Users/damian/.local-operator/sessions/fcb8a76716b3/scratchpad'))
+print('ISOLATION',os.environ['HOME'],os.environ['LOCAL_OPERATOR_CONFIG_DIR'],'CMUX absent')
+en=catalogues.load_catalogue('en',NS); vi=catalogues.load_catalogue('vi',NS)
+context=catalogues.context('en',NS)
+assert list(en)==list(vi)==list(context) and len(en)==4
+with patch.object(catalogues,'namespaces',return_value=(NS,)),patch.object(catalogues,'locales',return_value=('en','vi')):
+ problems=check.check_catalogues(); print('OFFICIAL scoped catalogue/context/ICU',problems); assert not problems
+ original=catalogues.load_catalogue
+ broken=dict(vi); del broken[NS+'.persist']
+ with patch.object(catalogues,'load_catalogue',side_effect=lambda loc,ns: broken if loc=='vi' else original(loc,ns)):
+  bad=check.check_catalogues(); print('NEGATIVE missing key',bad); assert any('missing key' in x for x in bad)
+ broken=dict(vi); broken[NS+'.with_model']=broken[NS+'.with_model'].replace('{label}','{wrong}')
+ with patch.object(catalogues,'load_catalogue',side_effect=lambda loc,ns: broken if loc=='vi' else original(loc,ns)):
+  bad=check.check_catalogues(); print('NEGATIVE renamed argument',bad); assert any('arguments' in x for x in bad)
+for key in en:
+ assert runtime.message_arguments(en[key])==runtime.message_arguments(vi[key])
+ assert runtime.plural_selectors(en[key])==runtime.plural_selectors(vi[key])==()
+ assert not re.search(r',\s*(plural|select|selectordinal)\b',vi[key])
+ assert unicodedata.normalize('NFC',vi[key])==vi[key]
+ assert re.findall(r'`[^`]*`|</?[^>]+>',en[key])==re.findall(r'`[^`]*`|</?[^>]+>',vi[key])==[]
+ assert not any(unicodedata.bidirectional(c) in ('LRE','RLE','LRO','RLO','PDF','LRI','RLI','FSI','PDI') for c in vi[key])
+ assert not any(x in context[key] for x in ('maxCells','maxChars'))
+ print('KEY',key,'arguments',runtime.message_arguments(vi[key]),'plural/select=0 NFC=yes cells',cell_len(vi[key]),'no explicit cap')
+for suffix,cmd in [('persist','/model default'),('settings','/settings'),('saved','/model saved')]:
+ assert vi[NS+'.'+suffix].count(cmd)==en[NS+'.'+suffix].count(cmd)==1
+ print('PROTECTED',cmd,'ASCII bytes unchanged')
+assert all(vi[NS+'.with_model'].count('{'+arg+'}')==1 for arg in ('label','routes'))
+for arg in ('label','routes'):
+ params={'label':'opaque/id','routes':'localized routes'}; del params[arg]
+ try: runtime.render_message(vi[NS+'.with_model'],params,'vi')
+ except runtime.MessageFormatError as exc: print('NEGATIVE missing',arg,type(exc).__name__,str(exc))
+ else: raise AssertionError('Missing argument accepted')
+try: messages.render(NS+'.missing_key',{},locale='vi')
+except Exception as exc: print('MISSING KEY API',type(exc).__name__,str(exc))
+else: raise AssertionError('Unknown message unexpectedly accepted')
+# Independent synthetic stress only: expand human segments, protecting commands/args.
+pattern=r'(/model default|/model saved|/settings|\{label\}|\{routes\})'
+def pseudo(value):
+ return ''.join(part if re.fullmatch(pattern,part) else ''.join(c*2 if c.isalpha() else c for c in part) for part in re.split(pattern,value))
+for locale,data in [('en',en),('vi',vi),('pseudo-en',{k:pseudo(v) for k,v in en.items()})]:
+ clauses={s:runtime.render_message(data[NS+'.'+s],{},'en' if locale=='pseudo-en' else locale) for s in ('persist','saved','settings')}
+ for state,parts in [('ordinary',('persist','saved','settings')),('missing-model',('persist','settings')),('absent-hosting',('settings',))]:
+  routes=' · '.join(clauses[s] for s in parts)
+  if state=='absent-hosting': assert '/model' not in routes
+  print('CLAUSE_ONLY',locale,state,routes)
+  for label in ('x','openai/gpt-6.1-sol','provider/very-long-opaque-model-20261122:thinking-high'):
+   params={'label':label,'routes':routes}
+   rendered=runtime.render_message(data[NS+'.with_model'],params,'en' if locale=='pseudo-en' else locale)
+   assert rendered.count(label)==1 and rendered.count(routes)==1
+   if locale!='pseudo-en': assert messages.render(NS+'.with_model',params,locale=locale)==rendered
+   for width in (80,100,120):
+    lines=Text(rendered).wrap(Console(width=width,force_terminal=False),width)
+    assert all(cell_len(line.plain)<=width for line in lines)
+    print('PLAIN_RICH',locale,state,label,width,'cells',[cell_len(line.plain) for line in lines],'rows',[line.plain for line in lines])
+frozen('AFTER')
+print('PASS all scoped checks; zero plural/select; 81 plain-Rich wrap cases. NOT styled NoticeBlock, native font, transcript-family geometry, RTL certification, consumer integration or release approval.')

@@ -110,31 +110,39 @@ def _git(*args: str, cwd: Path) -> None:
 
 
 @pytest.fixture
-def mobile(home: Path) -> Path:
-    """``~/local-operator-mobile`` with the five worktrees exactly as found live."""
+def mobile(home: Path, request: pytest.FixtureRequest) -> Path:
+    """The five field worktrees, or their witnessed counterpart for plain cleanup."""
+    witnessed = getattr(request, "param", False)
     repo = home / "local-operator-mobile"
     repo.mkdir()
     _git("init", "-q", "-b", "main", cwd=repo)
     (repo / ".gitignore").write_text("node_modules\n.expo\n.pnpm-store\n.worktrees/\n")
     (repo / "App.tsx").write_text("export {}\n")
+    if witnessed:
+        (repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
     _git("add", ".", cwd=repo)
     _git("commit", "-qm", "init", cwd=repo)
     deps = repo / ".worktrees" / "native-history-continuity"
     _git("worktree", "add", "-q", "-b", "feat/nhc", str(deps), cwd=repo)
-    (deps / "node_modules" / "react").mkdir(parents=True)
+    dep_root = repo if witnessed else deps
+    (dep_root / "node_modules" / "react").mkdir(parents=True)
     state = home / ".local-operator"
     prov.record_lineage(C, origin="subagent", parent=S, state_root=state)
     for name in NAMES:
         wt = repo / ".worktrees" / name
         _git("worktree", "add", "-q", "-b", f"fix/{name}", str(wt), cwd=repo)
-        # The live trees' only extras: a node_modules SYMLINK to the sibling's
-        # dependency tree, plus ignored ``.expo/`` (three) and ``.pnpm-store/`` (one).
-        (wt / "node_modules").symlink_to("../native-history-continuity/node_modules")
-        if name in ("refused-connect", "markdown-tables", "composer-ios-wrap"):
-            (wt / ".expo").mkdir()
-            (wt / ".expo" / "settings.json").write_text("{}")
-        if name == "refused-connect":
-            (wt / ".pnpm-store" / "v3").mkdir(parents=True)
+        if witnessed:
+            # Committed matching lockfiles and a link outside the removal:
+            # the checkpoint can prove that no dependency bytes are at risk.
+            (wt / "node_modules").symlink_to("../../node_modules")
+        else:
+            # The field used a sibling link and local ignored stores; none is witnessed.
+            (wt / "node_modules").symlink_to("../native-history-continuity/node_modules")
+            if name in ("refused-connect", "markdown-tables", "composer-ios-wrap"):
+                (wt / ".expo").mkdir()
+                (wt / ".expo" / "settings.json").write_text("{}")
+            if name == "refused-connect":
+                (wt / ".pnpm-store" / "v3").mkdir(parents=True)
         _record(home, wt)
     return repo
 
@@ -212,14 +220,30 @@ def test_ignored_only_trees_are_clean_even_for_a_foreign_ranking(mobile: Path) -
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("command", [COMMAND_1, COMMAND_2], ids=["plain", "force-loop"])
+@pytest.mark.parametrize(
+    ("mobile", "command"),
+    [(True, COMMAND_1), (False, COMMAND_2)],
+    indirect=["mobile"],
+    ids=["plain-witnessed", "force-loop"],
+)
 async def test_own_finished_worktrees_settle_without_the_judge(
     home: Path, mobile: Path, command: str
 ) -> None:
-    """(b) Both live commands run with zero judge calls."""
+    """A witnessed plain compound command does not change legacy force-loop ranking."""
     judge = _Judge("BLOCK: should not be asked")
     outcome = await _check(home, command, judge)
     assert outcome is None or not outcome.blocked, outcome and outcome.text
+    assert judge.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_own_plain_compound_cleanup_holds_unwitnessed_ignored_payload(
+    home: Path, mobile: Path
+) -> None:
+    judge = _Judge("ALLOW ledger")
+    outcome = await _check(home, COMMAND_1, judge)
+    assert outcome is not None and outcome.blocked
+    assert "3 ignored entries the guard cannot prove regenerable" in outcome.text
     assert judge.prompts == []
 
 
@@ -284,6 +308,7 @@ async def test_unrelated_session_still_goes_to_the_judge_and_a_ledger_claim_fail
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mobile", [True], indirect=True, ids=["witnessed"])
 async def test_unrelated_plain_remove_while_owner_runs_goes_to_the_judge(
     home: Path, mobile: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

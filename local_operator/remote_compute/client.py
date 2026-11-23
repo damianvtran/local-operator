@@ -42,12 +42,21 @@ cloudflared token and an origin credential; both are returned once, on the
 reads ``run`` and lets the wrapper go out of scope, so there is no value here
 to log, print, cache or serialise by accident — the rule is structural, not a
 redaction step someone has to remember to run.
+
+AN ARTIFACT URL IS A BEARER TOO, AND THIS MODULE DOES BIND IT. A run's artifact
+listing answers a presigned GET per file, which authorises that download for a
+few minutes without any Radient header at all. So the URL is a field of
+:class:`Artifact` that is kept out of its ``repr`` and out of :meth:`Artifact.to_json`:
+the download needs it, every other surface must not have it, and a single filter
+in the type is what makes that true of the CLI, the route and any log line in
+between.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import urllib.parse
 import uuid
 from contextlib import closing
@@ -60,22 +69,82 @@ from local_operator.providers.auth_store import (
     AuthStoreError,
     CredentialInvalidError,
 )
-from local_operator.remote_compute.config import invalid_override, resolve_api_url
+from local_operator.remote_compute.config import (
+    invalid_override,
+    is_loopback_host,
+    resolve_api_url,
+)
 from local_operator.remote_compute.errors import (
-    ERROR_BY_STATUS,
     InvalidIdempotencyKey,
     NetworkMismatch,
     RemoteComputeError,
     RunIdentityMismatch,
     Unreachable,
     UnreadableEnvelope,
+    refusal_code,
+    refusal_for,
+    refusal_message,
+    retry_after_seconds,
 )
 from local_operator.remote_compute.request import RunCreateRequest
+from local_operator.remote_compute.tiers import tier_from_server
 from local_operator.tunnels import api as tunnels_api
 from local_operator.tunnels.errors import LoginRequired
 
+logger = logging.getLogger(__name__)
+
 #: Where the run endpoints live, relative to the API host.
 RUNS_PATH = "/v1/remote-compute/runs"
+
+#: Where the capacity read lives. A SIBLING of ``RUNS_PATH``, not a child of it:
+#: the tiers this deployment can provision answer "can a run be admitted at
+#: all", which a surface asks BEFORE it offers one.
+CAPACITY_PATH = "/v1/remote-compute/capacity"
+
+#: The page size the logs endpoint uses when the caller names none, and the
+#: contract's bound on it.
+#:
+#: THE CONTRACT'S OWN NUMBERS (1-1000, default 200) rather than this build's
+#: preference: a page is the server's answer about how much it will return at
+#: once, and asking for more than the contract admits is a 400 for a request this
+#: client could have sized correctly.
+LOGS_PAGE_DEFAULT = 200
+LOGS_PAGE_MINIMUM = 1
+LOGS_PAGE_MAXIMUM = 1000
+
+#: The keys a log entry may carry.
+#:
+#: A WHITELIST, for the reason :data:`SECRET_RUN_FIELDS` exists in the other
+#: direction: a log entry is republished by a GUI's log panel, so a field the
+#: contract does not name is dropped here rather than passed to a renderer that
+#: would have to remember not to paint it. A TUPLE rather than a set, so the
+#: surviving keys come out in the contract's order on every run instead of in a
+#: hash order a reader would have to check twice.
+LOG_EVENT_KEYS: tuple[str, ...] = ("timestamp", "message")
+
+#: The keys the run's git summary may carry. Whitelisted for the same reason.
+GIT_RESULT_KEYS: tuple[str, ...] = ("branch", "commit", "bundle_present")
+
+#: The keys a run object may carry that are SECRETS when they appear at all.
+#:
+#: Named here rather than in a surface because the create wrapper is this
+#: module's fact: ``run_token`` authenticates the pod and ``tunnel`` carries its
+#: cloudflared credentials, both returned once on the 201 (see the module
+#: docstring). :meth:`RemoteComputeClient.create_run` already refuses to carry
+#: either, and this list is the same rule applied to a whole body a surface is
+#: about to print or return — defence in depth, not a response to a known leak.
+SECRET_RUN_FIELDS: tuple[str, ...] = ("run_token", "tunnel")
+
+
+def without_secrets(payload: dict[str, Any]) -> dict[str, Any]:
+    """The run without the fields that are secrets when they appear at all.
+
+    ONE implementation for every surface that publishes a run (the CLI's
+    ``--remote-status`` and the desktop route both call this): two copies of a
+    filter is how one surface comes to print a field the other redacts.
+    """
+    return {key: value for key, value in payload.items() if key not in SECRET_RUN_FIELDS}
+
 
 #: The keys the v1 response envelope may carry, and nothing else.
 #:
@@ -231,23 +300,44 @@ def _confirm_network(run: dict[str, Any], *, expected: str) -> str:
     return returned
 
 
-def _failed(status: int) -> RemoteComputeError | LoginRequired:
-    """The typed error for ``status``, with a sentence that carries no body.
+def _failed(response: httpx.Response) -> RemoteComputeError | LoginRequired:
+    """The typed error for this refusal, BY CODE and then by status.
 
     ``401`` is answered with the SHARED ``LoginRequired`` rather than a row in
-    :data:`ERROR_BY_STATUS`: its remedy is the one a tunnel request's is (run
+    :data:`~local_operator.remote_compute.errors.ERROR_BY_STATUS`: its remedy is the
+    one a tunnel request's is (run
     ``lop login radient``), and a second class for the same meaning would make
     every handler learn the difference.
+
+    THE BODY IS READ HERE AND NOWHERE ELSE, and only through the two closed
+    readers in :mod:`local_operator.remote_compute.errors`: a ``code`` that is a
+    member of the contract's set, and the server's sentence for the ONE
+    disambiguation a codeless 409 needs. Neither is carried on the error, so the
+    redaction rule (no word of a provider body reaches a log) still holds; a body
+    that will not parse leaves both ``None`` and the status table answers, which
+    is how an older server behaves.
     """
-    if status == 401:
-        return LoginRequired(
-            "The Radient login was refused for this remote-compute request (HTTP 401); log in "
-            "again with `lop login radient`."
-        )
-    error = ERROR_BY_STATUS.get(status)
-    if error is not None:
-        return error(f"Radient refused the remote-compute request (HTTP {status}).")
-    return RemoteComputeError(f"Radient remote-compute request failed (HTTP {status}).")
+    status = response.status_code
+    body = _refusal_body(response)
+    return refusal_for(
+        status,
+        code=refusal_code(body),
+        message=refusal_message(body),
+        retry_after=retry_after_seconds(response.headers.get("Retry-After")),
+    )
+
+
+def _refusal_body(response: httpx.Response) -> object:
+    """The refusal body as JSON, or ``None`` when it is not one.
+
+    A body is allowed to be prose, HTML from a proxy, or empty; none of those is
+    an error here, because a refusal with no readable code is exactly the case
+    the status fallback exists for.
+    """
+    try:
+        return response.json()
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -274,6 +364,64 @@ class _Reply:
 
     payload: Any
     status: int
+
+
+@dataclasses.dataclass(frozen=True)
+class Artifact:
+    """One file a run published, and the presigned GET that would fetch it.
+
+    ``url`` IS A BEARER CREDENTIAL. It is kept out of ``repr`` on purpose: the
+    value authorises the download for about five minutes without any Radient
+    header, so an object printed into a log, a traceback or a support paste would
+    hand over the run's results. :meth:`to_json` is the shape a surface may
+    publish, and it has no url — see this module's docstring.
+    """
+
+    name: str
+    size_bytes: int
+    url: str = dataclasses.field(repr=False)
+    expires_at: str | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        """The artifact WITHOUT its url: what a panel or a route may publish."""
+        return {"name": self.name, "size_bytes": self.size_bytes, "expires_at": self.expires_at}
+
+
+@dataclasses.dataclass(frozen=True)
+class RunArtifacts:
+    """What a run produced: its files, its status, and its git summary."""
+
+    run_status: str
+    artifacts: tuple[Artifact, ...]
+    git: dict[str, Any] | None = None
+
+    def artifact(self, name: str) -> Artifact | None:
+        """The artifact with this name, or ``None`` when the run published none."""
+        return next((artifact for artifact in self.artifacts if artifact.name == name), None)
+
+
+@dataclasses.dataclass(frozen=True)
+class LogPage:
+    """One page of a run's logs, as the server returned it.
+
+    ``next_token`` is OPAQUE and run-scoped: it is passed back byte for byte and
+    never parsed. ``None`` means the server sent none, and a follower reads that
+    as "nothing further from this page" rather than as a token to invent.
+    """
+
+    events: tuple[dict[str, Any], ...]
+    next_token: str | None
+    run_status: str
+
+    @property
+    def empty(self) -> bool:
+        """Whether this page carried no lines at all."""
+        return not self.events
+
+    @property
+    def terminal(self) -> bool:
+        """Whether the run will not change again, so an empty page is the end."""
+        return self.run_status in TERMINAL_RUN_STATUSES
 
 
 class RemoteComputeClient:
@@ -347,6 +495,12 @@ class RemoteComputeClient:
     ) -> _Reply:
         """One call, as the payload plus the status that answered it.
 
+        ``path`` is relative to the API HOST, so each endpoint names its own
+        collection (``RUNS_PATH``, ``CAPACITY_PATH``) at the call site and this
+        method never has to be told which family it is speaking for. The
+        alternative — a base-path parameter — would be a knob whose only two
+        values are those constants.
+
         The STATUS comes back beside the payload because 200 and 201 mean
         different things on a create (replay versus created) and the body is
         identical either way, so the status is not recoverable from it.
@@ -369,7 +523,7 @@ class RemoteComputeClient:
         try:
             response = await self.client.request(
                 method,
-                self.api_url + RUNS_PATH + path,
+                self.api_url + path,
                 json=body,
                 params=params,
                 headers=headers,
@@ -394,7 +548,7 @@ class RemoteComputeClient:
             raise Unreachable("Radient could not be reached for this remote-compute request.")
         # Never surface a provider body — see the module docstring.
         if response.status_code >= 400:
-            raise _failed(response.status_code)
+            raise _failed(response)
         if empty_body_ok and not response.content.strip():
             # A cancel answers 204 (or a bodiless 200) on success, and a bodiless
             # success is not a malformed response.
@@ -421,7 +575,7 @@ class RemoteComputeClient:
                 "binding; a mapping could name a network this device is not in"
             )
         reply = await self._request(
-            "POST", "", body=request.to_json(), idempotency_key=idempotency_key
+            "POST", RUNS_PATH, body=request.to_json(), idempotency_key=idempotency_key
         )
         wrapper = reply.payload
         run = wrapper.get("run") if isinstance(wrapper, dict) else None
@@ -432,7 +586,7 @@ class RemoteComputeClient:
         # answered with another network's run would otherwise be reported as this
         # network's receipt.
         _confirm_network(run, expected=request.network_id)
-        return CreatedRun(run=run, replayed=reply.status == REPLAY_STATUS)
+        return CreatedRun(run=_tier_mapped_run(run), replayed=reply.status == REPLAY_STATUS)
 
     async def get_run(
         self, identifier: str, *, expected_network: str | None = None
@@ -444,14 +598,72 @@ class RemoteComputeClient:
         network's run must stop the watch with a typed failure rather than
         reporting that run's status as the one being watched.
         """
-        reply = await self._request("GET", _run_path(identifier))
+        reply = await self._request("GET", RUNS_PATH + _run_path(identifier))
         run = _single_run(reply.payload, identifier)
         if expected_network is not None:
             _confirm_network(run, expected=expected_network)
         return run
 
+    async def run_logs(
+        self, identifier: str, *, next_token: str | None = None, limit: int = LOGS_PAGE_DEFAULT
+    ) -> LogPage:
+        """One page of a run's logs.
+
+        THE TOKEN IS PASSED BACK BYTE FOR BYTE and never inspected: it is opaque
+        and run-scoped, so parsing or normalising it would address a page the
+        server did not mean. An EMPTY token is refused here rather than sent —
+        the endpoint answers 400 for one, and an empty value in a query string is
+        almost always an unset variable the caller meant to leave out (the rule
+        :meth:`list_runs` applies to a blank ``network_id``).
+
+        ``limit`` is bounded locally by the contract's own range, so a page size
+        outside it is a sentence naming the range rather than a 400 for a request
+        this client could have sized correctly.
+
+        A PAGE WITH NO RUN STATUS IS REFUSED. A follower's stop rule is "terminal
+        AND empty", so a page without a status cannot be acted on; reporting its
+        events anyway would leave the follower polling a run that has finished.
+        """
+        if next_token is not None and not next_token.strip():
+            raise ValueError("next_token must be an opaque token or omitted, not an empty string")
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise ValueError("limit must be an integer page size")
+        if not LOGS_PAGE_MINIMUM <= limit <= LOGS_PAGE_MAXIMUM:
+            raise ValueError(
+                f"limit must be from {LOGS_PAGE_MINIMUM} to {LOGS_PAGE_MAXIMUM} log entries"
+            )
+        params: dict[str, Any] = {"limit": limit}
+        if next_token is not None:
+            params["next_token"] = next_token
+        path = RUNS_PATH + _run_path(identifier) + "/logs"
+        reply = await self._request("GET", path, params=params)
+        return _log_page(reply.payload)
+
+    async def run_artifacts(self, identifier: str) -> RunArtifacts:
+        """The files a run published, each with a presigned GET, plus its git summary.
+
+        THE URL IS A BEARER, so it is validated before it is carried: ``https://``
+        only, except on a loopback host — the one exception
+        :func:`~local_operator.remote_compute.config.resolve_api_url` makes, and
+        deliberately the same predicate rather than a second spelling of "this
+        connection stays on the machine". A plaintext host would hand the run's
+        results to anything on the path.
+
+        THE GIT SUMMARY IS WHITELISTED. It is republished by the results route,
+        and ``branch``/``commit``/``bundle_present`` are the whole of what a
+        surface paints: a field the contract does not name is dropped rather than
+        forwarded to a renderer that would have to know not to show it.
+        """
+        reply = await self._request("GET", RUNS_PATH + _run_path(identifier) + "/artifacts")
+        return _run_artifacts(reply.payload)
+
     async def list_runs(
-        self, *, network_id: str | None = None, limit: int = 50, offset: int = 0
+        self,
+        *,
+        status: str | None = None,
+        network_id: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         """One page of runs, newest first by the server's ordering.
 
@@ -460,21 +672,70 @@ class RemoteComputeClient:
         a query string is almost always an unset variable the caller meant to
         leave out.
 
+        ``status`` is the same kind of filter and gets the same refusal. It is
+        NOT checked against :data:`KNOWN_RUN_STATUSES`: that set is what this
+        build can READ, and a server that gained a status the client does not
+        know yet can still be asked about it — filtering it locally would make
+        the panel silently empty instead of showing what the server holds.
+
         The page is ``result["runs"]``, with the page's own ``limit``/``offset``
         beside it; only the runs are returned, because a caller that read the
         echoed paging back would be trusting the server's copy of its own request.
         """
         if network_id is not None and not network_id.strip():
             raise ValueError("network_id must be a network id or omitted, not an empty string")
+        if status is not None and not status.strip():
+            raise ValueError("status must be a run status or omitted, not an empty string")
         params: dict[str, Any] = {"limit": limit, "offset": offset}
         if network_id is not None:
             params["network_id"] = network_id
-        reply = await self._request("GET", "", params=params)
+        if status is not None:
+            params["status"] = status
+        reply = await self._request("GET", RUNS_PATH, params=params)
         page = reply.payload
         runs = page.get("runs") if isinstance(page, dict) else None
         if not isinstance(runs, list) or not all(isinstance(run, dict) for run in runs):
             raise RemoteComputeError("Radient returned an invalid remote-compute run list.")
-        return runs
+        return [_tier_mapped_run(run) for run in runs]
+
+    async def capacity(self) -> list[dict[str, Any]]:
+        """Every tier this deployment can provision, and whether each is ready now.
+
+        THE SERVER'S ENVELOPE, IN THE SERVER'S VOCABULARY, TRANSLATED ONCE. The
+        read answers ``result["providers"]`` — one row per provider the deployment
+        can provision on — and each row's ``tier`` is the server's name for WHERE
+        the work runs (``fargate``, ``kubernetes``), not the id a surface offers
+        (``cloud_run``, ``dedicated``). Both are normalised HERE, at the one boundary
+        every caller crosses, through
+        :data:`~local_operator.remote_compute.tiers.SERVER_TIER_TO_TIER`: a surface
+        comparing the server's word paints a ready tier as unavailable.
+
+        A ROW WHOSE TIER THIS BUILD CANNOT NAME IS DROPPED, at debug. There is no
+        row to render — a surface matches an id it knows — and guessing one would
+        offer capacity under a word the server does not admit. A deployment that
+        grew a third tier is then a line in a log rather than a mislabelled row.
+
+        ``ready`` and ``detail`` are PASSED THROUGH WHOLE, AND NOTHING IS FILTERED
+        OUT OF THEM. ``detail`` is the deployment's own string map about its own
+        infrastructure, republished as it arrived: this module neither reads it nor
+        strips a rate or a pool name from it. The guarantee that the answer carries
+        no price is the SERVER's — it documents ``{tier, ready, detail}`` and no
+        money — so a surface must not assume a filter on this side backs it up.
+        """
+        reply = await self._request("GET", CAPACITY_PATH)
+        page = reply.payload
+        rows = page.get("providers") if isinstance(page, dict) else None
+        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+            raise RemoteComputeError("Radient returned an invalid remote-compute capacity list.")
+        mapped: list[dict[str, Any]] = []
+        for row in rows:
+            wire = row.get("tier")
+            tier = tier_from_server(wire) if isinstance(wire, str) else None
+            if tier is None:
+                logger.debug("remote compute: capacity row carries tier %r, dropped", wire)
+                continue
+            mapped.append({**row, "tier": tier})
+        return mapped
 
     async def cancel_run(self, identifier: str) -> dict[str, Any]:
         """Cancel a run. Idempotent: cancelling a finished run is not an error.
@@ -487,7 +748,23 @@ class RemoteComputeClient:
         body about another run would make this command report work cancelled
         that nobody cancelled.
         """
-        reply = await self._request("POST", _run_path(identifier) + "/cancel", empty_body_ok=True)
+        reply = await self._request(
+            "POST", RUNS_PATH + _run_path(identifier) + "/cancel", empty_body_ok=True
+        )
+        if not reply.payload:
+            return {}
+        return _single_run(reply.payload, identifier)
+
+    async def delete_run(self, identifier: str) -> dict[str, Any]:
+        """Delete a run's record. A bodiless 2xx is SUCCESS, as a cancel's is.
+
+        The endpoint is ``DELETE /v1/remote-compute/runs/:id`` and it documents no
+        response body; the run's secrets are gone with it, so nothing here keeps
+        a copy. When a body does come back it must name the run that was deleted —
+        an answer about another run would have this method report work deleted
+        that nobody deleted.
+        """
+        reply = await self._request("DELETE", RUNS_PATH + _run_path(identifier), empty_body_ok=True)
         if not reply.payload:
             return {}
         return _single_run(reply.payload, identifier)
@@ -505,7 +782,158 @@ def _single_run(payload: Any, asked_for: str) -> dict[str, Any]:
     answered = run_id(payload)
     if answered != asked_for:
         raise RunIdentityMismatch(asked_for=asked_for, answered=answered)
-    return payload
+    return _tier_mapped_run(payload)
+
+
+def _tier_mapped_run(payload: dict[str, Any]) -> dict[str, Any]:
+    """The run with the server's tier word replaced by this build's tier id.
+
+    A run row carries the SERVER's tier (``fargate``/``kubernetes``) — where the
+    deployment runs the work — and not the id a surface offers. The join is
+    :data:`~local_operator.remote_compute.tiers.SERVER_TIER_TO_TIER`, applied here
+    so every run this client hands back (a create's receipt, a per-run read, a
+    listing) speaks the one vocabulary a surface matches; a surface comparing the
+    server's word would find no tier it can label.
+
+    A ROW THAT ALREADY CARRIES THIS BUILD'S ID IS LEFT ALONE:
+    :func:`~local_operator.remote_compute.tiers.tier_from_server` answers an id in
+    :data:`~local_operator.remote_compute.tiers.TIERS` with itself, which is the
+    absence of a translation rather than a guess. Without that, a server build that
+    had caught up to this one had its tier silently removed from the row.
+
+    A TIER THIS BUILD CANNOT NAME LOSES THE FIELD AND THE ROW IS KEPT. A run is
+    work in flight: hiding it would make a running task vanish from the panel
+    exactly when the server's vocabulary moved ahead of this build, and the rest of
+    the row still says how to cancel it.
+    """
+    if "tier" not in payload:
+        return payload
+    wire = payload["tier"]
+    tier = tier_from_server(wire) if isinstance(wire, str) else None
+    if tier is None:
+        logger.debug("remote compute: a run carries tier %r, which this build cannot name", wire)
+        return {key: value for key, value in payload.items() if key != "tier"}
+    return {**payload, "tier": tier}
+
+
+def _log_page(payload: Any) -> LogPage:
+    """A log page, validated: entries, the opaque next token, and the run's status.
+
+    EVERY REFUSAL HERE IS A FIXED SENTENCE, because this is where a body is
+    interpreted for the first time and the redaction rule applies: nothing from
+    the document beyond the fields this build names may reach a caller.
+    """
+    if not isinstance(payload, dict):
+        raise RemoteComputeError("Radient returned an invalid remote-compute log page.")
+    events = payload.get("events")
+    status = payload.get("run_status")
+    if not isinstance(events, list) or not isinstance(status, str) or not status:
+        raise RemoteComputeError(
+            "Radient returned a remote-compute log page without its events or the run's status."
+        )
+    token = payload.get("next_token")
+    # A BLANK TOKEN IS REFUSED, NOT READ AS "THE END". Sending it back is refused
+    # locally (it would be a 400), and treating it as absent would restart the
+    # paging from the beginning and duplicate every line already reported.
+    if token is not None and (not isinstance(token, str) or not token):
+        raise RemoteComputeError(
+            "Radient returned a remote-compute log page with an unreadable next token."
+        )
+    return LogPage(
+        events=tuple(_log_event(event) for event in events),
+        next_token=token,
+        run_status=status,
+    )
+
+
+def _log_event(event: Any) -> dict[str, Any]:
+    """One log entry, narrowed to the keys the contract names.
+
+    ``message`` IS REQUIRED: an entry with no text is not a line a panel can
+    paint, and dropping it silently would lose the one thing a log exists for.
+    """
+    if not isinstance(event, dict):
+        raise RemoteComputeError("Radient returned a log entry that is not an object.")
+    message = event.get("message")
+    if not isinstance(message, str) or not message:
+        raise RemoteComputeError("Radient returned a log entry without a message.")
+    kept = {key: event[key] for key in LOG_EVENT_KEYS if key in event}
+    timestamp = kept.get("timestamp")
+    if timestamp is not None and not isinstance(timestamp, str):
+        raise RemoteComputeError("Radient returned a log entry with an unreadable timestamp.")
+    return kept
+
+
+def _run_artifacts(payload: Any) -> RunArtifacts:
+    """An artifact listing, validated: the run's status, its files, its git summary."""
+    if not isinstance(payload, dict):
+        raise RemoteComputeError("Radient returned an invalid remote-compute artifact list.")
+    status = payload.get("run_status")
+    rows = payload.get("artifacts")
+    if not isinstance(status, str) or not status:
+        raise RemoteComputeError(
+            "Radient returned a remote-compute artifact list without the run's status."
+        )
+    if not isinstance(rows, list):
+        raise RemoteComputeError(
+            "Radient returned a remote-compute artifact list without its artifacts."
+        )
+    return RunArtifacts(
+        run_status=status,
+        artifacts=tuple(_artifact(row) for row in rows),
+        git=_git_results(payload.get("git")),
+    )
+
+
+def _artifact(row: Any) -> Artifact:
+    """One artifact, validated, with its URL held to :func:`_presigned_url`."""
+    if not isinstance(row, dict):
+        raise RemoteComputeError("Radient returned an artifact that is not an object.")
+    name = row.get("name")
+    size = row.get("size_bytes")
+    url = row.get("url")
+    expires = row.get("expires_at")
+    if not isinstance(name, str) or not name:
+        raise RemoteComputeError("Radient returned an artifact without a name.")
+    # ``bool`` is an ``int`` to ``isinstance`` and ``True`` is not a size.
+    if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+        raise RemoteComputeError("Radient returned an artifact without a readable size.")
+    if not isinstance(url, str) or not url:
+        raise RemoteComputeError("Radient returned an artifact without a download URL.")
+    if expires is not None and not isinstance(expires, str):
+        raise RemoteComputeError("Radient returned an artifact with an unreadable expiry.")
+    return Artifact(name=name, size_bytes=size, url=_presigned_url(url), expires_at=expires)
+
+
+def _presigned_url(url: str) -> str:
+    """The artifact URL, refused unless a bearer may travel to it.
+
+    ``https://`` ONLY, except on a loopback host — the exception
+    :func:`~local_operator.remote_compute.config.resolve_api_url` makes for a local
+    test server, and deliberately its predicate (``is_loopback_host``) rather than
+    a second spelling of "this connection stays on the machine". The URL carries
+    the signature that authorises one GET, so a host that cannot present TLS does
+    not get this run's results.
+    """
+    parts = urllib.parse.urlsplit(url)
+    host = parts.hostname or ""
+    if parts.scheme == "https" and host:
+        return url
+    if parts.scheme == "http" and host and is_loopback_host(host):
+        return url
+    raise RemoteComputeError(
+        "Radient returned an artifact download URL that is not https, so this build will not "
+        "send the request it authorises."
+    )
+
+
+def _git_results(summary: Any) -> dict[str, Any] | None:
+    """The run's git summary, narrowed to the keys the contract names."""
+    if summary is None:
+        return None
+    if not isinstance(summary, dict):
+        raise RemoteComputeError("Radient returned a git summary that is not an object.")
+    return {key: summary[key] for key in GIT_RESULT_KEYS if key in summary}
 
 
 def run_status(payload: dict[str, Any]) -> str:
@@ -608,13 +1036,23 @@ def run_max_hours(payload: dict[str, Any]) -> float | None:
 
 
 __all__ = [
+    "Artifact",
+    "CAPACITY_PATH",
     "CreatedRun",
     "ENVELOPE_KEYS",
+    "GIT_RESULT_KEYS",
     "KNOWN_RUN_OUTCOMES",
     "KNOWN_RUN_STATUSES",
+    "LOG_EVENT_KEYS",
+    "LOGS_PAGE_DEFAULT",
+    "LOGS_PAGE_MAXIMUM",
+    "LOGS_PAGE_MINIMUM",
+    "LogPage",
     "MAX_IDEMPOTENCY_KEY_BYTES",
     "REPLAY_STATUS",
     "RUNS_PATH",
+    "RunArtifacts",
+    "SECRET_RUN_FIELDS",
     "TERMINAL_RUN_STATUSES",
     "RemoteComputeClient",
     "charged_amount",
@@ -627,4 +1065,5 @@ __all__ = [
     "run_network",
     "run_outcome",
     "run_status",
+    "without_secrets",
 ]

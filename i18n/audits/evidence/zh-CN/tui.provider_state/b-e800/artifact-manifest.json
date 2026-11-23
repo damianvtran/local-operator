@@ -1,0 +1,26 @@
+{
+  "kind": "artifact_hash_manifest_not_ledger_receipt",
+  "record_reference": "i18n/audits/evidence/zh-CN/tui.provider_state/b-e800/record.json",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.provider_state/b-e800/report.md",
+      "sha256": "08befe0681299ecbb0dc74173e9421611d86942488692488597014032b2979f2"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.provider_state/b-e800/audit.log",
+      "sha256": "f59ffa7c8411c2960f763c60bb5853c19b1e6c19054af217d18279c813b2f0eb"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.provider_state/b-e800/script.py.txt",
+      "sha256": "91aa5a7d3f56997f13a46ddb4f5eb74b1e074ee828e0b4740c621708d2e42114"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.provider_state/b-e800/ledger-receipt.json",
+      "sha256": "3c9046eba11f2425e3a027bbfa894964aeff931f8fcb3c5666f22aa2db64fe17"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.provider_state/b-e800/record.json",
+      "sha256": "ee086adf72d2580b10ecddefa93c0407c852b2a72099b767304cf3a1220ad36e"
+    }
+  ]
+}

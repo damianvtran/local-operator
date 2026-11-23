@@ -1,0 +1,75 @@
+{
+  "locale": "hi",
+  "namespace": "tui.model_persistence",
+  "source_sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff",
+  "context_sha256": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc",
+  "target_sha256": "fe5174ef5f6cd8ea96d751c6722707d58a6a9108d17922d9b411b9a6b6799967",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "fdf96049990f",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": false,
+    "actual_model_source": "Parent message: wait(job9b5a2af8589d) completion and hub list both report served model openai/gpt-6.1-sol; auditor did not independently read those host snapshots",
+    "fallback": {
+      "used": "unknown_for_repair",
+      "reason": "No fresh repair fallback telemetry supplied; historical original authorship fallback is not evidence of a repair fallback reason"
+    },
+    "date": "2026-11-22",
+    "provenance_scope": "saved repair only; original remaining three keys authored by original_translator below",
+    "original_translator": {
+      "agent": "i18n-translator",
+      "session": "fdf96049990f",
+      "model": "openai/gpt-6.1-sol",
+      "independent_from_translator_session": false,
+      "actual_model_source": "Host model-switch telemetry: provider failure: quota; fallback from anthropic/claude-opus-5-5 to openai/gpt-6.1-sol before Hindi authorship",
+      "fallback": {
+        "used": true,
+        "from": "anthropic/claude-opus-5-5",
+        "to": "openai/gpt-6.1-sol",
+        "reason": "provider failure: quota"
+      }
+    },
+    "source_records": [
+      "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/record.json",
+      "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9-fix1/record.json"
+    ],
+    "author_self_reported_model": "anthropic/claude-opus-5-5",
+    "author_self_report_source": "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9-fix1/record.json; resumed context, not verified served telemetry",
+    "model_provenance_qualification": "Conflict retained: parent host-completion/Hub metadata versus author context self-report; root retains snapshots. Claude actual not verified."
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "29fd3d454da2",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": true,
+    "independent_from_source_author_session": true,
+    "actual_model_source": "Current resumed-run host Model declaration; no current-run fallback event supplied",
+    "fallback": {
+      "used": false,
+      "scope": "current resumed A round 2 only; old A recorded GPT quota fallback remains historical"
+    },
+    "date": "2026-11-22",
+    "result": "passed",
+    "unresolved_blocker_major": 0,
+    "finding_ids": []
+  },
+  "status": "passed",
+  "note": "A R2 whole4 passed; HI-A1/B-HI-1 attachment resolved in A; fresh B separate. Record: i18n/audits/evidence/hi/tui.model_persistence/a29r2/record.json",
+  "evidence": "i18n/audits/evidence/hi/tui.model_persistence/a29r2/record.json",
+  "record_reference": "i18n/audits/evidence/hi/tui.model_persistence/a29r2/record.json",
+  "round": "A-R2",
+  "audit_date": "2026-11-22",
+  "executions": [
+    {
+      "command": "env -i HOME=\"$LOCAL_OPERATOR_SCRATCHPAD/hi-a29r2-home\" LOCAL_OPERATOR_CONFIG_DIR=\"$LOCAL_OPERATOR_SCRATCHPAD/hi-a29r2-home/config\" PATH=\"$PATH\" TERM=xterm-256color PYTHONPATH=\"$PWD\" /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/hi/tui.model_persistence/a29r2/script.py.txt > i18n/audits/evidence/hi/tui.model_persistence/a29r2/audit.log 2>&1",
+      "cwd": "/Users/damian/local-operator/.worktrees/i18n-model-persist-notice",
+      "exit_code": 0,
+      "log": "i18n/audits/evidence/hi/tui.model_persistence/a29r2/audit.log"
+    }
+  ],
+  "resolved_finding_ids": [
+    "HI-A1",
+    "B-HI-1"
+  ],
+  "resolution_authority": "A assessment only, not B sign-off"
+}

@@ -1,0 +1,100 @@
+{
+  "record_kind": "translation_author_receipt_not_independent_audit",
+  "locale": "vi",
+  "namespace": "tui.provider_state",
+  "audit_date": "2026-11-22",
+  "recorded_at": "2026-11-22T11:43:41.010115+00:00",
+  "key_count": 5,
+  "source_revision": "a54ec02de48a94b68d6c3dc92e1307c97ea776ad",
+  "source_author_session_from_brief": "93b7",
+  "author": {
+    "agent": "i18n-translator / provider-state-vi-author",
+    "session": "5644d4838456",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": false,
+    "actual_model_source": "Explicit host/user model-switch message: openai/gpt-6.1-sol replaces anthropic/claude-opus-5-5 due to provider failure: quota",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "auditor": {
+    "agent": "i18n-translator / provider-state-vi-author",
+    "session": "5644d4838456",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": false,
+    "actual_model_source": "Explicit host/user model-switch message: openai/gpt-6.1-sol replaces anthropic/claude-opus-5-5 due to provider failure: quota",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.json",
+      "sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.context.json",
+      "sha256": "67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/vi/tui.provider_state.json",
+      "sha256": "74e6607520947d1910479a85be916e8fa3e0efa6104230d19cef8d74a3aa4867"
+    }
+  },
+  "guidance_hashes": [
+    {
+      "path": "i18n/style-guides/vi.md",
+      "sha256": "99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51"
+    },
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/vi/tui.provider_state/author-5644/notes.md",
+      "sha256": "90642819997d82346d4ca1df74fd5f55f6161e959861ec4ab4c03353b52d2bb0"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/tui.provider_state/author-5644/validator.py.txt",
+      "sha256": "c3ce44f2245663d8072e98d26f58b75999fe017bc938610420ef5d473476ff67"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/tui.provider_state/author-5644/audit.log",
+      "sha256": "0f0aea15a3155560cf2f632c289f491e0fae9d355ae54a4dd8657629ecb070bd"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "translated",
+    "unresolved_blocker_major_count": null,
+    "finding_ids": [],
+    "independent_audit_performed": false,
+    "reason": "Author mechanical validation only. Independent approved-reader A/B audit pending."
+  },
+  "mechanical_validation": {
+    "official_entrypoint": "scripts.i18n.check.check_catalogues",
+    "scope": "en/vi tui.provider_state only, isolated fixture root",
+    "exit_code": 0,
+    "negative_controls": [
+      "missing key rejected",
+      "added argument rejected"
+    ],
+    "restored_control": []
+  },
+  "audit_notes_not_execution_log": "i18n/audits/evidence/vi/tui.provider_state/author-5644/notes.md",
+  "actual_execution_log": "i18n/audits/evidence/vi/tui.provider_state/author-5644/audit.log",
+  "limitations": [
+    "No independent self-audit or passed verdict",
+    "No production eligibility/shipping claim",
+    "Plain Rich width diagnostics only, no real settings/native geometry/fonts",
+    "No fixed/global width cap",
+    "No app/server/browser startup or backend invariant execution"
+  ]
+}

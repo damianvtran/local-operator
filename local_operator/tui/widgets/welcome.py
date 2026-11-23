@@ -606,6 +606,19 @@ def _tips() -> tuple[str, ...]:
         _t(tui_welcome.tip_fork()),
         _t(tui_welcome.tip_fork_placement()),
         _t(tui_welcome.tip_cmux()),
+        # The transcript-scroll pair. It gets the pool's eighteenth slot, and
+        # the ceiling moved 17 -> 18 for the same reason the keyed tips moved
+        # it 12 -> 15: a chord has no picker and no other discovery route on
+        # the frame a first-run user reads, while every slash command here has
+        # one. It is NOT a third classification-style exception — the dilution
+        # rule still governs slash tips.
+        #
+        # A STATIC sentence rather than a keyed template: it names two chords,
+        # and two 25-cell worst-case substitutions would triple the template
+        # budget behind ``TIP_MIN_WIDTH`` and drop every tip on terminals under
+        # ~90 cells. The remap-staleness cost is accepted and documented on the
+        # tip's catalogue row; `/help` and the `?` legend carry the live name.
+        _t(tui_welcome.tip_transcript_scroll()),
         # The classification layer's two facts: how to stop it and how to give one
         # of its legs a credential. Appended at the END of the literal group rather
         # than interleaved, so the pinned opening tip stays `TIPS[0]` and the
@@ -633,12 +646,13 @@ def _tips() -> tuple[str, ...]:
         # today. These two are 57 and 53 cells of content — 59 and 55 painted, so
         # the threshold moves not at all (measured, and pinned by that test).
         #
-        # BOTH BUDGETS ARE NOW SPENT, and the next contributor should know it before
-        # adding another entry. The 59-cell floor means the row is painted from a
-        # 63-COLUMN terminal (the view is the grid minus 4 columns: 59 at 63, 56 at
-        # 60, and at 60 no tip row is drawn at all), and `len(TIPS)` sits exactly at
-        # the ceiling `test_welcome.py` asserts. An entry that needs either budget
-        # takes a slot from the pool rather than adding one.
+        # The 59-cell floor means the row is painted from a 63-COLUMN terminal
+        # (the view is the grid minus 4 columns: 59 at 63, 56 at 60, and at 60 no
+        # tip row is drawn at all). The width budget is SPENT — a longer entry
+        # takes the row away from terminals that have it today — while the pool
+        # ceiling moved 17 -> 18 once for the transcript-scroll pair above.
+        # Everything else still takes a slot from the pool rather than adding
+        # one.
         _t(tui_welcome.tip_classification_off()),
         _t(tui_welcome.tip_classification_login()),
         # THE MESH'S OWN ENTRY, and it TOOK A SLOT rather than adding one: both

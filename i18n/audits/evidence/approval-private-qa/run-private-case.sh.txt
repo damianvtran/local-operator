@@ -1,0 +1,16 @@
+#!/bin/bash
+set -u
+ROOT=/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad
+name=$1; driver=$2; shift 2
+mkdir -p "$ROOT/run-$name/home/config" "$ROOT/run-$name/temp"
+cd "$ROOT/run-$name"
+set -m
+env -i HOME="$ROOT/run-$name/home" LOCAL_OPERATOR_CONFIG_DIR="$ROOT/run-$name/home/config" TMPDIR="$ROOT/run-$name/temp" PATH=/opt/homebrew/bin:/usr/bin:/bin TERM=xterm-256color PYTHONPATH=/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy PYTHONDONTWRITEBYTECODE=1 LOCAL_OPERATOR_NO_NOTIFICATIONS=1 LOCAL_OPERATOR_NO_DESKTOP_LAUNCH=1 /Users/damian/local-operator/.venv/bin/python "$ROOT/$driver" "$@" > "$ROOT/$name.log" 2>&1 &
+pid=$!
+printf 'OWNED_PID_PGID=%s\n' "$pid" | tee "$ROOT/$name.process.log"
+cleanup(){ kill -TERM -- -"$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; if kill -0 "$pid" 2>/dev/null; then echo REAP_FAILED; return 1; else echo OWNED_PID_GONE; fi; }
+trap cleanup EXIT INT TERM
+wait "$pid"; rc=$?
+cat "$ROOT/$name.log"
+printf 'CASE_EXIT=%s\n' "$rc"
+exit "$rc"

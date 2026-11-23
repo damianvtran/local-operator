@@ -1,0 +1,18 @@
+{
+  "kind": "manager-mechanical-count-verification-not-native-audit",
+  "comparison_head": "90009effa833836ce4471e99d90d3b6438de7f60",
+  "locale_keys_each": 895,
+  "changed_values": {
+    "zh-CN": 50,
+    "fr": 34,
+    "es": 32,
+    "ru": 47,
+    "vi": 57,
+    "hi": 63,
+    "ur": 75
+  },
+  "total_changed_values": 358,
+  "independent_audit": "pending",
+  "runtime_native_fit": "unverified",
+  "next_owner_job": "934602620bc9"
+}

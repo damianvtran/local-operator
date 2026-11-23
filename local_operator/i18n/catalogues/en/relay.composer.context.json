@@ -34,5 +34,50 @@
     "tone": "Imperative verb phrase, lowercase, no punctuation.",
     "maxCells": 28,
     "note": "Accessible name of the Stop action on the working line (the row that says what the agent is doing and for how long). Longer than the visible word 'stop' and must CONTAIN the same verb as relay.composer.action.stop so a screen-reader user hears the visible text. 'The agent' is the glossary's agent."
+  },
+  "relay.composer.delivery.label": {
+    "role": "busy-send mode chip, accessible name",
+    "tone": "One lowercase noun, no punctuation; the chip that opens the delivery-mode sheet while the agent is working.",
+    "maxCells": 16,
+    "note": "The small chip beside the model chip while the agent is working; it cycles through steer/queue/both without a sheet. Its accessible name carries the current mode."
+  },
+  "relay.composer.delivery.steer": {
+    "role": "busy-send mode option, sheet row",
+    "tone": "One lowercase verb, no punctuation; the mode that interrupts now.",
+    "maxCells": 16,
+    "note": "Sheet row for the delivery mode that interrupts the running turn at once, today's behaviour."
+  },
+  "relay.composer.delivery.queue": {
+    "role": "busy-send mode option, sheet row",
+    "tone": "One lowercase noun, no punctuation; the mode that waits.",
+    "maxCells": 16,
+    "note": "Sheet row for the delivery mode that waits for the step and never interrupts the tools."
+  },
+  "relay.composer.delivery.both": {
+    "role": "busy-send mode option, sheet row",
+    "tone": "One short lowercase phrase, no punctuation; the mode that waits then steers.",
+    "maxCells": 17,
+    "note": "Sheet row for the delivery mode that waits without interrupting and steers when it has waited too long. Says what the mode DOES (wait, then steer) rather than naming the internal value `both`."
+  },
+  "relay.composer.delivery.steer_hint": {
+    "role": "busy-send mode hint, sheet row",
+    "tone": "One short sentence fragment under the option label; no terminal period.",
+    "note": "Muted hint line under the 'steer' row of the delivery sheet: interrupts a running tool now. Same meaning as the settings description."
+  },
+  "relay.composer.delivery.queue_hint": {
+    "role": "busy-send mode hint, sheet row",
+    "tone": "One short sentence fragment under the option label; no terminal period.",
+    "note": "Muted hint line under the 'queue' row of the delivery sheet: waits for the step and never interrupts the tools. Same meaning as the settings description."
+  },
+  "relay.composer.delivery.both_hint": {
+    "role": "busy-send mode hint, sheet row",
+    "tone": "One short sentence fragment under the option label; no terminal period.",
+    "note": "Muted hint line under the 'queue, then steer' row of the delivery sheet: waits for the step and never interrupts the tools, then steers like a steer if it has waited too long. Same meaning as the settings description."
+  },
+  "relay.composer.delivery.both_chip": {
+    "role": "busy-send mode chip, visible text",
+    "tone": "Two lowercase words joined by an arrow, no spaces around the arrow; a chip label.",
+    "maxCells": 11,
+    "note": "The VISIBLE text of the delivery chip when the mode is queue-then-steer: the full label ('queue, then steer') clips at 280 px, so the chip shows the short form. The accessible name and the sheet row keep relay.composer.delivery.both; keep this under 12 cells or it clips the composer row on a 280 px phone."
   }
 }

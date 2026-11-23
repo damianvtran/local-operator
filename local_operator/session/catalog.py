@@ -17,8 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from local_operator.i18n.duration_message import format_duration as _format_duration
 from local_operator.i18n.messages import Msg
-from local_operator.info.model import format_duration
 from local_operator.resume import UNTITLED_CONVERSATION, SessionRow
 from local_operator.session import temporary
 from local_operator.session.archived import archived_ids
@@ -472,7 +472,7 @@ class CatalogEntry:
             from local_operator.i18n.keys import wire_session_status
 
             return _terminal_label(
-                wire_session_status.wedged_heartbeat(duration=format_duration(age))
+                wire_session_status.wedged_heartbeat(duration=status_duration(age))
             )
         # THE DRAIN OUTRANKS "Working", and says it in the record's own words.
         # A draining runtime IS working, so "Working" was true and useless: the
@@ -657,6 +657,40 @@ def _terminal_label(message: Msg) -> str:
     from local_operator.i18n.messages import render
 
     return render(message.code, dict(message.params), locale=_label_locale())
+
+
+def status_duration(seconds: float) -> str:
+    """A compact elapsed time (``42s`` / ``4m`` / ``3h 12m`` / ``2d 4h``) in the
+    row-label language, for insertion into a ``wire.session_status`` sentence.
+
+    WHY a catalogue render rather than :func:`local_operator.info.model.format_duration`:
+    the unit letters are product copy inside a localized label, so an ASCII
+    ``4m`` inside a French sentence was English leaking into a translated row
+    (the operator's "no English anywhere" requirement). ``info.model`` stays
+    stdlib-only by contract and keeps its ASCII spelling for machine/CLI users.
+    The shared lightweight duration leaf owns the branch arithmetic; Info uses
+    its own callback and active locale without importing this heavy catalogue.
+
+    CONSTRAINTS:
+
+    * The four branches and their thresholds are ``info.model.format_duration``'s
+      exactly, so English output is byte-identical to what the row printed
+      before (pinned by ``tests/unit/session/test_catalog_status_duration.py``).
+    * Locale comes from :func:`_label_locale` via :func:`_terminal_label` — the
+      same config-owned language as the enclosing sentence, never the TUI's
+      active-locale seam — so the duration cannot disagree with its sentence.
+    * ``days`` is passed as a pre-rendered ASCII digit string, not an ICU
+      ``number``: the renderer supports no ``::group-off`` skeleton (only
+      ``integer|percent|decimal``), and a number argument would turn a
+      1000-day age into ``1,000d`` where English printed ``1000d``. No shipped
+      locale transliterates digits (``i18n.format`` emits ASCII digits for all),
+      so the string loses nothing. The other arms are bounded below 1000
+      (seconds/minutes < 60, hours < 24), so their ``number`` arguments never
+      group.
+    * Negative ages clamp to zero like the original; callers handle ``None``
+      ("not measured") themselves — this never renders ``unknown``.
+    """
+    return _format_duration(seconds, render=_terminal_label)
 
 
 def waiting_label(jobs: int, subagents: int = 0) -> str:
@@ -859,7 +893,7 @@ def status_dedupe_key(row: SessionRow, attention: Mapping[str, Any] | None) -> S
     """``status_of``'s pair with the CLOCK term removed — the edge channel's key.
 
     WHY THE PAIR IS NOT ENOUGH (review round 1, MINOR 2). One label carries a
-    live clock: the ``wedged`` arm embeds ``format_duration(heartbeat_age_s)``
+    live clock: the ``wedged`` arm embeds ``status_duration(heartbeat_age_s)``
     (``46s`` -> ``47s`` -> ``1m``), so a wedged session's pair changes with the
     clock alone, with no write and no event behind it — roughly one change per
     second for the 45-59 s window after the beat crosses

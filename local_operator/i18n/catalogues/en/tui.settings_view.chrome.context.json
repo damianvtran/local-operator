@@ -1,0 +1,306 @@
+{
+  "tui.settings_view.chrome.capture.chord_grammar": {
+    "role": "status",
+    "tone": "plain, terse",
+    "maxCells": 64,
+    "note": "Detail line while a SEND-SHORTCUT row (composer scope) waits for the key to bind. Teaches the chord grammar where it is bound: alt+<letter> works in every terminal, ctrl+enter arrives as plain Enter in terminals without enhanced (kitty-protocol) key reporting. `alt+<letter>` and `ctrl+enter` are key names: keep them verbatim, untranslated, including the angle brackets; translate only 'works anywhere' and 'needs enhanced keys'. No ICU arguments."
+  },
+  "tui.settings_view.chrome.capture.contract_cancel": {
+    "role": "key hint",
+    "tone": "plain, terse",
+    "note": "Key contract while a shortcut row is listening. {cancel_key} ('esc') is a key name inserted verbatim.",
+    "maxCells": 16
+  },
+  "tui.settings_view.chrome.capture.contract_confirm": {
+    "role": "key hint",
+    "tone": "plain, terse",
+    "note": "Key contract once a shortcut has been captured but not yet saved. {save_key} ('enter') and {cancel_key} ('esc') are key names inserted verbatim.",
+    "maxCells": 30
+  },
+  "tui.settings_view.chrome.capture.listening": {
+    "role": "status",
+    "tone": "plain, terse",
+    "note": "Detail line while a shortcut row waits for the user to press the key to bind.",
+    "maxCells": 24
+  },
+  "tui.settings_view.chrome.capture.needs_enhanced_keys": {
+    "role": "status",
+    "tone": "plain, terse",
+    "note": "Short warning joined in front of a conflict note (' — ') or shown alone on the capture line after a send-shortcut chord that only works in terminals with enhanced (kitty-protocol) key reporting was pressed. Warns and stores; it is not a refusal. 'enhanced keys' is the terminal feature, not a product term. No ICU arguments."
+  },
+  "tui.settings_view.chrome.capture.press_another": {
+    "role": "key hint",
+    "tone": "plain, terse",
+    "note": "Detail line while a shortcut row is listening and the pressed key was refused (reserved or not capturable): asks the user to press a different key.",
+    "maxCells": 24
+  },
+  "tui.settings_view.chrome.capture.saved": {
+    "role": "notice",
+    "tone": "plain, terse",
+    "note": "Detail-line notice after a captured shortcut was written. {shortcut} is the shortcut as displayed (e.g. 'ctrl+k'), inserted verbatim.",
+    "maxCells": 40
+  },
+  "tui.settings_view.chrome.capture.takes_from": {
+    "role": "warning",
+    "tone": "plain, terse",
+    "note": "Shown while a captured shortcut is pending when that key is already bound to another action: confirming steals it. {shortcut} is the shortcut (e.g. 'ctrl+k'); {victim} is the name of the action losing it. Keep the quotation marks around {victim} (use the locale's own quotation marks).",
+    "maxCells": 48
+  },
+  "tui.settings_view.chrome.cascade.cleared": {
+    "role": "notice",
+    "tone": "plain, terse",
+    "note": "Detail-line notice after the user pressed r on a corrupt fallback cascade and it was deleted. The settings page's detail line is about 74 cells at 80 columns.",
+    "maxCells": 48
+  },
+  "tui.settings_view.chrome.cascade.empty": {
+    "role": "empty state",
+    "tone": "plain, terse",
+    "note": "Indented row under the fallback-cascade setting when no failover chains exist.",
+    "maxCells": 40
+  },
+  "tui.settings_view.chrome.cascade.expected": {
+    "role": "validation error",
+    "tone": "plain, terse",
+    "note": "Detail-line error when the user submits an empty new-chain line. {syntax} is the literal input shape '<chain-key> <provider>/<model>' inserted verbatim.",
+    "maxCells": 74
+  },
+  "tui.settings_view.chrome.cascade.first_hop": {
+    "role": "validation error",
+    "tone": "plain, terse",
+    "note": "Detail-line error when a new chain's first hop (provider/model) is invalid. {problem} is the validator's own explanation, inserted as-is. A hop is one provider/model step in a failover chain. Painted on the one-row detail line (74 cells at 80x24); a longer rendering is cut with a visible … rather than dropped, so lead with what went wrong: the fixed words and the start of the inserted text are what survive.",
+    "maxCells": 74
+  },
+  "tui.settings_view.chrome.cascade.malformed": {
+    "role": "empty state",
+    "tone": "plain, direct",
+    "note": "Indented row under the fallback-cascade setting when the stored value is corrupt (not a mapping). {key} is the key name 'r' inserted verbatim; pressing it deletes the corrupt value.",
+    "maxCells": 48
+  },
+  "tui.settings_view.chrome.cascade.reset_refused": {
+    "role": "notice",
+    "tone": "plain, direct",
+    "note": "Detail-line notice when r is pressed on a healthy fallback cascade: r does not reset the whole cascade; chains are deleted one at a time with d on the chain's own row. {reset_key} ('r') and {delete_key} ('d') are key names inserted verbatim.",
+    "maxCells": 74
+  },
+  "tui.settings_view.chrome.clause.default": {
+    "role": "state clause",
+    "tone": "plain, terse",
+    "note": "Detail-line clause on a setting changed from its default, naming the default value. {value} is the value as the page displays it.",
+    "maxCells": 40
+  },
+  "tui.settings_view.chrome.clause.inert": {
+    "role": "state clause",
+    "tone": "plain, terse",
+    "note": "Detail-line clause on a setting whose master switch is off, so it currently has no effect. {master} is the master setting's label.",
+    "maxCells": 48
+  },
+  "tui.settings_view.chrome.clause.no_limits": {
+    "role": "state clause",
+    "tone": "plain, terse",
+    "note": "Detail-line clause on the session-cleanup master switch when it is on but no cleanup limits are set in the rows below it.",
+    "maxCells": 40
+  },
+  "tui.settings_view.chrome.clause.not_saved": {
+    "role": "state clause",
+    "tone": "plain, terse",
+    "note": "Detail-line clause while a list of choices is expanded: nothing is written until {save_key} ('enter', a key name inserted verbatim) is pressed.",
+    "maxCells": 30
+  },
+  "tui.settings_view.chrome.clause.would_remove": {
+    "role": "state clause",
+    "tone": "plain, terse",
+    "note": "Detail-line clause on the session-cleanup master switch: how many stored sessions the configured policy would delete at the next launch. {count} selects the plural; {shown} is the same number as raw digits. {command} is the literal CLI command 'lop sessions cleanup --dry-run' inserted verbatim. Painted on the one-row detail line (74 cells at 80x24); the shed ladder keeps it alone on the line when nothing else fits, but a rendering wider than the line is DROPPED whole and the row's help shows instead, so the count and the command vanish together. English is 72 cells at a two-digit count.",
+    "maxCells": 74
+  },
+  "tui.settings_view.chrome.confirm.ask": {
+    "role": "confirmation question",
+    "tone": "plain, direct",
+    "note": "Detail-line question before deleting a failover chain. {chain} is the user's chain name (may be cropped with …); {count} selects the plural, {shown} is the same number as raw digits. A hop is one provider/model step in the chain. Followed on the same line by the key contract."
+  },
+  "tui.settings_view.chrome.confirm.contract_long": {
+    "role": "key hint",
+    "tone": "plain, terse",
+    "note": "Key contract after the delete-chain question. {key} ('d') and {cancel_key} ('esc') are key names inserted verbatim. Sheds to the short form when the chain name would be cropped.",
+    "maxCells": 40
+  },
+  "tui.settings_view.chrome.confirm.contract_short": {
+    "role": "key hint",
+    "tone": "plain, terse",
+    "note": "Narrow form of the delete-chain key contract. {key} ('d') and {cancel_key} ('esc') are key names inserted verbatim.",
+    "maxCells": 26
+  },
+  "tui.settings_view.chrome.error.config_unreadable": {
+    "role": "error",
+    "tone": "plain, direct",
+    "note": "Detail-line error when the config file cannot be parsed, so a save was refused. {file} is the file name 'config.yml' inserted verbatim; {error} is the parser's own message. Painted on the one-row detail line (74 cells at 80x24); a longer rendering is cut with a visible … rather than dropped, so lead with what went wrong: the fixed words and the start of the inserted text are what survive.",
+    "maxCells": 74
+  },
+  "tui.settings_view.chrome.error.not_text": {
+    "role": "validation error",
+    "tone": "plain, terse",
+    "note": "Detail-line message when a setting kind has no text editor.",
+    "maxCells": 74
+  },
+  "tui.settings_view.chrome.error.retired": {
+    "role": "validation error",
+    "tone": "plain, terse",
+    "note": "Detail-line message when enter is pressed on a read-only, retired setting.",
+    "maxCells": 74
+  },
+  "tui.settings_view.chrome.error.save_failed": {
+    "role": "error",
+    "tone": "plain, terse",
+    "note": "Detail-line error for any other failed write (read-only directory, full disk). {error} is the system's message. Painted on the one-row detail line (74 cells at 80x24); a longer rendering is cut with a visible … rather than dropped, so lead with what went wrong: the fixed words and the start of the inserted text are what survive.",
+    "maxCells": 74
+  },
+  "tui.settings_view.chrome.error.unexpected_structure": {
+    "role": "error",
+    "tone": "plain, direct",
+    "note": "Detail-line error when the config file parses but holds the wrong shape underneath. {path} is the config file's path; {error} is the original technical message, kept for bug reports. Painted on the one-row detail line (74 cells at 80x24); a longer rendering is cut with a visible … rather than dropped, so lead with what went wrong: the fixed words and the start of the inserted text are what survive.",
+    "maxCells": 74
+  },
+  "tui.settings_view.chrome.footer.any_key": {
+    "role": "key hint",
+    "tone": "plain, terse, lower-case",
+    "note": "Footer key-hint label painted right after a key glyph in the settings page's bottom hint bar (e.g. '↑↓ move'); a single space separates them. The bar sheds whole hints right-to-left when the terminal is narrow, so keep it a short verb. Beside ↑↓ while the row is listening for a shortcut: any key pressed is captured (the arrows are not moving the cursor).",
+    "maxCells": 12
+  },
+  "tui.settings_view.chrome.footer.back": {
+    "role": "key hint",
+    "tone": "plain, terse, lower-case",
+    "note": "Footer key-hint label painted right after a key glyph in the settings page's bottom hint bar (e.g. '↑↓ move'); a single space separates them. The bar sheds whole hints right-to-left when the terminal is narrow, so keep it a short verb. Beside esc, the narrow form of 'back to conversation': esc leaves the settings page.",
+    "maxCells": 8
+  },
+  "tui.settings_view.chrome.footer.back_to_conversation": {
+    "role": "key hint",
+    "tone": "plain, terse, lower-case",
+    "note": "Footer key-hint label painted right after a key glyph in the settings page's bottom hint bar (e.g. '↑↓ move'); a single space separates them. The bar sheds whole hints right-to-left when the terminal is narrow, so keep it a short verb. Beside esc when nothing is pending: esc leaves the settings page and returns to the chat transcript. Widest form; the bar falls back to the 'back' label when it does not fit.",
+    "maxCells": 24
+  },
+  "tui.settings_view.chrome.footer.cancel": {
+    "role": "key hint",
+    "tone": "plain, terse, lower-case",
+    "note": "Footer key-hint label painted right after a key glyph in the settings page's bottom hint bar (e.g. '↑↓ move'); a single space separates them. The bar sheds whole hints right-to-left when the terminal is narrow, so keep it a short verb. Beside esc while editing, choosing, capturing or confirming a delete: esc cancels that and stays on the page.",
+    "maxCells": 10
+  },
+  "tui.settings_view.chrome.footer.change": {
+    "role": "key hint",
+    "tone": "plain, terse, lower-case",
+    "note": "Footer key-hint label painted right after a key glyph in the settings page's bottom hint bar (e.g. '↑↓ move'); a single space separates them. The bar sheds whole hints right-to-left when the terminal is narrow, so keep it a short verb. Beside enter: enter opens/changes the selected setting.",
+    "maxCells": 10
+  },
+  "tui.settings_view.chrome.footer.choose": {
+    "role": "key hint",
+    "tone": "plain, terse, lower-case",
+    "note": "Footer key-hint label painted right after a key glyph in the settings page's bottom hint bar (e.g. '↑↓ move'); a single space separates them. The bar sheds whole hints right-to-left when the terminal is narrow, so keep it a short verb. Beside enter while a list of choices is expanded: enter picks the highlighted choice.",
+    "maxCells": 10
+  },
+  "tui.settings_view.chrome.footer.complete": {
+    "role": "key hint",
+    "tone": "plain, terse, lower-case",
+    "note": "Footer key-hint label painted right after a key glyph in the settings page's bottom hint bar (e.g. '↑↓ move'); a single space separates them. The bar sheds whole hints right-to-left when the terminal is narrow, so keep it a short verb. Beside tab while a suggestion dropdown is open: tab completes the highlighted suggestion into the field.",
+    "maxCells": 12
+  },
+  "tui.settings_view.chrome.footer.confirm": {
+    "role": "key hint",
+    "tone": "plain, terse, lower-case",
+    "note": "Footer key-hint label painted right after a key glyph in the settings page's bottom hint bar (e.g. '↑↓ move'); a single space separates them. The bar sheds whole hints right-to-left when the terminal is narrow, so keep it a short verb. Beside enter while a captured shortcut is pending: enter commits it.",
+    "maxCells": 10
+  },
+  "tui.settings_view.chrome.footer.default": {
+    "role": "key hint",
+    "tone": "plain, terse, lower-case",
+    "note": "Footer key-hint label painted right after a key glyph in the settings page's bottom hint bar (e.g. '↑↓ move'); a single space separates them. The bar sheds whole hints right-to-left when the terminal is narrow, so keep it a short verb. Beside r: r resets the selected setting to its default value. Imperative sense 'reset to default'.",
+    "maxCells": 10
+  },
+  "tui.settings_view.chrome.footer.move": {
+    "role": "key hint",
+    "tone": "plain, terse, lower-case",
+    "note": "Footer key-hint label painted right after a key glyph in the settings page's bottom hint bar (e.g. '↑↓ move'); a single space separates them. The bar sheds whole hints right-to-left when the terminal is narrow, so keep it a short verb. Beside ↑↓: the arrow keys move the cursor between settings rows.",
+    "maxCells": 10
+  },
+  "tui.settings_view.chrome.footer.move_cancel": {
+    "role": "key hint",
+    "tone": "plain, terse, lower-case",
+    "note": "Footer key-hint label painted right after a key glyph in the settings page's bottom hint bar (e.g. '↑↓ move'); a single space separates them. The bar sheds whole hints right-to-left when the terminal is narrow, so keep it a short verb. Beside ↑↓ while a text editor is open: moving off the row cancels the edit. Reads as the key's two effects (move, and that cancels), not a sentence.",
+    "maxCells": 14
+  },
+  "tui.settings_view.chrome.footer.panes": {
+    "role": "key hint",
+    "tone": "plain, terse, lower-case",
+    "note": "Footer key-hint label painted right after a key glyph in the settings page's bottom hint bar (e.g. '↑↓ move'); a single space separates them. The bar sheds whole hints right-to-left when the terminal is narrow, so keep it a short verb. Beside ←→: left/right switch the read-only side pane between its teams and agents tabs.",
+    "maxCells": 10
+  },
+  "tui.settings_view.chrome.footer.save": {
+    "role": "key hint",
+    "tone": "plain, terse, lower-case",
+    "note": "Footer key-hint label painted right after a key glyph in the settings page's bottom hint bar (e.g. '↑↓ move'); a single space separates them. The bar sheds whole hints right-to-left when the terminal is narrow, so keep it a short verb. Beside enter while editing a value: enter saves it.",
+    "maxCells": 10
+  },
+  "tui.settings_view.chrome.footer.suggestions": {
+    "role": "key hint",
+    "tone": "plain, terse, lower-case",
+    "note": "Footer key-hint label painted right after a key glyph in the settings page's bottom hint bar (e.g. '↑↓ move'); a single space separates them. The bar sheds whole hints right-to-left when the terminal is narrow, so keep it a short verb. Beside ↑↓ while a suggestion dropdown is open: the arrows browse the suggestions.",
+    "maxCells": 14
+  },
+  "tui.settings_view.chrome.gate_kept.long": {
+    "role": "alert",
+    "tone": "plain, direct",
+    "note": "Widest of three detail-line forms after an approvals setting was saved but this running session keeps its stricter gate. {command} is the literal command '/approvals auto' inserted verbatim. The line sheds to shorter forms when narrow; the command is the part that must survive.",
+    "maxCells": 61
+  },
+  "tui.settings_view.chrome.gate_kept.medium": {
+    "role": "alert",
+    "tone": "plain, direct",
+    "note": "Middle form of the gate-kept alert (see gate_kept.long). {command} is '/approvals auto' inserted verbatim. Shown when the long form does not fit — the 54-cell detail line at 60x24; at 44x20 (38 cells) the short form takes over.",
+    "maxCells": 54
+  },
+  "tui.settings_view.chrome.gate_kept.short": {
+    "role": "alert",
+    "tone": "plain, terse",
+    "note": "Narrowest form of the gate-kept alert (see gate_kept.long). {command} is '/approvals auto' inserted verbatim.",
+    "maxCells": 26
+  },
+  "tui.settings_view.chrome.hotkey.desktop_detail": {
+    "role": "help text",
+    "tone": "plain, sentence case",
+    "note": "Detail line for a desktop-app global shortcut row: the terminal can capture only keys it receives; any other chord is set in the desktop app.",
+    "maxCells": 96
+  },
+  "tui.settings_view.chrome.hotkey.hold_detail": {
+    "role": "help text",
+    "tone": "plain, sentence case",
+    "note": "Detail line for a desktop hold-to-talk shortcut row: a terminal cannot capture a held modifier, so it is set only in the desktop app.",
+    "maxCells": 60
+  },
+  "tui.settings_view.chrome.hotkey.hold_refusal": {
+    "role": "validation error",
+    "tone": "plain, direct",
+    "note": "Detail-line refusal when enter is pressed on a hold-to-talk shortcut row in the terminal.",
+    "maxCells": 80
+  },
+  "tui.settings_view.chrome.hotkey.recording_detail": {
+    "role": "help text",
+    "tone": "plain, sentence case",
+    "note": "Detail line for the desktop speech-to-text recording shortcut (delivered to the focused desktop window, not global). Must fit one line at 100x30.",
+    "maxCells": 60
+  },
+  "tui.settings_view.chrome.notice.discarded": {
+    "role": "notice",
+    "tone": "plain, terse",
+    "note": "Detail-line notice after an edited value was abandoned: the typed text was not saved. Explains the editor's rule: {save_key} ('enter') saves, {cancel_key} ('esc') or moving the cursor away cancels. Key names inserted verbatim.",
+    "maxCells": 74
+  },
+  "tui.settings_view.chrome.value.auto": {
+    "role": "setting value",
+    "tone": "plain, terse, lower-case",
+    "note": "Value column of a tri-state setting that is unset (e.g. display.nerd_icons): the program decides automatically. Matches the word `config edit` accepts in English, but here it is display only.",
+    "maxCells": 10
+  },
+  "tui.settings_view.chrome.value.chains": {
+    "role": "setting value",
+    "tone": "plain, terse",
+    "note": "Value column of the fallback-cascade setting: how many failover chains are configured. {count} selects the plural; {shown} is the same number as raw digits — insert {shown}, do not localise digits.",
+    "maxCells": 14
+  }
+}

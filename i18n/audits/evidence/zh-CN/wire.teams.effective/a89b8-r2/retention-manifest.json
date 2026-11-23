@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "note": "Byte-identical originals; original paths/provenance/verdicts remain unchanged. Integration-only retention mapping, not an audit.",
+  "files": [
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.teams.effective/a89b8-r2/receipt.zh-CN.json",
+      "original_path": "/Users/damian/.local-operator/sessions/89b8acddcc7c/scratchpad/receipt.zh-CN.json",
+      "sha256": "dbd644e835630ca8e029713c0af7d48de8602fc96c15420564aa2c2127f6f4c6"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.teams.effective/a89b8-r2/record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/89b8acddcc7c/scratchpad/record.zh-CN.json",
+      "sha256": "64f50de714faef89972fb7eeaf0ab831217bf1a722eebdb7f60e73b1f28c0933"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.teams.effective/a89b8-r2/translator-receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/530f154495de/scratchpad/zh-CN.wire.teams.effective.translator-receipt.json",
+      "sha256": "cd670459e27140ac60a009c72ef40ddb90485c5e9a1deb82a7af241974432f4a"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.teams.effective/a89b8-r2/target.json",
+      "original_path": "/Users/damian/.local-operator/sessions/530f154495de/scratchpad/zh-CN.wire.teams.effective.json",
+      "sha256": "6d8d1fc410def690b03ad02ba6c759a5d7b3e82391d9c12dc441fbff7d73f454"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.teams.effective/a89b8-r2/zh-CN.wire.teams.effective.json",
+      "original_path": "/Users/damian/.local-operator/sessions/530f154495de/scratchpad/zh-CN.wire.teams.effective.json",
+      "sha256": "6d8d1fc410def690b03ad02ba6c759a5d7b3e82391d9c12dc441fbff7d73f454"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.teams.effective/a89b8-r2/report.zh-CN.json",
+      "original_path": "/Users/damian/.local-operator/sessions/89b8acddcc7c/scratchpad/report.zh-CN.json",
+      "sha256": "e49b017abfff8c8c2ec6bd31fc62204f1026f1a6aff0fe3b3eed1b41ed061ed7"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.teams.effective/a89b8-r2/mechanical.zh-CN.json",
+      "original_path": "/Users/damian/.local-operator/sessions/89b8acddcc7c/scratchpad/mechanical.zh-CN.json",
+      "sha256": "4906e0ebf67f5d1cc4ceccd68d7db092174ae9a8f343f62c945fb2d8ec62bb57"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.teams.effective/a89b8-r2/audit_second.py",
+      "original_path": "/Users/damian/.local-operator/sessions/89b8acddcc7c/scratchpad/audit_second.py",
+      "sha256": "ce30588fb959999ad895a9cbfd2e2a5ee9a4b09e715880df85b082bea2659f9e"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/zh-CN/wire.teams.effective/a89b8-r2/receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/2b66cec83cdb/scratchpad/receipt.json",
+      "sha256": "fc746e9e7a58f104a549f8db28953f2f4d09f4a00f116276c9acf45c2d3dad97"
+    }
+  ]
+}

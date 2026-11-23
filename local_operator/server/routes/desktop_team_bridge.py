@@ -2026,6 +2026,32 @@ class ConversationCreateIn(ConversationOwnerIn):
     members: list[ConversationMemberIn] = Field(default_factory=list, max_length=500)
 
 
+class ConversationRenameIn(ConversationOwnerIn):
+    """A rename carries a body, so its owner receipt rides in the body (as create
+    and send do) rather than the query the bodyless archive/unarchive use.
+
+    ``max_length`` is a loose transport bound (create's 128), deliberately NOT
+    the server's 64-code-point limit: a name over 64 must reach the server so the
+    renderer gets its ``400 invalid_request`` with ``details.rule=too_long``
+    (and the other sanitizing rules) rather than a local 422 with no rule. For
+    the same reason there is no ``min_length``: an empty name is forwarded so
+    ``""`` and a whitespace-only name both get the server's ``rule=empty``.
+    """
+
+    name: str = Field(max_length=128)
+
+
+class ConversationUpdateIn(ConversationOwnerIn):
+    """Partial metadata: absence, null and empty string have different wire meanings.
+
+    The upstream owns canonical validation (including grandfathered unchanged
+    values). Null is forwarded for its field-aware refusal, never dropped.
+    """
+
+    name: str | None = None
+    topic: str | None = None
+
+
 class ConversationSendIn(ConversationOwnerIn):
     client_ref: str = Field(min_length=1, max_length=128)
     #: Empty only for an image-only message (``attachment_ids`` non-empty).
@@ -2510,6 +2536,74 @@ async def conversation_unarchive(
         await _conversation_reply(
             client.conversation_lifecycle(
                 conversation_id, "unarchive", **_conversation_owner_query(request).model_dump()
+            )
+        )
+    )
+
+
+# Rename is its own static path for the same reason as archive/unarchive:
+# never a dynamic ``{action}`` segment that could swallow ``/messages``.
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/rename",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_rename(
+    conversation_id: str,
+    request: Request,
+    body: ConversationRenameIn,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Rename a channel or group (same authority as archive, server-enforced).
+
+    Answers the updated conversation, the same shape as the detail GET, so the
+    renderer can replace its row and header without a refetch. Every refusal
+    (``conversation_name_taken`` with its ``details``, ``conversation_archived``,
+    ``invalid_transition`` with its ``rule``, 403, the opaque 404, 503) is
+    carried through ``_conversation_reply`` unchanged.
+    """
+
+    _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
+    if {"tenant_id", "expected_account_id"} & set(request.query_params):
+        # The receipt belongs in the body here. A query copy would be silently
+        # ignored, so a caller that mirrored archive's query receipt would rename
+        # without the owner guard (or in the default tenant): refuse it instead.
+        _raise_read("invalid_request")
+    client = _conversation_client(config_manager)
+    result = await _conversation_reply(
+        client.conversation_rename(
+            conversation_id,
+            body.name,
+            tenant_id=body.tenant_id,
+            expected_account_id=body.expected_account_id,
+        )
+    )
+    return reply(result)
+
+
+@router.patch(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_update(
+    conversation_id: str,
+    request: Request,
+    body: ConversationUpdateIn,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Relay one atomic metadata patch with the captured bearer-owner guard.
+
+    No local metadata cache, fallback to rename, or refusal translation: an old
+    hub must refuse rather than turn a two-field edit into a partial write.
+    """
+    _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
+    if {"tenant_id", "expected_account_id"} & set(request.query_params):
+        _raise_read("invalid_request")
+    return reply(
+        await _conversation_reply(
+            _conversation_client(config_manager).conversation_update(
+                conversation_id, **body.model_dump(exclude_unset=True)
             )
         )
     )
@@ -4596,11 +4690,18 @@ HOLDS_QUERY_PARAMS = frozenset({"expected_account_id"})
 
 
 class TeamBridgeHoldDecision(_Strict):
-    """Deliver/Discard body. ``body_sha256`` is the hash of the body the card showed."""
+    """Deliver/Discard body: exactly one of ``body_sha256`` or ``hold_receipt``.
+
+    ``body_sha256`` is the hash of the body the card showed. ``hold_receipt``
+    is the list's ``discard_receipt`` for a hold whose body can no longer be
+    loaded (expired at the hub, owner-audit unavailable): it binds the local
+    hold record, is accepted by Discard only, and Deliver answers 422 for it.
+    """
 
     expected_account_id: str = Field(min_length=1, max_length=128)
     conversation_id: str = Field(min_length=1, max_length=128)
-    body_sha256: str = Field(min_length=64, max_length=64)
+    body_sha256: str | None = Field(default=None, min_length=64, max_length=64)
+    hold_receipt: str | None = Field(default=None, min_length=64, max_length=64)
 
     @model_validator(mode="after")
     def _grammar(self) -> "TeamBridgeHoldDecision":
@@ -4608,8 +4709,11 @@ class TeamBridgeHoldDecision(_Strict):
             raise ValueError("expected_account_id is outside the accepted grammar")
         if not re.fullmatch(CONVERSATION_ID_PATTERN, self.conversation_id):
             raise ValueError("conversation_id is outside the accepted grammar")
-        if not re.fullmatch(r"[0-9a-f]{64}", self.body_sha256):
-            raise ValueError("body_sha256 must be a lowercase sha256 hex")
+        if (self.body_sha256 is None) == (self.hold_receipt is None):
+            raise ValueError("exactly one of body_sha256 or hold_receipt is required")
+        for value in (self.body_sha256, self.hold_receipt):
+            if value is not None and not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise ValueError("body_sha256 and hold_receipt must be lowercase sha256 hex")
         return self
 
 
@@ -4691,6 +4795,7 @@ async def _decide_hold(
             body_sha256=body.body_sha256,
             word=word,
             account_id=body.expected_account_id,
+            hold_receipt=body.hold_receipt,
         )
     except holds.HoldRefused as refusal:
         _raise_hold(refusal.code)

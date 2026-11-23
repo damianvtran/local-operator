@@ -2026,8 +2026,16 @@ class ReplaySuffix:
     #: because eager would keep looking further back for a parseable one.
     usage_proven_absent: bool = False
     #: :func:`read_cold_tail` only: bytes the absence proof scanned below the
-    #: tail, for the caller's evidence; not a contract.
+    #: tail, for the caller's evidence; not a contract. With a prior proof
+    #: (``known_absent``) this is only the span the prior proof did not cover.
     absence_scan_bytes: int = 0
+    #: :func:`read_cold_tail` only: ``absence_needles`` are now proven absent from
+    #: ``[0, absence_covered_end)``, a row boundary (the start of the oldest row
+    #: the tail consumed). Both are ``0``/``()`` when no absence was proven. A
+    #: caller may persist them so the NEXT read of a grown journal scans only
+    #: the bytes above this boundary (``replay_cache.build_cold_tail_metadata``).
+    absence_covered_end: int = 0
+    absence_needles: tuple[bytes, ...] = ()
 
 
 #: Ceiling on the bytes BELOW the bounded tail that :func:`read_cold_tail` will
@@ -2159,6 +2167,7 @@ def read_cold_tail(
     max_bytes: int = 4 * 1024 * 1024,
     max_rows: int = 256,
     max_scan_bytes: int = ABSENCE_SCAN_MAX_BYTES,
+    known_absent: tuple[int, frozenset[bytes]] | None = None,
 ) -> ReplaySuffix | None:
     """Prove first-frame facts from a bounded plain-journal suffix, or decline.
 
@@ -2231,6 +2240,23 @@ def read_cold_tail(
     since the byte before ``low`` is a newline that no spelling contains, but
     it keeps the bound conservative. Above ``max_scan_bytes``
     (:data:`ABSENCE_SCAN_MAX_BYTES`) the tail declines.
+
+    ``known_absent`` (``(boundary, needles)``) is a PRIOR proof that every
+    needle in ``needles`` is absent from ``[0, boundary)`` of THIS file. The
+    caller owns validating it against the journal (same inode, unchanged row
+    ending at ``boundary``: ``replay_cache._prior_absence``); this function only
+    uses it, and only when it covers every needle this read needs. Then the
+    scan starts at ``boundary - (longest needle - 1)`` instead of ``0``: a
+    spelling wholly inside ``[0, boundary)`` is excluded by the prior proof, and
+    any other occurrence ends past ``boundary`` so starts at or above that
+    start. The overlap is DEFENSIVE: ``boundary`` is always a row start and no
+    needle contains a newline, so today no real journal places a spelling
+    across it; it keeps the answer exact if either ever stops holding.
+    WHY: an ACTIVE session's journal grows between opens, so the cold
+    metadata record misses on every open, and without this each open re-scanned
+    the whole journal below the tail (measured on a 55 MB fixture with no spend
+    row: 55,112,712 bytes per grown open). The answer is unchanged either way;
+    only the bytes read differ.
 
     When the walk stops: once every fact is met (as before), at the
     4 MiB / 256-row bound, or at a shrink row met AFTER a parseable usage
@@ -2365,10 +2391,16 @@ def read_cold_tail(
                 needles.extend(spelling)
             if not have_usage:
                 needles.extend(_USAGE_SPELLINGS)
-            scan_end = min(end, low + max(len(n) for n in needles) - 1)
+            longest = max(len(n) for n in needles)
+            scan_end = min(end, low + longest - 1)
+            # The cap stays on the RANGE the proof covers, not on the bytes this
+            # call reads, so a prior proof never changes which journals decline.
             if scan_end > max_scan_bytes:
                 return None
-            if not _spellings_absent(handle, 0, scan_end, tuple(needles)):
+            scan_start = 0
+            if known_absent is not None and set(needles) <= known_absent[1]:
+                scan_start = max(0, min(known_absent[0], scan_end) - (longest - 1))
+            if not _spellings_absent(handle, scan_start, scan_end, tuple(needles)):
                 return None
             return ReplaySuffix(
                 entries=tuple(reversed(parsed)),
@@ -2379,7 +2411,9 @@ def read_cold_tail(
                 bytes_read=bytes_read,
                 rows_read=len(parsed),
                 usage_proven_absent=not have_usage,
-                absence_scan_bytes=scan_end,
+                absence_scan_bytes=scan_end - scan_start,
+                absence_covered_end=low,
+                absence_needles=tuple(needles),
             )
     except (OSError, UnicodeError, TypeError, ValueError):
         return None
@@ -3677,6 +3711,17 @@ class Transcript:
     def entries(self) -> list[TranscriptEntry]:
         """All entries in append order (in-memory snapshot)."""
         return list(self._entries)
+
+    def recent_entries(self, limit: int) -> list[TranscriptEntry]:
+        """The newest ``limit`` entries in append order, without copying the rest.
+
+        For per-turn-end readers (the economic compaction gate) on journals
+        that are hundreds of thousands of rows long, where ``entries()``'s
+        full copy would be paid at every wake.
+        """
+        if limit <= 0:
+            return []
+        return list(self._entries[-limit:])
 
     def latest_custom(self, custom_type: str) -> dict[str, Any] | None:
         """Details of the newest custom entry of ``custom_type`` (backward

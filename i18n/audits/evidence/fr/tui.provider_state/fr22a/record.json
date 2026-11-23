@@ -1,0 +1,102 @@
+{
+  "record_kind": "translation_author_receipt_not_independent_audit",
+  "locale": "fr",
+  "namespace": "tui.provider_state",
+  "audit_date": null,
+  "translation_date": "2026-11-22",
+  "key_count": 5,
+  "status": "translated",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "e0c1b7382197",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host model-switch notice before authoring: temporary fallback from anthropic/claude-opus-5-5 due to provider failure: quota",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "auditor": {
+    "agent": null,
+    "session": null,
+    "model": null,
+    "independent_from_translator_session": null,
+    "actual_model_source": null,
+    "status": "not_performed"
+  },
+  "source_author": {
+    "agent": "coder",
+    "session": "93b7b02899af",
+    "private_revision": "1b77e201977c7f252a1fd8bac4baed36fc46c83a",
+    "source_receipt": "source-author session scratchpad/provider-state-source-receipt.md supplied by manager; not this author"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.json",
+      "sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.context.json",
+      "sha256": "67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be"
+    },
+    "fr": {
+      "path": "local_operator/i18n/catalogues/fr/tui.provider_state.json",
+      "sha256": "87cf1654daed989e12d9f431395f4f731c07de5d3204aeb3f0cb0705e92719f8"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/fr/tui.provider_state/fr22a/notes.md",
+      "sha256": "97025d2f5105d32d6c0706218122ae5f1b6b968875aeb320fa48a66bead03b17"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.provider_state/fr22a/validator.py.txt",
+      "sha256": "3ee8d13ef91cd7022f87f2a386107c251b7c9616a116e7ccff32c6c0ab2c2cef"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.provider_state/fr22a/validation.log",
+      "sha256": "62f3ff5cd44cd64ed3d368de7212b350e33708a3f7a845f6526b8ffc52b76fa6"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "translated",
+    "unresolved_blocker_major_count": null,
+    "finding_ids": [],
+    "independent_audit_performed": false
+  },
+  "mechanical_validation": {
+    "exit_code": 0,
+    "official_scoped_catalogue_problems": 0,
+    "scope": "en/fr tui.provider_state only",
+    "ordered_keys": 5,
+    "icu_arguments_per_key": 0,
+    "plural_select_branches": 0,
+    "nfc": true,
+    "render_api_checked": true,
+    "negative_control_rejected": true,
+    "fr_cell_lengths": [
+      8,
+      19,
+      17,
+      17,
+      21
+    ],
+    "completion_id": "16ad869ce2814d13a699060f8bdbb0dd",
+    "cleanup": "unknown"
+  },
+  "notes_classification": "audit_notes_not_execution_log",
+  "execution_log": "validation.log",
+  "glossary_proposals": {
+    "logged in": "connecté",
+    "sign in": "se connecter",
+    "login required": "connexion requise",
+    "environment key": "clé d’environnement"
+  },
+  "limitations": [
+    "Not an independent audit; A/B passes pending",
+    "No UI/native/visual/network-isolation/release proof",
+    "No fixed source width cap; synthetic diagnostics only",
+    "No ledger/history/generated/eligibility changes; no staging/commit/push"
+  ]
+}

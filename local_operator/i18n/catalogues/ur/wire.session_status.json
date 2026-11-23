@@ -29,5 +29,9 @@
   "wire.session_status.delegating_jobs": "{count, plural, one {# جاب جاری} other {# جاب جاری}}",
   "wire.session_status.delegating_running": "{count, plural, one {# ذیلی ایجنٹ جاری} other {# ذیلی ایجنٹس جاری}}",
   "wire.session_status.delegating_queued": "{count, plural, one {# ذیلی ایجنٹ قطار میں} other {# ذیلی ایجنٹس قطار میں}}",
-  "wire.session_status.delegating_queued_addend": "{count, plural, one {# قطار میں} other {# قطار میں}}"
+  "wire.session_status.delegating_queued_addend": "{count, plural, one {# قطار میں} other {# قطار میں}}",
+  "wire.session_status.duration_seconds": "{count, number} سیکنڈ",
+  "wire.session_status.duration_minutes": "{count, number} منٹ",
+  "wire.session_status.duration_hours_minutes": "{hours, plural, one {# گھنٹہ} other {# گھنٹے}} {minutes, number} منٹ",
+  "wire.session_status.duration_days_hours": "{days} دن {hours, plural, one {# گھنٹہ} other {# گھنٹے}}"
 }

@@ -122,7 +122,7 @@ def test_the_dry_run_digest_round_trips_through_confirm_working_set(
     receipt = json.loads(capsys.readouterr().out)
     assert code == 0, receipt
     assert receipt["working_set"]["scope_digest"] == digest
-    assert receipt["working_set"]["transferred"] is False
+    assert receipt["working_set"]["transferred"] is True
     assert not (server_a.root / "sessions" / SESSION).exists()
     assert (server_b.root / "sessions" / SESSION).is_dir()
 
@@ -152,27 +152,19 @@ def test_an_interactive_terminal_is_warned_and_only_y_moves(
 
     assert declined == 1
     # The warning names the session and the DESTINATION device, says plainly that the
-    # files do not travel yet (PR A), and lists the worktree and the withheld secret.
+    # files TRAVEL there (both relays speak the transfer protocol, PR B), and lists the
+    # worktree and the withheld secret; the prompt asks to SEND them to that device.
     assert f"Moving {SESSION} to device-b mid-conversation" in first.out
-    assert "does not bring its working files yet" in first.out
-    # A RECALL runs this prompt on the DESTINATION: the files stay on the owner, which
-    # is named — never "this device", which here would be the wrong machine.
-    assert "They stay on device-a:" in first.out
-    assert (
-        prompts[0]
-        == f"Move {SESSION} to device-b and leave these working files on device-a? [y/N] "
-    )
+    assert "sends its working files there" in first.out
+    assert "Only continue if device-b should receive these files." in first.out
+    assert prompts[0] == "Send these working files to device-b? [y/N] "
     assert "~/proj/.worktrees/feat" in first.out
     assert "withheld (looks like a secret): ~/proj/.worktrees/feat/.env.local" in first.out
     assert prompts[0].endswith("[y/N] ")
     assert "Not moved" in first.err
     assert still_here
     assert accepted == 0, second
-    assert "Working files were not transferred: 1 worktree stays on device-a." in second.out
-    # QA round 1, Q-2: the receipt LISTS what stayed, not only the count.
-    assert "~/proj/.worktrees/feat  stays on device-a:" in second.out
-    assert "withheld (looks like a secret): ~/proj/.worktrees/feat/.env.local" in second.out
-    assert "not copied: ~/proj/.worktrees/feat/node_modules" in second.out
+    assert "Working files arrived from device-a: 1 worktree restored here." in second.out
     assert (server_b.root / "sessions" / SESSION).is_dir()
 
 
@@ -368,10 +360,16 @@ def test_a_mistyped_digest_says_it_does_not_match(
 
 
 def test_a_scripted_refusal_speaks_once_and_names_the_keeper(
-    staged: tuple[Devices, Rig], capsys: pytest.CaptureFixture[str]
+    staged: tuple[Devices, Rig],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """U4: a non-tty refusal printed the owner's English sentence ("on this device",
-    the wrong machine on a recall) and then the keyed summary."""
+    the wrong machine on a recall) and then the keyed summary. The destination here
+    speaks the pre-transfer protocol, so the files STAY and the keeper is named."""
+    from local_operator.network import workset
+
+    monkeypatch.setattr(workset, "WORKSET_TRANSFER_VERSION", 1)
     code = _run([])
 
     err = capsys.readouterr().err
@@ -568,3 +566,174 @@ def test_an_unreadable_working_set_keeps_the_older_relay_refused(
 
     assert refused["code"] == "relay_restart_required", refused
     assert sent == []
+
+
+# ---------------------------------------------------------------------------
+# Dependency STATUS (design §9 phase 2, status-only on #4378): no run mode exists
+# ---------------------------------------------------------------------------
+
+
+def _recording_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """`pnpm`/`npm`/`uv`/`yarn` ahead of the host's: any launch leaves a `.launched` file.
+
+    A negative control for "nothing runs": the scripts are real executables on PATH,
+    so ANY code path that started a package manager — whatever argv — would write
+    the marker. Tests assert the marker never appears.
+    """
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir()
+    marker = tmp_path / ".launched"
+    for tool in ("pnpm", "npm", "uv", "yarn"):
+        script = bindir / tool
+        script.write_text(
+            f'#!/bin/sh\necho "{tool} $*|$PWD" >> "{marker}"\nmkdir -p node_modules\n'
+        )
+        script.chmod(0o755)
+    import os
+
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+    return marker
+
+
+@pytest.mark.parametrize("to", ["laptop", "local"])
+def test_the_former_setup_deps_move_flag_is_rejected_before_anything_moves(
+    to: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`move --setup-deps` no longer exists: argparse refuses it before the command runs."""
+    from local_operator.network import mobility
+
+    def never(*_a: Any, **_k: Any) -> dict[str, Any]:
+        raise AssertionError("a move carrying the removed --setup-deps flag was issued")
+
+    monkeypatch.setattr(mobility, "request_move", never)
+
+    with pytest.raises(SystemExit) as raised:
+        cli.build_cli_parser().parse_args(
+            ["sessions", "move", SESSION, "--to", to, "--setup-deps", "--yes"]
+        )
+
+    assert raised.value.code == 2
+    assert "--setup-deps" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [[], ["--status", "--yes"], ["--status", "-y"]],
+    ids=["no-status", "yes", "y"],
+)
+def test_setup_deps_has_no_run_mode(extra: list[str], capsys: pytest.CaptureFixture[str]) -> None:
+    """Without `--status` (or with the removed `--yes`) the verb is a usage error, rc 2."""
+    with pytest.raises(SystemExit) as raised:
+        cli.build_cli_parser().parse_args(["sessions", "setup-deps", SESSION, *extra])
+
+    assert raised.value.code == 2
+    err = capsys.readouterr().err
+    assert ("--status" in err) if not extra else ("unrecognized arguments" in err)
+
+
+def test_a_recall_launches_nothing_and_status_reads_the_arrival(
+    staged: tuple[Devices, Rig],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The real two-relay recall with package managers on PATH: zero launches, then
+    `--status` over THIS device's own restore record reports, still launching nothing."""
+    (_server_a, server_b, _h, _p), rig = staged
+    marker = _recording_tools(tmp_path, monkeypatch)
+    source_tree = sorted(p.name for p in (rig.feat / "node_modules").iterdir())
+
+    code = _run(["--yes"])
+
+    assert code == 0, capsys.readouterr().err
+    capsys.readouterr()
+    monkeypatch.setenv("HOME", str(rig.home))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
+    args = cli.build_cli_parser().parse_args(
+        ["sessions", "setup-deps", SESSION, "--status", "--json"]
+    )
+
+    assert cli.sessions_setup_deps_command(args) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document["executes"] is False and document["ran"] is False
+    (row,) = document["rows"]
+    assert row["kind"] == "pnpm" and row["state"] in {"pending", "present_unverified"}
+    assert not marker.exists()
+    assert not (server_b.root / "network" / "workset-in" / SESSION / "setup.json").exists()
+    assert sorted(p.name for p in (rig.feat / "node_modules").iterdir()) == source_tree
+
+
+def test_status_text_says_nothing_ran_and_lists_every_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home, config = tmp_path / "home", tmp_path / "config"
+    wt = home / "src" / "app"
+    wt.mkdir(parents=True)
+    (wt / "package-lock.json").write_text("{}")
+    (wt / "node_modules").mkdir()  # EMPTY: still pending, and never removed
+    arrived = config / "network" / "workset-in" / SESSION
+    arrived.mkdir(parents=True)
+    (arrived / "pending.json").write_text(
+        json.dumps(
+            {
+                "plans": [{"n": 0, "path": "~/src/app"}, {"n": 1, "path": "~/src/later"}],
+                "restored": {
+                    "0": {"state": "restored", "dest_path": "~/src/app"},
+                    "1": {"state": "pending_restore", "path": "~/src/later"},
+                },
+            }
+        )
+    )
+    marker = _recording_tools(tmp_path, monkeypatch)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    args = cli.build_cli_parser().parse_args(["sessions", "setup-deps", SESSION, "--status"])
+
+    code = cli.sessions_setup_deps_command(args)
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Nothing was run or installed." in out.splitlines()[0]
+    # S2-R2: a standalone query reports the LAST restored set, not proof of the
+    # latest move (a later move may have carried no working set).
+    assert "last restored on this device" in out.splitlines()[0]
+    assert "Not set up · ~/src/app (npm)" in out
+    assert "Not restored on this device yet: ~/src/later" in out
+    assert "this command never does that" in out
+    assert "--yes" not in out and "npm ci" not in out
+    assert (wt / "node_modules").is_dir() and not any((wt / "node_modules").iterdir())
+    assert not marker.exists() and not (arrived / "setup.json").exists()
+    # The verb is listed in the `lop sessions` usage synopsis (design D5).
+    with pytest.raises(SystemExit):
+        cli.build_cli_parser().parse_args(["sessions", "--help"])
+    assert "move,setup-deps,sync" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("as_json", [False, True], ids=["text", "json"])
+def test_status_of_a_damaged_record_is_unknown_not_absent(
+    as_json: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """R2-1 / U10 / D13: a corrupt record used to read "no working set" (rc 1) or
+    traceback; it is an answered query whose status is unknown (rc 0)."""
+    config = tmp_path / "config"
+    arrived = config / "network" / "workset-in" / SESSION
+    arrived.mkdir(parents=True)
+    (arrived / "pending.json").write_text('{"plans": ["x"], "restored": {}}')
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    argv = ["sessions", "setup-deps", SESSION, "--status", *(["--json"] if as_json else [])]
+
+    code = cli.sessions_setup_deps_command(cli.build_cli_parser().parse_args(argv))
+
+    out = capsys.readouterr()
+    assert code == 0
+    assert "No working set" not in out.out + out.err
+    if as_json:
+        document = json.loads(out.out)
+        assert document["state"] == "unknown" and document["rows"] == []
+        assert document["restore_record"] == {"state": "unreadable", "lease_epoch": ""}
+    else:
+        assert "could not be read" in out.out

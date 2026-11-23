@@ -1,0 +1,126 @@
+{
+  "locale": "zh-CN",
+  "namespace": "tui.session_sidebar",
+  "source_sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a",
+  "target_sha256": "983747baa9851e6a95088fc829d8b24fc75b504e2423d553d0a893103cbea8ec",
+  "context_sha256": "698e8f0e151fee53d52a533bc51d7edcc600ce6964d74cdb024888238161f6e0",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20"
+  },
+  "auditor": {
+    "agent": "translation-auditor / sidebar-reaudit-zh-CN / ae54742aeda3",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "round": 2,
+  "scope": [
+    "tui.session_sidebar.footer.hub_note",
+    "tui.session_sidebar.footer.asks_note"
+  ],
+  "keys_read": 2,
+  "findings": [],
+  "note": "Round-2 delta audit only; not a fresh full-namespace audit. Read complete 21-key English/Chinese sidebar catalogues for composition context, but reviewed changed keys only. 链接 names the counted noun in shipped Hub链接 title and follows manager ruling to omit Latin hub. 待答 accurately denotes queued questions awaiting answers and matches neighboring ctrl+f待答问题. Chinese requires no plural inflection for these simple placeholders. No markup, skeleton or RTL concerns in changed keys. Runtime 0 is exercised but UI suppresses zero notes per _asks_note/_hub_note source. No rendered TUI screenshot claim: runtime strings and cell widths verified. Translator date is task date; translator identity/model supplied by manager, not independently observed. Actual auditor model openai/gpt-6.1-sol; no fallback used.",
+  "evidence": {
+    "tui.session_sidebar.footer.hub_note": {
+      "english": "hub: {count}",
+      "target": "链接：{count}",
+      "arguments": [
+        [
+          "count",
+          "simple"
+        ]
+      ],
+      "maxCells": 10,
+      "renders": [
+        {
+          "count": 0,
+          "text": "链接：0",
+          "cells": 7
+        },
+        {
+          "count": 1,
+          "text": "链接：1",
+          "cells": 7
+        },
+        {
+          "count": 9,
+          "text": "链接：9",
+          "cells": 7
+        },
+        {
+          "count": 10,
+          "text": "链接：10",
+          "cells": 8
+        },
+        {
+          "count": 99,
+          "text": "链接：99",
+          "cells": 8
+        }
+      ]
+    },
+    "tui.session_sidebar.footer.asks_note": {
+      "english": "asks: {count}",
+      "target": "待答：{count}",
+      "arguments": [
+        [
+          "count",
+          "simple"
+        ]
+      ],
+      "maxCells": 10,
+      "renders": [
+        {
+          "count": 0,
+          "text": "待答：0",
+          "cells": 7
+        },
+        {
+          "count": 1,
+          "text": "待答：1",
+          "cells": 7
+        },
+        {
+          "count": 9,
+          "text": "待答：9",
+          "cells": 7
+        },
+        {
+          "count": 10,
+          "text": "待答：10",
+          "cells": 8
+        },
+        {
+          "count": 99,
+          "text": "待答：99",
+          "cells": 8
+        }
+      ]
+    }
+  },
+  "composition": {
+    "door_title": "Hub链接",
+    "asks_suffix": " · ctrl+f待答问题",
+    "examples": [
+      {
+        "count": 10,
+        "text": "f9聚焦 · ctrl+f待答问题 · 待答：10 · 链接：10",
+        "cells": 45
+      },
+      {
+        "count": 99,
+        "text": "f9聚焦 · ctrl+f待答问题 · 待答：99 · 链接：99",
+        "cells": 45
+      }
+    ]
+  },
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-tui-sidebar",
+  "head": "c8343f3a608785b5064e61307c7333a2473126ae"
+}

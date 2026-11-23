@@ -95,9 +95,13 @@ async def test_actual_frontend_late_publication_bumps_idle_phone_without_final_o
     notifications = []
     events = []
     unlisten = session.subscribe(events.append)
-    unsubscribe = bind_owner_peer_cycles(
-        fold, session, lambda: notifications.append(projection.version), asyncio.get_running_loop()
-    )
+    landed = asyncio.Event()
+
+    def _notify() -> None:
+        notifications.append(projection.version)
+        landed.set()
+
+    unsubscribe = bind_owner_peer_cycles(fold, session, _notify, asyncio.get_running_loop())
     try:
         fold.fold_history(history)
         assert not any("peer_cycle" in row.details for row in projection.transcript)
@@ -107,6 +111,11 @@ async def test_actual_frontend_late_publication_bumps_idle_phone_without_final_o
             peer_cycle_display={"refs": [record["id"]], "records": [record]}
         )
         await asyncio.sleep(0)
+        # The indexed validator never builds on the loop: the append left the
+        # index stale, so the first apply may only arm the shared refresh; the
+        # binder re-applies once that refresh lands -- still with no final/user
+        # event. Wait on the notification (the event), bounded.
+        await asyncio.wait_for(landed.wait(), timeout=10)
         assert projection.version > before and notifications
         assert any("peer_cycle" in row.details for row in projection.transcript)
         assert not events and not stream.requests

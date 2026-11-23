@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "browser.site_approval",
-  "history_sha256": "f1c558ddcfb770ae6ce1d5a5e6b593c2ab596830f8a0ef94ffcf0341b1b19c99",
+  "history_sha256": "4284229bb899ec95d7c1f3f94df348386792688c40fe52f926b79f8180ae6c5e",
   "entries": [
     {
       "locale": "fr",
@@ -29,6 +29,41 @@
       },
       "status": "passed",
       "note": "Translation audit round 1 of PR #3938 at d1a7d4066, 2026-11-14. Target fr/browser.site_approval.json sha256 2f337d33a8f9ca5fc472e7c063bd6490705f89fdb79235bfdcca381f2c0a9318 (32/32 keys, new namespace). Semantic read of all 32 values against en, its context sidecar, glossary and the locale style guide; usage checked in browser_bridge/site_approval.py (Deny-first options, signer re-renders the card in every shipped locale), tui/app.py card title and the `lop browser sites` CLI. Whole file re-checked mechanically: key set/order, placeholder multiset, byte-identical backtick spans (incl. '<who, when>' verbatim per glossary §3), paths/URLs/flags, question line break and {origin}-before-{node}, NFC, no bidi controls, locale punctuation. Safety copy meaning preserved: Approve = this exact origin on that node until `lop browser sites --revoke` on that machine; Deny sticks; card mismatch / node-name mismatch = possible tampering, don't retry; old signer = update, card stays open; no_approver causes and remedies; nothing approved never weakened. Non-gating findings: N1 (see comment). Single independent audit on the same model family as the translator; no second/cross-model or native-speaker audit and no rendered RTL/overflow evidence claimed. Comment: https://github.com/damianvtran/local-operator/pull/3938#issuecomment-6869620543 Second independent safety-copy audit PASS (15 safety keys × 7 locales): https://github.com/damianvtran/local-operator/pull/3938#issuecomment-6869587556 (translation-auditor session 00c76a918112, anthropic/claude-opus-5-5)"
+    },
+    {
+      "locale": "fr",
+      "namespace": "browser.site_approval",
+      "source_sha256": "dc4eae99c932c54f95f731bc1ece9caa0cbe92916551248848e6346bb71624c2",
+      "target_sha256": "5156308608a8faa9cf95c0210ea41238363ff5118a1be89728a9dd572af3186a",
+      "translator": {
+        "agent": "coder (team lopdev, PR #4283 round-4 narrowing implementer, commit f6aad9917)",
+        "session": null,
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": "reviewer (team lopdev, independent i18n audit of PR #4283 round 1), session 7f5b5246af52; independent of the translator",
+        "session": "7f5b5246af52",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-19",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "locale_verdict": "CLEAN",
+        "corrections": "No corrections."
+      },
+      "status": "passed",
+      "note": "PR #4283 (fix/child-site-card-ancestor, head 4c2b7d00c) i18n audit round 1: independent reviewer session 7f5b5246af52 audited the 1 new key browser.site_approval.refused_outcome_unknown against en dc4eae99c932 and its .context.json note (toast when the node's browser may have applied the answer but its confirmation was lost; await_access and `lop browser sites` literal) and its two call sites in session.py _site_decide_bound (lost reply after dispatch, and every later tap on an 'unknown' card). Mechanical, whole namespace: key set and order equal en; vs base 1c29d7c22 only this key differs, every other value byte-identical (carried from the prior passed audit); no placeholders in en and none introduced; backtick span `lop browser sites` byte-identical; await_access kept as a literal; NFC; no bidi/control chars. Meaning preserved: outcome is unknown (may or may not have applied), do not answer the card again, the agent's await_access reads the browser itself, `lop browser sites` on the node shows what is stored; nothing claims approval or revocation. Glossary term for 'agent' checked. No corrections. Translator session not recorded in the PR (comment 'Narrowing — round 4' names coder, anthropic/claude-opus-5-5), so session left null. Native-speaker review and rendered-frame certification not claimed.",
+      "round": "pr4283-r1",
+      "keys_audited": 1
     }
   ]
 }

@@ -1,0 +1,74 @@
+{
+  "schema": 1,
+  "receipt_kind": "independent-merged-namespace-translation-audit",
+  "instance": "66500855f473",
+  "date": "2026-11-22",
+  "auditor": {
+    "agent": "reviewer (lopdev independent translation auditor)",
+    "session": "66500855f473",
+    "model": "openai/gpt-6.2-sol",
+    "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.2-sol (provider quota; before semantic review)",
+    "date": "2026-11-22",
+    "result": "passed",
+    "findings": [],
+    "unresolved_blocker_major": []
+  },
+  "status": "passed",
+  "repository": "local-operator",
+  "pr_url": "https://github.com/damianvtran/local-operator/pull/4408",
+  "head": "9be06fc428a0f5f9617a87d762f59c1b0ffbd8a8",
+  "base": "f815ea7b74fe06e13266bef583e15293fbce7532",
+  "namespace": "relay.transcript",
+  "locale": "ru",
+  "source_path": "local_operator/i18n/catalogues/en/relay.transcript.json",
+  "source_sha256": "87a3e3d62fddefb9212eeba2d1981e15ebf532237c5034d56f464ab47dde0af1",
+  "target_path": "local_operator/i18n/catalogues/ru/relay.transcript.json",
+  "target_sha256": "2ea8307a60d656e2fe9f711f2ed1943ddd9e4881486d551b705f6d8864049c5c",
+  "keys_reviewed": [
+    "relay.transcript.bridge.held",
+    "relay.transcript.bridge.offline",
+    "relay.transcript.bridge.thread_reply",
+    "relay.transcript.jump.latest",
+    "relay.transcript.jump.latest_short"
+  ],
+  "keys_changed_from_origin_main": [
+    "relay.transcript.bridge.held",
+    "relay.transcript.bridge.offline",
+    "relay.transcript.bridge.thread_reply"
+  ],
+  "reviewed_values": {
+    "relay.transcript.bridge.held": {
+      "english": "Held for review",
+      "target": "Задержано для проверки",
+      "result": "passed: still reviewable, not refused or awaiting ordinary delivery"
+    },
+    "relay.transcript.bridge.offline": {
+      "english": "Couldn't reach Radient — retrying",
+      "target": "Нет связи с Radient — повторяем попытку",
+      "result": "passed: connection failure with retry in progress, no manual action implied"
+    },
+    "relay.transcript.bridge.thread_reply": {
+      "english": "Thread reply",
+      "target": "Ответ в ветке",
+      "result": "passed: concise marker for an in-thread reply"
+    },
+    "relay.transcript.jump.latest": {
+      "english": "Jump to latest",
+      "target": "Перейти к последнему",
+      "result": "retained: infinitive action label, byte-identical to origin/main"
+    },
+    "relay.transcript.jump.latest_short": {
+      "english": "Latest",
+      "target": "Последнее",
+      "result": "retained: one-word shorthand with an implicit message, byte-identical to origin/main"
+    }
+  },
+  "checks": {
+    "key_parity": "43/43, no missing, extra or duplicate keys",
+    "placeholder_parity": "43/43 values preserve ICU argument names, types, order, select arms and #; plural arms follow Russian categories",
+    "nfc": "all target values are NFC",
+    "direction_and_entities": "no manual bidi markup, Unicode format controls, or escaped entities in target values",
+    "framing": "Unchanged provenance marks external untrusted content, not moderation. Pending and transient screening do not imply a decision; only refused says moderation rejected the message."
+  },
+  "scope_note": "All 43 English/Russian pairs read against i18n/glossary.md, i18n/style-guides/ru.md and the English context sidecar. This attests the merged namespace hashes and independently verifies the three changed translations. All 40 unchanged Russian JSON value tokens, including both jump labels, are byte-identical to the previously audited origin/main version at the recorded base and retain prior audits rather than receiving new approvals. No native-speaker claim, rendered-fit validation, client behavior validation, or activation approval. Underlying review unchanged; delta vs the previously attested bytes is whitespace-only (tab -> 2-space re-serialization). Verified parsed-JSON equality."
+}

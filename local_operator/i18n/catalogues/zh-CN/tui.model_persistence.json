@@ -1,0 +1,6 @@
+{
+ "tui.model_persistence.persist": "/model default将当前模型保存为新会话的默认模型",
+ "tui.model_persistence.settings": "/settings也可修改新会话的默认模型",
+ "tui.model_persistence.saved": "/model saved将本会话切换至已保存的默认模型",
+ "tui.model_persistence.with_model": "模型：{label} — {routes}"
+}

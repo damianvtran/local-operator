@@ -1,0 +1,165 @@
+{
+  "locale": "fr",
+  "namespace": "wire.settings",
+  "source_sha256": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+  "context_sha256": "e5c44bf0a9bcfdfa159a5bbf1c5caffcde2318946561fa4d7550bc30255e85a1",
+  "target_sha256": "7067ac12bb803902e580de79671c11a134a6890a26b98f34610d4a1be9613076",
+  "translator": {
+    "agent": "Separate translator agent; identity/session not supplied in delegation",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "fallback": "provider quota fallback; provenance supplied by manager, not independently observed"
+  },
+  "auditor": {
+    "agent": "translation-auditor (voice-audit-fr)",
+    "session": "6119a75e58af",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "fallback": "provider quota failure from anthropic/claude-opus-5-5; observed in this session",
+    "result": "passed",
+    "verdict": "clean",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "read_route_verified": true
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "round": 1,
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-voice-choice-backfill",
+  "head": "0bf4305da8f4b113f3ce2120bfdf58845b3218c9",
+  "base": "4128f2a2",
+  "scope_keys": [
+    "wire.settings.speech_voice_tone.choice.warm.label",
+    "wire.settings.speech_voice_tone.choice.neutral.label",
+    "wire.settings.speech_voice_tone.choice.bright.label",
+    "wire.settings.speech_voice_tone.choice.calm.label",
+    "wire.settings.speech_voice_tone.choice.authoritative.label",
+    "wire.settings.speech_voice_expressiveness.choice.low.label",
+    "wire.settings.speech_voice_expressiveness.choice.medium.label",
+    "wire.settings.speech_voice_expressiveness.choice.high.label"
+  ],
+  "scope_key_count": 8,
+  "read_key_count": 16,
+  "read_key_count_explanation": "8 changed labels audited; 8 unchanged companion descriptions read for semantic consistency. Two field labels and help text read as UI context. Not a complete 895-key namespace re-audit.",
+  "findings": [],
+  "note": "Independent contribution-only audit. Head is context commit; eight French label edits were uncommitted in the manager-owned shared worktree when audited, pinned here by full target-file SHA. English preflight source hash is current; preflight context hash is stale because the new 16 context entries were subsequently added (actual current context hash recorded above). Only the eight requested label values differ from base; companion descriptions are byte-unchanged. This receipt certifies those eight keys only, not re-audit of unchanged namespace keys. No repository edits, installations, suites or UI dispatch.",
+  "linguistic_review": {
+    "accuracy": "warm→chaleureuse names friendliness rather than temperature; bright→enjouée names upbeat delivery rather than luminosity; authoritative→assurée captures confidence without authoritarian connotation. Neutral/calm and low/medium/high map naturally to the documented voice settings.",
+    "idiom_and_register": "All eight are natural concise French adjectives, lowercase as compact UI fragments. Feminine chaleureuse/enjouée/assurée agrees with Tonalité (also voix); moyenne/élevée agrees with Expressivité. No personal address, so no T/V mismatch. Existing masculine companion fragments can describe implicit ton or débit and are unchanged, not a new label agreement defect.",
+    "glossary": "No conflicting mandated term or unsanctioned English. neutre/calme are native French terms, not untranslated config tokens; stable machine IDs remain warm/neutral/bright/calm/authoritative and low/medium/high.",
+    "placeholder_integrity": "8/8; none present; no ICU/plural/markup tokens",
+    "key_order": "eight scoped keys ordered identically in English/French; full target key order unchanged from base",
+    "plural": "N/A: no counts or ICU plural/select branches in the eight labels",
+    "rtl": "N/A: French is LTR. No bidi embedding/override/isolate controls found in these labels; Urdu logical bidi audit not applicable to fr."
+  },
+  "fit": {
+    "method": "rich.cells.cell_len on actual localized settings_io Choice label and description",
+    "measurements": [
+      {
+        "key": "wire.settings.speech_voice_tone.choice.warm.label",
+        "machine_value": "warm",
+        "english": "warm",
+        "target": "chaleureuse",
+        "source_locale": "fr",
+        "english_cells": 4,
+        "target_cells": 11,
+        "target_label_plus_description_cells": 38
+      },
+      {
+        "key": "wire.settings.speech_voice_tone.choice.neutral.label",
+        "machine_value": "neutral",
+        "english": "neutral",
+        "target": "neutre",
+        "source_locale": "fr",
+        "english_cells": 7,
+        "target_cells": 6,
+        "target_label_plus_description_cells": 27
+      },
+      {
+        "key": "wire.settings.speech_voice_tone.choice.bright.label",
+        "machine_value": "bright",
+        "english": "bright",
+        "target": "enjouée",
+        "source_locale": "fr",
+        "english_cells": 6,
+        "target_cells": 7,
+        "target_label_plus_description_cells": 29
+      },
+      {
+        "key": "wire.settings.speech_voice_tone.choice.calm.label",
+        "machine_value": "calm",
+        "english": "calm",
+        "target": "calme",
+        "source_locale": "fr",
+        "english_cells": 4,
+        "target_cells": 5,
+        "target_label_plus_description_cells": 24
+      },
+      {
+        "key": "wire.settings.speech_voice_tone.choice.authoritative.label",
+        "machine_value": "authoritative",
+        "english": "authoritative",
+        "target": "assurée",
+        "source_locale": "fr",
+        "english_cells": 13,
+        "target_cells": 7,
+        "target_label_plus_description_cells": 34
+      },
+      {
+        "key": "wire.settings.speech_voice_expressiveness.choice.low.label",
+        "machine_value": "low",
+        "english": "low",
+        "target": "faible",
+        "source_locale": "fr",
+        "english_cells": 3,
+        "target_cells": 6,
+        "target_label_plus_description_cells": 25
+      },
+      {
+        "key": "wire.settings.speech_voice_expressiveness.choice.medium.label",
+        "machine_value": "medium",
+        "english": "medium",
+        "target": "moyenne",
+        "source_locale": "fr",
+        "english_cells": 6,
+        "target_cells": 7,
+        "target_label_plus_description_cells": 31
+      },
+      {
+        "key": "wire.settings.speech_voice_expressiveness.choice.high.label",
+        "machine_value": "high",
+        "english": "high",
+        "target": "élevée",
+        "source_locale": "fr",
+        "english_cells": 4,
+        "target_cells": 6,
+        "target_label_plus_description_cells": 25
+      }
+    ],
+    "assessment": "No hard per-field cap declared. warm expands 4→11 cells and low 3→6; retain correct idiom, flag for independent rendered narrow-width check. All French labels are 5–11 cells. Label + two-space + description figures exclude indentation, choice marker and default marker and are not full-row widths. Actual settings_view.py:3947 truncates to available row width with ellipsis; choice rows do not wrap. No claim of visual fit."
+  },
+  "controls": {
+    "tested": [
+      "real config.yml language: fr via config_value/resolve_language",
+      "settings_io live registry localized choices 8/8",
+      "tr_record 8/8 source_locale fr",
+      "live locale refresh fr→en→fr",
+      "LOP_I18N=0 resolves English",
+      "Exact eight-key diff coverage vs 4128f2a2; no added/removed target keys; unchanged descriptions 8/8",
+      "English/French scoped key order equality; all target keys/order unchanged from base",
+      "No placeholder/markup/plural/control tokens in eight labels; parity 8/8"
+    ],
+    "not_run": [
+      "Pseudo-localization",
+      "Rendered TUI/layout, screenshots, narrow terminal overflow, animation or settled-frame checks (independent QA later)",
+      "Native/browser/mobile/device paths",
+      "Automated test suites or full i18n gate"
+    ],
+    "probe_setup_corrections": [
+      "Initial overbroad full catalogue order assertion failed: all 895 key sets match, target ordering is unchanged from base; scoped eight-key order passes. Not introduced by this contribution.",
+      "Initial synthetic config incorrectly put language at YAML root; corrected to values.language: fr per production config reader. All reported runtime controls ran successfully with the corrected real config file."
+    ]
+  },
+  "evidence_file": "/Users/damian/.local-operator/sessions/6119a75e58af/scratchpad/audit-fr-evidence.json",
+  "probe_file": "/Users/damian/.local-operator/sessions/6119a75e58af/scratchpad/audit_fr.py"
+}

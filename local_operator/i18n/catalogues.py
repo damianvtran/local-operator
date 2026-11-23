@@ -168,6 +168,11 @@ DEFERRED_NAMESPACES: dict[str, str] = {
     "wire.settings.keymap": (
         "hotkey row labels/help rendered by settings_io._t as plain label/help strings"
     ),
+    "wire.settings.transcript_display": (
+        "transcript layout row label/help and its two choice labels/descriptions "
+        "rendered by settings_io._t as plain strings; the slash command reuses the "
+        "rendered label as a receipt, never a code"
+    ),
     "wire.language_receipts": (
         "the /language receipts printed by tui/app.py and returned as finished "
         "text by session/runtime/serving.py; no envelope identity is sent"
@@ -247,6 +252,46 @@ DEFERRED_NAMESPACES: dict[str, str] = {
         "by providers/bedrock/login.py, providers/bedrock/sso_login.py, "
         "providers/auth_cli.py, server/utils/desktop_auth.py and tui/app.py; "
         "callbacks and operation snapshots carry finished text, never a catalogue key"
+    ),
+    # Deferred rather than raising the eager total ceiling (PR #4356): with
+    # these four keys hi's eager total reached 78,943 B against
+    # EAGER_TOTAL_MAX_BYTES (77,824 B), and no client resolves one of them.
+    # The failover notice is rendered by ``sign_in_required_text`` and handed
+    # to every host as a finished NoticeEvent ``text`` (no ``code``); the
+    # ``lop login-status`` / ``/login status`` state word is rendered by
+    # ``_sign_in_required_state`` into a plain line.
+    "wire.providers.reauth": (
+        "Google sign-in recovery notice and login-status state words rendered "
+        "in-process: providers/failover.py::sign_in_required_text (render_record) "
+        "and providers/auth_cli.py::_sign_in_required_state (render_resolved); "
+        "the session notice and the login-status line carry finished text, never "
+        "a catalogue key"
+    ),
+    # Deferred rather than raising the eager total ceiling (PR #4349, merge gate
+    # run 44849201008): adding mcp_ready_timeout_invalid took hi's eager total to
+    # 77,924 B, 100 B past EAGER_TOTAL_MAX_BYTES (77,824 B); this namespace alone
+    # is 5,603 B in hi. No client resolves one of its keys: the SDK refusals are
+    # rendered in the EMBEDDING process by ``spec_refusal_text`` (active locale)
+    # and raised as a one-string SessionSpecError with no code attribute, so
+    # nothing a desktop/phone client loads at startup ever needs this copy.
+    "wire.errors.sdk_spec": (
+        "SDK specification refusals rendered in-process by session/spec.py and "
+        "sdk.py through spec_refusal_text (active locale) and raised as a "
+        "one-string SessionSpecError; the exception carries finished text, never "
+        "a catalogue key"
+    ),
+    # Deferred rather than raising the eager total ceiling (PR #4297, merge gate
+    # run 44928980132): this namespace's 22 keys took hi's eager total to
+    # 78,277 B against EAGER_TOTAL_MAX_BYTES (77,824 B); it is 3,805 B in hi.
+    # No client resolves one of its keys: ``ask_question`` renders the consent
+    # card in-process and the integrations tool files the finished question,
+    # option labels and descriptions as plain strings (the affirm/decline labels
+    # are then matched as text), so no startup surface needs this copy.
+    "wire.team_integrations": (
+        "Team Integrations consent-card copy rendered in-process by "
+        "team_bridge/integrations.py::ask_question; the integrations tool files "
+        "the finished question and option labels as plain strings, never a "
+        "catalogue key"
     ),
 }
 

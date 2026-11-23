@@ -287,6 +287,14 @@ async def test_the_queued_row_stops_saying_composing_the_moment_dictation_ends()
         # is what they reported for thirty to sixty minutes. Compared on THE
         # ROW, not on the whole frame: the frame also carries the status bar's
         # own clock and spinner, which tick for their own reasons.
+        #
+        # EXACT bytes, and a settle frame first. The one thing that legitimately
+        # changes a row between arrival and a breath later is the fold's first
+        # derive re-fitting it into the step it now belongs to; asking after
+        # that frame is what makes the padded row a fair baseline, and once it
+        # is taken nothing may move — not even the padding (F9: the earlier
+        # word-normalised comparison could not tell a re-pad from a tick).
+        await _parked(pilot)
         before = _rows_for(app, "wake")
         await asyncio.sleep(1.1)
         await _parked(pilot)
@@ -425,11 +433,17 @@ async def test_a_never_run_call_settles_when_the_verdict_exists() -> None:
 
         await turn.finish()
         # Turn death is now a no-op for this row: it has an outcome, and the
-        # retirement pass only touches cards that are still live.
+        # retirement pass only touches cards that are still live. Compared on
+        # the row's WORDS: the settled turn re-derives in the next frame and the
+        # ledger lane can re-fit around the fold's step, which moves the
+        # right-aligned status column without changing what the row says.
         app.post_message(TurnBoundaryEnd())
         await _parked(pilot)
         assert wake_cards[0].state == "error"
-        assert [row for row in _rows_for(app, "wake") if "never sent" in row] == wake_rows
+        after = [row for row in _rows_for(app, "wake") if "never sent" in row]
+        assert [" ".join(row.split()) for row in after] == [
+            " ".join(row.split()) for row in wake_rows
+        ]
 
 
 @pytest.mark.asyncio

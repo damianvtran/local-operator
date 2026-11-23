@@ -29,5 +29,9 @@
   "wire.session_status.delegating_jobs": "{count, plural, other {#个任务运行中}}",
   "wire.session_status.delegating_running": "{count, plural, other {#个子智能体运行中}}",
   "wire.session_status.delegating_queued": "{count, plural, other {#个子智能体排队中}}",
-  "wire.session_status.delegating_queued_addend": "{count, plural, other {#个排队中}}"
+  "wire.session_status.delegating_queued_addend": "{count, plural, other {#个排队中}}",
+  "wire.session_status.duration_seconds": "{count, number}秒",
+  "wire.session_status.duration_minutes": "{count, number}分钟",
+  "wire.session_status.duration_hours_minutes": "{hours, number}小时{minutes, number}分",
+  "wire.session_status.duration_days_hours": "{days}天{hours, number}小时"
 }

@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "tui.tool_card.extra",
+  "history_sha256": "0873ed4044c3792766f412bb237330a8b29973a23af1b04ebb0fe28dea6de12e",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "tui.tool_card.extra",
+      "source_sha256": "a89883a2ea4462b720f39ec853b5569904920da2a7ca72f98855d28f19f8bd2c",
+      "context_sha256": "ef227e6333498cd9cfb4a82a1e4e8038e716264040cf0da0440b7721f5911b45",
+      "target_sha256": "9532e80728937be13fee32176d18ad380b6a3bddadb6600847fe60d93e3871a9",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator')",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-21",
+        "provenance": "identity and model as supplied in the audit brief; translator instance not independently observed by the auditor"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent, label extra-audit-hi), not the translator; did not edit values",
+        "session": "4750be73fa37",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-21",
+        "result": "clean-with-findings",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 1
+        },
+        "finding_ids": [
+          "H1"
+        ],
+        "fallback_used": true,
+        "fallback_detail": "session primary openai/gpt-6.1-sol hit quota HTTP 429 after the first setup command; harness descended to anthropic/claude-opus-5-5, which performed the whole semantic audit. Same model as the translator: agent-independent, not model-independent.",
+        "independent_from_translator": true,
+        "actual_model_source": "harness [model switch] notices in the auditor session",
+        "pinned_model": "openai/gpt-6.1-sol"
+      },
+      "status": "passed",
+      "note": "Independent full audit (round 1, te1) of the new tui.tool_card.extra namespace (16 keys), source commit 37892ab97f46 (rebased 690dc589139e, catalogue bytes unchanged). Auditor 4750be73fa37 pinned openai/gpt-6.1-sol, served by anthropic/claude-opus-5-5 as a disclosed quota fallback (same model as the translator; independence by separate agent instance only). Verdict clean-with-findings: 0 blocker, 0 major, 0 minor, 1 nit (H1). target_sha256 re-derived against the committed file at ledger-write time. Record: i18n/audits/evidence/hi/tui.tool_card.extra/te1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/hi/tui.tool_card.extra/te1/record.json",
+      "round": "te1"
+    }
+  ]
+}

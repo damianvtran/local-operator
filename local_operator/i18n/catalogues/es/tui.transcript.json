@@ -15,5 +15,7 @@
   "tui.transcript.group.steered": "{count, plural, one {{label} redirección} many {{label} redirecciones} other {{label} redirecciones}}",
   "tui.transcript.hub.reply_requested": "Respuesta solicitada",
   "tui.transcript.hub.steered": "Redirigido",
-  "tui.transcript.hub.from": "De {identity}"
+  "tui.transcript.hub.from": "De {identity}",
+  "tui.transcript.jump_to_latest": "Ir a lo más reciente",
+  "tui.transcript.jump_to_latest.short": "Reciente"
 }

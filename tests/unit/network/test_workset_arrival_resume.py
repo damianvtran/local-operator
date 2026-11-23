@@ -30,7 +30,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.network import mobility
+from local_operator.network import mobility, workset
 from local_operator.session.runtime.inbox import peek_inbox
 from tests.unit.network.test_mobility import (  # noqa: F401 — `devices` is a fixture
     SESSION,
@@ -132,6 +132,10 @@ def test_the_note_names_the_worktree_and_the_device_that_kept_it(
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     source = _session(pair, monkeypatch, ago_s=10)
     point_session_at(source, rig.feat)
+    # The note's "NOT on this device" sentence is the OLDER-destination arm: a device
+    # speaking working-set protocol 1 is never sent the files (PR B carries them to a
+    # protocol-2 destination, and the note then says "restored on this device").
+    monkeypatch.setattr(workset, "WORKSET_TRANSFER_VERSION", 1)
     digest = _move(server_b, monkeypatch, to="local", dry_run=True)["working_set"]["scope_digest"]
 
     moved = _move(server_b, monkeypatch, to="local", confirm_working_set=digest)

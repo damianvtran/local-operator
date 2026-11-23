@@ -1,0 +1,4 @@
+{"audit":"tui.settings_view.chrome","locale":"zh-CN","round":2,"auditor":"translation-auditor","model":"anthropic/claude-opus-5-5 (fallback; primary openai/gpt-6.1-sol hit quota 429)","worktree":"~/local-operator/.worktrees/i18n-settings-leftovers","head":"183ed01e92cc",
+"sha256":{"en":"2e04f79550d0b09cd262c32850a31c20d5dec2b88b09facd2369d967bd5ee930","en_context":"4d981004bb67852a6b4f8420ecb6eabba2f6c2c3d2328780830bcb4313dc8b40","zh-CN":"758205a6637717aedf89f3214e44480752c73a22ff5cf49f5ecae79e04b9440b"},
+"keys_read":49,"keys_over_cap":0,"placeholder_set_mismatches":0,"check_py_catalogues_only":"0 problem(s), no zh-CN lines",
+"findings":[],"verdict":"clean"}

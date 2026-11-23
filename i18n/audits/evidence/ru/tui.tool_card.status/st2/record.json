@@ -1,0 +1,59 @@
+{
+  "locale": "ru",
+  "namespace": "tui.tool_card.status",
+  "source_sha256": "521c2289a94bca69288753c2ac7fbd73544ff823669c6e5422d98c8e1f7bba93",
+  "target_sha256": "b78c7f08ecbf3f603a6e39304dd9e3b463209a438aaf9e296024e364be496aa3",
+  "context_sha256": "33fdaa44400ced67d6326a594e024fc38eaeb2865562d2b2b4d8dfc5b2a81bd0",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "provenance_source": "delegating task; not independently inferred",
+    "date": "2026-11-20"
+  },
+  "auditor": {
+    "agent": "translation-auditor (status-reaudit-ru)",
+    "session": "b175c1d5b6e2",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "fallback": "none",
+    "result": "clean",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "independent_from_translator": true,
+    "scope": "Round 2: send.receipt_reused only, plus composition with send.no_new_wake; 18 English/Russian pairs read for namespace context, not a fresh full-namespace audit"
+  },
+  "status": "passed",
+  "head": "66c87c0755e264db07ea375c67242cffbe302bc0",
+  "round": 2,
+  "keys_reaudited": [
+    "tui.tool_card.status.send.receipt_reused"
+  ],
+  "composition_neighbours": [
+    "tui.tool_card.status.send.no_new_wake"
+  ],
+  "keys_read": 18,
+  "checks": [
+    {
+      "key": "tui.tool_card.status.send.receipt_reused",
+      "en": "receipt reused",
+      "ru": "квитанция та же",
+      "arguments": [],
+      "rendered": "квитанция та же",
+      "cells": 15,
+      "maxCells": 16,
+      "pass": true
+    },
+    {
+      "key": "tui.tool_card.status.send.no_new_wake",
+      "en": "no new wake",
+      "ru": "не пробуждали",
+      "arguments": [],
+      "rendered": "не пробуждали",
+      "cells": 13,
+      "maxCells": 14,
+      "pass": true
+    }
+  ],
+  "findings": [],
+  "note": "Changed label is idiomatic terse Russian: квитанция та же (the same receipt), accurately indicating reuse of the previous receipt in the duplicate-suppressed branch. Composition квитанция та же · не пробуждали is coherent and lower-case, with no address-form conflict, English residue, placeholders, markup, plurals, or direction-sensitive runs. 15 cells versus English 14 and maxCells 16; neighbour 13/14. Consumer tool_card.py:1018-1038 confirms duplicate suppression, first-position label and no-new-wake composition. No over-cap or exactly-at-cap case for the changed key. No rendered-frame claim; runtime string rendering and cell geometry verified. This delta-only receipt does not independently renew approval of unchanged namespace keys; retain round-1 evidence."
+}

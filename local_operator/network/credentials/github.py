@@ -254,6 +254,27 @@ SOURCE_GH = "gh"
 #: the ladder forbids.
 SOURCE_UNREADABLE = "unreadable"
 
+#: What a listing SHOWS for the gh arm (lend honesty, 2026-11-19). ``GITHUB_KIND``
+#: stays the machine ``kind`` — it is the placement row's wire type, the offer
+#: table's key and the relay's grant filter, so renaming it would break those
+#: readers — but printing ``github-app`` beside a lend served from a gh login
+#: told the operator an App-scoped credential was travelling when gh's token is
+#: the account's own broad user token, fenced to the designated repositories
+#: only by the git-side checks. The App and token arms keep ``GITHUB_KIND`` as
+#: their label: that is exactly what they showed before.
+GH_SOURCE_LABEL = "gh CLI login (full account)"
+
+
+def source_label(source: str) -> str:
+    """The label a listing shows for the arm ``source`` names (never a secret).
+
+    Only the gh arm reads differently; every other answer — App, token, no arm,
+    unreadable — keeps the row's historic ``GITHUB_KIND`` so nothing that was
+    honest before changes its words.
+    """
+    return GH_SOURCE_LABEL if source == SOURCE_GH else GITHUB_KIND
+
+
 #: How much of ``gh``'s hosts file one read may take. gh writes a few hundred
 #: bytes; the bound exists so a pathological file cannot make the lender read
 #: it wholesale — and an oversized file is refused BY NAME, never parsed
@@ -1477,6 +1498,17 @@ def resolve_source(root: Path | None = None, *, home: Path | None = None) -> str
     PRESENCE, not usability, for each arm it does resolve: a configured but
     broken arm RESOLVES so the serve-time refusal can name it. THE ONE ORDER:
     the lender serves with this, and the receipts name the arm with it.
+
+    SELECTION ORDER, first match wins (narrowest credential first):
+
+    1. ``SOURCE_APP`` — the ``APP_SECRET_NAME`` entry in the encrypted store;
+    2. ``SOURCE_TOKEN`` — the ``TOKEN_SECRET_NAME`` (PAT) entry in that store;
+    3. ``SOURCE_GH`` — a ``gh`` CLI login for github.com (:func:`gh_login_present`),
+       the account's full user token: the widest arm, so the listing labels it
+       :data:`GH_SOURCE_LABEL` and ``ready`` warns about it;
+    4. ``""`` — nothing to serve.
+
+    An unreadable store at step 1 or 2 answers ``SOURCE_UNREADABLE`` and stops.
     """
     app_state = _secret_state(root, APP_SECRET_NAME)
     if app_state is None:
@@ -2776,14 +2808,27 @@ def apply_grant_narrowing(outcome: Any, *, client: Any, root: Path | None = None
         return {"changed": False, "repositories": [], "error": exc.__class__.__name__}
 
 
+#: The owner-outage refusals that, with no saved access, leave a bash child with no
+#: GitHub login: ``borrowed_git_env`` reports them through ``on_refusal``. A deny,
+#: a withdrawn share or a panic is not an outage and keeps its existing copy.
+OUTAGE_REFUSALS: frozenset[str] = frozenset({"owner_offline", "owner_unreachable", "owner_busy"})
+
+
 def borrowed_git_env(
     *,
     root: Path | None = None,
     session_id: str = "",
     client: Any = None,
     on_timeout: Callable[[Any], object] | None = None,
+    on_refusal: Callable[[Any], object] | None = None,
+    hold_fallback_session_ids: tuple[str, ...] = (),
 ) -> tuple[dict[str, str], str]:
     """Fetch-on-use: ``(env, token)`` for one child, or ``({}, "")``. Never raises.
+
+    ``hold_fallback_session_ids`` are the session's ancestors in the harness's
+    task tree; while the owner is away a subagent may serve its ancestor's held
+    grant (``MeshCredentialClient._bridge_ancestor_hold``). ``on_refusal`` hears
+    an owner-outage refusal that left nothing to inject (:data:`OUTAGE_REFUSALS`).
 
     ``{}`` is every not-now answer on purpose — this runs on the bash tool's
     spawn path, and a command must never fail because a borrow could not: the
@@ -2800,18 +2845,36 @@ def borrowed_git_env(
             return {}, ""
         if not client.should_borrow(GITHUB_KEY):
             return {}, ""
-        outcome = client.request_grant_sync(GITHUB_KEY, session_id=session_id, provider=GITHUB_KEY)
+        # Only when there are ancestors, so a caller (or test double) without any
+        # keeps the exact call it always made.
+        bridge: dict[str, Any] = (
+            {"hold_fallback_session_ids": tuple(hold_fallback_session_ids)}
+            if hold_fallback_session_ids
+            else {}
+        )
+        outcome = client.request_grant_sync(
+            GITHUB_KEY, session_id=session_id, provider=GITHUB_KEY, **bridge
+        )
     except Exception:  # noqa: BLE001 — see the docstring
         return {}, ""
     token = str(getattr(outcome, "access_token", "") or "")
     if not token:
         from .types import BorrowTimeout
 
-        if isinstance(outcome, BorrowTimeout) and on_timeout is not None:
-            # A local diagnostic only. Denials, missing sinks and policy answers
-            # do not become timeouts, and nothing enters the child's environment.
+        if isinstance(outcome, BorrowTimeout):
+            if on_timeout is not None:
+                # A local diagnostic only. Denials, missing sinks and policy answers
+                # do not become timeouts, and nothing enters the child's environment.
+                try:
+                    on_timeout(outcome)
+                except Exception:  # noqa: BLE001 — diagnostics cannot break a command
+                    pass
+        elif on_refusal is not None and getattr(outcome, "code", "") in OUTAGE_REFUSALS:
+            # WHY: an outage with no saved access used to return silently, and
+            # ``gh`` then said only "set the GH_TOKEN environment variable" (remote
+            # review/QA subagents, 2026-11-21). Codes and the owner label only.
             try:
-                on_timeout(outcome)
+                on_refusal(outcome)
             except Exception:  # noqa: BLE001 — diagnostics cannot break a command
                 pass
         return {}, ""
@@ -2844,7 +2907,7 @@ def borrowed_git_env(
                 if grants is not None:
                     grants.drop(GITHUB_KEY)
                 fresh = client.request_grant_sync(
-                    GITHUB_KEY, session_id=session_id, provider=GITHUB_KEY
+                    GITHUB_KEY, session_id=session_id, provider=GITHUB_KEY, **bridge
                 )
                 fresh_token = str(getattr(fresh, "access_token", "") or "")
                 if fresh_token:
@@ -2884,6 +2947,8 @@ def lent_github_env(
     register: Callable[[str], object] | None,
     client: Any = None,
     on_timeout: Callable[[Any], object] | None = None,
+    on_refusal: Callable[[Any], object] | None = None,
+    hold_fallback_session_ids: tuple[str, ...] = (),
 ) -> tuple[dict[str, str], str]:
     """The ONE door a mesh-lent github bearer takes into a local consumer.
 
@@ -2925,6 +2990,10 @@ def lent_github_env(
         # Only when asked for: a caller (or test double) that never passes it keeps
         # the exact call it always made.
         extra: dict[str, Any] = {"on_timeout": on_timeout} if on_timeout is not None else {}
+        if on_refusal is not None:
+            extra["on_refusal"] = on_refusal
+        if hold_fallback_session_ids:
+            extra["hold_fallback_session_ids"] = tuple(hold_fallback_session_ids)
         env, token = borrowed_git_env(session_id=session_id, client=client, **extra)
     except Exception:  # noqa: BLE001 — borrowed_git_env never raises; belt and braces
         return {}, ""
