@@ -62,7 +62,7 @@ async def _sse_view(app, session_id: str, query: bytes = b""):
         await task
 
 
-async def _next_projection(view: asyncio.Queue[dict[str, Any]]) -> tuple[bytes, dict]:
+async def _next_projection(view: asyncio.Queue[dict[str, Any]]) -> tuple[bytes, dict[str, Any]]:
     frame = await view.get()
     assert frame["type"] == "http.response.body"
     body = frame["body"]
@@ -208,8 +208,8 @@ class _CommandHandle(_InlineHandle):
         self,
         text: str,
         images: list[dict[str, str]] | None = None,
-        *,
         command_id: str | None = None,
+        *,
         inline_ui: bool = False,
     ) -> str:
         if text == "busy":
@@ -220,8 +220,8 @@ class _CommandHandle(_InlineHandle):
         self,
         text: str,
         images: list[dict[str, str]] | None = None,
-        *,
         command_id: str | None = None,
+        *,
         inline_ui: bool = False,
     ) -> str:
         return await self._record("steer", text, command_id=command_id, inline_ui=inline_ui)

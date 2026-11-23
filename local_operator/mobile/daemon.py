@@ -7996,7 +7996,8 @@ def build_app(daemon: MobileDaemon):
                     if inline_ui:
                         # Enrich at the last hop so queued ordinary repaints
                         # can't erase freshly seeded or newer row deltas.
-                        owner = daemon.table.entries.get(frame.get("pid"))
+                        pid = frame.get("pid")
+                        owner = daemon.table.entries.get(pid) if isinstance(pid, int) else None
                         if owner is not None and owner.record.session_id == session_id:
                             frame = _inline_ui_frame(frame, owner)
                     yield _projection_live_event(client_frame(stamp_temporary(frame)), have)

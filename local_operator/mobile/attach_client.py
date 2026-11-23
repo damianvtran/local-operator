@@ -2370,14 +2370,15 @@ class AttachClient:
         input_path: str = "",
         inline_ui: bool = False,
     ) -> str:
-        fields = self._annotation_fields(input_mode, input_path)
+        fields: dict[str, Any] = dict(self._annotation_fields(input_mode, input_path))
+        if inline_ui is True:
+            fields["inline_ui"] = True
         return await self._request(
             "prompt",
             command_id=command_id or str(uuid.uuid4()),
             text=text,
             images=list(images or []),
             **fields,
-            **({"inline_ui": True} if inline_ui else {}),
         )
 
     async def send_command(self, command: ContinuationCommand, *, streaming: bool = False) -> str:
@@ -2435,14 +2436,15 @@ class AttachClient:
         input_path: str = "",
         inline_ui: bool = False,
     ) -> str:
-        fields = self._annotation_fields(input_mode, input_path)
+        fields: dict[str, Any] = dict(self._annotation_fields(input_mode, input_path))
+        if inline_ui is True:
+            fields["inline_ui"] = True
         return await self._request(
             "steer",
             command_id=command_id or str(uuid.uuid4()),
             text=text,
             images=list(images or []),
             **fields,
-            **({"inline_ui": True} if inline_ui else {}),
         )
 
     async def desktop_watch(self, *, visible: bool, can_notify: bool) -> str:
