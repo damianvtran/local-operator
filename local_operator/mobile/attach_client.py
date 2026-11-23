@@ -75,6 +75,7 @@ from local_operator.mobile.types import (
 from local_operator.operator.keychain import KeyBackendError
 from local_operator.operator.sign import effect_copy, sign_challenge
 from local_operator.paths import config_dir
+from local_operator.session.inline_ui_text import INLINE_UI_V1
 from local_operator.session.runtime.registry import scan
 from local_operator.session.runtime.types import (
     ASK_ATTACHMENTS_CAPABILITY,
@@ -1134,8 +1135,11 @@ class AttachClient:
         surface: str = "terminal",
         on_operator_prompt: Callable[[str], None] | None = None,
         origin: str = "",
+        inline_ui: bool = False,
     ) -> None:
         self._surface = surface
+        self._wants_inline_ui = inline_ui
+        self._inline_ui_supported = False
         #: ADR 0009: ``"mobile"`` when this client carries the PHONE's human
         #: input (declared by the mobile daemon only), else ``""``. Sent as the
         #: auth frame's ``origin`` key, which the owner reads once at auth time
@@ -1456,6 +1460,12 @@ class AttachClient:
             auth["cwd_adoption"] = True
         if self._surface == "desktop":
             auth["surface"] = "desktop"
+        # The caller declares it understands v1; the selected record decides
+        # whether this authenticated connection can carry it. An old runtime
+        # gets neither a new auth field nor a new continuation field.
+        self._inline_ui_supported = self._wants_inline_ui and INLINE_UI_V1 in record.capabilities
+        if self._inline_ui_supported:
+            auth["inline_ui"] = True
         if self._origin == "mobile":
             # ADR 0009. Additive: an owner from before the key ignores it, and
             # the mesh relay's ``AUTH_FIELDS`` never forwards it, so only a dial
@@ -2210,6 +2220,12 @@ class AttachClient:
         # private keyword, popped so it never reaches the wire.
         operator_ask = bool(fields.pop("_operator_ask", False))
         fields = self._strip_unsupported_annotation(fields)
+        if (
+            op not in ("prompt", "steer")
+            or not self._inline_ui_supported
+            or fields.get("inline_ui") is not True
+        ):
+            fields.pop("inline_ui", None)
         # FITTED BEFORE THE FUTURE IS REGISTERED, because this can raise
         # `OversizedRequest` and a future parked in `_pending` for a request
         # that was never written is never resolved by anything: it sits there
@@ -2352,13 +2368,16 @@ class AttachClient:
         images: list[dict[str, str]] | None = None,
         input_mode: str = "",
         input_path: str = "",
+        inline_ui: bool = False,
     ) -> str:
+        fields = self._annotation_fields(input_mode, input_path)
         return await self._request(
             "prompt",
             command_id=command_id or str(uuid.uuid4()),
             text=text,
             images=list(images or []),
-            **self._annotation_fields(input_mode, input_path),
+            **fields,
+            **({"inline_ui": True} if inline_ui else {}),
         )
 
     async def send_command(self, command: ContinuationCommand, *, streaming: bool = False) -> str:
@@ -2370,6 +2389,7 @@ class AttachClient:
         """
         if command.session_id != self._session_id:
             raise ValueError("command belongs to another conversation")
+        inline_ui = {"inline_ui": True} if command.inline_ui else {}
         if streaming:
             return await self.steer(
                 command.text,
@@ -2377,6 +2397,7 @@ class AttachClient:
                 images=command.images,
                 input_mode=command.input_mode,
                 input_path=command.input_path,
+                **inline_ui,
             )
         try:
             return await self.prompt(
@@ -2385,6 +2406,7 @@ class AttachClient:
                 images=command.images,
                 input_mode=command.input_mode,
                 input_path=command.input_path,
+                **inline_ui,
             )
         except RuntimeError as exc:
             # Local import, matching this module's other `session.errors` use:
@@ -2400,6 +2422,7 @@ class AttachClient:
                 images=command.images,
                 input_mode=command.input_mode,
                 input_path=command.input_path,
+                **inline_ui,
             )
 
     async def steer(
@@ -2410,13 +2433,16 @@ class AttachClient:
         images: list[dict[str, str]] | None = None,
         input_mode: str = "",
         input_path: str = "",
+        inline_ui: bool = False,
     ) -> str:
+        fields = self._annotation_fields(input_mode, input_path)
         return await self._request(
             "steer",
             command_id=command_id or str(uuid.uuid4()),
             text=text,
             images=list(images or []),
-            **self._annotation_fields(input_mode, input_path),
+            **fields,
+            **({"inline_ui": True} if inline_ui else {}),
         )
 
     async def desktop_watch(self, *, visible: bool, can_notify: bool) -> str:
@@ -3293,6 +3319,7 @@ async def continue_command(
             input_mode=command.input_mode,
             input_path=command.input_path,
             origin=origin,
+            **({"inline_ui": True} if command.inline_ui else {}),
         ),
         deadline_s=deadline_s,
         on_projection=on_projection,

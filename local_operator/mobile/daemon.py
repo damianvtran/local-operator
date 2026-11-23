@@ -71,6 +71,7 @@ if TYPE_CHECKING:
     from starlette.responses import JSONResponse, Response
 
     from local_operator.mobile.attach_client import AttachClient
+    from local_operator.mobile.projection import LiveInlineUiEnvelope
     from local_operator.mobile.push_transport import PushLane
     from local_operator.mobile.push_worker import PushWorker
     from local_operator.providers.auth_store import StoredCredential
@@ -120,6 +121,7 @@ from local_operator.mobile.transfer_receipts import (
     Unclaimed,
 )
 from local_operator.mobile.types import (
+    PROJECTION_TRANSCRIPT_LIMIT,
     PROTOCOL_VERSION,
     SessionProjection,
     SessionRecord,
@@ -127,6 +129,7 @@ from local_operator.mobile.types import (
 )
 from local_operator.network.types import MeshRefusal
 from local_operator.session.creation import session_created_at
+from local_operator.session.inline_ui_text import INLINE_UI_V1
 from local_operator.session.media import SUPPLEMENT_FILE_TYPES as _SUPPLEMENT_FILE_TYPES
 from local_operator.session.media import SUPPLEMENT_JOB as _SUPPLEMENT_JOB
 from local_operator.session.runtime import registry
@@ -553,6 +556,11 @@ class SessionEntry:
     def __init__(self, record: SessionRecord) -> None:
         self.record = record
         self.projection: SessionProjection | None = None
+        # Runtime frames carry row deltas, not replacement snapshots. Keep
+        # them beside the projection: a row and its sidecar can arrive in either
+        # order, and neither changes the installed-client transcript shape.
+        self._live_inline_ui: dict[str, LiveInlineUiEnvelope | None] = {}
+        self._inline_ui_seeded = False
         self.writer: asyncio.StreamWriter | None = None
         #: The operator handshake's state for THIS connection (issue #1310). The
         #: relay is a legitimate console exactly when it spawned the runtime —
@@ -578,6 +586,63 @@ class SessionEntry:
         self.subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
         # Monotonic request id for control frames we originate.
         self._req_seq = 0
+
+    def live_inline_ui(self) -> dict[str, LiveInlineUiEnvelope]:
+        from local_operator.mobile.projection import project_live_inline_ui
+
+        projection = self.projection
+        if projection is None or projection.session_id != self.record.session_id:
+            return {}
+        return project_live_inline_ui(projection, self._live_inline_ui)
+
+    def remember_inline_ui(self, messages: dict[str, LiveInlineUiEnvelope | None]) -> bool:
+        overlay = self._live_inline_ui
+        changed = False
+        for row_id, envelope in messages.items():
+            if row_id in overlay and overlay[row_id] == envelope:
+                continue
+            overlay.pop(row_id, None)
+            overlay[row_id] = envelope
+            changed = True
+        # Keep the display window plus one unpublished row (a sidecar may
+        # win the race with the projection which first adds that row).
+        while len(overlay) > PROJECTION_TRANSCRIPT_LIMIT + 1:
+            overlay.pop(next(iter(overlay)))
+        return changed
+
+    async def seed_inline_ui(self) -> None:
+        """Restore completed overlays when a rich viewer joins an existing dial."""
+        from local_operator.mobile.projection import durable_inline_ui, read_live_inline_ui
+
+        projection = self.projection
+        if self._inline_ui_seeded or projection is None:
+            return
+        needed = {
+            row.id for row in projection.transcript
+            if row.kind == "assistant" and row.final and row.id not in self._live_inline_ui
+        }
+        if not needed:
+            return
+        writer = self.writer
+
+        def recover() -> dict[str, LiveInlineUiEnvelope | None]:
+            durable = _durable_projection(self.record.session_id)
+            if durable is None:
+                return {}
+            return read_live_inline_ui(durable_inline_ui(
+                row for row in durable.transcript if row.id in needed
+            ).get("inline_ui"))
+
+        messages = await asyncio.to_thread(recover)
+        if self.writer is not writer or self.ended:
+            return
+        # This fold ran off-loop. A newer live event (including a tombstone)
+        # beats the journal snapshot, so only fill still-unknown ids.
+        self._inline_ui_seeded = True
+        self.remember_inline_ui({
+            row_id: envelope for row_id, envelope in messages.items()
+            if row_id not in self._live_inline_ui
+        })
 
     def next_req(self) -> int:
         self._req_seq += 1
@@ -3155,7 +3220,10 @@ def _strip_unsupported_annotation(record: _CapabilityCarrier, frame: dict[str, A
 async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
     """Open (or re-open) the control socket to one registrant and pump its
     frames until the connection dies. One task per session."""
+    from local_operator.mobile.projection import read_live_inline_ui
+
     record = entry.record
+    inline_ui = INLINE_UI_V1 in record.capabilities
     try:
         # Match the registrant's 1 MB line limit. The default 64 KB
         # StreamReader cap is what made a transcript push raise
@@ -3213,6 +3281,9 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
             "locality": "remote",
             "origin": "mobile",
         }
+        if inline_ui:
+            # This is a local viewer declaration, not phone/HTTP negotiation.
+            auth["inline_ui"] = True
         if entry.operator_nonce:
             # A nonce, never the capability: see ``harness/approval._proof``.
             auth["operator_nonce"] = entry.operator_nonce
@@ -3303,6 +3374,11 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
                     daemon.table.invalidate_summaries_cache()
                 daemon.table.notify_list_changed()
                 _fan_out(entry, daemon)
+            elif op == "inline_ui" and inline_ui and entry.ready.is_set():
+                if entry.remember_inline_ui(read_live_inline_ui(frame.get("data"))):
+                    # The row may already be on the phone; no repaint is owed
+                    # to a legacy viewer when only its optional overlay changed.
+                    _fan_out(entry, daemon, inline_ui_only=True)
             # acks/errors are matched by req id in _request's future map.
             pending = daemon._pending_reqs.pop((record.pid, frame.get("req")), None)
             if pending is not None and not pending.done():
@@ -3313,6 +3389,8 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
         if entry.writer is writer:
             entry.writer = None
             entry.ready.clear()
+            entry._live_inline_ui.clear()
+            entry._inline_ui_seeded = False
         entry.next_dial_at = time.monotonic() + REDIAL_BACKOFF_S
         entry.degraded = not entry.ended
         _mirror_dial_health(entry)
@@ -3927,7 +4005,9 @@ class _UnavailablePage(list[Any]):
         self.unavailable = reason
 
 
-def _history_response(page: list[Any], has_more: bool) -> dict[str, Any]:
+def _history_response(
+    page: list[Any], has_more: bool, *, inline_ui: bool = False
+) -> dict[str, Any]:
     """The wire body for one history page, with the honest emptiness beside it.
 
     ``unavailable`` is ADDITIVE and present only when the page is empty for a
@@ -3941,6 +4021,10 @@ def _history_response(page: list[Any], has_more: bool) -> dict[str, Any]:
     reason = getattr(page, "unavailable", "")
     if reason:
         body["unavailable"] = reason
+    if inline_ui:
+        from local_operator.mobile.projection import durable_inline_ui
+
+        body.update(durable_inline_ui(page))
     return body
 
 
@@ -4371,7 +4455,32 @@ def _range_window(header: str, size: int) -> tuple[int, int] | Literal["unsatisf
     return (size - length, size - 1)
 
 
-def _fan_out(entry: SessionEntry, daemon: "MobileDaemon | None" = None) -> None:
+def _inline_ui_frame(frame: dict[str, Any], entry: SessionEntry) -> dict[str, Any]:
+    from local_operator.session.runtime.inline_ui_egress import _MAX_SIDECAR_BYTES
+
+    messages = entry.live_inline_ui()
+    if not messages:
+        return frame
+    # As with the durable page, bound the optional data without clipping its
+    # exact text or widget offsets. Prefer the visible tail when both won't fit.
+    visible: dict[str, LiveInlineUiEnvelope] = {}
+    envelope = {"version": 1, "messages": visible}
+    used = len(json.dumps(envelope, separators=(",", ":")))
+    for row in reversed(frame["transcript"]):
+        row_id = row["id"]
+        if row["kind"] != "assistant" or row_id not in messages:
+            continue
+        size = len(json.dumps({row_id: messages[row_id]}, separators=(",", ":"))) - 2
+        size += bool(visible)  # comma between entries
+        if used + size <= _MAX_SIDECAR_BYTES:
+            visible[row_id] = messages[row_id]
+            used += size
+    return {**frame, "inline_ui": envelope} if visible else frame
+
+
+def _fan_out(
+    entry: SessionEntry, daemon: "MobileDaemon | None" = None, *, inline_ui_only: bool = False
+) -> None:
     """Push a repaint to durable session viewers, never one pid generation."""
     if entry.projection is None:
         return
@@ -4387,6 +4496,10 @@ def _fan_out(entry: SessionEntry, daemon: "MobileDaemon | None" = None) -> None:
         # ``_projection_frame`` is recomputed from its reference at the next
         # serialization, so skipping it here loses nothing.
         return
+    if inline_ui_only:
+        queues = {queue for queue in queues if isinstance(queue, _InlineUiProjectionQueue)}
+        if not queues:
+            return
     frame = _projection_frame(entry.projection)
     for queue in queues:
         while True:
@@ -4417,6 +4530,10 @@ class _LatestProjectionQueue(asyncio.Queue[dict[str, Any]]):
             if previous.get("version", 0) > item.get("version", 0):
                 item = previous
         super().put_nowait(item)
+
+
+class _InlineUiProjectionQueue(_LatestProjectionQueue):
+    """A phone viewer that opted in to an overlay on its projection snapshots."""
 
 
 def _latest_projection_frame(
@@ -5922,6 +6039,15 @@ class MobileDaemon:
             # — the same seam, because this is the one place a phone-shaped frame
             # becomes a control frame.
             _strip_unsupported_annotation(entry.record, frame)
+        # The declaration is per send and is not authority. Only the selected
+        # owner can accept it, on a connection that negotiated this capability.
+        # A busy prompt and its same-id steer fallback keep the same declaration.
+        if (
+            op not in ("prompt", "steer")
+            or frame.get("inline_ui") is not True
+            or INLINE_UI_V1 not in entry.record.capabilities
+        ):
+            frame.pop("inline_ui", None)
         proof = _operator_request_proof(entry, op, fields)
         if proof is not None:
             frame["operator_cap"] = proof
@@ -7746,7 +7872,8 @@ def build_app(daemon: MobileDaemon):
         # pull — while the RELEASE is owned by both callers below, because a
         # cancellation parked on ``http.response.start`` never starts the
         # iterator and so never runs its ``finally``.
-        queue: asyncio.Queue[dict[str, Any]] = _LatestProjectionQueue()
+        inline_ui = request.query_params.get("inline_ui") == "1"
+        queue = _InlineUiProjectionQueue() if inline_ui else _LatestProjectionQueue()
 
         def release() -> None:
             """Detach this stream's queue, from whichever close arrives first.
@@ -7800,6 +7927,10 @@ def build_app(daemon: MobileDaemon):
                     # Notification routing is distinct from idle readiness;
                     # mixed-version registrants may reject this optional op.
                     daemon.notify_watch_transition(live.record.pid, watching=True)
+                if inline_ui and live is not None:
+                    await live.seed_inline_ui()
+                    # The off-loop journal read may have overlapped a handoff.
+                    live = _entry_for_session(daemon, session_id)
                 projection = live.projection if live is not None else None
                 if projection is None:
                     # Stamped fold: a clear that lands while the fold is in
@@ -7833,9 +7964,18 @@ def build_app(daemon: MobileDaemon):
                     # (``marked_at``/``deletes_at``), not a countdown, so it is
                     # stable between repaints; a mark, Keep or activity that
                     # moves it is a real change the phone must receive in full.
-                    yield _projection_seed_event(
-                        client_frame(stamp_temporary(_projection_frame(projection))), have
-                    )
+                    frame = _projection_frame(projection)
+                    if inline_ui:
+                        if live is not None and live.projection is projection:
+                            frame = _inline_ui_frame(frame, live)
+                        else:
+                            from local_operator.mobile.projection import durable_inline_ui
+
+                            visible = {row["id"] for row in frame["transcript"]}
+                            frame.update(durable_inline_ui(
+                                row for row in projection.transcript if row.id in visible
+                            ))
+                    yield _projection_seed_event(client_frame(stamp_temporary(frame)), have)
                     sent_at = loop.time()
                 while True:
                     try:
@@ -7852,10 +7992,14 @@ def build_app(daemon: MobileDaemon):
                         wait = PROJECTION_FRAME_INTERVAL_S - (loop.time() - sent_at)
                         if wait > 0:
                             await asyncio.sleep(wait)
-                    yield _projection_live_event(
-                        client_frame(stamp_temporary(_latest_projection_frame(queue, frame))),
-                        have,
-                    )
+                    frame = _latest_projection_frame(queue, frame)
+                    if inline_ui:
+                        # Enrich at the last hop so queued ordinary repaints
+                        # can't erase freshly seeded or newer row deltas.
+                        owner = daemon.table.entries.get(frame.get("pid"))
+                        if owner is not None and owner.record.session_id == session_id:
+                            frame = _inline_ui_frame(frame, owner)
+                    yield _projection_live_event(client_frame(stamp_temporary(frame)), have)
                     sent_at = loop.time()
             finally:
                 await _cleanup_stream(release)
@@ -8992,7 +9136,9 @@ def build_app(daemon: MobileDaemon):
                 {"error": "history cursor not found", "reset": True, "reason": reset},
                 status_code=409,
             )
-        return JSONResponse(_history_response(page, has_more))
+        return JSONResponse(_history_response(
+            page, has_more, inline_ui=request.query_params.get("inline_ui") == "1"
+        ))
 
     async def api_session_checkpoints(request: Request) -> Response:
         """The checkpoint manifest for one conversation: the rail's ticks.
@@ -9656,6 +9802,8 @@ def build_app(daemon: MobileDaemon):
             owner_row = await remote_row(session_id)
             if owner_row is not None:
                 remote_op = body.pop("op", None)
+                # Mesh has not negotiated the phone's widget egress contract.
+                body.pop("inline_ui", None)
                 if not isinstance(remote_op, str) or not remote_op:
                     return JSONResponse({"error": "invalid_op"}, status_code=422)
                 denied = _device_refusal(body.get("operator_cert"))

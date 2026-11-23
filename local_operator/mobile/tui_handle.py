@@ -212,6 +212,7 @@ class TuiSessionHandle(SessionHandle):
         # the phone continues receiving only projections. Rebound beside the
         # projection subscription on session swaps.
         self._on_event: Callable[[dict[str, Any]], None] | None = None
+        self._inline_ui_sidecars = False
         self._unsubscribe_events: Callable[[], None] | None = None
         self._unsubscribe_detail_changes: Callable[[], None] | None = None
         # Mutated only on Textual's loop, making admission atomic even though
@@ -351,7 +352,7 @@ class TuiSessionHandle(SessionHandle):
         if self._on_projection is not None:
             self.subscribe(self._on_projection)
         if self._on_event is not None:
-            self.subscribe_events(self._on_event)
+            self.subscribe_events(self._on_event, inline_ui_sidecars=self._inline_ui_sidecars)
         # The registrant outlives the session object, so two pieces of
         # per-session state must follow the swap. First, the started hook:
         # the NEW session object must get it or (on a TUI-owned record) it
@@ -511,7 +512,7 @@ class TuiSessionHandle(SessionHandle):
         return self._session().frontend_state
 
     async def subscribe_frontend(
-        self, on_update, *, display_window=False
+        self, on_update, *, display_window=False, inline_ui_sidecars: bool = False
     ):  # type: ignore[no-untyped-def]
         """Capture snapshot+subscription atomically on Textual's owner loop.
 
@@ -533,18 +534,26 @@ class TuiSessionHandle(SessionHandle):
         a 25 s freeze, so bounding it was a regression in this PR's own case.
         The budget protects callers who are waiting; nobody waits for this.
         """
+        options = {"display_window": display_window}
+        if inline_ui_sidecars:
+            options["inline_ui_sidecars"] = True
         return await self._on_app(
-            lambda: self._session().subscribe_frontend(on_update, display_window=display_window),
+            lambda: self._session().subscribe_frontend(on_update, **options),
             budget=None,
         )
 
     async def record_shell(self, command: str, result: Any) -> None:
         await self._on_app(lambda: self._session().record_shell(command, result))
 
-    async def history_page(self, before: str, anchor: str = "") -> dict[str, Any]:
-        return await self._on_app(lambda: self._session().history_page(before, anchor))
+    async def history_page(
+        self, before: str, anchor: str = "", *, inline_ui_sidecars: bool = False
+    ) -> dict[str, Any]:
+        options = {"inline_ui_sidecars": True} if inline_ui_sidecars else {}
+        return await self._on_app(lambda: self._session().history_page(before, anchor, **options))
 
-    def subscribe_events(self, on_event: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
+    def subscribe_events(
+        self, on_event: Callable[[dict[str, Any]], None], *, inline_ui_sidecars: bool = False
+    ) -> Callable[[], None]:
         """Feed serialized AgentEvents to the registrant's v4 relay.
 
         Serialization happens on the Textual/session loop where the event is
@@ -552,7 +561,14 @@ class TuiSessionHandle(SessionHandle):
         only schedules onto its own loop), so this preserves producer order
         without moving pydantic objects across threads.
         """
+        from local_operator.session.runtime.inline_ui_egress import InlineUiEvents
+
         self._on_event = on_event
+        self._inline_ui_sidecars = inline_ui_sidecars
+        # Marked output must remain safe on an old attached viewer. Sanitize
+        # at the same owner-loop seam as the serving handle even without a
+        # sidecar consumer; the runtime filters sidecars per connection.
+        projection = InlineUiEvents(sidecars=inline_ui_sidecars)
 
         def handler(event: Any) -> None:
             try:
@@ -565,7 +581,7 @@ class TuiSessionHandle(SessionHandle):
                 # bypassable by whichever host happens to own the session.
                 on_event(
                     bound_agent_end_for_wire(
-                        event.model_dump(mode="json"),
+                        projection.dump(event),
                         session_id=getattr(self._session(), "session_id", None),
                     )
                 )
@@ -583,6 +599,9 @@ class TuiSessionHandle(SessionHandle):
         text: str,
         images: list[dict[str, str]] | None = None,
         command_id: str | None = None,
+        *,
+        input_surface: str = "",
+        inline_ui: bool = False,
     ) -> str:
         if not command_id:
             raise ValueError("command_id is required")
@@ -601,8 +620,17 @@ class TuiSessionHandle(SessionHandle):
                         "message_id": command_id,
                         "admitted": admitted,
                     }
-                    if "producer_command_id" in inspect.signature(session.prompt).parameters:
+                    parameters = inspect.signature(session.prompt).parameters
+                    if "producer_command_id" in parameters:
                         fields["producer_command_id"] = command_id
+                    # The registrant derives the surface from authenticated
+                    # connection facts. Forward it with the declaration;
+                    # otherwise the in-process default mistakes a phone send
+                    # for typed TUI input and bypasses viewer negotiation.
+                    if input_surface and "input_surface" in parameters:
+                        fields["input_surface"] = input_surface
+                    if inline_ui and "inline_ui" in parameters:
+                        fields["inline_ui"] = True
                     await session.prompt(text, image_blocks, **fields)
                 except BaseException as exc:
                     if not admitted.done():
@@ -636,6 +664,9 @@ class TuiSessionHandle(SessionHandle):
         text: str,
         images: list[dict[str, str]] | None = None,
         command_id: str | None = None,
+        *,
+        input_surface: str = "",
+        inline_ui: bool = False,
     ) -> str:
         if not command_id:
             raise ValueError("command_id is required")
@@ -647,8 +678,13 @@ class TuiSessionHandle(SessionHandle):
                 return False
             try:
                 fields: dict[str, Any] = {"message_id": command_id}
-                if "producer_command_id" in inspect.signature(session.steer).parameters:
+                parameters = inspect.signature(session.steer).parameters
+                if "producer_command_id" in parameters:
                     fields["producer_command_id"] = command_id
+                if input_surface and "input_surface" in parameters:
+                    fields["input_surface"] = input_surface
+                if inline_ui and "inline_ui" in parameters:
+                    fields["inline_ui"] = True
                 session.steer(text, image_blocks, **fields)
             except Exception:
                 self._command_reservations.reject(command_id)

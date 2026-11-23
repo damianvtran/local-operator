@@ -131,6 +131,9 @@ class ContinuationCommand:
     submitted_at: float = field(default_factory=time.time)
     input_mode: str = ""
     input_path: str = ""
+    # A viewer declaration travels across cold-owner arbitration, but the
+    # selected owner's advertised capability still gates the actual socket send.
+    inline_ui: bool = False
 
     @staticmethod
     def create(
@@ -144,7 +147,10 @@ class ContinuationCommand:
         )
 
     def to_json(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        if not self.inline_ui:
+            data.pop("inline_ui", None)
+        return data
 
     @staticmethod
     def from_json(data: dict[str, Any]) -> "ContinuationCommand":
@@ -188,6 +194,7 @@ class ContinuationCommand:
             submitted_at=float(submitted_at),
             input_mode=input_mode,
             input_path=input_path,
+            inline_ui=data.get("inline_ui") is True,
         )
 
 
@@ -796,9 +803,13 @@ class TranscriptEntry:
     calls_tools: bool = False
     custom_type: str = ""
     terminal: bool = False
+    # Durable replay keeps the marked source beside the display row. It is
+    # never an ordinary row field on the wire; only negotiated overlays use it.
+    _inline_ui_source: str | None = field(default=None, repr=False, compare=False)
 
     def to_json(self) -> dict[str, Any]:
         data = asdict(self)
+        data.pop("_inline_ui_source", None)
         if not self.files:
             data.pop("files", None)
         # SPARSE: each condensation fact goes out only when it differs from its
@@ -1521,6 +1532,7 @@ def _projection_from_json(data: dict[str, Any], record: SessionRecord) -> Sessio
         for item in items:
             values = {k: v for k, v in item.items() if k in known}
             if cls is TranscriptEntry:
+                values.pop("_inline_ui_source", None)
                 # Older runtimes did not say whether the real row ending survived.
                 # Unknown completeness cannot authorize a completion receipt.
                 values["text_complete"] = item.get("text_complete") is True

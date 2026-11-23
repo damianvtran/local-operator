@@ -28,7 +28,7 @@ import logging
 import re
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
 from local_operator.cross_session import SEND_TOOL_NAME, cross_session_hidden
@@ -143,7 +143,11 @@ from local_operator.session.frontend_state import (
     ACTIVITY_PHASE_RUNNING,
     ACTIVITY_PHASE_THINKING,
 )
+from local_operator.session.inline_ui_text import INLINE_UI_V1, InlineUiEnvelope, project_inline_ui
 from local_operator.team_bridge.display_receipt import projected_display_receipt
+
+if TYPE_CHECKING:
+    from local_operator.session.runtime.inline_ui_egress import InlineUiEvents
 
 logger = logging.getLogger(__name__)
 
@@ -381,6 +385,97 @@ def _live_call_map(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
     return {str(key): item for key, item in value.items()}
+
+
+class LiveInlineUiEnvelope(InlineUiEnvelope):
+    # The runtime and phone repaint paths do not necessarily produce the same prose.
+    text: str
+
+
+def read_live_inline_ui(data: object) -> dict[str, LiveInlineUiEnvelope | None]:
+    """Read the shape of the authenticated runtime's already-validated sidecar."""
+    if not isinstance(data, dict) or type(data.get("version")) is not int or data["version"] != 1:
+        return {}
+    messages = data.get("messages")
+    if not isinstance(messages, dict):
+        return {}
+    decoded: dict[str, LiveInlineUiEnvelope | None] = {}
+    for message_id, envelope in messages.items():
+        if not isinstance(message_id, str) or not message_id:
+            continue
+        if envelope is None:
+            # A final event can supersede a streaming widget with plain prose.
+            # Tombstones are local runtime control frames, never HTTP overlays.
+            decoded[message_id] = None
+            continue
+        if (
+            not isinstance(envelope, dict)
+            or type(envelope.get("version")) is not int
+            or envelope["version"] != 1
+        ):
+            continue
+        text = envelope.get("text")
+        if not isinstance(text, str):
+            continue
+        # A valid UTF-16 position must also fall between Unicode code points.
+        # Build boundaries only for typed rows, never their unrelated prose.
+        boundaries = {0}
+        cursor = 0
+        for character in text:
+            cursor += 2 if ord(character) > 0xFFFF else 1
+            boundaries.add(cursor)
+        widgets = envelope.get("widgets")
+        if not isinstance(widgets, list) or not widgets:
+            continue
+        previous = 0
+        for widget in widgets:
+            if (
+                not isinstance(widget, dict)
+                or type(offset := widget.get("offset")) is not int
+                or offset < previous
+                or offset not in boundaries
+                or not isinstance(widget.get("payload"), dict)
+            ):
+                break
+            previous = offset
+        else:
+            decoded[message_id] = cast(LiveInlineUiEnvelope, envelope)
+    return decoded
+
+
+def project_live_inline_ui(
+    projection: SessionProjection, messages: Mapping[str, LiveInlineUiEnvelope | None]
+) -> dict[str, LiveInlineUiEnvelope]:
+    """Associate sidecars with visible assistant rows without mutating wire rows.
+
+    Offsets are relative to the runtime's inline-ui prose projection, not the
+    legacy mobile row text. The envelope carries that prose basis unchanged.
+    """
+    if not messages:
+        return {}
+    return {
+        row.id: envelope
+        for row in projection.transcript
+        if row.kind == "assistant" and (envelope := messages.get(row.id)) is not None
+    }
+
+
+def durable_inline_ui(rows: Iterable[TranscriptEntry]) -> dict[str, Any]:
+    """Build bounded overlays for visible durable rows, using their marked source."""
+    from local_operator.session.runtime.inline_ui_egress import _attach
+
+    frame: dict[str, Any] = {}
+    for row in rows:
+        if row.kind != "assistant" or row._inline_ui_source is None:
+            continue
+        projection = project_inline_ui(
+            row._inline_ui_source,
+            streaming=False,
+            source_version=1,
+            capabilities=frozenset({INLINE_UI_V1}),
+        )
+        _attach(frame, row.id, projection, include_text=True)
+    return frame
 
 
 def _message_text(message: AgentMessage) -> str:
@@ -2040,13 +2135,22 @@ def fold_messages_to_entries(
             # extra EMPTY row here that the TUI (which tests its stripped
             # text) never emits. Same rows plus one blank one is not the
             # same rows.
-            assistant_text = assistant_row_text(message.text)
-            if assistant_text:
+            source = message.text if message._inline_ui_source_version == 1 else None
+            text = (
+                message.text
+                if source is None
+                else project_inline_ui(
+                    source, streaming=False, source_version=1, capabilities=frozenset()
+                )["text"]
+            )
+            assistant_text = assistant_row_text(text)
+            if assistant_text or (source is not None and source.strip()):
                 entries.append(
                     TranscriptEntry(
                         id=message.id,
                         kind="assistant",
                         text=assistant_text,
+                        _inline_ui_source=source,
                         # The condensation facts (types.TranscriptEntry): the
                         # provider's phase declaration and whether this row
                         # carried calls of its own. Both arms set them, and
@@ -2283,6 +2387,9 @@ class ProjectionFold:
 
     def __init__(self, projection: SessionProjection, *, queued_engine: bool = False) -> None:
         self.projection = projection
+        # Created only when a marked response actually streams. Normal turns
+        # continue to append provider deltas without parsing Markdown.
+        self._inline_ui_events: InlineUiEvents | None = None
         # Only an explicit owner-side source binding can negotiate this field;
         # reconstructing a projection with raw details is not authentication.
         projection.peer_cycles = None
@@ -2743,7 +2850,17 @@ class ProjectionFold:
                 if row is not None:
                     # Append the delta; never re-read the whole message — the
                     # delta contract is what makes 30 Hz streaming cheap.
-                    row.text += event.delta
+                    if (
+                        isinstance(event.message, Message)
+                        and event.message._inline_ui_source_version == 1
+                    ):
+                        if self._inline_ui_events is None:
+                            from local_operator.session.runtime import inline_ui_egress
+
+                            self._inline_ui_events = inline_ui_egress.InlineUiEvents()
+                        row.text += self._inline_ui_events.dump(event)["delta"]
+                    else:
+                        row.text += event.delta
         elif isinstance(event, ReasoningDeltaEvent):
             # The model's reasoning, streamed onto its own row. Display-only in
             # the same sense the event is: the row is not the assistant message,
@@ -2756,7 +2873,16 @@ class ProjectionFold:
         elif isinstance(event, MessageEndEvent):
             row = self._find(event.message.id)
             if row is not None:
-                row.text = _message_text(event.message)
+                text = _message_text(event.message)
+                if (
+                    isinstance(event.message, Message)
+                    and event.message.role == "assistant"
+                    and event.message._inline_ui_source_version == 1
+                ):
+                    text = project_inline_ui(
+                        text, streaming=False, source_version=1, capabilities=frozenset()
+                    )["text"]
+                row.text = text
                 row.final = True
                 # The provider's phase declaration arrives WITH the end frame,
                 # so it is stamped here rather than at start: a lead-in frame
@@ -2765,6 +2891,7 @@ class ProjectionFold:
                 # row.
                 row.stop_reason = _stop_reason_of(event.message)
                 row.calls_tools = _calls_tools_of(event.message)
+            self._inline_ui_events = None
             self._close_reasoning_row()
             self._open_message_id = None
         elif isinstance(event, ToolCallComposeEvent):

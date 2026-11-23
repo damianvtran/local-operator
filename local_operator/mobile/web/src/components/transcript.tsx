@@ -10,7 +10,8 @@ import { useScrollCues } from "../lib/use-scroll-cues";
  * the bottom. Scrolling up to read must never be yanked back by a repaint.
  */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Markdown } from "./markdown"
+import type { AssistantPart, InlineUiMessages } from "../inline-ui-parts";
+import { AssistantContent } from "./inline-ui";
 import { AskRow } from "./ask-row";
 import { BridgeCardBodyPanel, isBridgeCardNotice } from "./bridge-card-body";
 import { AttachmentImage } from "./attachment-image";
@@ -23,7 +24,7 @@ import { Disclosure } from "./ui/disclosure";
 import { CONTENT_RESIZED_EVENT } from "../lib/content-resized";
 import { MESSAGE_PRESSED_EVENT } from "../lib/message-fold";
 import { followScrollTop, jumpOffered, newCommandIds } from "../lib/scroll-follow";
-import { getHistory, getSubagentHistory } from "../api";
+import { getHistory, getSubagentHistory, type TranscriptPage } from "../api";
 import { messageRuntime } from "../store";
 import { cn } from "../lib/cn";
 import { IMAGE_GEN_TOOLS } from "../lib/image-gen";
@@ -153,7 +154,12 @@ function NoticeRow({ entry }: { entry: TranscriptEntry }) {
 	);
 }
 
-function Entry({ entry, pid, condensed = false }: { entry: TranscriptEntry; pid: string; condensed?: boolean }) {
+function Entry({ entry, pid, condensed = false, overlay }: {
+	entry: TranscriptEntry;
+	pid: string;
+	condensed?: boolean;
+	overlay?: readonly AssistantPart[];
+}) {
 	switch (entry.kind) {
 		case "user": {
 			/* The user's own words. Right-aligned like the desktop app's bubble,
@@ -266,7 +272,7 @@ function Entry({ entry, pid, condensed = false }: { entry: TranscriptEntry; pid:
 			   report). */
 			return (
 				<div className="min-w-0 text-body leading-normal break-words">
-					<Markdown text={entry.text} />
+					<AssistantContent text={entry.text} overlay={overlay} />
 				</div>
 			);
 		case "tool":
@@ -331,10 +337,11 @@ function Entry({ entry, pid, condensed = false }: { entry: TranscriptEntry; pid:
  * competing-patterns defect that rule exists for — so the pending state is said
  * in words and ink, not in motion. */
 function CondensedRows({
-	items, pid, supplements, supplementLive, openRuns, onToggle,
+	items, pid, overlayFor, supplements, supplementLive, openRuns, onToggle,
 }: {
 	items: readonly CondenseEntry[];
 	pid: string;
+	overlayFor: (entry: TranscriptEntry) => readonly AssistantPart[] | undefined;
 	supplements: Record<string, SupplementBeat>;
 	supplementLive: (beat: SupplementBeat) => boolean;
 	openRuns: ReadonlySet<string>;
@@ -346,12 +353,12 @@ function CondensedRows({
 			const showBeat = beat && item.entry.kind === "assistant" && !item.condensed;
 			return <RowBoundary key={item.key}>
 				<div data-completion-anchor={item.entry.id} data-completion-complete={item.entry.final && item.entry.text_complete === true ? "true" : "false"}>
-					<Entry entry={item.entry} pid={pid} condensed={item.condensed} />
+					<Entry entry={item.entry} pid={pid} condensed={item.condensed} overlay={overlayFor(item.entry)} />
 				</div>
 				{showBeat ? <SupplementBlock beat={beat} sessionId={pid} jobLive={supplementLive(beat)} /> : null}
 			</RowBoundary>;
 		}
-		const children = <CondensedRows items={item.children} pid={pid} supplements={supplements}
+		const children = <CondensedRows items={item.children} pid={pid} overlayFor={overlayFor} supplements={supplements}
 			supplementLive={supplementLive} openRuns={openRuns} onToggle={onToggle} />;
 		return item.kind === "turn" ? (
 			<TurnBar key={item.key} entry={item} open={openRuns.has(item.segment.key)}
@@ -599,6 +606,7 @@ export function Transcript({
 	pending = [],
 	streaming = false,
 	topInset = 0,
+	inlineUi,
 	supplements,
 	projectionPid = 0,
 	peerCycles = false,
@@ -608,6 +616,7 @@ export function Transcript({
 }: {
 	pid: string;
 	entries: TranscriptEntry[];
+	inlineUi?: InlineUiMessages;
 	jobId?: string;
 	scrollKey?: string;
 	/** Turn supplements ("Highlights", memo §3.1 row 18): the projection's
@@ -661,6 +670,13 @@ export function Transcript({
 	   never arrives over SSE — it is paged in from the transcript on disk as
 	   the user scrolls up. */
 	const [older, setOlder] = useState<TranscriptEntry[]>([]);
+	// A held overlay belongs to the actual row snapshot, not just its id.
+	// A current live row lacking an overlay must not inherit one from a page,
+	// while a settled row scrolling out of the live tail may keep its last view.
+	const heldInlineUi = useRef(new WeakMap<TranscriptEntry, readonly AssistantPart[]>());
+	const currentRows = useMemo(() => new Set(entries), [entries]);
+	const overlayFor = (entry: TranscriptEntry) => currentRows.has(entry)
+		? inlineUi?.get(entry.id) : heldInlineUi.current.get(entry);
 	const [heldLive, setHeldLive] = useState<TranscriptEntry[]>(entries);
 	const [hasMore, setHasMore] = useState(true);
 	const [loadingOlder, setLoadingOlder] = useState(false);
@@ -888,7 +904,7 @@ export function Transcript({
 	const transcriptRow = (entry: TranscriptEntry) => (
 		<RowBoundary key={entry.id}>
 			<div data-completion-anchor={entry.id} data-completion-complete={entry.final && entry.text_complete === true}>
-				<Entry entry={entry} pid={pid} />
+				<Entry entry={entry} pid={pid} overlay={overlayFor(entry)} />
 			</div>
 			{(() => {
 				/* The supplement block's seat: under the FINAL answer, outside
@@ -1041,6 +1057,14 @@ export function Transcript({
 	};
 
 	useEffect(() => {
+		for (const entry of entries) {
+			const parts = entry.final && inlineUi?.get(entry.id);
+			if (parts) heldInlineUi.current.set(entry, parts);
+			else heldInlineUi.current.delete(entry);
+		}
+	}, [entries, inlineUi]);
+
+	useEffect(() => {
 		setHeldLive((current) => {
 			const next = new Map(current.map((entry) => [rowKey(entry), entry]));
 			for (const entry of entries) next.set(rowKey(entry), entry);
@@ -1069,10 +1093,16 @@ export function Transcript({
 		setLoadingOlder(true);
 		setOlderError(false);
 		try {
-			const { entries: page, has_more } = jobId
+			const { entries: page, has_more, inline_ui: pageInlineUi }: TranscriptPage = jobId
 				? await getSubagentHistory(pid, jobId, oldestId, PAGE)
 				: await getHistory(pid, oldestId, PAGE);
 			if (page.length > 0) {
+				if (pageInlineUi) {
+					for (const row of page) {
+						const parts = pageInlineUi.get(row.id);
+						if (parts) heldInlineUi.current.set(row, parts);
+					}
+				}
 				prependPage(page);
 				/* A page that lands while the reader is parked at the top has to MOUNT
 				   in the same commit, or they see the idle hairline and nothing else
@@ -1352,7 +1382,7 @@ export function Transcript({
 				   the old 2px bar / 1px hairline pair moved the rows by a pixel per swap
 				   and the anchor hold's compensating write re-fired `scroll` into a fetch. */}
 				{slotState !== null ? <HistorySlot state={slotState} onActivate={onSlot} /> : null}
-				{detachedOpener ? <div data-detached-opener="true"><Entry entry={detachedOpener} pid={pid} /></div> : null}
+				{detachedOpener ? <div data-detached-opener="true"><Entry entry={detachedOpener} pid={pid} overlay={overlayFor(detachedOpener)} /></div> : null}
 				{seamOpen ? <SeamLine /> : null}
 				{pagedItems.map((item) => {
 					if (item.kind === "quiet") {
@@ -1367,10 +1397,10 @@ export function Transcript({
 					}
 					if (item.kind !== "row") {
 						return <CondensedRows key={item.key} items={[item]} pid={pid} supplements={supplements ?? {}}
-							supplementLive={(beat) => beatLive(beat, projectionPid ?? pid)} openRuns={openRuns} onToggle={toggleCondensed} />;
+							supplementLive={(beat) => beatLive(beat, projectionPid ?? pid)} openRuns={openRuns} onToggle={toggleCondensed} overlayFor={overlayFor} />;
 					}
 					return <CondensedRows key={item.key} items={[item]} pid={pid} supplements={supplements ?? {}}
-						supplementLive={(beat) => beatLive(beat, projectionPid ?? pid)} openRuns={openRuns} onToggle={toggleCondensed} />;
+						supplementLive={(beat) => beatLive(beat, projectionPid ?? pid)} openRuns={openRuns} onToggle={toggleCondensed} overlayFor={overlayFor} />;
 				})}
 				{pagedItems.length === 0 && pending.length === 0 ? emptyContent : null}
 				{/* After the last projected row, because that is where the session will
