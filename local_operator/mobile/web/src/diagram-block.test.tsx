@@ -372,7 +372,7 @@ describe("inline height clamp", () => {
 		expect(screen.getByTestId("diagram-tap").style.maxHeight).toBe("40rem");
 		expect(screen.getByTestId("diagram-fade")).not.toBeNull();
 		const hint = screen.getByTestId("diagram-cut-hint");
-		expect(hint.textContent).toContain("Full size");
+		expect(hint.textContent).toBe("Full size");
 		/* decorative: opening stays with the tap area and the footer button */
 		expect(hint.closest("button")).toBeNull();
 		await act(async () => fireEvent.click(screen.getByTestId("diagram-tap")));

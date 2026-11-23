@@ -15,6 +15,11 @@ describe("inline diagram clamp rule", () => {
 		expect(inlineMaxHeight(true)).toBe("40rem");
 	});
 
+	it("does not clamp at exactly 46rem (736 px) but clamps at 737 px", () => {
+		expect(mustClamp(736, 16)).toBe(false);
+		expect(mustClamp(737, 16)).toBe(true);
+	});
+
 	it("scales with the root font size", () => {
 		expect(mustClamp(46 * 20, 20)).toBe(false);
 		expect(mustClamp(46 * 20 + 1, 20)).toBe(true);

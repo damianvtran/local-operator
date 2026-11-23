@@ -296,7 +296,6 @@ export function DiagramBlock({ source, fallback }: { source: string; fallback: R
 	const openRef = useRef<HTMLButtonElement>(null);
 	const [width, setWidth] = useState(0);
 	const [result, setResult] = useState<DrawResult | undefined>(undefined);
-	const [clipped, setClipped] = useState(false);
 	const [clamped, setClamped] = useState(false);
 	const [open, setOpen] = useState(false);
 
@@ -349,7 +348,6 @@ export function DiagramBlock({ source, fallback }: { source: string; fallback: R
 	useLayoutEffect(() => {
 		const el = clip.current;
 		if (!el) {
-			setClipped(false);
 			setClamped(false);
 			return;
 		}
@@ -357,9 +355,7 @@ export function DiagramBlock({ source, fallback }: { source: string; fallback: R
 		   set, so deciding to clamp from it cannot feed back into itself. */
 		const check = () => {
 			const remPx = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
-			const clamp = mustClamp(el.scrollHeight, remPx);
-			setClamped(clamp);
-			setClipped(clamp && el.scrollHeight > el.clientHeight + 1);
+			setClamped(mustClamp(el.scrollHeight, remPx));
 		};
 		check();
 		if (typeof ResizeObserver === "undefined") return;
@@ -399,7 +395,7 @@ export function DiagramBlock({ source, fallback }: { source: string; fallback: R
 					style={{ maxHeight: inlineMaxHeight(clamped) }}
 				>
 					<SvgHost node={node} className="[&_svg]:mx-auto [&_svg]:block" />
-					{clipped ? (
+					{clamped ? (
 						<div
 							aria-hidden="true"
 							data-testid="diagram-fade"
@@ -413,7 +409,7 @@ export function DiagramBlock({ source, fallback }: { source: string; fallback: R
 								data-testid="diagram-cut-hint"
 								className="rounded-full border border-hairline bg-surface px-3 py-1 text-body-sm text-ink-muted"
 							>
-								{messageRuntime.t("relay.diagram.full_size")} ⤢
+								{messageRuntime.t("relay.diagram.full_size")}
 							</span>
 						</div>
 					) : null}
