@@ -81,6 +81,7 @@ for translators and the auditor.
 - tool trace → 轨迹 · transcript → 记录 (会话记录 when the noun stands alone)
 - schedule → 定时 (定时任务 for an item) · monitor → 监控 · relay → 中继
 - workspace → 工作区 · prompt → 提示词 · compaction → 压缩 (上下文压缩)
+- suggestions (the ↑↓ hint of the settings editor's suggestion dropdown) → 浏览建议 — never 选建议: the arrows only move the highlight (tab completes, enter saves), and 选 reads as choose/select, which 选择 owns; bare 浏览 where a hint has only a verb slot
 
 ## Plurals
 
