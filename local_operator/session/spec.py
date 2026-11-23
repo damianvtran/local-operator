@@ -70,6 +70,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     # so this spec's schema vocabulary cannot drift from ``OutputContract``'s.
     from local_operator.i18n.messages import Msg
     from local_operator.output_contract import OutputSchemaValue
+    from local_operator.research_evidence import PublicResearchPolicy
 
 __all__ = [
     "ApprovalPolicy",
@@ -544,6 +545,9 @@ class SessionSpec:
     #: (``wait_for_tools`` remains the manual gate). ``open_session(mode="own")``
     #: only: attach and ``spawn_session`` refuse a non-default value.
     mcp_ready_timeout_s: float | None = 30.0
+    # None preserves the ordinary SDK/exec path. Only the in-process owner
+    # can authorize companion egress; never checkpoint or inherit this policy.
+    public_research: PublicResearchPolicy | None = None
 
     def __post_init__(self) -> None:
         if self.agent_name and self.agent_id:

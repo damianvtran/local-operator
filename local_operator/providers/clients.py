@@ -6063,7 +6063,12 @@ class AnthropicClient:
     # ``tests/unit/providers/bedrock/test_client.py`` T4 regression cells).
 
     async def _messages_request(
-        self, body: dict[str, Any], headers: dict[str, str], api_key: str | None
+        self,
+        body: dict[str, Any],
+        headers: dict[str, str],
+        api_key: str | None,
+        *,
+        evidence_binding: Any = None,
     ) -> tuple[str, bytes, dict[str, str]]:
         """``(url, exact body bytes, headers)`` for one Messages POST.
 
@@ -6094,7 +6099,12 @@ class AnthropicClient:
 
     @contextlib.asynccontextmanager
     async def _open_messages_stream(
-        self, body: dict[str, Any], headers: dict[str, str], api_key: str | None = None
+        self,
+        body: dict[str, Any],
+        headers: dict[str, str],
+        api_key: str | None = None,
+        *,
+        evidence_binding: Any = None,
     ) -> AsyncIterator[httpx.Response]:
         """Open the Messages stream, shedding a refused ``diagnostics`` key once.
 
@@ -6105,7 +6115,12 @@ class AnthropicClient:
         identical request is sent again. Nothing has been streamed yet, so the
         retry is invisible to the turn; every other status passes through.
         """
-        url, content, sent_headers = await self._messages_request(body, headers, api_key)
+        evidence_kwargs = (
+            {"evidence_binding": evidence_binding} if evidence_binding is not None else {}
+        )
+        url, content, sent_headers = await self._messages_request(
+            body, headers, api_key, **evidence_kwargs
+        )
         async with self._http.stream(
             "POST", url, content=content, headers=sent_headers
         ) as response:
@@ -6118,7 +6133,9 @@ class AnthropicClient:
             "anthropic: cache diagnostics refused by the API (HTTP 400); "
             "disabled for this process"
         )
-        url, content, sent_headers = await self._messages_request(body, headers, api_key)
+        url, content, sent_headers = await self._messages_request(
+            body, headers, api_key, **evidence_kwargs
+        )
         async with self._http.stream(
             "POST", url, content=content, headers=sent_headers
         ) as response:
@@ -6145,7 +6162,15 @@ class AnthropicClient:
         oauth_access: "OAuthAccess | None",
         sent: dict[str, Any],
     ) -> AsyncIterator[StreamEvent]:
-        stop_reason = "stop"
+        # The companion may replace raw evidence, so it cannot use the legacy
+        # EOF-as-stop behavior. Leave existing primary Anthropic turns alone.
+        strict_completion = (
+            request.model.provider == "bedrock"
+            and request._evidence_binding is not None
+            and request._evidence_binding.expected is not None
+        )
+        stop_reason = "incomplete" if strict_completion else "stop"
+        terminal = False
         # Stamped at construction, before the request goes out: the ``Usage`` is
         # filled in as the stream arrives, and a call's time-of-use window is a
         # property of the call (seconds of skew across a stream boundary cannot
@@ -6195,6 +6220,11 @@ class AnthropicClient:
                 ),
             ),
             api_key,
+            **(
+                {"evidence_binding": request._evidence_binding}
+                if request._evidence_binding is not None and request.model.provider == "bedrock"
+                else {}
+            ),
         ) as response:
             if overage_account:
                 # Before the status check: a 429 carries the same headers, and
@@ -6338,8 +6368,16 @@ class AnthropicClient:
                     if "output_tokens" in raw_usage:
                         output_reported = _reported_token_count(raw_usage, "output_tokens")
                         usage.output_tokens = int(raw_usage["output_tokens"])
+                elif event_type == "message_stop":
+                    terminal = stop_reason != "incomplete"
                 elif event_type == "error":
                     raise _anthropic_stream_error(event.get("error") or {})
+
+        if strict_completion and not (terminal and input_reported and output_reported):
+            # Never emit the provisional Usage: a missing counter is not zero,
+            # and downstream would otherwise price it in analytics and receipts.
+            yield StreamEndEvent(stop_reason="incomplete", served_model=served_model)
+            return
 
         mapped = {
             "end_turn": "stop",

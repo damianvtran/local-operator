@@ -7563,6 +7563,7 @@ class SessionStreamFn:
                     signal=signal,
                     session_id=self._session_id,
                 ),
+                signal=signal,
             ):
                 yield event
             return
@@ -7780,7 +7781,11 @@ class SessionStreamFn:
         return self._descendant_request_counter.count > 0
 
     async def _record_stream(
-        self, request: ChatRequest, stream: AsyncIterator[StreamEvent]
+        self,
+        request: ChatRequest,
+        stream: AsyncIterator[StreamEvent],
+        *,
+        signal: AbortSignal | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Forward a provider stream unchanged, then record its usage analytics.
 
@@ -7812,7 +7817,7 @@ class SessionStreamFn:
         sent.
         """
         started_at = time.monotonic()
-        request_id = uuid.uuid4().hex
+        request_id = request._auxiliary_request_id or uuid.uuid4().hex
         # Resolved ONCE here, at request start (see
         # ``_request_observation_target``): the ordinary path pays two
         # attribute reads and a ``None`` check per REQUEST, never per delta.
@@ -8085,6 +8090,14 @@ class SessionStreamFn:
             outcome = type(exc).__name__
             raise
         finally:
+            if (
+                request._evidence_binding is not None
+                and request._evidence_binding.expected is not None
+                and (outcome == "CancelledError" or (signal is not None and signal.aborted))
+            ):
+                # The companion's durable receipt calls both cancellation
+                # paths aborted; keep the observer and ledger on that outcome.
+                ok, outcome = False, "aborted"
             if counted_child_request:
                 # Stop representing provider work before the separate analytics
                 # handoff; that bookkeeping must not widen the in-flight window.
