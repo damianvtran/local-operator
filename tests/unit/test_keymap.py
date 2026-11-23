@@ -13,6 +13,8 @@ override and restores the default under them.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from local_operator import keymap, settings_io
@@ -927,8 +929,16 @@ def test_fixed_app_keys_are_the_app_bindings_that_are_not_rows() -> None:
 
     `keymap.py` cannot import the app, so the table is spelled here and this
     test derives the expected set from the live bindings: every app-level key
-    that is NOT a registry row, not a reserved key, not a bare printable and not
-    the mouse/copy screen binding.
+    that is NOT a registry row, not a reserved key and not a bare printable.
+
+    `super+b` is the one entry the BINDINGS cannot supply everywhere: the app
+    declares that alternate ONLY on darwin (Textual decodes Kitty's Super
+    modifier; terminals that intercept Cmd+B never deliver it). The table is
+    static, so it lists the key on every platform — which made the derivation
+    fail the Linux CI merge gate with `Left contains 1 more item: 'super+b'`
+    while it passed on macOS. The derivation therefore adds the documented
+    darwin-only extras explicitly, and the linux shape is exercised on EVERY
+    platform by removing that binding from a copy of the live list.
     """
     from textual.keys import key_to_character
 
@@ -938,22 +948,49 @@ def test_fixed_app_keys_are_the_app_bindings_that_are_not_rows() -> None:
         char = key_to_character(part)
         return char is not None and char.isprintable()
 
+    # The documented platform-conditional extras: key -> the job `BINDINGS`
+    # names on darwin. Asserted separately below so the static table cannot drop
+    # one silently.
+    DARWIN_ONLY = {"super+b": "Sessions"}
+
     row_keys = {action.default for action in keymap.KEY_ACTIONS if action.scope == "app"}
-    expected: dict[str, str] = {}
-    for binding in OperatorApp.BINDINGS:
-        raw = str(getattr(binding, "key", "") or "")
-        for part in raw.split(","):
-            if not part or part in row_keys or part in keymap.RESERVED_KEYS:
-                continue
-            # A bare printable (and every spelling of one: `p`, `question`,
-            # `left_square_bracket`) is TEXT, refused by `validate_key`, so it is
-            # not a binding a remap can land on.
-            if _is_printable(part) or part in {"question", "question_mark"}:
-                continue
-            # The DESCRIPTION travels with the key (M3): the warning names what
-            # the fixed binding does, and there is no other setting to point at.
-            expected[part] = str(getattr(binding, "description", ""))
+
+    def _derive(bindings: Any) -> dict[str, str]:
+        derived: dict[str, str] = {}
+        for binding in bindings:
+            raw = str(getattr(binding, "key", "") or "")
+            for part in raw.split(","):
+                if not part or part in row_keys or part in keymap.RESERVED_KEYS:
+                    continue
+                # A bare printable (and every spelling of one: `p`, `question`,
+                # `left_square_bracket`) is TEXT, refused by `validate_key`, so
+                # it is not a binding a remap can land on.
+                if _is_printable(part) or part in {"question", "question_mark"}:
+                    continue
+                # The DESCRIPTION travels with the key (M3): the warning names
+                # what the fixed binding does, and there is no other setting to
+                # point at.
+                derived[part] = str(getattr(binding, "description", ""))
+        return derived
+
+    expected = _derive(OperatorApp.BINDINGS)
+    if "super+b" not in expected:
+        expected.update(DARWIN_ONLY)
     assert dict(keymap.FIXED_APP_KEYS) == expected
+
+    # The Linux merge gate's shape, run on every platform: the same bindings
+    # WITHOUT the darwin-only entry must land on the same table.
+    without_darwin = [
+        binding
+        for binding in OperatorApp.BINDINGS
+        if str(getattr(binding, "key", "") or "") != "super+b"
+    ]
+    linux_expected = _derive(without_darwin)
+    linux_expected.update(DARWIN_ONLY)
+    assert dict(keymap.FIXED_APP_KEYS) == linux_expected
+
+    # And the static table carries the extras with the jobs they do.
+    assert {key: keymap.FIXED_APP_KEYS[key] for key in DARWIN_ONLY} == DARWIN_ONLY
 
 
 def test_conflict_note_warns_about_a_fixed_app_chord() -> None:
