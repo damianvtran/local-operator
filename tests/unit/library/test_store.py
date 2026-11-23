@@ -617,6 +617,34 @@ def test_a_failed_thumbnail_write_leaves_no_temp_file(tmp_path, monkeypatch) -> 
     assert store.thumb_is_live(asset_id, 480) is None
 
 
+def test_a_decode_failure_never_records_a_stale_target(tmp_path, monkeypatch) -> None:
+    """Only a lost REPLACE race may fall back to an existing target.
+
+    The key is hashed before ``Image.open``; if the source is rewritten in
+    between, decoding fails while a WebP for the OLD content already sits at
+    the key. Recording that file under the new stamp would serve the old
+    picture as the new one, so a decode failure must stay a failure.
+    """
+    root, asset_id, store = _thumb_asset(tmp_path, monkeypatch)
+    source, _content_type, _suffix = store.thumbnail_source(asset_id)
+    real_key = store_module._thumb_key
+    thumbs = root / "cache" / "library" / "thumbs"
+
+    def key_then_rewrite(path, width):
+        key = real_key(path, width)
+        # A peer already published the old content's thumbnail ...
+        thumbs.mkdir(parents=True, exist_ok=True)
+        (thumbs / f"{key}.webp").write_bytes(b"old-content-webp")
+        # ... and the source changes before this writer decodes it.
+        Path(path).write_bytes(b"not an image any more")
+        return key
+
+    monkeypatch.setattr(store_module, "_thumb_key", key_then_rewrite)
+    assert store.ensure_thumbnail(asset_id, width=480, quality=82) is None
+    assert store.thumb_is_live(asset_id, 480) is None
+    assert not list(thumbs.glob("*.tmp"))
+
+
 def test_a_path_token_is_searchable(tmp_path, monkeypatch) -> None:
     """``CameraRoll`` is a folder name: the old haystack matched the display path."""
     root = config_root(monkeypatch, tmp_path)

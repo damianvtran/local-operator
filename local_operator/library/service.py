@@ -28,6 +28,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -35,6 +36,7 @@ from typing import Any, Final
 from local_operator.library import classify, identity
 from local_operator.library import index as library_index
 from local_operator.library import store as library_store
+from local_operator.library.atomic import unique_temp
 from local_operator.library.indexer import ensure_started
 from local_operator.library.metadata import FIELD_SOURCES, MetadataStore, TagRefused
 from local_operator.library.store import LibraryStore
@@ -1091,16 +1093,19 @@ def waveform(config_dir: str | Path, asset_id: str) -> dict[str, Any]:
     from local_operator.audiogen.peaks import peaks_payload
 
     payload = peaks_payload(peaks)
+    # Atomic: two grid renders can ask for the same waveform at once, and a
+    # half-written JSON is a broken player, not a stale one (thumbnail's rule).
+    # Those renders are threads of one process, so the temp is per WRITE.
+    temp = unique_temp(target)
     try:
         cache_dir.mkdir(parents=True, exist_ok=True)
-        # Atomic: two grid renders can ask for the same waveform at once, and a
-        # half-written JSON is a broken player, not a stale one (thumbnail's rule).
-        temp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
         temp.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
         os.replace(temp, target)
     except OSError:
         # The payload is already in hand; a read-only cache is not a failed request.
         logger.debug("library: waveform cache write failed for %s", asset_id, exc_info=True)
+        with suppress(OSError):
+            temp.unlink(missing_ok=True)
     return payload
 
 

@@ -44,6 +44,7 @@ from typing import Any, Final, Protocol
 
 from local_operator.library import classify, identity
 from local_operator.library import index as library_index
+from local_operator.library.atomic import unique_temp
 from local_operator.library.metadata import (
     AUTHORITATIVE_TABLES,
     DB_DIRNAME,
@@ -2064,6 +2065,11 @@ class LibraryStore:
         key = _thumb_key(path, width)
         target = cache_dir / f"{key}.webp"
         temp: Path | None = None
+        # Set only once the WebP for THIS content is on disk: the peer-won
+        # fallback below is valid for a failed replace, never for a failed
+        # decode (the source may have changed since ``key`` was hashed, and the
+        # target at that key would then be the OLD picture).
+        saved = False
         try:
             cache_dir.mkdir(parents=True, exist_ok=True)
             with Image.open(path) as image:
@@ -2074,27 +2080,31 @@ class LibraryStore:
                 if image.mode not in ("RGB", "RGBA"):
                     image = image.convert("RGBA")
                 # Atomic: a reader must never see a half-written WebP. The temp
-                # name must be unique PER WRITE, not per process: the indexer's
-                # ``library-thumbs`` thread and an on-demand caller in the same
-                # process share a pid, so a ``<pid>.tmp`` name let both write one
-                # file and the second ``os.replace`` found it already consumed.
-                temp = target.with_name(
-                    f"{target.name}.{os.getpid()}.{threading.get_ident()}.{os.urandom(4).hex()}.tmp"
-                )
+                # name must be unique PER WRITE, not per process (see
+                # ``library.atomic``): the indexer's thread and an on-demand
+                # caller share a pid.
+                temp = unique_temp(target)
                 image.save(temp, "WEBP", quality=quality)
+                saved = True
                 os.replace(temp, target)
                 temp = None
-        except Exception:  # noqa: BLE001 - a thumbnail is cosmetic; the row still works
+        except Exception as error:  # noqa: BLE001 - a thumbnail is cosmetic; the row still works
             if temp is not None:
                 # Never strand a partial temp in the cache: nothing else reaps it.
                 with suppress(OSError):
                     temp.unlink(missing_ok=True)
-            # The name is the source CONTENT hash plus the width, so a target a
-            # concurrent writer already published is the very file this call was
-            # making. Losing that race is success, not "no thumbnail".
-            if not key or not target.is_file():
+            # The name is the source CONTENT hash plus the width, so once this
+            # call has encoded that content, a target a concurrent writer already
+            # published is the very file this call was making. Losing that race
+            # is success, not "no thumbnail".
+            if not (saved and key and target.is_file()):
                 logger.debug("library: thumbnail failed for %s", asset_id, exc_info=True)
                 return None
+            logger.debug(
+                "library: thumbnail for %s already published by a peer (%s)",
+                asset_id,
+                type(error).__name__,
+            )
         row = self._thumb_row(asset_id)
         stamp = self._source_stamp(path, row["digest"] if row is not None else None)
         with self.write() as connection:
