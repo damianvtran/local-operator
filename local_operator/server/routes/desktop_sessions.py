@@ -177,9 +177,15 @@ from local_operator.supplements.contract import (
 )
 
 if TYPE_CHECKING:
+    from typing import TypedDict
+
     # Type-only: the ``cast`` on each ``diff_bindings`` unpack names it as a string, so
     # this route module keeps its lazy ``tools.diff_archive`` import at runtime.
     from local_operator.tools.diff_archive import DiffBindingReadOptions
+
+    class _AnswerSessionOptions(TypedDict, total=False):
+        control_only: bool
+
 
 logger = logging.getLogger(__name__)
 
@@ -5298,7 +5304,11 @@ async def answer(session_id: str, body: Answer, request: Request):
     # A queued ask is addressed by durable ID, not by the display epoch. Its
     # control transport must remain usable when an older owner's canonical
     # snapshot exceeds the line limit; the pool still owns lookup and retirement.
-    session_options = {"control_only": True} if body.ask_id is not None else {}
+    # Keep the key absent for gate answers, and don't infer that this bool can
+    # fill unrelated pool keywords (such as the events-only ingress trace).
+    session_options: _AnswerSessionOptions = (
+        {"control_only": True} if body.ask_id is not None else {}
+    )
     async with errors(request), host(request).session(session_id, **session_options) as bridge:
         assert bridge.remote is not None
         if body.ask_id is not None:
