@@ -3075,16 +3075,27 @@ class OpenAICompatClient:
     # (Radient, OpenRouter) enforce Anthropic's 4-breakpoint limit per request.
     MAX_CACHE_BREAKPOINTS = 4
 
-    #: Whether the wire needs each request body to EXTEND the previous one as a
-    #: byte prefix (the Muse prompt-delta contract: it persists the exact bytes
-    #: it already paid for and replays them on resume). A per-request suffix is
-    #: fine for providers that tolerate an uncached tail, but on a
-    #: prefix-stable wire that suffix sits MID-conversation on the next request
-    #: (transcript, then suffix, then the new turn), so the earlier body is no
-    #: longer a prefix of the later one and the provider must re-send the whole
-    #: conversation uncached. Wires that declare this pin the inline discovery
-    #: hint at the HEAD instead, where it is byte-identical on every request and
-    #: rides the cached prefix; see ``_inline_ui_hint_item``.
+    #: Whether this wire's request bodies must grow APPEND-ONLY: each body the
+    #: Session sends has to extend the previous one byte for byte. That is the
+    #: Session's own persisted-prefix protocol (``append_only_state``, opted into
+    #: by every production system-block provider in ``session_factory``), and a
+    #: wire that honours it — Muse, whose shipped stability tests assert the
+    #: byte prefix — cannot carry a per-turn suffix. The suffix is fine where an
+    #: uncached tail is tolerated: it costs those tokens once per request. On a
+    #: prefix-stable wire it is worse than that: on the next request the suffix
+    #: sits MID-conversation (transcript, then suffix, then the new turn), so the
+    #: earlier body is no longer a prefix and every request pays to re-send from
+    #: the divergence. Wires that declare this therefore pin the inline discovery
+    #: hint at the HEAD of ``input``, where it is byte-identical on every request
+    #: and rides the cached prefix.
+    #:
+    #: Trade-off (review round 13, m1): the hint is present or absent per input
+    #: surface and re-resolved on every request, so a surface switch costs ONE
+    #: cold request whose prefix shares nothing with the previous one. That is
+    #: still strictly better than the tail placement, which costs a divergence on
+    #: every turn for as long as the hint is on. Ordering caveat (n2): a future
+    #: subclass that also takes the developer-instructions path inserts the hint
+    #: ahead of the standing instructions, since both are developer messages.
     inline_ui_hint_rides_head = False
 
     def __init__(
@@ -3834,9 +3845,9 @@ class OpenAICompatClient:
                 "content": [{"type": "input_text", "text": request.inline_ui_hint}],
             }
             if self.inline_ui_hint_rides_head:
-                # Prefix-stable wire: the tail would break the append-only body
-                # contract this provider requires (see the class attribute), so
-                # pin it before the transcript where it stays constant.
+                # Prefix-stable wire: a tail item would break the append-only body
+                # contract this wire declares (see the class attribute), so pin it
+                # before the transcript where it stays byte-identical.
                 body["input"].insert(0, hint_item)
             else:
                 body["input"].append(hint_item)
