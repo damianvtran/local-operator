@@ -141,10 +141,27 @@ async def _with_history(session: Session, turns: int) -> None:
         )
 
 
-def _restore_notice(app: OperatorApp) -> Any:
-    """The stale-attachment NoticeBlock, or ``None``."""
+#: What a bound team whose definition is gone at reopen reports. The refusal
+#: path cannot tell "deleted" from "not synced to this device yet" (both are
+#: ``_DefinitionNotLoaded``), so it no longer claims "could not restore … —
+#: renamed or deleted"; ``test_attachment_persistence.py`` pins the same string
+#: at the session layer. Pinned here too so a TUI that drops or rewrites the
+#: session's notice on adopt fails loudly instead of matching nothing.
+STALE_TEAM_NOTICE = "lopdev: team definition is unavailable; re-attach via /team"
+
+
+def _restore_notice(app: OperatorApp, session: Session) -> Any:
+    """The NoticeBlock carrying ``session``'s restore notice, or ``None``.
+
+    Keyed on the notice the SESSION recorded rather than on a copy literal: the
+    old ``"could not restore"`` key went silently stale when the refusal copy
+    changed, which made the on-screen check report "never mounted" for a notice
+    that was in fact mounted — and made the clean-resume negative vacuous.
+    """
+    expected = session.attachment_restore_notice
+    assert expected, "the session recorded no restore notice to look for"
     for block in app.query(NoticeBlock):
-        if "could not restore" in (block.text() or ""):
+        if (block.text() or "") == expected:
             return block
     return None
 
@@ -174,9 +191,14 @@ async def test_the_band_names_the_team_and_its_manager_a_resume_restored(tmp_pat
     pre-#2014 shape — a team AND an unrelated profile — written directly, since
     the two attaches that would produce it are now refused; what must paint is
     the team and its manager, NOT the dropped profile.
+
+    The team is BOUND first through the real ``attach_team`` path: a sidecar
+    name alone is no longer authority (see the name-only sibling below), so the
+    legacy pair only restores on a session whose binding record exists.
     """
     agents, teams = _registries(tmp_path)
-    _session(tmp_path, agents, teams)  # creates tmp_path/sess
+    first = _session(tmp_path, agents, teams)  # creates tmp_path/sess
+    first.attach_team(teams.get_team_by_name("lopdev"))
     write_session_attachment(tmp_path / "sess", team="lopdev", agent="auditor", goal="")
 
     resumed = _session(tmp_path, agents, teams)
@@ -197,6 +219,34 @@ async def test_the_band_names_the_team_and_its_manager_a_resume_restored(tmp_pat
         # segment goes through the shared display rule, and with no registry row
         # and no seed label to add information it falls back to the raw key.
         assert app._status._agent_profile == "manager"
+        assert resumed.attachment_restore_notice == ""
+
+
+@pytest.mark.asyncio
+async def test_a_name_only_team_is_not_painted_and_says_why(tmp_path) -> None:
+    """The complement of the bound case above: the same legacy sidecar with NO
+    binding record names a team, but a name is not authority. The band must stay
+    blank (painting it would claim a manager the prompt does not carry) and the
+    refusal must reach the screen rather than downgrade silently."""
+    agents, teams = _registries(tmp_path)
+    _session(tmp_path, agents, teams)  # creates tmp_path/sess, nothing bound
+    write_session_attachment(tmp_path / "sess", team="lopdev", agent="auditor", goal="")
+
+    resumed = _session(tmp_path, agents, teams)
+
+    async def factory() -> Session:
+        return resumed
+
+    app = OperatorApp(factory)
+    async with app.run_test(size=(120, 24)) as pilot:
+        await _adopted(app, pilot, resumed)
+        assert app._status is not None
+        assert app._status._team == ""
+        assert app._status._agent_profile == ""
+        assert resumed.attachment_restore_notice == (
+            "lopdev: recorded authority is unavailable; re-attach via /team"
+        )
+        assert _restore_notice(app, resumed) is not None
 
 
 @pytest.mark.asyncio
@@ -247,7 +297,8 @@ async def test_the_stale_notice_is_on_screen_on_a_session_with_history(tmp_path)
     app = OperatorApp(factory)
     async with app.run_test(size=(100, 26)) as pilot:
         await _adopted(app, pilot, resumed)
-        notice = _restore_notice(app)
+        assert resumed.attachment_restore_notice == STALE_TEAM_NOTICE
+        notice = _restore_notice(app, resumed)
         assert notice is not None, "the stale-attachment notice was never mounted"
         assert _is_on_screen(
             app, notice
@@ -333,8 +384,12 @@ async def test_a_clean_resume_raises_no_notice(tmp_path) -> None:
     app = OperatorApp(factory)
     async with app.run_test(size=(120, 24)) as pilot:
         await _adopted(app, pilot, resumed)
+        # Both halves: the session recorded nothing, AND nothing re-attach-shaped
+        # reached the screen by another route. The old literal key could not
+        # see the refusal copy at all, so it passed whatever was mounted.
+        assert resumed.attachment_restore_notice == ""
         notices = [(n.text() or "") for n in app.query(NoticeBlock)]
-        assert not any("could not restore" in text for text in notices), notices
+        assert not any("re-attach" in text for text in notices), notices
 
 
 @pytest.mark.asyncio
@@ -359,7 +414,7 @@ async def test_the_stale_notice_does_not_end_the_empty_state(tmp_path) -> None:
         # has started" edge both boot layouts hang off.
         assert app._welcome_visible is True
         notices = [(n.text() or "") for n in app.query(NoticeBlock)]
-        assert any("could not restore" in text for text in notices), notices
+        assert STALE_TEAM_NOTICE in notices, notices
 
 
 @pytest.mark.asyncio
