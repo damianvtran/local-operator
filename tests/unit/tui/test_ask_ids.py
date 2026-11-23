@@ -17,6 +17,7 @@ from __future__ import annotations
 import pytest
 from rich.style import Style
 from rich.text import Text
+from textual.content import Content
 from textual.selection import Selection
 
 from local_operator.tui.ask_ink import (
@@ -242,7 +243,9 @@ async def test_clicking_a_cited_id_opens_the_list_on_that_ask(enabled):
         prose.update_text("The old one, a-745e, is withdrawn.")
         app._append_block(prose)
         await pilot.pause()
-        plain = prose._render().plain
+        rendered = prose._render()
+        assert isinstance(rendered, Content)
+        plain = rendered.plain
         assert f"a-745e{NBSP}○" in plain, plain
         at = plain.index("a-745e")
         row = plain[:at].count("\n")
@@ -341,12 +344,13 @@ async def test_ask_with_an_id_lands_the_cursor_on_that_ask(enabled):
         await pilot.pause()
         await _submit(pilot, app, "/ask a-9f20")
         listing = app.query_one(AskQueueList)
-        assert listing.current() is not None
-        assert listing.current().ask_id == "a-9f20"
+        current = listing.current()
+        assert current is not None and current.ask_id == "a-9f20"
         # The bare suffix is the same command: the prefix is what a person
         # reads past, not what they should have to retype.
         await _submit(pilot, app, "/ask e53b")
-        assert app.query_one(AskQueueList).current().ask_id == "a-e53b"
+        landed = app.query_one(AskQueueList).current()
+        assert landed is not None and landed.ask_id == "a-e53b"
 
 
 async def test_ask_on_a_settled_id_switches_to_all_with_a_notice(enabled):
@@ -371,7 +375,8 @@ async def test_ask_on_a_settled_id_switches_to_all_with_a_notice(enabled):
         await _submit(pilot, app, "/ask a-745e")
         listing = app.query_one(AskQueueList)
         assert listing.filter_value == FILTER_ALL
-        assert listing.current().ask_id == "a-745e"
+        current = listing.current()
+        assert current is not None and current.ask_id == "a-745e"
         receipt = tr("tui.asks")(ask_keys.list_showing_all_settled(ask_id="a-745e"))
         assert app.query(NoticeBlock)[-1].text() == receipt
 
@@ -410,7 +415,7 @@ async def test_an_id_from_another_conversation_is_not_looked_up(enabled):
     app = _app(session)
     async with app.run_test(size=(120, 40)) as pilot:
         await await_booted(app, pilot)
-        app._ask_fleet_rows = [_row("a-1234", "Someone else's question?", status="open")]
+        app._ask_fleet_rows = ask_rows([_row("a-1234", "Someone else's question?", status="open")])
         app._sync_ask_surface(ask_rows([_row("a-e53b", "Ship it?")]))
         await pilot.pause()
         await _submit(pilot, app, "/ask a-1234")
