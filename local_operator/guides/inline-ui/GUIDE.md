@@ -5,7 +5,7 @@ description: Choose an inline chart, graph, pie, scatter plot, histogram, heatma
 
 # Inline UI catalog
 
-Use this only when the current request advertises inline UI. Amazon Bedrock Converse does not advertise widgets, even in a compatible viewer, because its signed reasoning must replay against the same conversation. Use normal prose on that route.
+Use this only when the current request advertises inline UI. Discovery is automatic for eligible turns in a compatible viewer on Anthropic Messages, Gemini, and OpenAI/Codex Responses. Chat Completions routes (including Radient and other OpenAI-compatible gateways) do not advertise widgets because the downstream model can require a strict chat template. Amazon Bedrock Converse also uses normal prose so signed reasoning can replay against the same conversation.
 
 Choose the view that answers the question, not the most elaborate one. Keep the main finding in normal prose so it survives in viewers without widgets. Use real data only; retain units, use a consistent scale, and label any aggregation. Don't use HTML, executable formulas, or a separate rendering call.
 

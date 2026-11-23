@@ -5563,10 +5563,11 @@ class ChatRequest(BaseModel):
 class StreamStartEvent(BaseModel):
     """The provider began responding to THIS request, on the wire.
 
-    Emitted by a wire client the moment the provider reveals its own identity
-    for the turn — the first chunk of an OpenAI-compatible stream, the
-    ``response.created`` event on the Responses API, Anthropic's
-    ``message_start``. It exists to give supervisors a boundary that means
+    Emitted by a wire client before forwarding generated output: the first
+    chunk of an OpenAI-compatible stream, ``response.created`` on Responses,
+    or Anthropic's ``message_start``. When a stream omits or delays its opening
+    event, generated output itself proves the request started. This gives
+    supervisors a boundary that means
     "the request crossed the wire and the provider started generating", which
     is NOT what ``MessageStartEvent`` means: the loop emits that one from a
     bare placeholder message before the ``ChatRequest`` is even constructed
@@ -5574,10 +5575,9 @@ class StreamStartEvent(BaseModel):
     prompt un-retryable that DNS, auth, or a rate limit could still reject.
 
     ``response_id`` is the provider's native turn identity, and is the token an
-    external runtime commits as no-replay proof. It is ``None`` when the
-    provider exposes no stable per-response id on its streaming surface
-    (Google), and a consumer must then treat acceptance as indeterminate
-    rather than inventing one.
+    external runtime commits as no-replay proof. It is ``None`` when a stable
+    per-response id isn't available at that boundary, and a consumer must then
+    treat acceptance as indeterminate for replay rather than inventing one.
     """
 
     type: Literal["start"] = "start"

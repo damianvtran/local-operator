@@ -3350,11 +3350,8 @@ class OpenAICompatClient:
             "openai-chat",
             scope,
             _estimate_slope(request.model),
-            extra_native_tokens=(
-                echo_turns * reasoning_echo_placeholder_tokens()
-                + google_boundary_tokens
-                + _inline_ui_suffix_tokens(request)
-            ),
+            extra_native_tokens=echo_turns * reasoning_echo_placeholder_tokens()
+            + google_boundary_tokens,
         )
         if direct_deepseek:
             messages = _deepseek_tool_images(messages)
@@ -3371,10 +3368,10 @@ class OpenAICompatClient:
                 frozen_entry=epoch_entry,
                 ephemeral_indices=ephemeral_indices,
             )
-        # Append only after cache placement: the next request (and an advisor)
-        # can read every original marker without having to resend discovery.
-        if request.inline_ui_hint is not None:
-            messages.append({"role": "user", "content": request.inline_ui_hint})
+        # Chat Completions is a wire format, not a downstream template
+        # contract. A suffix row can violate strict role alternation; changing
+        # an existing row can rewrite the cached prefix or a tool pair. Keep
+        # this entire route transparent and leave discovery to native inputs.
         body: dict[str, Any] = {
             "model": request.model.model_id,
             "stream": True,
@@ -4036,12 +4033,9 @@ class OpenAICompatClient:
                         # proof against it (see StreamStartEvent) and must not learn
                         # the turn was accepted only once it has already finished.
                         started = True
-                        yield StreamStartEvent(
-                            response_id=_stream_id(chunk.get("id")),
-                            inline_ui_source_version=(
-                                1 if request.inline_ui_hint is not None else None
-                            ),
-                        )
+                        # The chat body never sends discovery. Its default
+                        # None receipt also clears any failed primary's marker.
+                        yield StreamStartEvent(response_id=_stream_id(chunk.get("id")))
                     chunk_choices = chunk.get("choices") or []
                     chunk_finished = bool(
                         chunk_choices
@@ -4389,6 +4383,7 @@ class OpenAICompatClient:
         tool_call_count = 0
         terminal_stop: str | None = None
         terminal_error: str | None = None
+        started = False
         #: The model the upstream says actually answered (``response.model``), read
         #: off frames this loop already parses. Same contract as the chat wire's
         #: capture: the last carrier wins and a refused value leaves the previous
@@ -4531,16 +4526,30 @@ class OpenAICompatClient:
                     if event_type in ("response.failed", "error"):
                         raise _openai_response_error(payload)
                     continue
-                if event_type == "response.created":
-                    # The Responses API names the turn as soon as it opens it.
-                    # Capture the boundary HERE, not at ``response.completed``:
-                    # a supervisor keying no-replay proof on completion would
-                    # learn the turn was accepted only after it had already
-                    # produced its whole answer, which defeats the purpose.
+                if not started and event_type in (
+                    "response.created",
+                    "response.in_progress",
+                    "response.output_item.added",
+                    "response.output_item.done",
+                    "response.function_call_arguments.done",
+                    "response.function_call_arguments.delta",
+                    "response.output_text.delta",
+                    "response.refusal.delta",
+                    "response.completed",
+                    "response.incomplete",
+                ):
+                    # Compatible streams can omit or delay response.created.
+                    # Projectors need this attempt's receipt before its first
+                    # output (including terminal tool snapshots). Only the
+                    # response envelope identifies the turn: item/call IDs are
+                    # not acceptance proof, and a late created cannot start it
+                    # again. Errors and transport metadata never start a turn.
+                    started = True
                     yield StreamStartEvent(
                         response_id=_stream_id((payload.get("response") or {}).get("id")),
                         inline_ui_source_version=1 if request.inline_ui_hint is not None else None,
                     )
+                if event_type == "response.created":
                     created_model = _served_model_slug((payload.get("response") or {}).get("model"))
                     if created_model:
                         served_model = created_model
@@ -6079,6 +6088,7 @@ class AnthropicClient:
         native_blocks: dict[int, dict[str, Any]] = {}
         tool_json: dict[int, list[str]] = {}
         visible_text: list[str] = []
+        started = False
         #: The model the API says served this turn (``message.model`` on
         #: ``message_start``). Captured for the per-call ledger record because the
         #: request names the ROUTE the harness asked for, never the checkpoint
@@ -6139,32 +6149,35 @@ class AnthropicClient:
                         output_reported = True
                         usage.output_tokens = int(fill["output_tokens"])
                     continue
-                if event_type == "message_start":
-                    # Anthropic names the turn on its own ``message_start``,
-                    # which is the moment it began generating for this request.
-                    # The id was previously read past for usage alone, leaving
-                    # an Anthropic-pinned run with NO native turn identity on
-                    # any event — and therefore no way for an external runtime
-                    # to commit no-replay proof.
-                    # ``diagnostics`` rides the same frame (streaming puts it
-                    # on ``message_start``, nowhere else). Read only when THIS
-                    # request opted in — the retry below may have dropped the
-                    # key — so an undiagnosed call reports ``None``, never a
-                    # fabricated "baseline".
+                if not started and event_type in (
+                    "message_start",
+                    "content_block_start",
+                    "content_block_delta",
+                    "content_block_stop",
+                    "message_delta",
+                    "message_stop",
+                ):
+                    # Messages normally starts with an identity and any cache
+                    # diagnostics. The parser also accepts content without
+                    # that frame. Don't release it without this attempt's
+                    # receipt, or guess an identity/diagnosis if it was absent.
+                    message = (event.get("message") or {}) if event_type == "message_start" else {}
                     miss_type, missed_tokens = (
                         _anthropic_cache_diagnosis(
-                            event.get("message") or {},
+                            message,
                             previous_id=request.cache_diagnostics_previous_id,
                         )
-                        if "diagnostics" in body
+                        if event_type == "message_start" and "diagnostics" in body
                         else (None, 0)
                     )
+                    started = True
                     yield StreamStartEvent(
-                        response_id=_stream_id((event.get("message") or {}).get("id")),
+                        response_id=_stream_id(message.get("id")),
                         inline_ui_source_version=1 if request.inline_ui_hint is not None else None,
                         cache_miss_type=miss_type,
                         cache_missed_tokens=missed_tokens,
                     )
+                if event_type == "message_start":
                     start_model = _served_model_slug((event.get("message") or {}).get("model"))
                     if start_model:
                         served_model = start_model
@@ -6407,8 +6420,15 @@ def _google_digest(value: Any) -> bytes:
     return hashlib.sha256(encoded).digest()
 
 
-def _google_prefix_snapshot(body: Mapping[str, Any]) -> _GooglePrefixSnapshot:
+def _google_prefix_snapshot(
+    body: Mapping[str, Any], *, has_inline_ui_suffix: bool = False
+) -> _GooglePrefixSnapshot:
     contents = body.get("contents") or []
+    # This classifier attributes changes to the durable history. The builder's
+    # own final discovery row moves after new messages, without rewriting any
+    # of them. Do not alter the actual POST or the provider's token receipts.
+    if has_inline_ui_suffix:
+        contents = contents[:-1]
     return _GooglePrefixSnapshot(
         system_hash=_google_digest(body.get("systemInstruction")),
         tools_hash=_google_digest(body.get("tools")),
@@ -6445,7 +6465,8 @@ def _google_cache_diagnosis(
         a != b for a, b in zip(current.contents_hashes, prev_contents)
     ):
         return "messages_changed", shortfall
-    # The whole previous prompt is a byte-identical prefix of this one.
+    # The durable prompt is a matching prefix. Shortfall still comes from
+    # the provider's exact wire token counts, including any transient tail.
     if cached_tokens <= 0:
         if previous.prompt_tokens >= _GOOGLE_IMPLICIT_CACHE_MIN_TOKENS:
             return "evicted_or_rerouted", previous.prompt_tokens
@@ -6984,7 +7005,9 @@ class GoogleClient:
             # Silent telemetry must never fail a turn: a hashing bug only
             # loses this call's diagnosis (no snapshot, so nothing recorded).
             try:
-                prefix = _google_prefix_snapshot(body)
+                prefix = _google_prefix_snapshot(
+                    body, has_inline_ui_suffix=request.inline_ui_hint is not None
+                )
             except Exception:  # noqa: BLE001 — telemetry is best-effort
                 logger.debug("google cache snapshot failed", exc_info=True)
         prompt_tokens = 0
