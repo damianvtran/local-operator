@@ -1260,7 +1260,7 @@ const EMPTY_ASK_DRAFT: AskDraft = { answers: {}, skipped: [] };
  *  (ADR 0005). `skipped` carries no value and is kept. Returns the SAME object
  *  when nothing was stripped, so a caller can tell. */
 function withoutSecrets(draft: AskDraft, secretIds: readonly string[]): AskDraft {
-	if (!secretIds.some((id) => id in draft.answers)) return draft;
+	if (!secretIds.some((id) => Object.hasOwn(draft.answers, id))) return draft;
 	const answers = { ...draft.answers };
 	for (const id of secretIds) delete answers[id];
 	return { ...draft, answers };

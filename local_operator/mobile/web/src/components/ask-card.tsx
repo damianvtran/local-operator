@@ -633,7 +633,7 @@ export function AskCard({
 	   this card's memory while it is open and nowhere else (`useAskDraft`). Joined
 	   to a string so the list's identity does not change per render. */
 	const secretKey = (Array.isArray(row.questions) ? row.questions : [])
-		.filter((question) => question.secret === true)
+		.filter((question) => Boolean(question.secret))
 		.map((question) => String(question.id))
 		.join("\u0000");
 	const secretIds = useMemo(() => (secretKey === "" ? [] : secretKey.split("\u0000")), [secretKey]);
