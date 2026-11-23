@@ -579,6 +579,29 @@ def test_prompt_without_delivery_dumps_byte_identically_to_before() -> None:
     assert json.dumps(pinned.model_dump()) != json.dumps(dump)
 
 
+def test_inline_ui_default_leaves_the_receipt_dump_as_before() -> None:
+    """``inline_ui`` is retry identity only when a viewer actually claims it.
+
+    The receipt journal hashes ``model_dump()``. A same-id retry recorded
+    before the inline UI capability flag existed must replay after an upgrade,
+    so the default ``False`` is omitted, exactly like an absent ``delivery``.
+    A ``True`` claim DOES ride: a capable and an incapable send under one id
+    are different requests. Removing the omission fails the pinned-bytes test
+    above; this one guards the other half, that ``True`` is not dropped too.
+    """
+    import json
+
+    base = Prompt(request_id="12345678-1234-4678-9234-567812345678", text="hi")
+    assert "inline_ui" not in base.model_dump()
+    explicit_false = Prompt.model_validate(
+        {"request_id": "12345678-1234-4678-9234-567812345678", "text": "hi", "inline_ui": False}
+    )
+    assert json.dumps(explicit_false.model_dump()) == json.dumps(base.model_dump())
+    capable = base.model_copy(update={"inline_ui": True})
+    assert capable.model_dump()["inline_ui"] is True
+    assert json.dumps(capable.model_dump()) != json.dumps(base.model_dump())
+
+
 @pytest.mark.asyncio
 async def test_a_pinned_delivery_is_part_of_receipt_identity(tmp_path):
     """Same-id replay: the pinned delivery hashes; a changed delivery conflicts."""

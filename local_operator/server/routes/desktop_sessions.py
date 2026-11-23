@@ -1453,14 +1453,25 @@ class Prompt(Input):
     @model_serializer(mode="wrap")
     def _omit_absent_delivery(self, handler: Any, info: Any) -> Any:
         # The receipt journal fingerprints ``model_dump()`` bytes, so a
-        # same-id retry claimed BEFORE the delivery field existed must not
-        # read as a changed body after an upgrade. ``None`` is the absent
-        # reading, so it leaves the dump exactly as the pre-field build
-        # wrote it (the wrap-serializer pattern ``PromptImage.
-        # _omit_absent_origin`` already uses for the same reason).
+        # same-id retry claimed BEFORE a field existed must not read as a
+        # changed body after an upgrade. Each optional field's absent reading
+        # therefore leaves the dump exactly as the pre-field build wrote it
+        # (the wrap-serializer pattern ``PromptImage._omit_absent_origin``
+        # already uses for the same reason):
+        #
+        # * ``delivery``: ``None`` is absent.
+        # * ``inline_ui``: ``False`` is absent. The flag is the viewer's
+        #   per-send capability claim for inline UI widgets; a client that
+        #   predates it never sends it, and every reader downstream treats a
+        #   missing key as ``False`` (``frame.get("inline_ui") is True``), so
+        #   omitting the default changes no behaviour. ``True`` stays in the
+        #   dump: it is part of the retry identity, like ``input_mode``.
         data = handler(self)
-        if isinstance(data, dict) and data.get("delivery") is None:
-            data.pop("delivery", None)
+        if isinstance(data, dict):
+            if data.get("delivery") is None:
+                data.pop("delivery", None)
+            if data.get("inline_ui") is False:
+                data.pop("inline_ui", None)
         return data
 
     @model_validator(mode="after")
