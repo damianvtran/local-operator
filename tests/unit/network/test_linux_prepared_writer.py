@@ -31,6 +31,13 @@ from local_operator.network.wire import FrameReader, LinkCrypto, LinkKeys
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux mechanics only")
 
+#: select(2)'s FD_SETSIZE ceiling: the descriptor height these tests exist to
+#: clear when they lease a high slot. CPython does not export the C macro
+#: (``select.FD_SETSIZE`` does not exist), so it is spelled once, here, and every
+#: use derives from it -- a floor quietly lowered below this number would
+#: otherwise stop exercising the high-descriptor path while still passing.
+FDSET_CEILING = 1024
+
 
 @contextlib.contextmanager
 def tcp_pair():
@@ -127,7 +134,7 @@ def receive_all(peer):
 
 @contextlib.contextmanager
 def high_descriptor(writer, attribute):
-    """Lease only two high slots in this disposable test process, not the service.
+    """Lease one high slot in this disposable test process, not the service.
 
     F_DUPFD_CLOEXEC avoids opening thousands of descriptors merely to reproduce
     fd_set's ceiling. Restore the soft limit even when the old source fails.
@@ -137,16 +144,31 @@ def high_descriptor(writer, attribute):
 
     limits = resource.getrlimit(resource.RLIMIT_NOFILE)
     try:
-        if limits[0] <= 1024:
-            assert limits[1] >= 1026, "high-descriptor test lease unavailable"
-            resource.setrlimit(resource.RLIMIT_NOFILE, (1026, limits[1]))
+        if limits[0] <= FDSET_CEILING:
+            assert limits[1] >= FDSET_CEILING + 2, "high-descriptor test lease unavailable"
+            resource.setrlimit(resource.RLIMIT_NOFILE, (FDSET_CEILING + 2, limits[1]))
         low = getattr(writer, attribute)
-        fd = fcntl.fcntl(low.fileno(), fcntl.F_DUPFD_CLOEXEC, 1024)
+        # The floor argument IS the ceiling guarantee: F_DUPFD_CLOEXEC returns the
+        # LOWEST free slot at or above the floor, so it cannot hand back a slot below
+        # FD_SETSIZE. Re-asserting that here would be a tautology, not evidence.
+        fd = fcntl.fcntl(low.fileno(), fcntl.F_DUPFD_CLOEXEC, FDSET_CEILING)
         high = socket.socket(fileno=fd)
         try:
-            assert fd in (1024, 1025), "only the two leased high slots are allowed"
             high.settimeout(low.gettimeout())
             setattr(writer, attribute, high)
+            # NEVER assert the slot NUMBER. Which free slot the floor lands on is
+            # incidental to clearing the ceiling: 1024/1025 only happens in a
+            # pristine process, and nothing keeps a worker near FD_SETSIZE -- an
+            # xdist worker that already held 1024..1112 was handed 1113 (CI run
+            # 45172624920, job `test (3.13, 2)`: "assert 1113 in (1024, 1025)").
+            # What the test does need is that the swap took, and that can still
+            # fail, so the swapped descriptor is what is asserted. The observed
+            # value is in the message: a bare range told the next reader nothing
+            # about the process it ran in.
+            leased = getattr(writer, attribute)
+            assert leased.fileno() == fd, (
+                f"writer {attribute} still holds fd {leased.fileno()}, not the leased {fd}"
+            )
             low.close()
             yield fd
         finally:
