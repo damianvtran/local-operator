@@ -920,6 +920,9 @@ async def test_settings_projection_carries_the_derived_hotkey_scope(desktop):
         "keymap.next_session": "app",
         "keymap.cycle_effort": "app",
         "keymap.clear_transcript": "app",
+        "keymap.send_steer": "composer",
+        "keymap.send_queue": "composer",
+        "keymap.send_both": "composer",
     }
     assert not any(
         row["hotkey_scope"] for key, row in rows.items() if not key.startswith("keymap.")
@@ -944,6 +947,9 @@ async def test_settings_projection_carries_the_derived_hotkey_scope(desktop):
         "keymap.next_session": False,
         "keymap.cycle_effort": False,
         "keymap.clear_transcript": False,
+        "keymap.send_steer": False,
+        "keymap.send_queue": False,
+        "keymap.send_both": False,
     }
     assert not any(
         row["clearable"] for key, row in rows.items() if not key.startswith("keymap.")

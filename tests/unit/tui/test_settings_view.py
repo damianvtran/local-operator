@@ -295,7 +295,7 @@ async def test_a_collapsed_enum_row_shows_the_label_the_picker_shows(
         assert " both" not in collapsed, (locale, collapsed)
         # The value CELL is exactly the picker's label, not merely present in
         # the row: one string painted by two surfaces.
-        assert settings_view._render_value("both", setting=setting) == painted, locale
+        assert settings_view._render_value("both", setting=setting, raw=True) == painted, locale
 
         # The picker paints the same label: one source, one answer.
         view.action_activate()
