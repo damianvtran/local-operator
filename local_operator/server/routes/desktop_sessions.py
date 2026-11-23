@@ -4840,10 +4840,16 @@ async def prompt(session_id: str, body: Prompt, request: Request):
                 # when queueing is honest and why it is at-most-once.
                 if not _owner_busy(error):
                     raise
+                # The receipt callback must not close over the exception target
+                # Python clears at the end of an except block.
+                busy_error = error
 
                 async def spool(inline_ui: bool) -> dict[str, Any]:
                     return await _queue_or_refuse(
-                        request, session_id, body.model_copy(update={"inline_ui": inline_ui}), error
+                        request,
+                        session_id,
+                        body.model_copy(update={"inline_ui": inline_ui}),
+                        busy_error,
                     )
 
                 queued = await receipts(request).run_prompt(

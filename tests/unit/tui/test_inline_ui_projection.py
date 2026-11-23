@@ -85,10 +85,8 @@ def test_unsafe_json_numbers_use_exact_table_text_and_never_plot() -> None:
         source = f'```lop-ui\n{{"type":"{kind}","title":"Exact",{fields}}}\n```'
         return project_inline_ui(source, streaming=False, source_version=1, capabilities=_RICH)
 
-    table = project(
-        "table",
-        '"columns":["A"],"rows":[[9007199254740991],[9007199254740993],[9007199254740995.0],[1e30]]',
-    )
+    counts = "[9007199254740991],[9007199254740993],[9007199254740995.0],[1e30]"
+    table = project("table", f'"columns":["A"],"rows":[{counts}]')
     assert "inline_ui" in table
     wire = json.loads(json.dumps(table["inline_ui"]))
     assert wire["widgets"][0]["payload"]["rows"] == [
