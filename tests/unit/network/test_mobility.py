@@ -1756,12 +1756,60 @@ def test_an_offload_refreshes_definitions_on_the_destination_before_the_invite(
     pushes = [i for i, (kind, _) in enumerate(events) if kind == "push"]
     invite = events.index(("ask", "invite"))
     assert pushes and pushes[0] < invite, events
+    # Select the roster graph, not a second attachment for the team's speaker.
+    # Expansion carries its definitions so arrival can compute what to refuse.
     assert events[pushes[0]][1] == {"agents": [], "teams": ["lopdev"]}, events
     assert (server_b.root / "system_prompt.md").read_text(encoding="utf-8") == rules
     mirrored = TeamRegistry(server_b.root).get_team_by_name("lopdev")
     assert mirrored is not None
     # A clean refresh adds nothing to the receipt.
     assert "definitions_notice" not in (result.get("carry") or {}), result
+
+
+@pytest.mark.asyncio
+async def test_preinvite_team_definitions_do_not_bind_the_arriving_session(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.network import move_team
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    owner, receiver, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin", settings=receiver.settings)
+    source = _owned_session(owner)
+    manager = "offload-manager"
+    team = "offload-team"
+    AgentRegistry(owner.root).create_agent(AgentEditFields(name=manager, tags=["role"]))
+    TeamRegistry(owner.root).create_team(TeamEditFields(name=team, manager=manager))
+    _authorize_source(owner.root, source, team)
+    assert AgentRegistry(receiver.root).get_agent_by_name(manager) is None
+
+    destination = receiver.root / "sessions" / SESSION
+    real_ask = mobility.LinkTransport.ask
+    checked = False
+
+    def ask(self: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        nonlocal checked
+        if frame.get("phase") == "invite":
+            # Registry rows describe the ceiling, but are not an authority record.
+            assert AgentRegistry(receiver.root).get_agent_by_name(manager) is not None
+            assert TeamRegistry(receiver.root).get_team_by_name(team) is not None
+            assert not destination.exists()
+            with pytest.raises(move_team.TeamIdentityRefused, match=team):
+                move_team.check_arrival(receiver.root, source, None)
+            checked = True
+        return real_ask(self, frame)
+
+    monkeypatch.setattr(mobility.LinkTransport, "ask", ask)
+    result = _move(owner, SESSION, to=receiver.identity.device_id, monkeypatch=monkeypatch)
+    assert checked
+    assert result["ok"] is True, result
+    arrived = _open_team_session(receiver.root, destination)
+    try:
+        assert arrived.active_team_name == team
+        assert arrived._team_manager_name() == manager
+    finally:
+        await arrived.dispose()
 
 
 @pytest.mark.asyncio

@@ -8458,7 +8458,10 @@ def _push_move_definitions(
         attachment = None
     if attachment is not None:
         team, agent = attachment.team, attachment.agent
-    names = {"agents": [agent] if agent else [], "teams": [team] if team else []}
+    # A team owns the agent slot: its recorded speaker is not an independent
+    # attachment. Roster expansion supplies the manager and delegated roles for
+    # the ceiling check, not a binding for the arriving session.
+    names = {"agents": [agent] if agent and not team else [], "teams": [team] if team else []}
     try:
         pushed = definitions.push_to_peer(server, target_device, names=names)
     except Exception as exc:  # noqa: BLE001 — non-fatal, see the call site
