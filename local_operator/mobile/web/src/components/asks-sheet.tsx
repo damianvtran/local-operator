@@ -209,6 +209,11 @@ export function AsksSheet({
 			/* A RECEIPT BELONGS TO ONE OPENING: reopening later must not present
 			   a dismissal from the last visit as though it just happened. */
 			setReceipt(null);
+			/* AND SO DOES THE EXPANSION CHOICE, as on the native panel (its
+			   `opening` action restarts from the first answerable ask): a reopen
+			   must not keep the last visit's card, which may be a settled row. */
+			setChoice(undefined);
+			setFocusAsk(null);
 			return;
 		}
 		void load();
@@ -280,6 +285,7 @@ export function AsksSheet({
 	/** The ask whose first question takes focus on mount: set when an answer moves
 	    the reader on to the next ask. */
 	const [focusAsk, setFocusAsk] = useState<string | null>(null);
+	const [closeFocus, setCloseFocus] = useState(0);
 	const defaultOpen = pickOpen(bands.current, "", true);
 	const choiceLive =
 		choice !== undefined && (choice === null || listed.some((row) => row.ask_id === choice));
@@ -427,6 +433,9 @@ export function AsksSheet({
 		const next = pickOpen(bands.current, row.ask_id, false);
 		setChoice(next ? next.ask_id : null);
 		setFocusAsk(next ? next.ask_id : null);
+		// Nothing to walk on to: the answered card (and the control that had
+		// focus) is gone, so the reader's place goes to the sheet's ✕.
+		if (!next) setCloseFocus((n) => n + 1);
 		void load();
 	};
 	const dismissed = (askId: string, reason: "moot" | "answered_in_chat" | undefined) =>
@@ -496,6 +505,7 @@ export function AsksSheet({
 			onClose={onClose}
 			title={title}
 			scrollerRef={scroller}
+			closeFocusSignal={closeFocus}
 			/* THE ANSWERING CONTROLS ARE PINNED, outside the scroller: content may
 			   scroll, the control that answers the card may not. The bar is empty (and
 			   collapsed) unless the open ask has something to answer with. */

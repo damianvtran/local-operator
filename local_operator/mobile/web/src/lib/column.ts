@@ -88,6 +88,23 @@ export const ASK_QUESTION_FRACTION = 0.3;
  */
 export const SKILL_TRAY_FRACTION = 0.45;
 
+/** A sheet's pinned footer takes at most this share of the column and scrolls
+ *  inside itself past it (design D1, QA Q-1): at 200% text on a 320x568 phone the
+ *  uncapped bar, with the dismiss reasons open, left the reading area 0-14 px. */
+export const SHEET_FOOTER_FRACTION = 0.4;
+
+/** What a sheet's scroller keeps, as a share of the column, while a footer is
+ *  present: footer cap + this + the header stays inside the sheet's own 0.85
+ *  cap, so the question is always at least this tall. */
+export const SHEET_READING_MIN_FRACTION = 0.28;
+
+/** `min-height` in column units, the floor twin of `columnCap`. */
+export function columnFloor(fraction: number): { minHeight: string } {
+	return {
+		minHeight: `calc(var(${COLUMN_HEIGHT_VAR}, 100dvh) * ${fraction})`,
+	};
+}
+
 /** `max-height` in column units — see the module docstring for why not `dvh`. */
 export function columnCap(fraction: number): { maxHeight: string } {
 	return {

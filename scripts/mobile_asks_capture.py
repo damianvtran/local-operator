@@ -147,6 +147,23 @@ SHEET_PROBE = """
     scroller: scroller
       ? {scrollH: scroller.scrollHeight, clientH: scroller.clientHeight}
       : null,
+    // The reading area and the pinned footer, in real pixels (design D1 / QA
+    // Q-1): at large text the footer must scroll inside its cap and leave the
+    // reading area a floor, never 0-14 px. `readingShare` is the scroller's
+    // share of the column (`--lo-vvh`, else the window); the floor is 0.28.
+    footer: (() => {
+      const f = dialog ? dialog.querySelector('[data-sheet-footer]') : null;
+      if (!f || !scroller) return null;
+      const column = parseFloat(
+        getComputedStyle(dialog.parentElement || document.body)
+          .getPropertyValue('--lo-vvh')) || window.innerHeight;
+      return {
+        footerH: Math.round(f.getBoundingClientRect().height),
+        footerScrolls: f.scrollHeight > f.clientHeight + 1,
+        readingH: Math.round(scroller.getBoundingClientRect().height),
+        readingShare: +(scroller.getBoundingClientRect().height / column).toFixed(2),
+      };
+    })(),
     // The panel's own text, truncated: what the reader sees, as a string, so a
     // frame's claim about a sentence can be checked against the DOM that drew it
     // rather than argued from the component's source. No whitespace collapsing —

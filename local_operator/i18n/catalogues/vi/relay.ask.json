@@ -5,9 +5,9 @@
   "relay.ask.dismiss.cancel": "Hủy",
   "relay.ask.dismiss.moot": "Không còn cần nữa",
   "relay.ask.dismiss.moot_note": "Tác nhân sẽ không chờ câu trả lời nữa",
-  "relay.ask.dismiss.open": "Bỏ qua…",
-  "relay.ask.dismiss.receipt": "Đã bỏ qua — không gửi câu trả lời",
-  "relay.ask.dismiss.receipt_answered_in_chat": "Đã bỏ qua — đã trả lời trong cuộc trò chuyện",
-  "relay.ask.dismiss.receipt_moot": "Đã bỏ qua — không còn cần nữa",
+  "relay.ask.dismiss.open": "Đóng…",
+  "relay.ask.dismiss.receipt": "Đã đóng — không gửi câu trả lời",
+  "relay.ask.dismiss.receipt_answered_in_chat": "Đã đóng — đã trả lời trong cuộc trò chuyện",
+  "relay.ask.dismiss.receipt_moot": "Đã đóng — không còn cần nữa",
   "relay.ask.dismiss.title": "{count, plural, other {Đóng câu hỏi}}"
 }

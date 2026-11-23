@@ -1447,3 +1447,58 @@ describe("the panel's final look (native parity)", () => {
 		expect(screen.getByTestId("ask-question-text").className).toContain("text-start");
 	});
 });
+
+describe("the bar after the remediation batch", () => {
+	beforeEach(() => localStorage.clear());
+
+	it("greys a disabled Send with a sunken fill and muted ink, not a faded accent", () => {
+		renderCard(ask());
+		const send = screen.getByRole("button", { name: /Send answer/ });
+		expect((send as HTMLButtonElement).disabled).toBe(true);
+		expect(send.className).toContain("disabled:bg-sunken");
+		expect(send.className).toContain("disabled:text-ink-muted");
+		expect(send.className).not.toContain("disabled:opacity-50");
+	});
+
+	it("gives Decline a danger-tinted edge", () => {
+		renderCard(ask());
+		const decline = screen.getByRole("button", { name: /^Decline$/ });
+		expect(decline.className).toContain("border");
+		expect(decline.className).toContain("border-danger/40");
+	});
+
+	it("moves focus to the first reason on Dismiss…, and back to Dismiss… on Cancel", () => {
+		renderCard(ask());
+		fireEvent.click(screen.getByRole("button", { name: /^Dismiss…$/ }));
+		expect(document.activeElement).toBe(screen.getAllByRole("button").find((b) => /^(Answered in the conversation|No longer needed)/.test(b.textContent ?? "")));
+		fireEvent.click(screen.getByRole("button", { name: /^Cancel$/ }));
+		expect(document.activeElement).toBe(screen.getByRole("button", { name: /^Dismiss…$/ }));
+	});
+
+	it("centres Cancel in the reasons panel and drops Dismiss…'s start inset", () => {
+		renderCard(ask());
+		const dismiss = screen.getByRole("button", { name: /^Dismiss…$/ });
+		expect(dismiss.className).toContain("ps-0");
+		fireEvent.click(dismiss);
+		const cancel = screen.getByRole("button", { name: /^Cancel$/ });
+		expect(cancel.className).toContain("self-center");
+		expect(cancel.className).not.toContain("self-start");
+	});
+
+	it("scrolls the Other field into view when it takes focus", () => {
+		const scrolled = vi.fn();
+		const proto = HTMLElement.prototype as { scrollIntoView?: unknown };
+		const had = proto.scrollIntoView;
+		proto.scrollIntoView = scrolled;
+		try {
+			renderCard(ask());
+			fireEvent.click(screen.getByRole("radio", { name: /^Other/ }));
+			fireEvent.focus(screen.getByRole("textbox"));
+			expect(scrolled).toHaveBeenCalledWith({ block: "nearest" });
+		} finally {
+			if (had) proto.scrollIntoView = had;
+			else delete proto.scrollIntoView;
+		}
+	});
+});
+

@@ -876,4 +876,55 @@ describe("the ask panel", () => {
 		expect(line.parentElement).toBe(retry.parentElement);
 		expect(line.parentElement?.className).toContain("items-start");
 	});
+
+	it("reopens on the first answerable ask, not on the last visit's expanded row", async () => {
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [
+				choice("a", "first question?"),
+				choice("b", "second question?"),
+				ask({ ask_id: "gone", status: "answered", delivered: true, answers: { q1: ["blue"] } }),
+			],
+		});
+		const view = render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await screen.findByTestId("ask-card");
+		// Visit 1: open a settled row, replacing the card.
+		fireEvent.click(await screen.findByRole("button", { name: /blue|answered/i }));
+		await waitFor(() => expect(screen.getByTestId("ask-card").getAttribute("data-ask-id")).toBe("gone"));
+		view.rerender(<AsksSheet open={false} onClose={() => {}} currentSessionId="mine" />);
+		view.rerender(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getByTestId("ask-card").getAttribute("data-ask-id")).toBe("a"));
+	});
+
+	it("puts focus on the sheet's close button once the last ask is answered", async () => {
+		const { sendCommand } = await import("./api");
+		let current = [choice("a1", "only question?")];
+		(getAsks as ReturnType<typeof vi.fn>).mockImplementation(async () => ({ asks: current }));
+		(sendCommand as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+			current = [{ ...current[0], status: "answered", delivered: true, answers: { q1: ["yes"] } }];
+			return { ok: true, detail: "answered" };
+		});
+		open();
+		await screen.findByTestId("ask-card");
+		fireEvent.click(screen.getAllByRole("radio")[0]);
+		const send = await screen.findByRole("button", { name: /Send answer/ });
+		// The reader's place is on Send when they press it (the sheet's own
+		// opening focus is on the ✕, which would make this vacuous).
+		send.focus();
+		expect(document.activeElement).toBe(send);
+		fireEvent.click(send);
+		await waitFor(() =>
+			expect(document.activeElement).toBe(screen.getByRole("button", { name: "close sheet" })),
+		);
+	});
+
+	it("pins a footer that scrolls inside a cap, so the bar and the reasons cannot clip", async () => {
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({ asks: [choice("a", "question?")] });
+		open();
+		await screen.findByTestId("ask-card");
+		const bar = screen.getByTestId("asks-bar");
+		const footer = bar.closest("[data-sheet-footer]") as HTMLElement;
+		expect(footer.className).toContain("overflow-y-auto");
+		expect(footer.className).toContain("min-h-0");
+	});
 });
+

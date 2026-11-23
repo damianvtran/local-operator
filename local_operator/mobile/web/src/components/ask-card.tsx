@@ -149,22 +149,6 @@ function contextLine(row: PendingAsk): string | null {
 	return messageRuntime.t("relay.ask.context.messages", { count, time });
 }
 
-/** The sentence a row shows when the aggregate ALREADY reports its conversation
- *  as DEAD (`isDeadConversation`: no durable transcript AND nothing live to
- *  deliver to) — the state the daemon refuses every op on with
- *  `ask_session_gone` (design round 2, D6).
- *
- *  IT MIRRORS `daemon._ASK_GONE_RESPONSE` rather than waiting for the refusal,
- *  and that duplication is the point of a pre-emptive state: fetching the
- *  sentence would mean buying the guaranteed 409 the state exists to avoid. It
- *  is the ANSWER's wording, remedy included (design round 3, D7's NIT: one
- *  voice), because the card offers no control at all — so the sentence that fits
- *  is the one the primary control would have produced, and `start a new
- *  conversation and ask again` is the user's actual next move. The ops that
- *  carry their own sentence (a dismissal, a handed-over decision) are only told
- *  apart when the refusal comes FROM THE WIRE, which this branch never does.
- *  The sentence itself is `relay.asks.card.gone`. */
-
 /** Not a wire cap: the daemon stores whatever string it is given. 32768 is the
     bound the desktop client's answer schema uses, and the phone matches it so the
     same typed answer is accepted on both surfaces and a runaway paste stops at the
@@ -237,7 +221,6 @@ function answerValues(cell: readonly string[]): string[] {
 	return Array.from(new Set(cell.map((value) => value.trim()).filter((value) => value !== "")));
 }
 
-/** One question's control, plus whether it currently holds a complete answer. */
 /**
  * A question's text, capped at a share of the column and scrolling inside
  * itself (`ASK_QUESTION_FRACTION`), so a paragraph- or brief-length question
@@ -662,6 +645,18 @@ function QuestionField({
 								event.preventDefault();
 								event.currentTarget.blur();
 							}}
+							onFocus={(event) => {
+								/* KEEP THE FIELD ON SCREEN WITH THE KEYBOARD UP: the pinned bar and
+								   the keyboard leave the scroller little room, and the field sits
+								   at the foot of the options. The keyboard rises after focus, so
+								   the nudge runs again once the viewport has settled. */
+								const field = event.currentTarget;
+								const nudge = () => field.scrollIntoView?.({ block: "nearest" });
+								nudge();
+								window.setTimeout(() => {
+									if (document.activeElement === field) nudge();
+								}, 300);
+							}}
 							disabled={disabled}
 							aria-label={question.question}
 							placeholder={messageRuntime.t("relay.asks.card.placeholder_answer")}
@@ -755,6 +750,17 @@ export function AskCard({
 	    card that showed the in-flight mark here would claim a dismissal the
 	    operator has not made. */
 	const [closing, setClosing] = useState(false);
+	/* FOCUS FOLLOWS THE BAR'S SWAP: opening the reasons removes the control that
+	   was focused (`Dismiss…`), and Cancel removes the reasons, so each lands the
+	   reader's place on the control that replaced it rather than on the page. */
+	const dismissLink = useRef<HTMLButtonElement>(null);
+	const firstReason = useRef<HTMLButtonElement>(null);
+	const wasClosing = useRef(false);
+	useEffect(() => {
+		if (closing) firstReason.current?.focus();
+		else if (wasClosing.current) dismissLink.current?.focus();
+		wasClosing.current = closing;
+	}, [closing]);
 	/** Which reason was SENT, so the button that carries it keeps its label while
 	    the dismissal is in flight (UX round 1, U3). Both buttons used to collapse
 	    to `…`, which erased the only on-screen statement of what the operator
@@ -1238,9 +1244,10 @@ export function AskCard({
 					<span className="text-meta text-ink-dim">
 						{messageRuntime.t("relay.ask.dismiss.title", { count: questions.length })}
 					</span>
-					{DISMISS_REASONS.map((reason) => (
+					{DISMISS_REASONS.map((reason, index) => (
 						<button
 							key={reason}
+							ref={index === 0 ? firstReason : undefined}
 							type="button"
 							disabled={busy !== "" || dismissRefused}
 							aria-busy={(busy === "dismiss" && sentReason === reason) || undefined}
@@ -1273,7 +1280,7 @@ export function AskCard({
 							setError("");
 							setErrorOp("");
 						}}
-						className="flex min-h-11 items-center self-start rounded-sm px-2 text-body-sm text-ink-dim active:bg-surface disabled:opacity-50"
+						className="flex min-h-11 items-center self-center rounded-sm px-2 text-body-sm text-ink-dim active:bg-surface disabled:opacity-50"
 					>
 						{messageRuntime.t("relay.ask.dismiss.cancel")}
 					</button>
@@ -1315,7 +1322,16 @@ export function AskCard({
 							disabled={busy !== "" || !complete}
 							aria-busy={busy === "respond" || undefined}
 							onClick={respond}
-							className="flex min-h-11 min-w-fit flex-1 basis-0 items-center justify-center rounded-sm bg-accent px-4 text-body-sm font-medium whitespace-nowrap text-on-accent active:bg-accent-active disabled:opacity-50"
+							className={cn(
+								"flex min-h-11 min-w-fit flex-1 basis-0 items-center justify-center rounded-sm px-4 text-body-sm font-medium whitespace-nowrap",
+								/* GREY AT REST, DIMMED IN FLIGHT: a disabled Send is a sunken fill with
+								   muted ink (4.51:1 at worst across the 31 themes), not a half-faded
+								   accent that reads as live-but-pale. In flight it keeps the accent
+								   and dims, so the pressed label still says what was chosen. */
+								busy === "respond"
+									? "bg-accent text-on-accent opacity-50"
+									: "bg-accent text-on-accent active:bg-accent-active disabled:bg-sunken disabled:text-ink-muted",
+							)}
 						>
 							{open_questions.length > 1
 								? messageRuntime.t("relay.asks.card.send_answers")
@@ -1326,7 +1342,7 @@ export function AskCard({
 							disabled={busy !== ""}
 							aria-busy={busy === "decline" || undefined}
 							onClick={decline}
-							className="flex min-h-11 min-w-fit flex-1 basis-0 items-center justify-center rounded-sm bg-danger-wash px-3 text-body-sm whitespace-nowrap text-danger active:bg-danger-wash disabled:opacity-50"
+							className="flex min-h-11 min-w-fit flex-1 basis-0 items-center justify-center rounded-sm border border-danger/40 bg-danger-wash px-3 text-body-sm whitespace-nowrap text-danger active:bg-danger-wash disabled:opacity-50"
 						>
 							{messageRuntime.t("relay.asks.card.decline")}
 						</button>
@@ -1346,10 +1362,11 @@ export function AskCard({
 							<p className="min-w-0 flex-auto text-start text-meta text-ink-dim">{progressLine}</p>
 							{reason_needed && !keyboardUp ? (
 								<button
+									ref={dismissLink}
 									type="button"
 									disabled={busy !== "" || dismissRefused}
 									onClick={() => setClosing(true)}
-									className="flex min-h-11 shrink-0 items-center rounded-sm px-1 text-meta text-ink-muted active:bg-surface disabled:opacity-50"
+									className="flex min-h-11 shrink-0 items-center rounded-sm ps-0 pe-1 text-meta text-ink-muted active:bg-surface disabled:opacity-50"
 								>
 									{messageRuntime.t("relay.ask.dismiss.open")}
 								</button>

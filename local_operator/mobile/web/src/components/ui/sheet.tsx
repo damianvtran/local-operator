@@ -14,10 +14,16 @@ import { useScrollCues } from "../../lib/use-scroll-cues";
  * a scrim or ✕ receives it — dismissing the sheet the user never touched. The
  * guard below swallows exactly that one click; every other path is unchanged.
  */
-import { useCallback, useId, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode, type RefObject } from "react";
 import { cn } from "../../lib/cn";
 import { useModalLayer } from "./use-modal-layer";
-import { columnBox, columnCap } from "../../lib/column";
+import {
+	SHEET_FOOTER_FRACTION,
+	SHEET_READING_MIN_FRACTION,
+	columnBox,
+	columnCap,
+	columnFloor,
+} from "../../lib/column";
 
 export function Sheet({
 	open,
@@ -31,6 +37,7 @@ export function Sheet({
 	headerDetail,
 	footer,
 	scrollerRef,
+	closeFocusSignal,
 }: {
 	open: boolean;
 	onClose: () => void;
@@ -61,6 +68,10 @@ export function Sheet({
 	/** The scrolling region, for a caller that has to move it (the asks sheet
 	    puts the open card back at the top when it moves to the next ask). */
 	scrollerRef?: RefObject<HTMLDivElement | null>;
+	/** Bump it to put keyboard focus on the ✕: for a caller whose focused control
+	    just left (the asks sheet's last answer), so the reader's place is not
+	    dropped on the page behind. 0/undefined does nothing. */
+	closeFocusSignal?: number;
 	children: ReactNode;
 	returnFocusRef?: RefObject<HTMLElement | null>;
 	/** Where focus lands when the sheet opens. Defaults to the ✕; the slash
@@ -110,6 +121,11 @@ export function Sheet({
 		onPointerCancel: () => { drag.current = null; setDragY(0); },
 	};
 	const { dialogRef, closeRef, focusEdge } = useModalLayer({ open, onClose, onEscape, returnFocusRef, initialFocusRef });
+	useEffect(() => {
+		if (closeFocusSignal) closeRef.current?.focus();
+		// `closeRef` is a stable ref object.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [closeFocusSignal]);
 
 	if (!open) return null;
 	/* VIEWPORT-ANCHORED, AND THAT IS THE WHOLE POINT OF THIS ELEMENT.
@@ -202,7 +218,7 @@ export function Sheet({
 				<div {...dragHandlers} className="shrink-0 touch-none py-2"><div aria-hidden className="lo-grabber mx-auto h-1 w-9 rounded-full" /></div>
 				{title ? (
 					<div {...dragHandlers} className="flex touch-none items-center justify-between px-3 pb-1">
-						<span id={titleId} className="text-heading font-semibold text-ink">
+						<span id={titleId} className="line-clamp-2 min-w-0 text-start text-heading font-semibold text-ink">
 							{title}
 						</span>
 						{headerAction ? <div className="ms-auto flex items-center">{headerAction}</div> : null}
@@ -218,10 +234,25 @@ export function Sheet({
 					</div>
 				) : null}
 				{headerDetail ? <div className="shrink-0">{headerDetail}</div> : null}
-				<div ref={scrollRef} className="lo-scroll lo-fade-y min-h-0 flex-1 overflow-y-auto">
+				{/* With a footer, the reader keeps a floor of the column to read the question
+				    in: the footer is capped below and scrolls inside itself, so large text
+				    or open reasons cannot squeeze the reading area to nothing. */}
+				<div
+					ref={scrollRef}
+					className="lo-scroll lo-fade-y min-h-0 flex-1 overflow-y-auto"
+					style={footer ? columnFloor(SHEET_READING_MIN_FRACTION) : undefined}
+				>
 					{children}
 				</div>
-				{footer ? <div className="shrink-0">{footer}</div> : null}
+				{footer ? (
+					<div
+						data-sheet-footer
+						className="min-h-0 shrink overflow-y-auto overscroll-contain"
+						style={columnCap(SHEET_FOOTER_FRACTION)}
+					>
+						{footer}
+					</div>
+				) : null}
 			</div>
 			<span data-focus-guard tabIndex={0} aria-hidden onFocus={() => setTimeout(() => focusEdge(false), 0)} />
 		</div>

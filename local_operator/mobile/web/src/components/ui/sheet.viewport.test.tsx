@@ -114,3 +114,58 @@ describe("the sheet overlay's box", () => {
 		expect(panel.contains(scroller)).toBe(true);
 	});
 });
+
+describe("the sheet's pinned footer", () => {
+	/* WHY THESE ARE CLASS/STYLE ASSERTIONS: happy-dom does no layout, so the
+	   pixels (reading area >= 28% of the column at 200% text on 320x568) are
+	   measured on the real bundle by `scripts/mobile_asks_capture.py`'s
+	   `footer.readingShare`. Here: the cap that makes the footer scroll inside
+	   itself, and the floor that stops it squeezing the reader out (QA Q-1). */
+	function mountWithFooter(pinPx: number) {
+		const pin = { [COLUMN_HEIGHT_VAR]: `${pinPx}px` } as CSSProperties;
+		render(
+			<div style={pin}>
+				<Sheet open onClose={() => {}} title="Questions" footer={<div>bar</div>}>
+					<p>body</p>
+				</Sheet>
+			</div>,
+		);
+		const dialog = screen.getByRole("dialog");
+		return {
+			dialog,
+			footer: dialog.querySelector<HTMLElement>("[data-sheet-footer]"),
+			scroller: dialog.querySelector<HTMLElement>(".lo-scroll"),
+		};
+	}
+
+	it("caps the footer at 40% of the column and lets it scroll inside itself", () => {
+		const { footer } = mountWithFooter(568);
+		expect(footer).not.toBeNull();
+		expect(footer?.className).toContain("overflow-y-auto");
+		expect(footer?.className).toContain("overscroll-contain");
+		expect(footer?.className).toContain("min-h-0");
+		expect(footer?.className).not.toContain("shrink-0");
+		expect(getComputedStyle(footer as HTMLElement).maxHeight).toContain("568px");
+		expect(getComputedStyle(footer as HTMLElement).maxHeight).toContain("0.4");
+	});
+
+	it("gives the reading area a floor of 28% of the column, only when a footer is present", () => {
+		const { scroller } = mountWithFooter(568);
+		expect(getComputedStyle(scroller as HTMLElement).minHeight).toContain("568px");
+		expect(getComputedStyle(scroller as HTMLElement).minHeight).toContain("0.28");
+		cleanup();
+		render(
+			<Sheet open onClose={() => {}} title="Plain">
+				<p>body</p>
+			</Sheet>,
+		);
+		const plain = screen.getByRole("dialog").querySelector<HTMLElement>(".lo-scroll") as HTMLElement;
+		expect(plain.style.minHeight).toBe("");
+	});
+
+	it("keeps the title to two lines so large text cannot eat the header", () => {
+		mountWithFooter(568);
+		expect(screen.getByText("Questions").className).toContain("line-clamp-2");
+	});
+});
+

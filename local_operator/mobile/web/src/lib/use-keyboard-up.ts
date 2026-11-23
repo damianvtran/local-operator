@@ -18,7 +18,10 @@ export const KEYBOARD_MIN_PX = 120;
 export function useKeyboardUp(): boolean {
 	const read = () => {
 		const vv = typeof window === "undefined" ? undefined : window.visualViewport;
-		return vv ? window.innerHeight - vv.height > KEYBOARD_MIN_PX : false;
+		// A pinch-zoom shrinks `vv.height` by the zoom factor with no keyboard in
+		// play, so the gap is measured against the zoomed height: at scale 2 a
+		// 422 px visual viewport on an 844 px page is no gap at all.
+		return vv ? window.innerHeight - vv.height * (vv.scale || 1) > KEYBOARD_MIN_PX : false;
 	};
 	const [up, setUp] = useState(read);
 	useEffect(() => {
