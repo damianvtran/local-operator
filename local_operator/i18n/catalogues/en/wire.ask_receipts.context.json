@@ -1,0 +1,38 @@
+{
+  "wire.ask_receipts.name.secret_question": {
+    "role": "The name a receipt calls a secret ask by, quoted inside the receipt line: `a-745e · \"secret question\" — Answered, delivering`. Never a sentence on its own",
+    "tone": "neutral label, lowercase in English; it stands where a question's own words would stand",
+    "maxCells": 24,
+    "note": "EN-only context sidecar. A secret question's text and answer key may only be shown in the card that owns the ask, so its name is this generic label instead. Translate it as the noun phrase a person would use for 'a question that asks for a secret'; keep it short, because it is quoted beside the id on a single line. No ICU arguments. Used in every state (answered, declined, late, dismissed, timed out); the caller appends ' +N' outside this string when the ask holds further questions."
+  },
+  "wire.ask_receipts.response.answered": {
+    "role": "The state phrase of a settled ask receipt on the terminal transcript, the phone projection and the desktop bridge: `<ask id> · \"<ask name>\" — Answered, delivering`",
+    "tone": "calm receipt; a statement, not a celebration; no full stop; no exclamation",
+    "maxCells": 40,
+    "note": "EN-only context sidecar. This is the state half only — the id, the quoted name and the em dash are composed in code and are not part of the catalogue string. 'delivering' means the operator's answer is being handed to the agent in a following turn; it must not read as a notification being sent to someone. Paired meanings: declined = the agent is told no; late = the answer missed the deadline. No ICU arguments."
+  },
+  "wire.ask_receipts.response.declined": {
+    "role": "The state phrase of an ask receipt for an operator decline, on the same three surfaces as response.answered",
+    "tone": "plain state, not a rebuke and not a failure; no full stop",
+    "maxCells": 40,
+    "note": "EN-only context sidecar. 'the agent was told' matters: the model really is informed, so a reader must not think the no went nowhere. Keep it comparable in length to the answered phrase; the line is one row on the phone. No ICU arguments."
+  },
+  "wire.ask_receipts.response.dismissed": {
+    "role": "The state phrase of an ask receipt for an operator dismissal, on the same three surfaces as response.answered. It says who put the ask away, through which surface, and why",
+    "tone": "audit receipt; factual and short; no full stop",
+    "maxCells": 64,
+    "note": "EN-only context sidecar. Two ICU selects. `surface` is a stable code: remote = the operator's phone through the relay (word it as the phone), tui = the terminal, chat = dismissed by typing in the conversation, desktop = the desktop app, other = an older row with no surface, which must read as a plain 'dismissed by you'. `reason` is a stable code: answered_in_chat = it was settled by words in the conversation, other = it was no longer needed (this arm is also the default for an absent reason, so it must be the generic one). The reason clause should match the agent-facing label's MEANING (settled in chat / no longer needed), not its exact English words. The leading 'Dismissed by you' stays first in each arm; keep both selects' arms grammatical in sequence after it."
+  },
+  "wire.ask_receipts.response.late": {
+    "role": "The state phrase of an ask receipt for an answer that arrived after the deadline, on the same three surfaces as response.answered",
+    "tone": "receipt the reader should notice, not an alarm and not an apology; no full stop",
+    "maxCells": 44,
+    "note": "EN-only context sidecar. It must convey both facts: the answer came (so the agent has it) and it was late (so it may have arrived after the agent went ahead). Distinguish it from response.answered and from the timeout phrase. No ICU arguments."
+  },
+  "wire.ask_receipts.timeout.timed_out": {
+    "role": "The state phrase of an ask receipt for an ask whose deadline passed unanswered, on the same three surfaces as response.answered",
+    "tone": "calm warning; states the consequence without blaming the reader; no full stop",
+    "maxCells": 80,
+    "note": "EN-only context sidecar. `{waited}` is a preformatted short span from the harness (for example 45s, 42m, 3h, 2d) — treat it as an opaque token and keep it exactly, including any Latin digits. It must say the agent proceeds WITHOUT the answer; never imply the reader can still answer (no surface offers a late answer). No plurals: the span carries its own unit."
+  }
+}

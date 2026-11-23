@@ -303,7 +303,7 @@ async def test_a_conversation_with_only_lapsed_asks_does_not_open_by_itself(monk
 
 async def test_the_timeout_receipt_says_the_agent_goes_ahead_without_the_answer():
     text, kind = ask_timeout_notice({"ask_id": "a1", "waited_s": 2520})
-    assert text == "Timed out after 42m — the agent goes ahead without your answer (ask a1)"
+    assert text == "a1 — Timed out after 42m, the agent goes ahead without your answer"
     assert "still answer" not in text
     assert kind == "warning"
 
