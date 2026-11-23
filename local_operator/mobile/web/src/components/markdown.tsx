@@ -109,8 +109,8 @@ const Prose = memo(function Prose({ text, from }: { text: string; from?: number 
 	}
 	useLayoutEffect(() => { committed.current = { text, parts }; });
 	useLayoutEffect(() => {
-		if (!selected.length) return;
-		const doc = selected[0].ownerDocument;
+		const doc = selected[0]?.ownerDocument;
+		if (!doc) return;
 		// No polling and no listener for an unrelated selection/resting caret.
 		// Once the range leaves the affected node, retry the deferred merge.
 		const changed = () => { if (selected.some(node => !selects(node))) retire(); };
