@@ -4,5 +4,6 @@
   "wire.ask_receipts.response.declined": "अस्वीकार किया, एजेंट को बता दिया गया",
   "wire.ask_receipts.response.dismissed": "{surface, select, remote{आपने खारिज किया (फ़ोन)} tui{आपने खारिज किया (टर्मिनल)} chat{आपने खारिज किया (चैट)} desktop{आपने खारिज किया (डेस्कटॉप ऐप)} other{आपने खारिज किया}}, {reason, select, answered_in_chat{बातचीत में जवाब दिया गया} other{अब ज़रूरत नहीं}}",
   "wire.ask_receipts.response.late": "देर से उत्तर दिया, एजेंट को बता दिया गया",
-  "wire.ask_receipts.timeout.timed_out": "{waited} के बाद समय समाप्त, एजेंट आपके उत्तर के बिना आगे बढ़ रहा है"
+  "wire.ask_receipts.timeout.timed_out": "{waited} के बाद समय समाप्त, एजेंट आपके उत्तर के बिना आगे बढ़ रहा है",
+  "wire.ask_receipts.withdrawn.by_agent": "एजेंट ने वापस लिया"
 }

@@ -4,5 +4,6 @@
   "wire.ask_receipts.response.declined": "Refusé, l’agent a été prévenu",
   "wire.ask_receipts.response.dismissed": "{surface, select, remote{Ignorée par vous (téléphone)} tui{Ignorée par vous (terminal)} chat{Ignorée par vous (conversation)} desktop{Ignorée par vous (application de bureau)} other{Ignorée par vous}}, {reason, select, answered_in_chat{répondue dans la conversation} other{plus nécessaire}}",
   "wire.ask_receipts.response.late": "Répondu en retard, l’agent a été prévenu",
-  "wire.ask_receipts.timeout.timed_out": "Délai dépassé après {waited}, l’agent poursuit sans votre réponse"
+  "wire.ask_receipts.timeout.timed_out": "Délai dépassé après {waited}, l’agent poursuit sans votre réponse",
+  "wire.ask_receipts.withdrawn.by_agent": "Retiré par l’agent"
 }

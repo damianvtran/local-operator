@@ -4,5 +4,6 @@
   "wire.ask_receipts.response.declined": "انکار کیا گیا، ایجنٹ کو بتا دیا گیا",
   "wire.ask_receipts.response.dismissed": "{surface, select, remote{آپ نے خارج کیا (فون)} tui{آپ نے خارج کیا (ٹرمینل)} chat{آپ نے خارج کیا (گفتگو)} desktop{آپ نے خارج کیا (ڈیسک ٹاپ ایپ)} other{آپ نے خارج کیا}}، {reason, select, answered_in_chat{گفتگو میں جواب موجود ہے} other{اب ضرورت نہیں}}",
   "wire.ask_receipts.response.late": "دیر سے جواب دیا گیا، ایجنٹ کو بتا دیا گیا",
-  "wire.ask_receipts.timeout.timed_out": "{waited} کے بعد وقت ختم، ایجنٹ آپ کے جواب کے بغیر آگے بڑھ رہا ہے"
+  "wire.ask_receipts.timeout.timed_out": "{waited} کے بعد وقت ختم، ایجنٹ آپ کے جواب کے بغیر آگے بڑھ رہا ہے",
+  "wire.ask_receipts.withdrawn.by_agent": "ایجنٹ نے واپس لیا"
 }

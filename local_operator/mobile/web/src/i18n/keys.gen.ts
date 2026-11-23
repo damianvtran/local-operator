@@ -607,6 +607,7 @@ export type MessageParams = {
   "wire.ask_receipts.response.dismissed": { "surface": string; "reason": string };
   "wire.ask_receipts.response.late": undefined;
   "wire.ask_receipts.timeout.timed_out": { "waited": string };
+  "wire.ask_receipts.withdrawn.by_agent": undefined;
   "wire.bridge_taint.ack_refused": undefined;
   "wire.bridge_taint.ack_refused_other_session": undefined;
   "wire.bridge_taint.card_notice": undefined;
