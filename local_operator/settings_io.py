@@ -77,6 +77,7 @@ from local_operator.i18n.keys import wire_settings_account_policy as _ap
 from local_operator.i18n.keys import wire_settings_hub_defaults as _hd
 from local_operator.i18n.keys import wire_settings_hub_org as _ho
 from local_operator.i18n.keys import wire_settings_keymap as _wk
+from local_operator.i18n.keys import wire_settings_transcript_display as _td
 from local_operator.i18n.keys import wire_voice as _wv
 from local_operator.i18n.messages import Msg as _Msg
 from local_operator.memory import DEFAULT_EXCLUDED_DEVICES, SCOPES
@@ -128,6 +129,10 @@ _CHILD_SETTINGS_NAMESPACES = (
     "wire.settings.hub_defaults",
     "wire.settings.hub_org",
     "wire.settings.keymap",
+    # The transcript layout switch (`display.transcript_display`): its own child
+    # namespace so its six English keys never move the audited `wire.settings`
+    # source hash — the `hub_org` pattern.
+    "wire.settings.transcript_display",
     "wire.aida_cadence",
     "wire.host_speed",
     "wire.guardrails",
@@ -2962,6 +2967,33 @@ SETTINGS: tuple[Setting, ...] = (
                 "24h",
                 _t(_ws.display_time_format_choice_24h_label()),
                 _t(_ws.display_time_format_choice_24h_description()),
+            ),
+        ),
+    ),
+    Setting(
+        key="display.transcript_display",
+        # FLAT-DOTTED like every other ``display.*`` key: the dot is part of a
+        # literal top-level key, which is what ``tui/settings.py`` reads. Written
+        # as a nested tuple this key would be stored where nothing looks for it.
+        path=("display.transcript_display",),
+        section="appearance",
+        label=_t(_td.label()),
+        kind=Kind.ENUM,
+        # A literal, not an import (this module must stay off the consumers'
+        # import path); ``tests/unit/test_settings_io.py``'s ``_consumer_defaults``
+        # pins it to ``tui.settings.DEFAULT_TRANSCRIPT_DISPLAY``.
+        default="by-turn",
+        help=_t(_td.help()),
+        choices=(
+            Choice(
+                "by-turn",
+                _t(_td.choice_by_turn_label()),
+                _t(_td.choice_by_turn_description()),
+            ),
+            Choice(
+                "by-response",
+                _t(_td.choice_by_response_label()),
+                _t(_td.choice_by_response_description()),
             ),
         ),
     ),

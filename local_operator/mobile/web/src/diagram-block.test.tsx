@@ -105,6 +105,34 @@ describe("Markdown: mermaid fences", () => {
 });
 
 describe("diagram controls", () => {
+	it("retains the open duplicate diagram and its controls after preceding prose is corrected", async () => {
+		const source = fenced(DIAGRAM_SAMPLES.flowchart);
+		const text = (opening: string) => `${opening}\n\n${source}\n\n${source}`;
+		const writeText = vi.fn().mockResolvedValue(undefined);
+		Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+		const { container, rerender } = render(<Markdown text={text("Opening.")} />);
+		await waitFor(() => expect(container.querySelectorAll('[data-diagram-state="drawn"]')).toHaveLength(2));
+		const controls = screen.getAllByTestId("diagram-full-size");
+		controls[1].focus();
+		fireEvent.click(controls[1]);
+		const dialog = await screen.findByRole("dialog");
+		await waitFor(() => expect(dialog.querySelector("svg")).not.toBeNull());
+		const focused = document.activeElement;
+
+		rerender(<Markdown text={text("An unrelated corrected opening.")} />);
+
+		expect(screen.getByRole("dialog")).toBe(dialog);
+		expect(document.activeElement).toBe(focused);
+		expect(screen.getAllByTestId("diagram-full-size")).toEqual(controls);
+		fireEvent.keyDown(dialog, { key: "Escape" });
+		await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+		const copies = screen.getAllByTestId("diagram-copy");
+		await act(async () => fireEvent.click(copies[1]));
+		expect(writeText).toHaveBeenCalledWith(DIAGRAM_SAMPLES.flowchart);
+		expect(copies[1].querySelector("span span:not([aria-hidden])")?.textContent).toBe("Copied");
+		expect(copies[0].querySelector("span span:not([aria-hidden])")?.textContent).toBe("Copy source");
+	});
+
 	it("copies the fence source, then says so and goes back", async () => {
 		const writeText = vi.fn().mockResolvedValue(undefined);
 		Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });

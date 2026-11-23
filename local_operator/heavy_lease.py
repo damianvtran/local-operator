@@ -277,6 +277,8 @@ _PREFIX_WRAPPERS: dict[str, tuple[int, frozenset[str]]] = {
     "stdbuf": (0, frozenset({"-i", "-o", "-e"})),
     "ionice": (0, frozenset({"-c", "--class", "-n", "--classdata"})),
     "caffeinate": (0, frozenset({"-t", "-w"})),
+    # `arch -arm64 pod install`: the Apple Silicon spelling of CocoaPods.
+    "arch": (0, frozenset()),
     "taskset": (1, frozenset()),
     "chrt": (1, frozenset()),
     "prlimit": (0, frozenset({"-p", "--pid", "-o", "--output"})),
@@ -342,6 +344,14 @@ _SHALLOW_HEAVY_TOOLS = {"esbuild", "tsc", "vue-tsc", "vitest", "jest", "electron
     "webpack",
     "rollup",
 }
+#: ``xcodebuild`` options that only PRINT something (versions, schemes, build
+#: settings, destinations); anything else compiles or tests. Single-dash
+#: spellings, which :data:`_INFO_FLAGS_ANYWHERE` does not cover.
+_XCODEBUILD_INFO_FLAGS = frozenset(
+    {"-version", "-list", "-showsdks", "-showBuildSettings", "-showBuildSettingsForIndex"}
+    | {"-showdestinations", "-showTestPlans", "-usage", "-help", "-license"}
+    | {"-checkFirstLaunchStatus", "-runFirstLaunch"}
+)
 
 #: Placeholder for a ``$(…)``/backtick substitution, masked out of the line
 #: before tokenising. Why (node2, 2026-11-18): ``env $(env | grep -o
@@ -437,6 +447,14 @@ def _shallow_guess(command: str) -> str | None:
         name = os.path.basename(word.strip("'\""))
         if name in _SHALLOW_HEAVY_TOOLS:
             return name
+        if (tool := _native_tool_name(word)) in _NATIVE_MOBILE_TOOLS:
+            after_words: list[str] = []
+            for later in words[index + 1 :]:
+                if later in ("&&", "||", ";", "|", "&"):
+                    break
+                after_words.append(later.strip("'\""))
+            if verdict := _classify_native_mobile(tool, after_words):
+                return verdict
         is_module = name == "-m" and words[index + 1 : index + 2] == ["pytest"]
         if name == "pytest" or is_module:
             # Past the recursion bound a pytest gets the same verdict as a
@@ -655,6 +673,49 @@ def _shell_c_string(args: list[str]) -> str | None:
     return None
 
 
+_NATIVE_MOBILE_TOOLS = frozenset({"xcodebuild", "pod-install", "expo", "pod", "eas", "eas-cli"})
+
+
+def _native_tool_name(token: str) -> str:
+    """The tool a token names: no quotes, directory or npx ``@version``; the
+    package ``@expo/cli`` (what ``npx @expo/cli`` runs) is ``expo``."""
+    token = token.strip("'\"")
+    if re.fullmatch(r"@expo/cli(@[^/]*)?", token):
+        return "expo"
+    return re.sub(r"@[^/]*$", "", os.path.basename(token))
+
+
+def _classify_native_mobile(program: str, args: list[str]) -> str | None:
+    """Native iOS/Expo build tools: ``xcodebuild``, ``expo run:ios|prebuild``,
+    ``pod install``/``pod-install``, ``eas build --local``.
+
+    Why (2026-11-22): the lease counted none of these, so several lanes compiled
+    iOS apps at once and the host reached load 290-750 on 14 cores. ``program``
+    may carry an npx version (``eas-cli@latest``). Informational calls
+    (``xcodebuild -version|-list``, ``pod --version``, ``-h``) and everything else
+    (``expo start``, ``pod repo update``, a REMOTE ``eas build``) are not heavy.
+    """
+    if "-h" in args:  # `-h` is help for these tools (`xcodebuild -help` is listed below)
+        return None
+    first = _positionals(args)[:1]
+    if program == "xcodebuild":
+        return None if any(a in _XCODEBUILD_INFO_FLAGS for a in args) else "xcodebuild"
+    if program == "pod-install":
+        return "pod install"
+    # Subcommand anywhere in the line, not the first positional: an option VALUE
+    # can come first (`pod --project-directory ios install`, `expo --config a run:ios`).
+    if program == "pod" and "install" in args:
+        return "pod install"
+    if program == "expo":
+        for sub in ("run:ios", "prebuild"):
+            if sub in args:
+                return f"expo {sub}"
+    local = any(a in ("--local", "--local=true") for a in args)
+    if program in ("eas", "eas-cli") and first == ["build"] and local:
+        return "eas build --local"
+    return None
+
+
 def _classify_pm(
     program: str, args: list[str], cwd: str | None, depth: int, seen: _Seen = frozenset()
 ) -> str | None:
@@ -759,6 +820,8 @@ def _classify_segment(
     if not tokens:
         return None
     program = os.path.basename(tokens[0])
+    if (tool := _native_tool_name(tokens[0])) in _NATIVE_MOBILE_TOOLS:
+        program = tool  # `expo@latest`, `eas-cli@12`, `@expo/cli`: strip the package spec
     args = tokens[1:]
     # pytest's `-v` is VERBOSE (its version flag is `-V`/`--version`): a bare
     # `pytest -v` is a whole-suite run and must reach the pytest rules.
@@ -832,6 +895,12 @@ def _classify_segment(
         return f"{program} {heavy}" if heavy else None
     if program in ("cargo", "go") and args[:1] and args[0] in ("build", "test"):
         return f"{program} {args[0]}"
+    if program == "bundle" and args[:1] == ["exec"]:
+        # `bundle exec pod install`: the Gemfile-pinned CocoaPods most iOS repos use.
+        rest = [a for a in args[1:] if a != "--"]
+        return _classify_segment(rest, cwd, depth + 1, seen) if rest else None
+    if native := _classify_native_mobile(program, args):
+        return native
     if program == "make" and any(a.startswith("test") for a in args if not a.startswith("-")):
         return "make test"
     if program == "affected_tests.py" or (
@@ -1049,7 +1118,12 @@ def is_heavy(
     nearest config's ``addopts`` and a ``PYTEST_ADDOPTS=`` prefix), a directory
     or whole-suite pytest (``-k`` or not),
     ``affected_tests.py --run|--evidence``, ``make test*`` and
-    ``cargo``/``go`` build|test. ``$(…)``/backtick bodies are classified too,
+    ``cargo``/``go`` build|test, and native iOS builds: ``xcodebuild`` (not its
+    print-only ``-version``/``-list``/``-showBuildSettings`` family),
+    ``expo run:ios|prebuild``, ``pod install``/``pod-install`` and ``eas build
+    --local`` (also under ``npx``/``pnpm exec``/``bundle exec``/``arch``).
+    ``expo run:ios`` stays attached to Metro unless ``--no-bundler`` is given, so
+    it holds its slot until stopped or timed out. ``$(…)``/backtick bodies are classified too,
     and never hide the command around them.
 
     Classified by what actually runs: wrappers (``cd x &&``, env assignments,

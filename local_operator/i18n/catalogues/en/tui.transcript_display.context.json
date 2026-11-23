@@ -1,0 +1,27 @@
+{
+  "tui.transcript_display.save_failed": {
+    "note": "Refusal from `/transcript <mode>` when writing the setting failed. {reason} is the raw error text from the config write and may be technical; do not translate or paraphrase it.",
+    "role": "TUI /transcript command refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what failed"
+  },
+  "tui.transcript_display.set": {
+    "note": "Receipt for `/transcript by-turn` or `/transcript by-response`: {mode} is the mode's own label from the settings row (`wire.settings.display_transcript_display.choice.*.label`), e.g. 'By turn', never the stored token. Keep it a short one-line confirmation.",
+    "role": "TUI /transcript command receipt (a notice line in the transcript)",
+    "tone": "plain, short confirmation"
+  },
+  "tui.transcript_display.slash": {
+    "note": "The command's row in /help and the completion picker. It names both layout modes because the words ARE the value space: 'by turn' folds a turn to its final answer, 'by response' keeps every settled response on screen. The two layout names must match the settings-row labels (`wire.settings.display_transcript_display.choice.*.label`). No ICU arguments; keep it within 55 cells.",
+    "role": "command description line in /help and the completion picker",
+    "tone": "terse imperative like neighbouring commands"
+  },
+  "tui.transcript_display.unknown": {
+    "note": "Refusal for a token that is not a layout mode. {echo} is the user's own word, already quoted and bounded to the notice row. The two accepted tokens are stored settings values and stay verbatim in lowercase-hyphenated form.",
+    "role": "TUI /transcript command refusal (a notice line in the transcript)",
+    "tone": "plain, states the usable values"
+  },
+  "tui.transcript_display.usage": {
+    "note": "What a bare `/transcript` answers: the layout in force ({mode}, its label from the settings row, e.g. 'By turn') and the two values the command accepts, verbatim. Must fit one notice row at 80 columns.",
+    "role": "TUI /transcript command status line",
+    "tone": "plain, terse"
+  }
+}

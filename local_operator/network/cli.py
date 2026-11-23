@@ -51,12 +51,17 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 from local_operator.i18n.cli_help import help_text
 from local_operator.i18n.keys import cli_group_help as _gg
+from local_operator.i18n.keys import cli_network_send as _network_send
 from local_operator.i18n.keys import wire_github as _github_strings
 from local_operator.i18n.text import tr as _github_tr
+
+if TYPE_CHECKING:
+    from local_operator.mobile.types import SessionRecord
+    from local_operator.session.attached import _RuntimeLocator
 
 _github_text = _github_tr("wire.github")
 
@@ -7832,6 +7837,12 @@ _STOP_REMEDIES: dict[str, str] = {
 #: socket default. It is the same reason the TUI grants a peer call 260 s.
 PILOT_BIND_TIMEOUT_S = 120.0
 
+#: Publication grace for a stored send after the peer ACKs engage. Use the
+#: existing local cold-start allowance (runtime.launch.DEFAULT_DEADLINE_S),
+#: inside, never on top of, the CLI's bind deadline. A warm or refused engage
+#: never gets this grace.
+PILOT_COLD_BOOT_BUDGET_S = 30.0
+
 #: How much of :data:`PILOT_BIND_TIMEOUT_S` the BIND hands back before its own
 #: outer bound fires. The viewer is given the bind budget as an absolute deadline
 #: (``AttachedSession.bind_runtime(deadline=...)``) so a busy runtime gets the
@@ -8515,6 +8526,7 @@ async def _pilot_act(
     the resolution works on the RESOLVED id, so a name is one spelling of an
     address rather than a second kind of session.
     """
+    from local_operator.network.projection import ProjectionRefusal
     from local_operator.network.types import MeshRefusal
     from local_operator.session.remote_open import (
         open_remote_viewer,
@@ -8660,12 +8672,26 @@ async def _pilot_act(
             # it, which is where a stored session on the peer ENGAGES a runtime.
             # The viewer gets THIS verb's budget as its deadline; without it the
             # bind kept the TUI's 15 s foreground envelope inside a 120 s bound.
-            await asyncio.wait_for(
-                viewer.bind_runtime(
-                    deadline=bind_started + PILOT_BIND_TIMEOUT_S - _PILOT_BIND_SLACK_S
-                ),
-                timeout=PILOT_BIND_TIMEOUT_S,
-            )
+            deadline = bind_started + PILOT_BIND_TIMEOUT_S - _PILOT_BIND_SLACK_S
+            if verb == "send" and not live:
+
+                async def _wait_for_publication(
+                    locate: _RuntimeLocator, bind_deadline: float
+                ) -> SessionRecord:
+                    return await _pilot_wait_for_runtime_record(
+                        locate, bind_deadline, session_id, device
+                    )
+
+                bind = viewer.bind_runtime(
+                    deadline=deadline, wait_for_publication=_wait_for_publication
+                )
+            else:
+                bind = viewer.bind_runtime(deadline=deadline)
+            await asyncio.wait_for(bind, timeout=PILOT_BIND_TIMEOUT_S)
+        except ProjectionRefusal as exc:
+            if verb != "send":
+                raise
+            raise MeshRefusal(exc.code, exc.sentence) from exc
         except (TimeoutError, ConnectionError) as exc:
             # ONE HANDLER, THREE RUNGS, ASKED IN THIS ORDER. A runtime that was
             # REACHED and is merely busy comes first: two of its three shapes are
@@ -8840,14 +8866,17 @@ async def _pilot_mailbox_direct(
         )
         return MeshRefusal(code, sentence)
 
+    bind_deadline = time.monotonic() + PILOT_BIND_TIMEOUT_S - _PILOT_BIND_SLACK_S
+
     async def _locate() -> Any:
         # ENGAGE, THEN LOCATE — the order ``AttachedSession._bind_under_lock``
         # uses, for the same reason: a stored session on the peer gets its
         # runtime here (the act is what warms it, §8.3 — a send is a write), and
         # a warm one answers the engage at once. The short locate retry is the
         # bind loop's own, by its constants rather than a copy of their values:
-        # a runtime that has just been spawned publishes its record a moment
-        # after the engage returns.
+        # a runtime that has just been spawned publishes its record after the
+        # engage returns. Only a catalogued stored session is eligible for the
+        # longer publication wait; a warm row keeps its existing dial failure.
         try:
             await owner.engage(cwd="")
         except ProjectionRefusal as exc:
@@ -8857,6 +8886,10 @@ async def _pilot_mailbox_direct(
             record, _pid = await asyncio.to_thread(owner.locate)
             if record is not None:
                 return record
+            if not str(getattr(row, "live_state", "") or ""):
+                return await _pilot_wait_for_runtime_record(
+                    owner.locate, bind_deadline, session_id, device
+                )
             if attempt < _BIND_RETRY_ATTEMPTS - 1:
                 await asyncio.sleep(delay)
                 delay *= 2
@@ -8899,6 +8932,60 @@ async def _pilot_mailbox_direct(
             await client.detach()
         except Exception:  # noqa: BLE001 — see above
             logging.getLogger(__name__).debug("closing the mailbox dial failed", exc_info=True)
+
+
+async def _pilot_wait_for_runtime_record(
+    locate: _RuntimeLocator, bind_deadline: float, session_id: str, device: str
+) -> SessionRecord:
+    """Wait only for publication: the existing engage succeeded, but locate missed.
+
+    No second engage or write is allowed here. Both send paths remain unable to
+    hand over the text until this returns a record and the normal dial succeeds.
+    """
+    from local_operator.i18n.text import tr
+    from local_operator.network.types import MeshRefusal
+    from local_operator.session.attached import (
+        _BIND_RETRY_DELAY_CAP_S,
+        _BIND_RETRY_FACTOR,
+        _BIND_RETRY_INITIAL_S,
+    )
+
+    started = time.monotonic()
+    budget = max(0.0, min(PILOT_COLD_BOOT_BUDGET_S, bind_deadline - started))
+    logger = logging.getLogger(__name__)
+    scope = asyncio.timeout(budget)
+    delay = _BIND_RETRY_INITIAL_S
+    try:
+        async with scope:
+            while True:
+                logger.debug(
+                    "pilot cold ready miss session=%s peer=%s blocked_s=%.3f deadline_s=%.3f",
+                    session_id,
+                    device,
+                    time.monotonic() - started,
+                    budget,
+                )
+                await asyncio.sleep(delay)
+                record, _pid = await asyncio.to_thread(locate)
+                if record is not None:
+                    return record
+                delay = min(delay * _BIND_RETRY_FACTOR, _BIND_RETRY_DELAY_CAP_S)
+    except TimeoutError as exc:
+        if not scope.expired():
+            raise
+        logger.warning(
+            "pilot cold ready deadline session=%s peer=%s blocked_s=%.3f deadline_s=%.3f",
+            session_id,
+            device,
+            time.monotonic() - started,
+            budget,
+        )
+        raise MeshRefusal(
+            "session_unreachable",
+            tr("cli.network_send")(
+                _network_send.still_starting(session_id=session_id, peer=device)
+            ),
+        ) from exc
 
 
 class _MailboxMode:

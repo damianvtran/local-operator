@@ -168,6 +168,11 @@ DEFERRED_NAMESPACES: dict[str, str] = {
     "wire.settings.keymap": (
         "hotkey row labels/help rendered by settings_io._t as plain label/help strings"
     ),
+    "wire.settings.transcript_display": (
+        "transcript layout row label/help and its two choice labels/descriptions "
+        "rendered by settings_io._t as plain strings; the slash command reuses the "
+        "rendered label as a receipt, never a code"
+    ),
     "wire.language_receipts": (
         "the /language receipts printed by tui/app.py and returned as finished "
         "text by session/runtime/serving.py; no envelope identity is sent"

@@ -5366,6 +5366,60 @@ async def test_subagent_dock_row_renders_in_appearance_with_its_three_choices(
 
 
 @pytest.mark.asyncio
+async def test_the_transcript_display_row_offers_both_layouts_and_writes_flat(
+    tmp_path: Path,
+) -> None:
+    """The row the `/transcript` command is the discoverable half of.
+
+    Two things can go wrong silently here: the row sits under the wrong section
+    (a layout is Appearance, not Session), or its commit nests the key —
+    `values.display.transcript_display` instead of the literal top-level key
+    `display.transcript_display` that `tui/settings.py` reads.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        index = _select(view, "display.transcript_display")
+        lines = view.render_lines_for_test()
+        row = lines[index + 2]
+        # The collapsed row paints the LABEL, not the stored token: localization
+        # landed beside this row's choices, and the token is what the write at
+        # the end of this test checks (`by-turn` on disk).
+        assert "Transcript display" in row and "By turn" in row, row
+        headers = [
+            (offset, line)
+            for offset, line in enumerate(lines[: index + 2])
+            if line.strip().lower().startswith("appearance") or line.strip().lower() == "session"
+        ]
+        assert headers and headers[-1][1].strip().lower().startswith("appearance"), headers
+
+        view.action_activate()
+        await pilot.pause()
+        assert view._expanded == "display.transcript_display"
+        choices = [row.choice.value for row in view._rows if row.kind == "choice"]
+        assert choices == ["by-turn", "by-response"], choices
+        # The labels are the settings row's copy, not the stored tokens: the
+        # `/transcript` receipt names a mode by the same words this list paints.
+        labels = [row.choice.label for row in view._rows if row.kind == "choice"]
+        assert labels == ["By turn", "By response"], labels
+        assert any(
+            "By response" in line for line in view.render_lines_for_test()
+        ), "the expanded list must paint the mode labels"
+
+        for offset, row in enumerate(view._rows[index + 1 :], start=index + 1):
+            if row.kind == "choice" and row.choice.value == "by-response":
+                view._selected = offset
+                break
+        view.action_activate()
+        await pilot.pause()
+        assert _values(tmp_path)["display.transcript_display"] == "by-response"
+        assert "display" not in _values(tmp_path)
+
+
+@pytest.mark.asyncio
 async def test_the_session_name_row_is_inert_while_notifications_are_off() -> None:
     """Design round 1, D4: the row must not read ``on`` for a toast that cannot fire.
 

@@ -67,6 +67,7 @@ import {
 	getDraft,
 	messageRuntime,
 	noteViewedSession,
+	projectionRevealEpoch,
 	recordTemporaryTombstone,
 	setDraft,
 	useCapabilities,
@@ -986,6 +987,7 @@ export function SessionScreen({
 					headPinned={projection.transcript_head_pinned}
 					pending={pendingEchoes}
 					streaming={projection.streaming}
+					revealEpoch={projectionRevealEpoch(projection, connected)}
 					topInset={0}
 					supplements={projection.supplements}
 					projectionPid={projection.pid}

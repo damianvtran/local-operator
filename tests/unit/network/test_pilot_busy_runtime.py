@@ -289,7 +289,9 @@ class _DeadlineViewer(_FakeViewer):
         super().__init__()
         self.deadlines: list[float | None] = []
 
-    async def bind_runtime(self, *, deadline: float | None = None) -> None:
+    async def bind_runtime(
+        self, *, deadline: float | None = None, wait_for_publication: Any = None
+    ) -> None:
         self.deadlines.append(deadline)
         self.bound = True
 
@@ -315,7 +317,9 @@ def test_a_bare_timeout_keeps_the_doctor_rung(
     """A deadline alone is not evidence that the runtime answered."""
 
     class _TimeoutViewer(_FakeViewer):
-        async def bind_runtime(self, *, deadline: float | None = None) -> None:
+        async def bind_runtime(
+            self, *, deadline: float | None = None, wait_for_publication: Any = None
+        ) -> None:
             raise TimeoutError("the transport stayed silent")
 
     _patch(monkeypatch, _TimeoutViewer(), _remote_row())

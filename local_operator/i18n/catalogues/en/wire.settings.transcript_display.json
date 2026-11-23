@@ -1,0 +1,8 @@
+{
+  "wire.settings.transcript_display.choice.by_response.description": "every settled response",
+  "wire.settings.transcript_display.choice.by_response.label": "By response",
+  "wire.settings.transcript_display.choice.by_turn.description": "one answer per turn",
+  "wire.settings.transcript_display.choice.by_turn.label": "By turn",
+  "wire.settings.transcript_display.help": "By turn condenses each turn to its answer. By response keeps every settled response on screen, with the turn's final answer still marked.",
+  "wire.settings.transcript_display.label": "Transcript display"
+}
