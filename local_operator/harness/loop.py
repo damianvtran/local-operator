@@ -4903,6 +4903,7 @@ class AgentLoop:
                 context_tokens_hint=context_tokens_hint,
                 preparation_ms=(time.monotonic() - preparing_at) * 1000,
                 same_route_retry=same_route_retry,
+                inline_ui_hint=config.get_inline_ui_hint() if config.get_inline_ui_hint else None,
             )
             request = self._arm_one_turn_secrets(context, request)
             secret_active = request.has_one_turn_secrets
@@ -4925,7 +4926,6 @@ class AgentLoop:
             # ``ChatRequest._consumer_cut``).
             cut_receipt = request.arm_consumer_cut()
             provider_stream = config.stream_fn(request, signal)
-            assistant._inline_ui_source_version = request._inline_ui_source_version
             stream = _abortable_stream(provider_stream, signal, degeneration_cut)
             from local_operator.providers.failover import _one_turn_scrub_stream_event
 
@@ -4948,6 +4948,7 @@ class AgentLoop:
                         context_metadata_resolved=model.context_metadata_resolved,
                     )
                 elif isinstance(event, StreamStartEvent):
+                    assistant._inline_ui_source_version = event.inline_ui_source_version
                     # The provider is generating for THIS request. Republish it
                     # as a harness event so supervisors get a boundary that
                     # means "on the wire" — ``MessageStartEvent`` above is

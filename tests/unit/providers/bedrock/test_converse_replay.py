@@ -11,12 +11,13 @@ from local_operator.providers.bedrock.converse import (
 )
 from local_operator.providers.bedrock.models import capabilities_for
 from local_operator.providers.context import bind_native_context
+from local_operator.session.inline_ui import INSTRUCTIONS
 
 from .test_converse_body import ENDPOINT, NOVA, TOOL, body, request
 
 
-def signed_history():
-    req = request(tools=[TOOL])
+def signed_history(*, inline_ui_hint=None):
+    req = request(tools=[TOOL], inline_ui_hint=inline_ui_hint)
     req.system_blocks = ["system"]
     _, _, _, proof = project_conversation(req, capabilities_for(NOVA), ENDPOINT, "scope")
     acc = _Accumulator(200)
@@ -70,6 +71,22 @@ def test_unchanged_native_tool_loop_replays_and_counts_same_blocks():
     bound = bind_native_context(req, ENDPOINT, PROTOCOL, "scope", 1.0, selected_native=selected)
     assert bound.native_context_tokens > 0
     assert build_converse_body(bound, capabilities_for(NOVA), ENDPOINT, "scope")["messages"] == rows
+
+
+def test_inline_ui_is_outside_converse_wire_and_preserves_signed_tool_replay():
+    caps = capabilities_for(NOVA)
+    req = signed_history(inline_ui_hint=INSTRUCTIONS)
+    # The suffix was eligible on both calls, but sending it on the first call
+    # would make signed replay diverge when the next builder left it out.
+    body = build_converse_body(req, caps, ENDPOINT, "scope")
+    assert body == build_converse_body(
+        req.model_copy(update={"inline_ui_hint": None}), caps, ENDPOINT, "scope"
+    )
+    _, rows, selected, _ = project_conversation(req, caps, ENDPOINT, "scope")
+    assert selected[1] is not None
+    reasoning = rows[1]["content"][0]["reasoningContent"]["reasoningText"]
+    assert reasoning["signature"] == "opaque-signature"
+    assert rows[-1]["content"][0]["toolResult"]["toolUseId"] == "a"
 
 
 @pytest.mark.parametrize(

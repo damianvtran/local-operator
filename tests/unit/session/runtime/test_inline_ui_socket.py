@@ -131,8 +131,9 @@ async def test_warm_mobile_prompt_negotiates_inline_ui_per_request(
 
         def check_request(label: str, *, enabled: bool) -> None:
             request = requests[-1]
-            assert (INSTRUCTIONS in request.system_blocks) is enabled, label
-            assert request._inline_ui_source_version == (1 if enabled else None), label
+            assert INSTRUCTIONS not in request.system_blocks, label
+            assert request.inline_ui_hint == (INSTRUCTIONS if enabled else None), label
+            assert all(INSTRUCTIONS not in message.text for message in request.messages), label
             print(f"model request {label}: inline instructions={enabled}")
 
         async def prompt(
@@ -213,7 +214,10 @@ async def test_warm_mobile_prompt_negotiates_inline_ui_per_request(
         server._record.capabilities.remove(INLINE_UI_V1)
         async with _attach(server, **mobile, inline_ui=True) as unsupported:
             await prompt(unsupported, "runtime capability absent", inline_ui=True)
-        assert all(INSTRUCTIONS not in request.system_blocks for request in helpers)
+        assert all(
+            INSTRUCTIONS not in request.system_blocks and request.inline_ui_hint is None
+            for request in helpers
+        )
     finally:
         server.close()
         await handle.dispose()
@@ -249,6 +253,7 @@ async def test_mobile_steer_carries_inline_ui_to_the_next_provider_call(tmp_path
             async with asyncio.timeout(10):
                 await entered.wait()
             assert INSTRUCTIONS not in requests[0].system_blocks
+            assert requests[0].inline_ui_hint is None
             await _send(
                 writer, {"op": "steer", "text": "Add a table.", "inline_ui": True, "req": 2}
             )
@@ -258,7 +263,8 @@ async def test_mobile_steer_carries_inline_ui_to_the_next_provider_call(tmp_path
                 while len(requests) < 2:
                     await asyncio.sleep(0.001)
             assert requests[1].messages[-1].text == "Add a table."
-            assert INSTRUCTIONS in requests[1].system_blocks
+            assert INSTRUCTIONS not in requests[1].system_blocks
+            assert requests[1].inline_ui_hint == INSTRUCTIONS
     finally:
         release.set()
         server.close()

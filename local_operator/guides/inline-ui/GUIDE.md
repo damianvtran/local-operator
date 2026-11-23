@@ -5,7 +5,9 @@ description: Choose an inline chart, graph, pie, scatter plot, histogram, heatma
 
 # Inline UI catalog
 
-Use this only when the current turn advertises inline UI. Choose the view that answers the question, not the most elaborate one. Keep the main finding in normal prose so it survives in viewers without widgets. Use real data only; retain units, use a consistent scale, and label any aggregation. Don't use HTML, executable formulas, or a separate rendering call.
+Use this only when the current request advertises inline UI. Amazon Bedrock Converse does not advertise widgets, even in a compatible viewer, because its signed reasoning must replay against the same conversation. Use normal prose on that route.
+
+Choose the view that answers the question, not the most elaborate one. Keep the main finding in normal prose so it survives in viewers without widgets. Use real data only; retain units, use a consistent scale, and label any aggregation. Don't use HTML, executable formulas, or a separate rendering call.
 
 Place a single JSON object inside a top-level fenced block tagged `lop-ui`; put the closing backticks on their own line. Use `type` and a nonempty `title` on every component. Use no more than 32 rows or points and 8 columns per component; keep labels short. Use a CSV or workbook deliverable for a full dataset or editable spreadsheet, and put a small read-only preview inline. Do not silently truncate data.
 

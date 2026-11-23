@@ -4240,6 +4240,9 @@ class LoopConfig(BaseModel):
     # Required: render transcript messages (incl. custom entries) into the
     # LLM-visible list sent to the provider.
     convert_to_llm: Callable[[list[AgentMessage]], list[Message]] = Field(exclude=True)
+    # Model-facing widget discovery is an input capability, not a new user
+    # message. The host reads its current grant at each real request boundary.
+    get_inline_ui_hint: Callable[[], str | None] | None = Field(default=None, exclude=True)
 
     # Required in practice: stream one assistant response. Providers implement
     # this; the loop only knows the signature.
@@ -5001,6 +5004,11 @@ class ChatRequest(BaseModel):
     system_blocks: list[str] = Field(default_factory=list)
     messages: list[Message] = Field(default_factory=list)
     tools: list[AgentTool] = Field(default_factory=list)
+    # Not a conversation row: history/Saver, cache breakpoints and last-user
+    # accounting must never treat it as one. Compatible wire builders append
+    # it only after encoding the durable prefix. As a declared field it is
+    # still covered by the armed one-turn retry/copy integrity check.
+    inline_ui_hint: str | None = Field(default=None, exclude=True, repr=False)
     # The generation bound for THIS call. Left ``None`` it is filled from
     # :func:`turn_output_budget` by the validator at the end of this class, so a
     # request built anywhere in the harness is bounded without the caller having
@@ -5433,9 +5441,6 @@ class ChatRequest(BaseModel):
     # transcript, telemetry row, helper call or independent conversation.
     _codex_turn_state: Any = PrivateAttr(default=None)
 
-    # Runtime dispatch stamps the exact request that received the catalog.
-    _inline_ui_source_version: int | None = PrivateAttr(default=None)
-
     _one_turn_secrets: dict[str, SecretStr] = PrivateAttr(default_factory=dict)
 
     @property
@@ -5577,6 +5582,10 @@ class StreamStartEvent(BaseModel):
 
     type: Literal["start"] = "start"
     response_id: str | None = None
+    # The accepting adapter, not the requested model or viewer, proves that
+    # its wire body carried the discovery suffix. A retry's start replaces
+    # this receipt, including when the next route does not support the hint.
+    inline_ui_source_version: Literal[1] | None = Field(default=None, exclude=True)
     #: Anthropic cache diagnostics for THIS request, when it was opted in (see
     #: ``ChatRequest.cache_diagnostics``). ``None`` = not diagnosed (another
     #: provider, the conversation's first request, or the feature latched off).

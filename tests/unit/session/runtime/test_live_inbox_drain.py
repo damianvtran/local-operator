@@ -640,7 +640,8 @@ async def test_successor_replays_the_persisted_owner_opt_in(
         assert _user_rows(directory, row.text) == 1
         assert peek_inbox(directory) == []
         [turn] = [request for request in stream.requests if request.purpose == "turn"]
-        assert (INSTRUCTIONS in turn.system_blocks) is inline_ui
-        assert turn._inline_ui_source_version == (1 if inline_ui else None)
+        assert INSTRUCTIONS not in turn.system_blocks
+        assert turn.inline_ui_hint == (INSTRUCTIONS if inline_ui else None)
+        assert turn.messages[-1].text == row.text
     finally:
         await handle.dispose()

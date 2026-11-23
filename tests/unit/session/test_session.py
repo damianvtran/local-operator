@@ -399,7 +399,8 @@ async def test_prompt_full_turn_events_and_persistence(tmp_path):
     assert len(session._context.messages) == 4
 
     # System blocks reached the provider.
-    assert stream.requests[0].system_blocks == ["stable", "env", INSTRUCTIONS]
+    assert stream.requests[0].system_blocks == ["stable", "env"]
+    assert stream.requests[0].inline_ui_hint == INSTRUCTIONS
     await session.dispose()
 
 
@@ -1268,7 +1269,8 @@ async def test_async_system_blocks_provider(tmp_path):
     stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
     session = make_session(tmp_path, stream, system_blocks_provider=provider)
     await session.prompt("hi")
-    assert stream.requests[0].system_blocks == ["block-a", "block-b", INSTRUCTIONS]
+    assert stream.requests[0].system_blocks == ["block-a", "block-b"]
+    assert stream.requests[0].inline_ui_hint == INSTRUCTIONS
     await session.dispose()
 
 
@@ -1309,7 +1311,8 @@ async def test_live_model_label_reaches_a_label_aware_provider(tmp_path):
     session = make_session(tmp_path, stream, system_blocks_provider=provider)
     await session.prompt("hi")
     assert seen[-1] == "test/m"
-    assert stream.requests[0].system_blocks == ["Model: test/m", INSTRUCTIONS]
+    assert stream.requests[0].system_blocks == ["Model: test/m"]
+    assert stream.requests[0].inline_ui_hint == INSTRUCTIONS
     await session.dispose()
 
 
@@ -1321,7 +1324,8 @@ async def test_zero_arg_provider_still_works_after_the_label_addition(tmp_path):
     session = make_session(tmp_path, stream, system_blocks_provider=lambda: ["stable", "env"])
     assert session._blocks_provider_takes_label is False
     await session.prompt("hi")
-    assert stream.requests[0].system_blocks == ["stable", "env", INSTRUCTIONS]
+    assert stream.requests[0].system_blocks == ["stable", "env"]
+    assert stream.requests[0].inline_ui_hint == INSTRUCTIONS
     await session.dispose()
 
 
@@ -4690,9 +4694,10 @@ class TestAChangedGoalTakesEffectAtTheNextCall:
             await session.dispose()
 
         assert [request.system_blocks for request in stream.requests] == [
-            ["stable", "goal: old goal", INSTRUCTIONS],
-            ["stable", "goal: new goal", INSTRUCTIONS],
+            ["stable", "goal: old goal"],
+            ["stable", "goal: new goal"],
         ]
+        assert [request.inline_ui_hint for request in stream.requests] == [INSTRUCTIONS] * 2
 
 
 class TestASwitchedModelTakesEffectAtTheNextCall:
@@ -4785,10 +4790,11 @@ class TestASwitchedModelTakesEffectAtTheNextCall:
 
         assert self._labels(stream) == ["test/m", "test/m", "test/other"]
         assert [request.system_blocks for request in stream.requests] == [
-            ["Model: test/m", INSTRUCTIONS],
-            ["Model: test/m", INSTRUCTIONS],
-            ["Model: test/other", INSTRUCTIONS],
+            ["Model: test/m"],
+            ["Model: test/m"],
+            ["Model: test/other"],
         ]
+        assert [request.inline_ui_hint for request in stream.requests] == [INSTRUCTIONS] * 3
 
     @pytest.mark.asyncio
     async def test_a_switch_mid_stream_never_re_targets_the_call_in_flight(self, tmp_path):

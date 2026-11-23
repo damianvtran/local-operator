@@ -23763,17 +23763,7 @@ class Session:
                     # frame. Refuse dispatch, rather than just stopping future
                     # transforms after these bytes have crossed the boundary.
                     raise RuntimeError("bridge body authority changed before dispatch")
-                # Keep this capability out of frozen system state and off helper
-                # and background calls. Never inherit the previous turn's viewer.
-                inline_ui = inline_ui_instructions(
-                    self._run_input_surface, viewer_capable=self._run_inline_ui_viewer_capable
-                )
-                request._inline_ui_source_version = (
-                    1 if inline_ui is not None and self._output_contract is None else None
-                )
                 request = request.model_copy()
-                if inline_ui is not None and request._inline_ui_source_version == 1:
-                    request.system_blocks = [*request.system_blocks, inline_ui]
                 if getattr(self, "_required_image_evidence", False):
                     request.required_image_count = sum(
                         isinstance(block, ImageContent)
@@ -23911,6 +23901,16 @@ class Session:
                 # prefix cannot diverge (see ``_render_for_request``).
                 convert_to_llm=self._render_for_request,
                 stream_fn=marking_stream_fn,
+                # Resolve at each call, not once per run: a folded steer can
+                # change the input surface between provider requests. Helpers
+                # bypass this loop config and must keep the exact system prefix.
+                get_inline_ui_hint=lambda: (
+                    inline_ui_instructions(
+                        self._run_input_surface, viewer_capable=self._run_inline_ui_viewer_capable
+                    )
+                    if self._output_contract is None
+                    else None
+                ),
                 get_steering_messages=self._drain_steering,
                 has_steering_messages=lambda: not self._steering_queue.empty(),
                 # The idle-steer wake's opening drain: this run exists because

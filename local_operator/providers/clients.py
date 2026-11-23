@@ -1924,6 +1924,13 @@ def _estimated_prompt_tokens(request: ChatRequest) -> tuple[int, int]:
     return int(visible * _estimate_slope(request.model)) + native, visible + native
 
 
+def _inline_ui_suffix_tokens(request: ChatRequest) -> int:
+    # Only serializers that send the suffix count it. It contributes to this
+    # request's admission, but is not part of the stored conversation measure.
+    hint = request.inline_ui_hint
+    return (len(hint) + 3) // 4 if hint is not None else 0
+
+
 def _reasoning_effort(request: ChatRequest) -> str | None:
     """The effort level to send, or ``None`` when the key must not appear.
 
@@ -3344,7 +3351,9 @@ class OpenAICompatClient:
             scope,
             _estimate_slope(request.model),
             extra_native_tokens=(
-                echo_turns * reasoning_echo_placeholder_tokens() + google_boundary_tokens
+                echo_turns * reasoning_echo_placeholder_tokens()
+                + google_boundary_tokens
+                + _inline_ui_suffix_tokens(request)
             ),
         )
         if direct_deepseek:
@@ -3362,6 +3371,10 @@ class OpenAICompatClient:
                 frozen_entry=epoch_entry,
                 ephemeral_indices=ephemeral_indices,
             )
+        # Append only after cache placement: the next request (and an advisor)
+        # can read every original marker without having to resend discovery.
+        if request.inline_ui_hint is not None:
+            messages.append({"role": "user", "content": request.inline_ui_hint})
         body: dict[str, Any] = {
             "model": request.model.model_id,
             "stream": True,
@@ -3752,6 +3765,7 @@ class OpenAICompatClient:
             "openai-responses",
             scope,
             _estimate_slope(request.model),
+            extra_native_tokens=_inline_ui_suffix_tokens(request),
         )
         wire_messages = request.wire_messages()
         body: dict[str, Any] = {
@@ -3781,6 +3795,16 @@ class OpenAICompatClient:
                 )
             else:
                 body["instructions"] = instructions
+        if request.inline_ui_hint is not None:
+            # A real user item would move the Responses turn boundary, discard
+            # encrypted tool-round reasoning and reposition top-level instructions.
+            body["input"].append(
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": request.inline_ui_hint}],
+                }
+            )
         if request.tools:
             body["tools"] = _tools_to_openai_responses(request.tools)
             body["tool_choice"] = {"auto": "auto", "none": "none", "required": "required"}.get(
@@ -4012,7 +4036,12 @@ class OpenAICompatClient:
                         # proof against it (see StreamStartEvent) and must not learn
                         # the turn was accepted only once it has already finished.
                         started = True
-                        yield StreamStartEvent(response_id=_stream_id(chunk.get("id")))
+                        yield StreamStartEvent(
+                            response_id=_stream_id(chunk.get("id")),
+                            inline_ui_source_version=(
+                                1 if request.inline_ui_hint is not None else None
+                            ),
+                        )
                     chunk_choices = chunk.get("choices") or []
                     chunk_finished = bool(
                         chunk_choices
@@ -4509,7 +4538,8 @@ class OpenAICompatClient:
                     # learn the turn was accepted only after it had already
                     # produced its whole answer, which defeats the purpose.
                     yield StreamStartEvent(
-                        response_id=_stream_id((payload.get("response") or {}).get("id"))
+                        response_id=_stream_id((payload.get("response") or {}).get("id")),
+                        inline_ui_source_version=1 if request.inline_ui_hint is not None else None,
                     )
                     created_model = _served_model_slug((payload.get("response") or {}).get("model"))
                     if created_model:
@@ -5750,6 +5780,7 @@ class AnthropicClient:
             _ANTHROPIC_NATIVE_PROTOCOL,
             scope,
             _estimate_slope(request.model),
+            extra_native_tokens=_inline_ui_suffix_tokens(request),
         )
         body: dict[str, Any] = {
             "model": request.model.model_id,
@@ -5806,6 +5837,12 @@ class AnthropicClient:
                 ttl=ttl,
                 frozen_block=epoch_block,
                 ephemeral_indices=ephemeral_indices,
+            )
+        # An ephemeral frame belongs beyond all original cache points. Keep a
+        # preceding user/tool-result row byte-identical, including block order.
+        if request.inline_ui_hint is not None:
+            messages.append(
+                {"role": "user", "content": [{"type": "text", "text": request.inline_ui_hint}]}
             )
         if request.tools:
             # Safe default: unmapped values fall back to auto (PR-22).
@@ -6124,6 +6161,7 @@ class AnthropicClient:
                     )
                     yield StreamStartEvent(
                         response_id=_stream_id((event.get("message") or {}).get("id")),
+                        inline_ui_source_version=1 if request.inline_ui_hint is not None else None,
                         cache_miss_type=miss_type,
                         cache_missed_tokens=missed_tokens,
                     )
@@ -6625,8 +6663,10 @@ class GoogleClient:
             "google-content",
             scope,
             _estimate_slope(request.model),
-            extra_native_tokens=boundary_tokens,
+            extra_native_tokens=boundary_tokens + _inline_ui_suffix_tokens(request),
         )
+        if request.inline_ui_hint is not None:
+            contents.append({"role": "user", "parts": [{"text": request.inline_ui_hint}]})
         body: dict[str, Any] = {"contents": contents}
         if request.system_blocks:
             # Gemini's dedicated system slot (not folded into a user turn).
@@ -6964,7 +7004,10 @@ class GoogleClient:
                     # so a consumer waits forever instead of failing closed on an
                     # indeterminate acceptance (which is the documented contract).
                     started = True
-                    yield StreamStartEvent(response_id=None)
+                    yield StreamStartEvent(
+                        response_id=None,
+                        inline_ui_source_version=1 if request.inline_ui_hint is not None else None,
+                    )
                 version = _served_model_slug(chunk.get("modelVersion"))
                 if version:
                     served_model = version

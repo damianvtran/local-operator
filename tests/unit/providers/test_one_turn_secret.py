@@ -42,6 +42,7 @@ from local_operator.providers.failover import (
     _request_with_degradations,
     stream_with_failover,
 )
+from local_operator.session.inline_ui import INSTRUCTIONS
 from local_operator.variables import VariableStore
 from tests.unit.providers.test_failover import FakeAuth, _FnClient
 
@@ -130,9 +131,12 @@ _BUILDERS: dict[str, Callable[[ChatRequest], dict[str, Any]]] = {
 
 
 @pytest.mark.parametrize("wire", sorted(_BUILDERS))
-def test_each_provider_substitutes_exactly_one_tool_result_leaf(wire: str) -> None:
+@pytest.mark.parametrize("hint", [None, INSTRUCTIONS], ids=["ordinary", "inline-ui"])
+def test_each_provider_substitutes_exactly_one_tool_result_leaf(
+    wire: str, hint: str | None
+) -> None:
     canary = _canary(wire)
-    request = _request(canary)
+    request = _request(canary).model_copy(update={"inline_ui_hint": hint})
     build = _BUILDERS[wire]
     public_body = build(request)
     assert canary not in json.dumps(public_body)
@@ -150,7 +154,11 @@ def test_each_provider_substitutes_exactly_one_tool_result_leaf(wire: str) -> No
     assert canary in str(armed_value)
 
     # Same-body transport/credential retries reuse the same request overlay.
-    assert json.dumps(build(request), sort_keys=True) == json.dumps(armed_body, sort_keys=True)
+    assert json.dumps(build(request.model_copy()), sort_keys=True) == json.dumps(
+        armed_body, sort_keys=True
+    )
+    with pytest.raises(OneTurnSecretScopeError):
+        request.model_copy(update={"inline_ui_hint": None if hint else INSTRUCTIONS})
     with pytest.raises(OneTurnSecretSerializationError):
         request.model_dump(mode="json")
 

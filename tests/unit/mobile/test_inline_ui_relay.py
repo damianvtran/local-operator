@@ -25,6 +25,7 @@ from local_operator.harness.types import (
     MessageUpdateEvent,
     StreamEndEvent,
     StreamEvent,
+    StreamStartEvent,
     StreamTextDelta,
 )
 from local_operator.mobile.auth import COOKIE_NAME, sign_cookie
@@ -424,6 +425,7 @@ async def test_warm_mobile_send_streams_and_replays_widget(
                 yield event
             return
         requests.append(request)
+        yield StreamStartEvent(inline_ui_source_version=1 if request.inline_ui_hint else None)
         yield StreamTextDelta(delta=lead)
         yield StreamTextDelta(delta=fragment[:16])
         yield StreamTextDelta(delta=fragment[16:])
@@ -494,7 +496,10 @@ async def test_warm_mobile_send_streams_and_replays_widget(
                     assert b"```lop-ui" not in raw
                     if frame.get("inline_ui"):
                         break
-                assert len(requests) == 1 and INSTRUCTIONS in requests[0].system_blocks
+                [request] = requests
+                assert request.inline_ui_hint == INSTRUCTIONS
+                assert INSTRUCTIONS not in request.system_blocks
+                assert request.messages[-1].text == "Chart June traffic."
                 assert frame["streaming"] is True and not finish_answer.is_set()
                 ((row_id, overlay),) = frame["inline_ui"]["messages"].items()
                 assert overlay["text"] == lead + "\n"

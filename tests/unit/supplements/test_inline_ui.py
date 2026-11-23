@@ -16,6 +16,7 @@ from local_operator.harness.types import (
     Message,
     MessageUpdateEvent,
     StreamEndEvent,
+    StreamStartEvent,
     StreamTextDelta,
 )
 from local_operator.session.inline_ui import INSTRUCTIONS, instructions_for
@@ -33,13 +34,14 @@ from tests.unit.supplements.test_runner import (
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("surface", "viewer_capable", "inline_enabled"),
+    ("surface", "viewer_capable", "inline_enabled", "adapter_supports_hint"),
     [
-        ("desktop", False, False),
-        ("desktop", True, True),
-        ("tui", False, True),
-        ("mobile", False, False),
-        ("mobile", True, True),
+        ("desktop", False, False, True),
+        ("desktop", True, True, True),
+        ("tui", False, True, True),
+        ("mobile", False, False, True),
+        ("mobile", True, True, True),
+        ("tui", False, True, False),  # A capable viewer can still get a hint-free route.
     ],
 )
 async def test_inline_ui_replaces_decoration_but_keeps_file_highlights(
@@ -48,6 +50,7 @@ async def test_inline_ui_replaces_decoration_but_keeps_file_highlights(
     surface: str,
     viewer_capable: bool,
     inline_enabled: bool,
+    adapter_supports_hint: bool,
 ) -> None:
     target = "reports/q3.md"
     chunks = [
@@ -61,8 +64,21 @@ async def test_inline_ui_replaces_decoration_but_keeps_file_highlights(
         *(StreamTextDelta(delta=chunk) for chunk in chunks),
         StreamEndEvent(stop_reason="stop"),
     ]
+
+    async def adapter(request, signal):
+        events = stream(request, signal)
+        if request.inline_ui_hint and not adapter_supports_hint:
+            # A hinted primary was accepted but died before emitting content.
+            # The serving adapter's unhinted receipt must replace this one.
+            yield StreamStartEvent(response_id="failed-primary", inline_ui_source_version=1)
+        yield StreamStartEvent(
+            inline_ui_source_version=1 if adapter_supports_hint and request.inline_ui_hint else None
+        )
+        async for event in events:
+            yield event
+
     session = _make_session(
-        tmp_path / "sessions" / "s1", stream, [_write_tool(tmp_path, [])], tmp_path
+        tmp_path / "sessions" / "s1", adapter, [_write_tool(tmp_path, [])], tmp_path
     )
     handle = ServingSessionHandle(
         session, asyncio.get_running_loop(), install_gates=False, cwd=str(tmp_path)
@@ -83,10 +99,16 @@ async def test_inline_ui_replaces_decoration_but_keeps_file_highlights(
             inline_ui=None if surface == "tui" else viewer_capable,
         )
         row = await _await_row(session.transcript)
-        if inline_enabled:
-            assert all(request.system_blocks[-1] == INSTRUCTIONS for request in stream.requests)
-        else:
-            assert all(INSTRUCTIONS not in request.system_blocks for request in stream.requests)
+        assert all(request.system_blocks == ["stable"] for request in stream.requests)
+        assert all(
+            request.inline_ui_hint == (INSTRUCTIONS if inline_enabled else None)
+            for request in stream.requests
+        )
+        assert all(
+            INSTRUCTIONS not in message.text
+            for request in stream.requests
+            for message in request.messages
+        )
         assert all(question == FILES_QUESTION_ID for question in vendor.asked)
         assert not vendor_calls
         assert len(stream.requests) == 2  # the file tool and the answer, no graphics round
@@ -99,8 +121,9 @@ async def test_inline_ui_replaces_decoration_but_keeps_file_highlights(
         assert [file["path"] for file in row["files"]] == [target]
         anchor = next(entry for entry in session.transcript.entries() if entry.id == row["anchor"])
         plain = "".join(block["text"] for block in anchor.payload["content"])
-        assert plain == ("Traffic rose.\n\n\n\nSee the report." if inline_enabled else reply)
-        expected_version = 1 if inline_enabled else None
+        hinted_answer = inline_enabled and adapter_supports_hint
+        assert plain == ("Traffic rose.\n\n\n\nSee the report." if hinted_answer else reply)
+        expected_version = 1 if hinted_answer else None
         assert anchor.inline_ui_source_version == expected_version
         assert "inline_ui_source_version" not in anchor.payload
         assert all(
