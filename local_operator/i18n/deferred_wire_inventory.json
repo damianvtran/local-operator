@@ -306,7 +306,7 @@
         }
       ],
       "references": {
-        "settings_io.py": 38
+        "settings_io.py": 46
       }
     },
     "wire.settings.transcript_display": {

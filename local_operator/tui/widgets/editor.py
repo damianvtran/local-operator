@@ -3867,6 +3867,26 @@ class Editor(TextArea):
             event.stop()
             event.prevent_default()
             return
+        # Transcript scrolling chords while the composer owns the caret.
+        # `alt+<letter>` is PRINTABLE, so without this claim TextArea inserts
+        # the letter before any app binding runs. What the key MEANS is read
+        # from the LIVE binding map rather than written here as a chord: the
+        # map is already filtered by `check_action` (keymap capture keeps the
+        # key) and already rebuilt by `set_keymap`, so a remap moves the claim
+        # with it and there is no second list to drift. Only APP-level
+        # bindings qualify — a picker's own chord with the same spelling keeps
+        # first refusal because a focused picker is not this widget.
+        active = self.screen.active_bindings.get(key)
+        if active is not None and active.node is self.app and active.enabled:
+            action = active.binding.action
+            if action.startswith("keymap_transcript_") or action in (
+                "transcript_home",
+                "transcript_end",
+            ):
+                await self.app.run_action(action, default_namespace=self.app)
+                event.stop()
+                event.prevent_default()
+                return
         # Bang-mode entry. Consumed rather than inserted, matching opencode:
         # the bang is the MODE SWITCH, not the first character of the command,
         # so the buffer the user then types is the command itself. Gated on an

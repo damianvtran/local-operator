@@ -920,6 +920,13 @@ async def test_settings_projection_carries_the_derived_hotkey_scope(desktop):
         "keymap.next_session": "app",
         "keymap.cycle_effort": "app",
         "keymap.clear_transcript": "app",
+        # The transcript scroll rows this branch adds: app-scope like every
+        # other terminal binding, derived from the registry #4469 introduced,
+        # so they appear in the projection without any server change.
+        "keymap.transcript_up": "app",
+        "keymap.transcript_down": "app",
+        "keymap.transcript_half_up": "app",
+        "keymap.transcript_half_down": "app",
     }
     assert not any(
         row["hotkey_scope"] for key, row in rows.items() if not key.startswith("keymap.")
@@ -944,6 +951,10 @@ async def test_settings_projection_carries_the_derived_hotkey_scope(desktop):
         "keymap.next_session": False,
         "keymap.cycle_effort": False,
         "keymap.clear_transcript": False,
+        "keymap.transcript_up": False,
+        "keymap.transcript_down": False,
+        "keymap.transcript_half_up": False,
+        "keymap.transcript_half_down": False,
     }
     assert not any(
         row["clearable"] for key, row in rows.items() if not key.startswith("keymap.")

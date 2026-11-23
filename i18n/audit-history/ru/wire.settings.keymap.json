@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "wire.settings.keymap",
-  "history_sha256": "3e344ee6e056eaa4b5789ad369513add00711c1ad99f5dbec31587fe514bfb98",
+  "history_sha256": "294e2e489515a6d72c17b06bd2e23dc5c1061e0ae6d73feda84d209858f2f317",
   "entries": [
     {
       "locale": "ru",
@@ -76,6 +76,132 @@
       },
       "status": "passed",
       "note": "Suffix receipt for 26 new keys. Auditor-suggested replacements for toggle_subagents.help and fork_aside.label were applied verbatim by the manager after the audit; that delta was not re-audited. No dedicated i18n-translator/i18n-auditor profile was available in this session; general task and reviewer subagents were used with the repo's glossary/style-guide brief. target_sha256 is the namespace file SHA-256 at recording time. Dates are the day recorded."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings.keymap",
+      "source_sha256": "3736fadd1232b8ef4615e497d2149400f679f2dcbe4a9bf6da9542cb075ef088",
+      "context_sha256": "44a7abc7b091cc5a5ce6809d85d3574093df155cefde6d9a7f91a24e4bc04486",
+      "target_sha256": "bb6d8b4a6644244c720a1f6858202dec37cedd837a9e9337e69b90cf3743ee6b",
+      "changed_keys": [
+        "wire.settings.keymap.transcript_up.label",
+        "wire.settings.keymap.transcript_up.help",
+        "wire.settings.keymap.transcript_down.label",
+        "wire.settings.keymap.transcript_down.help",
+        "wire.settings.keymap.transcript_half_up.label",
+        "wire.settings.keymap.transcript_half_up.help",
+        "wire.settings.keymap.transcript_half_down.label",
+        "wire.settings.keymap.transcript_half_down.help"
+      ],
+      "translator": {
+        "agent": "coder/tui-scroll-keys — self-translated per manager instruction (2026-11-22)",
+        "session": "ed5662a9280c",
+        "session_kind": "lop session id",
+        "model": "radient/auto",
+        "model_kind": "configured session model; concrete upstream provider not exposed to this session",
+        "underlying_model": "unknown (not exposed)",
+        "date": "2026-11-22",
+        "fallback": "not exposed to this session; no provider switch was requested"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "86c5cf020f85",
+        "session_kind": "lop session id (delta re-audit under team lopdev)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model reported in this session's system header",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-22",
+        "fallback": "none observed; no provider switch during this audit",
+        "result": "passed",
+        "findings": 0,
+        "findings_by_severity": {
+          "BLOCKER": 0,
+          "MAJOR": 0,
+          "MINOR": 0,
+          "NIT": 0
+        },
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Independent delta re-audit at worktree HEAD 8704efd8e (round 2; round-1 audit was a different run at 94ecb8983). Whole namespace read at the new bytes against en source; source/context/target sha256 re-derived from disk and match the translator draft. Checked: meaning, native idiom, glossary + style-guide terms vs the locale's shipped catalogue usage, display-cell widths (rich cell_len, CJK double-width) vs sidecar maxCells (chip 20/10, hotkey label 24, help 72, legend 44, tip 57) and vs the namespace's widest existing row (no layout widening), literal keys (⌥J/K, alt+g/G), placeholder/ICU parity, key-set parity, NFC/controls/stray spaces, fr U+202F before ';', ur no manual bidi controls. R1 MINOR fixed: 'беседу' + 'в поле ввода' (restores composer qualifier), 68-70/72 cells, matches sibling new_session/resume rows. No findings.  Note: en/tui.chrome.bindings.json was re-formatted (minified->pretty-printed, JSON-equal to the audited content) between rounds, so its source_sha256 moved dfe44861…->3189693e…; no wording change."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings.keymap",
+      "source_sha256": "c49dee930248dc8f76f3239e42314bf865a0c0410a71cd31a21700b8e724a14b",
+      "context_sha256": "3f13a192ffd7da08bc3c502717d064f28d7da8365c860a6f3927622826eed3d4",
+      "target_sha256": "1d36e422f45a53be1c0d8de9aa4372ea6a7302467a9685499a5c700abbb8c0a8",
+      "changed_keys": [
+        "wire.settings.keymap.aside.help",
+        "wire.settings.keymap.aside.label",
+        "wire.settings.keymap.clear_transcript.help",
+        "wire.settings.keymap.clear_transcript.label",
+        "wire.settings.keymap.command_palette.help",
+        "wire.settings.keymap.command_palette.label",
+        "wire.settings.keymap.cycle_effort.help",
+        "wire.settings.keymap.cycle_effort.label",
+        "wire.settings.keymap.focus_sidebar.help",
+        "wire.settings.keymap.focus_sidebar.label",
+        "wire.settings.keymap.fork_aside.help",
+        "wire.settings.keymap.fork_aside.label",
+        "wire.settings.keymap.next_session.help",
+        "wire.settings.keymap.next_session.label",
+        "wire.settings.keymap.prev_session.help",
+        "wire.settings.keymap.prev_session.label",
+        "wire.settings.keymap.toggle_asks.help",
+        "wire.settings.keymap.toggle_asks.label",
+        "wire.settings.keymap.toggle_pin.help",
+        "wire.settings.keymap.toggle_pin.label",
+        "wire.settings.keymap.toggle_sidebar.help",
+        "wire.settings.keymap.toggle_sidebar.label",
+        "wire.settings.keymap.toggle_subagents.help",
+        "wire.settings.keymap.toggle_subagents.label",
+        "wire.settings.keymap.toggle_todos.help",
+        "wire.settings.keymap.toggle_todos.label",
+        "wire.settings.keymap.transcript_down.help",
+        "wire.settings.keymap.transcript_down.label",
+        "wire.settings.keymap.transcript_half_down.help",
+        "wire.settings.keymap.transcript_half_down.label",
+        "wire.settings.keymap.transcript_half_up.help",
+        "wire.settings.keymap.transcript_half_up.label",
+        "wire.settings.keymap.transcript_up.help",
+        "wire.settings.keymap.transcript_up.label"
+      ],
+      "translator": {
+        "agent": "union of two audited translations, no new translation: 26 keys by a task-subagent translator for feat/tui-configurable-keybinds (session 47ab69ad2d9c); 8 transcript keys by coder/tui-scroll-keys (session ed5662a9280c)",
+        "session": "47ab69ad2d9c + ed5662a9280c",
+        "session_kind": "lop task subagent JOB id and lop session id, respectively",
+        "model": "anthropic/claude-sonnet-5-5 + radient/auto",
+        "model_kind": "served models as self-reported by each translating session",
+        "underlying_model": "anthropic/claude-sonnet-5-5 / unknown (radient/auto route not exposed)",
+        "date": "2026-11-22",
+        "fallback": "none reported by either translating session"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "c5195593cf0d",
+        "session_kind": "lop session id (union whole-namespace audit under team lopdev, task from manager)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model reported in this session's system header",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-23",
+        "fallback": "none observed; no provider switch during this audit",
+        "result": "passed",
+        "findings": 2,
+        "findings_by_severity": {
+          "BLOCKER": 0,
+          "MAJOR": 0,
+          "MINOR": 1,
+          "NIT": 1
+        },
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true,
+        "translator_session": "47ab69ad2d9c + ed5662a9280c",
+        "scope": "whole namespace (44 keys) at the union bytes, cross-set consistency of the 26-key #4469 delta and the 8-key transcript delta plus 10 base keys"
+      },
+      "status": "passed",
+      "note": "Independent whole-namespace audit of the merge union at worktree HEAD 290a76c8c (parents c44fdf1ea tui-scroll-keys side, ce57801168 origin/main side). Purely additive: every one of the 44 keys is byte-equal to its text in a parent (10 base in both, 26 in origin/main 4e32078b2, 8 transcript in 8704efd8e); no key changed, none new. source/context/target sha256 re-derived with shasum -a 256 from disk and match the draft. Checked: meaning vs en, terminology identical across the two halves and vs shipped catalogue usage (transcript, composer, sidebar, aside, fork, pin, asks, dock, todo, effort, subagent, session, row/cursor), glossary + style guide, label/help register, display-cell widths (rich cell_len, CJK double-width) vs declared maxCells (24 label / 72 help on the 8 transcript rows, all within), literal tokens (/new /resume /sidebar /effort esc), NFC, controls, spacing, punctuation, key order parity. Findings (0 BLOCKER, 0 MAJOR, 1 MINOR, 1 NIT): MINOR R1 toggle_todos.help and toggle_subagents.help (A keys) say 'в нижней панели' for the dock; shipped wire.settings.display_dock.label is 'Док субагентов' and no other ru key uses 'нижняя панель'. Suggested: 'Разворачивает или сворачивает список задач в доке.' (50) and 'Переключает панель субагентов в доке по кругу: полный, сводка, скрытый.' (71; was 80). NIT 6 A/base helps >72 cells; caps declared on transcript rows only."
     }
   ]
 }

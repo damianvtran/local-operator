@@ -34,5 +34,13 @@
   "wire.settings.keymap.cycle_effort.label": "推理强度",
   "wire.settings.keymap.cycle_effort.help": "循环切换推理强度；/effort可直接指定档位。",
   "wire.settings.keymap.clear_transcript.label": "清空会话记录",
-  "wire.settings.keymap.clear_transcript.help": "清空当前显示的会话记录；已保存的历史会保留。"
+  "wire.settings.keymap.clear_transcript.help": "清空当前显示的会话记录；已保存的历史会保留。",
+  "wire.settings.keymap.transcript_up.label": "向上滚动会话记录",
+  "wire.settings.keymap.transcript_up.help": "将对话向上滚动两行，光标留在输入框。",
+  "wire.settings.keymap.transcript_down.label": "向下滚动会话记录",
+  "wire.settings.keymap.transcript_down.help": "将对话向下滚动两行，光标留在输入框。",
+  "wire.settings.keymap.transcript_half_up.label": "向上滚动半屏",
+  "wire.settings.keymap.transcript_half_up.help": "将对话向上滚动半屏，光标留在输入框。",
+  "wire.settings.keymap.transcript_half_down.label": "向下滚动半屏",
+  "wire.settings.keymap.transcript_half_down.help": "将对话向下滚动半屏，光标留在输入框。"
 }

@@ -34,5 +34,13 @@
   "wire.settings.keymap.cycle_effort.label": "तर्क-प्रयास",
   "wire.settings.keymap.cycle_effort.help": "तर्क-प्रयास का स्तर बदलता है; /effort सीधे एक स्तर तय करता है।",
   "wire.settings.keymap.clear_transcript.label": "ट्रांसक्रिप्ट साफ़ करें",
-  "wire.settings.keymap.clear_transcript.help": "ट्रांसक्रिप्ट का दृश्य साफ़ करता है; सहेजा गया इतिहास बना रहता है।"
+  "wire.settings.keymap.clear_transcript.help": "ट्रांसक्रिप्ट का दृश्य साफ़ करता है; सहेजा गया इतिहास बना रहता है।",
+  "wire.settings.keymap.transcript_up.label": "ऊपर स्क्रॉल करें",
+  "wire.settings.keymap.transcript_up.help": "बातचीत को दो पंक्तियाँ ऊपर स्क्रॉल करता है; कर्सर अपनी जगह रहता है।",
+  "wire.settings.keymap.transcript_down.label": "नीचे स्क्रॉल करें",
+  "wire.settings.keymap.transcript_down.help": "बातचीत को दो पंक्तियाँ नीचे स्क्रॉल करता है; कर्सर अपनी जगह रहता है।",
+  "wire.settings.keymap.transcript_half_up.label": "आधा पेज ऊपर",
+  "wire.settings.keymap.transcript_half_up.help": "बातचीत को आधी स्क्रीन ऊपर स्क्रॉल करता है; कर्सर अपनी जगह रहता है।",
+  "wire.settings.keymap.transcript_half_down.label": "आधा पेज नीचे",
+  "wire.settings.keymap.transcript_half_down.help": "बातचीत को आधी स्क्रीन नीचे स्क्रॉल करता है; कर्सर अपनी जगह रहता है।"
 }

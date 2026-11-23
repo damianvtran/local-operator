@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "tui.chrome.bindings",
-  "history_sha256": "77f979315e2983698b0b1be5f1cd2324c286643e22439d9367ff1ca611850524",
+  "history_sha256": "a326a843ab52b3b5948049849dbc15bfdfa22e538bd99762798e4c510ab0e2e5",
   "entries": [
     {
       "locale": "ru",
@@ -73,6 +73,87 @@
       },
       "status": "passed",
       "note": "Round-2 audit of the remediated bytes (target_sha256 re-derived at write time): verdict clean-with-findings (0 blocker, 0 major, 2 minor, 1 nit), scoped to the remediation delta with unchanged rows carried from round 1. First-pass translator job 4e26e9ba17b2; remediation translator job c5fd4eeda74d. docs/I18N.md step 3 says high-visibility/safety copy needs a SECOND independent audit; the doc does not define whether a keys legend or notification banners are high-visibility. No such classification is claimed and no second-audit approval is manufactured: the round-2 audit is a second independent auditor instance but delta-scoped, so it is not a full second audit of the carried rows. Evidence is the translators' and auditors' own reports (their commands and outputs), not coder-invented output. Verdict counts cover the locale's two namespaces together (tui.chrome.bindings and tui.chrome.banners), not this namespace alone. Unresolved minors/nits are deferred, not fixed (counts only; the coder was not given per-finding text). "
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.chrome.bindings",
+      "source_sha256": "3189693e2963935f0eed13c2a61f73d07817bdea45be2385a6e61ea54b0d7887",
+      "context_sha256": "f6f50e8e607ccf45600b2e6d31b7290ed7267b75c1c061b4fda5deaa76a507bb",
+      "target_sha256": "34b03609bf79179d6f00a2b7ddbe7a410584acd22ac189a65062f928b1984967",
+      "changed_keys": [
+        "tui.chrome.bindings.legend_app_ctrl_home_end"
+      ],
+      "translator": {
+        "agent": "coder/tui-scroll-keys — self-translated per manager instruction (2026-11-22)",
+        "session": "ed5662a9280c",
+        "session_kind": "lop session id",
+        "model": "radient/auto",
+        "model_kind": "configured session model; concrete upstream provider not exposed to this session",
+        "underlying_model": "unknown (not exposed)",
+        "date": "2026-11-22",
+        "fallback": "not exposed to this session; no provider switch was requested"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "86c5cf020f85",
+        "session_kind": "lop session id (delta re-audit under team lopdev)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model reported in this session's system header",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-22",
+        "fallback": "none observed; no provider switch during this audit",
+        "result": "passed",
+        "findings": 0,
+        "findings_by_severity": {
+          "BLOCKER": 0,
+          "MAJOR": 0,
+          "MINOR": 0,
+          "NIT": 0
+        },
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Independent delta re-audit at worktree HEAD 8704efd8e (round 2; round-1 audit was a different run at 94ecb8983). Whole namespace read at the new bytes against en source; source/context/target sha256 re-derived from disk and match the translator draft. Checked: meaning, native idiom, glossary + style-guide terms vs the locale's shipped catalogue usage, display-cell widths (rich cell_len, CJK double-width) vs sidecar maxCells (chip 20/10, hotkey label 24, help 72, legend 44, tip 57) and vs the namespace's widest existing row (no layout widening), literal keys (⌥J/K, alt+g/G), placeholder/ICU parity, key-set parity, NFC/controls/stray spaces, fr U+202F before ';', ur no manual bidi controls. R1 MINOR fixed: 48->40/44 cells ('к началу или концу транскрипта (alt+g/G)'). No findings.  Note: en/tui.chrome.bindings.json was re-formatted (minified->pretty-printed, JSON-equal to the audited content) between rounds, so its source_sha256 moved dfe44861…->3189693e…; no wording change."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.chrome.bindings",
+      "source_sha256": "7e610311fb093e1c35d8fa100815a0fdd615a9e24167a4b5c7b954b485a572e4",
+      "context_sha256": "20b645474050b00d21c8d781ef714fcc4c4f42386be9168c67df19d1f0681a6f",
+      "target_sha256": "24e4730226fac73b9da046c232a494b30ce57a7d4697c90657573ce3f3b2215a",
+      "changed_keys": [
+        "tui.chrome.bindings.legend_app_ctrl_home_end"
+      ],
+      "translator": {
+        "agent": "coder agent (local-operator lopdev team, PR #4440 remediation round 1)",
+        "model": "radient/auto",
+        "model_kind": "configured session model; concrete upstream provider not exposed to the auditor",
+        "underlying_model": "unknown (not exposed)",
+        "date": "2026-11-22"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "5a2e32439c19",
+        "session_kind": "lop session id (round 3 delta audit under team lopdev)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model reported in this session's system header",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-22",
+        "fallback": "none observed; no provider switch during this audit",
+        "result": "passed",
+        "findings": 0,
+        "findings_by_severity": {
+          "BLOCKER": 0,
+          "MAJOR": 0,
+          "MINOR": 0,
+          "NIT": 0
+        },
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Independent audit (round 3, delta) at worktree HEAD 18dd9e949 vs 8704efd8e. Whole namespace read against en source+sidecar; source/context/target sha256 re-derived from disk (shasum) and equal the coder draft. Checked: meaning/idiom, glossary+style-guide terms (transcript/conversation/composer family consistent with the namespace's other rows), display cells via rich cell_len (CJK double-width) vs sidecar maxCells, ICU/placeholder + key-set parity, NFC, no control chars, literal keys option+k/j and ctrl+]/\\\\ byte-preserved with no U+2325 glyph left, scripts/i18n/check.py --catalogues-only 0 problems. Changed key legend_app_ctrl_home_end = 49 cells (sidecar maxCells 50, raised from 44 in this commit; en is 43). Card does not widen: keys_legend.natural_width unchanged because the widest row per locale is another row (up_down 55/49/39/50/52/50/41 for fr/es/zh/ru/vi/ur/hi) above the new row; fr natural_width 74 (the ~74 ceiling) is set by up_down. The /help row is hard-coded English (app.py _key_row), not catalogue-fed, so no locale composes there. ru is 49 cells, above the brief's 44 but within the sidecar's 50 and below ru's widest row (50)."
     }
   ]
 }

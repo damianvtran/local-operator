@@ -34,5 +34,13 @@
   "wire.settings.keymap.cycle_effort.label": "استدلال کی شدت",
   "wire.settings.keymap.cycle_effort.help": "استدلال کی شدت کی سطح باری باری بدلتا ہے؛ /effort سے براہ راست مقرر کریں۔",
   "wire.settings.keymap.clear_transcript.label": "ٹرانسکرپٹ صاف کریں",
-  "wire.settings.keymap.clear_transcript.help": "ٹرانسکرپٹ کا منظر صاف کرتا ہے؛ محفوظ شدہ تاریخ برقرار رہتی ہے۔"
+  "wire.settings.keymap.clear_transcript.help": "ٹرانسکرپٹ کا منظر صاف کرتا ہے؛ محفوظ شدہ تاریخ برقرار رہتی ہے۔",
+  "wire.settings.keymap.transcript_up.label": "اوپر اسکرول کریں",
+  "wire.settings.keymap.transcript_up.help": "گفتگو کو دو سطروں اوپر اسکرول کرتا ہے؛ کرسر اپنی جگہ رہتا ہے۔",
+  "wire.settings.keymap.transcript_down.label": "نیچے اسکرول کریں",
+  "wire.settings.keymap.transcript_down.help": "گفتگو کو دو سطروں نیچے اسکرول کرتا ہے؛ کرسر اپنی جگہ رہتا ہے۔",
+  "wire.settings.keymap.transcript_half_up.label": "آدھا صفحہ اوپر",
+  "wire.settings.keymap.transcript_half_up.help": "گفتگو کو آدھی اسکرین اوپر اسکرول کرتا ہے؛ کرسر اپنی جگہ رہتا ہے۔",
+  "wire.settings.keymap.transcript_half_down.label": "آدھا صفحہ نیچے",
+  "wire.settings.keymap.transcript_half_down.help": "گفتگو کو آدھی اسکرین نیچے اسکرول کرتا ہے؛ کرسر اپنی جگہ رہتا ہے۔"
 }

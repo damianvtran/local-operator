@@ -5192,9 +5192,14 @@ class OperatorApp(App[None]):
         # an open picker keeps first refusal on the key, exactly like the
         # other composer-adjacent chords. `home` jumps to the oldest row
         # (mounting one page, then further pages per press once the head is
-        # still deferred); `end` returns to the live tail.
-        Binding("ctrl+home", "transcript_home", "Transcript top", show=False),
-        Binding("ctrl+end", "transcript_end", "Transcript end", show=False),
+        # still deferred); `end` returns to the live tail. `alt+g`/
+        # `alt+shift+g` are the mnemonic pair, on the same bindings rather
+        # than as two remappable rows: the top/bottom actions are FIXED (like
+        # ctrl+home/end always were), which keeps `wire.settings.keymap` two
+        # rows and eight translations shorter, and a user who needs another
+        # chord already has the four remappable scroll rows for row movement.
+        Binding("ctrl+home,alt+g", "transcript_home", "Transcript top", show=False),
+        Binding("ctrl+end,alt+shift+g", "transcript_end", "Transcript end", show=False),
     ]
 
     def __init__(
@@ -36066,6 +36071,18 @@ class OperatorApp(App[None]):
         # review round 2 (F9) fixed once already. `named` is `text` wherever
         # nothing was collapsed, so every other caller is unchanged.
         image_blocks = self._append_image_blocks(images, marker_text=named)
+        # SENDING is a request for the live tail: a reader who scrolled up to
+        # re-read history is carried to the row they just sent and stays on the
+        # follow from then on (typing alone never moves the view). Every sender
+        # funnels through here, so this is the one hook. `follow_tail`
+        # re-acquires the anchor outright; on a windowed resume the tail page
+        # may still be deferred, so `end`'s action is the better ask — it
+        # requests that page through the app's own hook and then follows.
+        transcript = self._transcript_view()
+        if self._resume_pending_tail:
+            transcript.action_scroll_end()
+        else:
+            transcript.follow_tail()
         if self._session is None:
             # Through the helper: after a bare /stop the honest answer is the
             # reopen command, not "still starting" (measured: the first
@@ -49576,6 +49593,50 @@ class OperatorApp(App[None]):
         """
         self._cmd_resume("", self._notice)
 
+    def _reader_transcript_view(self) -> TranscriptView:
+        """The transcript the reader is LOOKING at.
+
+        The full-page subagent view mounts a second, live transcript; its
+        scroll keys must move the rows under the reader's eyes, not the hidden
+        parent's. Read through ``SubagentView.transcript`` so the page keeps
+        ownership of its own body rather than the app reaching into ``_body``.
+        """
+        page = self._subagent_view
+        if page is not None:
+            return page.transcript
+        return self._transcript_view()
+
+    def _scroll_transcript(self, delta: int) -> None:
+        """Move the reader's transcript ``delta`` rows; never edit the composer.
+
+        The transcript owns the gesture (including the tail-tolerance rule that
+        keeps a single upward press from snapping home); this path only chooses
+        the view and the step. `note_user_scroll` fires inside, so a clamped
+        press still requests older history at the top and retires upward demand
+        on the way down.
+        """
+        self._reader_transcript_view().scroll_rows(delta)
+
+    def _transcript_half_step(self) -> int:
+        """Half a screenful of the reader's transcript, never zero."""
+        return max(1, self._reader_transcript_view().scrollable_content_region.height // 2)
+
+    def action_keymap_transcript_up(self) -> None:
+        """The remappable row-step up — ``alt+k`` unless remapped."""
+        self._scroll_transcript(-2)
+
+    def action_keymap_transcript_down(self) -> None:
+        """The remappable row-step down — ``alt+j`` unless remapped."""
+        self._scroll_transcript(2)
+
+    def action_keymap_transcript_half_up(self) -> None:
+        """The remappable half-page up — ``alt+u`` unless remapped."""
+        self._scroll_transcript(-self._transcript_half_step())
+
+    def action_keymap_transcript_half_down(self) -> None:
+        """The remappable half-page down — ``alt+d`` unless remapped."""
+        self._scroll_transcript(self._transcript_half_step())
+
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Disarm every app binding while the settings page is CAPTURING a key.
 
@@ -49819,9 +49880,18 @@ class OperatorApp(App[None]):
         input rearms), and with the gate open the deferred check can fetch.
         A wheel notch never comes through this action, so a healthy in-flight
         fetch is not cancelled by scrolling.
+
+        The page under the reader's eyes is the target: an open subagent page
+        owns the keyboard and its body is the transcript being read, so
+        reaching for the hidden parent's top would be a no-op on the visible
+        frame. The parent's abandoned paging lease is retired FIRST, page open
+        or not: ``_break_abandoned_paging_lease`` is a no-op when nothing is
+        leased, and this chord is the documented keyboard recovery for a
+        wedged fetch — gating it on the page would remove the only recovery
+        for the parent transcript (review round 1, F3).
         """
         self._break_abandoned_paging_lease(self._interaction)
-        self._transcript_view().action_scroll_home()
+        self._reader_transcript_view().action_scroll_home()
 
     def action_transcript_end(self) -> None:
         """``ctrl+end`` — take the transcript back to the live tail (UX1, U2).
@@ -49830,9 +49900,9 @@ class OperatorApp(App[None]):
         something returns to where new turns arrive without a mouse. Routes
         through the transcript's own ``end`` action for the same reasons —
         ``note_user_scroll`` plus the tail-anchor handoff the action already
-        performs.
+        performs. The visible page is the target, as in :meth:`action_transcript_home`.
         """
-        self._transcript_view().action_scroll_end()
+        self._reader_transcript_view().action_scroll_end()
 
     def _scroll_todos(self, *, down: bool) -> None:
         """Drive the todo panel's keyboard scroll, the one path both keys share.
@@ -59317,8 +59387,19 @@ class OperatorApp(App[None]):
         # resume notice that appears when the reader is already stuck. One row
         # for both ends, naming what each is FOR rather than the direction:
         # "top" is where a resumed conversation's older history is loaded from.
-        # 64 composed cells against the 74-cell ceiling this block documents.
-        lines.append(_key_row("ctrl+home", "jump to the transcript top; ctrl+end returns"))
+        # The row also carries the two-row scroll pair and its no-setup
+        # fallback: `alt+<letter>` chords are invisible until the user learns
+        # them (the splash tip is one of eighteen, rotating), and on a terminal
+        # that does not send Meta they type a character instead — so the
+        # working `ctrl+]`/`ctrl+\` pair is named HERE, where a stuck reader
+        # already looks, rather than only on a Hotkeys page eight sections
+        # down (UX round 1, U1/U2). The `alt+g`/`alt+shift+g` mnemonic pair is
+        # left to the guide: ctrl+home/end already says what the row does, and
+        # the scroll chords earn the cells. Lowercase `option` matches the
+        # block's own `option+left/right` rows (design round 1, D6).
+        # 66 composed cells (20-cell name column + 46) against the 74-cell
+        # ceiling this block documents.
+        lines.append(_key_row("ctrl+home/end", "jump to top/end; scroll option+k/j or ctrl+]/\\"))
         # The second row is the KEYBOARD half of the head notice's offer, and
         # it is here rather than in the notice for a reason both the design and
         # UX rounds endorsed: the copy must not recite a chord, and `ctrl+home`

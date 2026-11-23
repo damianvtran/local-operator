@@ -178,5 +178,53 @@
     "role": "Settings row help for the clear-transcript hotkey",
     "tone": "plain, one sentence",
     "note": "EN-only context sidecar. The reassurance ('the stored history stays') is the point of the sentence: the gesture looks destructive. No ICU arguments."
+  },
+  "wire.settings.keymap.transcript_up.label": {
+    "role": "Hotkey settings row label for a transcript scrolling action",
+    "tone": "title case, noun phrase",
+    "maxCells": 24,
+    "note": "EN-only context sidecar. Names the direction and the step size so the row is distinguishable from its partner. No ICU arguments."
+  },
+  "wire.settings.keymap.transcript_up.help": {
+    "role": "Hotkey settings row help for a transcript scrolling action",
+    "tone": "sentence, plain",
+    "maxCells": 72,
+    "note": "EN-only context sidecar. Says the caret stays in the composer, which is the property that distinguishes this from moving focus. No ICU arguments."
+  },
+  "wire.settings.keymap.transcript_down.label": {
+    "role": "Hotkey settings row label for a transcript scrolling action",
+    "tone": "title case, noun phrase",
+    "maxCells": 24,
+    "note": "EN-only context sidecar. Names the direction and the step size so the row is distinguishable from its partner. No ICU arguments."
+  },
+  "wire.settings.keymap.transcript_down.help": {
+    "role": "Hotkey settings row help for a transcript scrolling action",
+    "tone": "sentence, plain",
+    "maxCells": 72,
+    "note": "EN-only context sidecar. Says the caret stays in the composer, which is the property that distinguishes this from moving focus. No ICU arguments."
+  },
+  "wire.settings.keymap.transcript_half_up.label": {
+    "role": "Hotkey settings row label for a transcript scrolling action",
+    "tone": "title case, noun phrase",
+    "maxCells": 24,
+    "note": "EN-only context sidecar. Names the direction and the step size so the row is distinguishable from its partner. No ICU arguments."
+  },
+  "wire.settings.keymap.transcript_half_up.help": {
+    "role": "Hotkey settings row help for a transcript scrolling action",
+    "tone": "sentence, plain",
+    "maxCells": 72,
+    "note": "EN-only context sidecar. Says the caret stays in the composer, which is the property that distinguishes this from moving focus. No ICU arguments."
+  },
+  "wire.settings.keymap.transcript_half_down.label": {
+    "role": "Hotkey settings row label for a transcript scrolling action",
+    "tone": "title case, noun phrase",
+    "maxCells": 24,
+    "note": "EN-only context sidecar. Names the direction and the step size so the row is distinguishable from its partner. No ICU arguments."
+  },
+  "wire.settings.keymap.transcript_half_down.help": {
+    "role": "Hotkey settings row help for a transcript scrolling action",
+    "tone": "sentence, plain",
+    "maxCells": 72,
+    "note": "EN-only context sidecar. Says the caret stays in the composer, which is the property that distinguishes this from moving focus. No ICU arguments."
   }
 }

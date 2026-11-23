@@ -270,6 +270,22 @@ KEYMAP_ENGLISH = {
         "Clear transcript",
         "Clears the transcript view; the stored history stays.",
     ),
+    "keymap.transcript_up": (
+        "Scroll transcript up",
+        "Scrolls the conversation up two rows; the caret stays in the composer.",
+    ),
+    "keymap.transcript_down": (
+        "Scroll transcript down",
+        "Scrolls the conversation down two rows; the caret stays in the composer.",
+    ),
+    "keymap.transcript_half_up": (
+        "Half-page transcript up",
+        "Scrolls the conversation up half a screen; the caret stays in the composer.",
+    ),
+    "keymap.transcript_half_down": (
+        "Half-page transcript down",
+        "Scrolls the conversation down half a screen; the caret stays in the composer.",
+    ),
 }
 
 

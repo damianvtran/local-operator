@@ -34,5 +34,13 @@
   "wire.settings.keymap.cycle_effort.label": "Mức suy luận",
   "wire.settings.keymap.cycle_effort.help": "Đổi lần lượt các mức suy luận; /effort đặt thẳng một mức.",
   "wire.settings.keymap.clear_transcript.label": "Xóa bản ghi",
-  "wire.settings.keymap.clear_transcript.help": "Xóa bản ghi đang hiển thị; lịch sử đã lưu vẫn còn."
+  "wire.settings.keymap.clear_transcript.help": "Xóa bản ghi đang hiển thị; lịch sử đã lưu vẫn còn.",
+  "wire.settings.keymap.transcript_up.label": "Cuộn lên",
+  "wire.settings.keymap.transcript_up.help": "Cuộn cuộc trò chuyện lên hai dòng; con trỏ giữ nguyên.",
+  "wire.settings.keymap.transcript_down.label": "Cuộn xuống",
+  "wire.settings.keymap.transcript_down.help": "Cuộn cuộc trò chuyện xuống hai dòng; con trỏ giữ nguyên.",
+  "wire.settings.keymap.transcript_half_up.label": "Nửa trang lên",
+  "wire.settings.keymap.transcript_half_up.help": "Cuộn cuộc trò chuyện lên nửa màn hình; con trỏ giữ nguyên.",
+  "wire.settings.keymap.transcript_half_down.label": "Nửa trang xuống",
+  "wire.settings.keymap.transcript_half_down.help": "Cuộn cuộc trò chuyện xuống nửa màn hình; con trỏ giữ nguyên."
 }

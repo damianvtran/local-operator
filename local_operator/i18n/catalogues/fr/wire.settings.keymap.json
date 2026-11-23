@@ -34,5 +34,13 @@
   "wire.settings.keymap.cycle_effort.label": "Effort de raisonnement",
   "wire.settings.keymap.cycle_effort.help": "Fait défiler les niveaux d’effort de raisonnement ; /effort en choisit un directement.",
   "wire.settings.keymap.clear_transcript.label": "Vider la transcription",
-  "wire.settings.keymap.clear_transcript.help": "Vide la transcription affichée ; l’historique enregistré est conservé."
+  "wire.settings.keymap.clear_transcript.help": "Vide la transcription affichée ; l’historique enregistré est conservé.",
+  "wire.settings.keymap.transcript_up.label": "Défiler vers le haut",
+  "wire.settings.keymap.transcript_up.help": "Remonte la conversation de deux lignes ; la saisie garde le curseur.",
+  "wire.settings.keymap.transcript_down.label": "Défiler vers le bas",
+  "wire.settings.keymap.transcript_down.help": "Descend la conversation de deux lignes ; la saisie garde le curseur.",
+  "wire.settings.keymap.transcript_half_up.label": "Demi-page vers le haut",
+  "wire.settings.keymap.transcript_half_up.help": "Remonte la conversation d’un demi-écran ; la saisie garde le curseur.",
+  "wire.settings.keymap.transcript_half_down.label": "Demi-page vers le bas",
+  "wire.settings.keymap.transcript_half_down.help": "Descend la conversation d’un demi-écran ; la saisie garde le curseur."
 }

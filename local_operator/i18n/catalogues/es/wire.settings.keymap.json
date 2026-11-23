@@ -34,5 +34,13 @@
   "wire.settings.keymap.cycle_effort.label": "Esfuerzo de razonamiento",
   "wire.settings.keymap.cycle_effort.help": "Recorre los niveles de esfuerzo de razonamiento; /effort fija uno directamente.",
   "wire.settings.keymap.clear_transcript.label": "Vaciar transcripción",
-  "wire.settings.keymap.clear_transcript.help": "Vacía la transcripción en pantalla; el historial guardado se conserva."
+  "wire.settings.keymap.clear_transcript.help": "Vacía la transcripción en pantalla; el historial guardado se conserva.",
+  "wire.settings.keymap.transcript_up.label": "Desplazar hacia arriba",
+  "wire.settings.keymap.transcript_up.help": "Desplaza la conversación dos líneas hacia arriba; el cursor no se mueve.",
+  "wire.settings.keymap.transcript_down.label": "Desplazar hacia abajo",
+  "wire.settings.keymap.transcript_down.help": "Desplaza la conversación dos líneas hacia abajo; el cursor no se mueve.",
+  "wire.settings.keymap.transcript_half_up.label": "Media página arriba",
+  "wire.settings.keymap.transcript_half_up.help": "Desplaza la conversación media pantalla arriba; el cursor no se mueve.",
+  "wire.settings.keymap.transcript_half_down.label": "Media página abajo",
+  "wire.settings.keymap.transcript_half_down.help": "Desplaza la conversación media pantalla abajo; el cursor no se mueve."
 }

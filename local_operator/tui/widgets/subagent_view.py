@@ -1850,6 +1850,12 @@ class HintButton(Static):
 class SubagentTranscriptView(TranscriptView):
     """Transcript body whose top-edge command belongs to its reader page."""
 
+    #: The page's own footer already carries `end` and the scroll hints, and
+    #: its body streams a CHILD's output under a reader who is deliberately
+    #: inspecting that run — a chip offering "the conversation" would be about
+    #: a transcript the page is not showing.
+    SHOWS_JUMP_CHIP = False
+
     BINDINGS = [
         Binding("home", "load_earlier", "Load earlier transcript", show=False, priority=True)
     ]
@@ -2104,6 +2110,15 @@ class SubagentView(Vertical):
     def job_id(self) -> str:
         """The task job this page is showing."""
         return self._job_id
+
+    @property
+    def transcript(self) -> SubagentTranscriptView:
+        """The child's scrolling transcript — the rows the reader is looking at.
+
+        Public so the app's scroll actions can target the visible page without
+        reaching into ``_body``; the page keeps ownership of its own body.
+        """
+        return self._body
 
     def diff_archive_directory(self) -> str | None:
         """The CHILD's session directory, where its write/edit rows are persisted.

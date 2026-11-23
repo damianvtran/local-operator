@@ -45,6 +45,7 @@ _STATIC_TIP_KEYS = (
     "tui.welcome.tip.fork",
     "tui.welcome.tip.fork_placement",
     "tui.welcome.tip.cmux",
+    "tui.welcome.tip.transcript_scroll",
     "tui.welcome.tip.classification_off",
     "tui.welcome.tip.classification_login",
     "tui.welcome.tip.mesh",

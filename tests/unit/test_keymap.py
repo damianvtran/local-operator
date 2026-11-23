@@ -772,6 +772,63 @@ def test_resolved_keymap_keeps_none_and_not_rejected() -> None:
     assert rejected == ["keymap.quick_send"]
 
 
+def test_the_transcript_scroll_rows_are_registered_and_reach_their_actions() -> None:
+    """The rows exist, in the app scope, and name methods the app really has.
+
+    Deliberately structural, like every other test in this file: the pilot
+    behaviour lives in `tests/unit/tui/test_transcript_scroll_keys.py`, and
+    what can silently break here is the IDENTITY — a row whose action method
+    does not exist fails only when somebody presses the key.
+    """
+    from local_operator.tui.app import OperatorApp
+
+    expected = {
+        "keymap.transcript_up": ("keymap_transcript_up", "alt+k,ctrl+right_square_bracket"),
+        "keymap.transcript_down": ("keymap_transcript_down", "alt+j,ctrl+backslash"),
+        "keymap.transcript_half_up": ("keymap_transcript_half_up", "alt+u"),
+        "keymap.transcript_half_down": ("keymap_transcript_half_down", "alt+d"),
+    }
+    for action_id, (method, default) in expected.items():
+        action = keymap.BY_ID[action_id]
+        assert (action.scope, action.action, action.default) == ("app", method, default)
+        assert callable(getattr(OperatorApp, f"action_{method}"))
+
+
+def test_only_the_transcript_rows_accept_a_printable_option_chord() -> None:
+    """``<modifier>+<printable>`` is scoped to the rows the editor claims (F2).
+
+    ``alt+k`` is not a Textual ``Keys`` member, so the transcript defaults
+    needed the widened grammar — but widening it for EVERY app row turns a
+    save-time refusal into a silent dead binding: ``keymap.quick_send`` on
+    ``alt+z`` would save and then type ``z`` into the composer, because no
+    editor claim covers that action (``Editor._on_key`` claims exactly the
+    ``keymap_transcript_`` ids). Measured against the real vocabulary: the
+    baseline refused it, so the refusals below are the pre-PR behaviour.
+    """
+    assert keymap.validate_key("alt+z", action_id="keymap.transcript_up") is None
+    assert keymap.validate_key("alt+l", action_id="keymap.transcript_half_down") is None
+    assert keymap.validate_key("alt+z") is not None, "no action id must not widen"
+    for action_id in ("keymap.quick_send", "keymap.new_session", "keymap.resume"):
+        assert keymap.validate_key("alt+z", action_id=action_id) is not None, action_id
+    # The punctuation fallbacks are real ``Keys`` members, so they were and
+    # remain valid for every app row — the gate is on the widening, not on
+    # what Textual can already name.
+    assert keymap.validate_key("ctrl+right_square_bracket", action_id="keymap.quick_send") is None
+
+
+def test_key_display_spells_the_punctuation_chords_as_keycaps() -> None:
+    """`/settings` → Hotkeys must not print Textual's internal names (D5).
+
+    The row's value goes through this ONE app-scope display path, so the two
+    non-keycap names are mapped here rather than on one page: a reader who is
+    told `ctrl+]` in /help and the docs must find the same chord on the remap
+    page, not `ctrl+right_square_bracket`.
+    """
+    assert keymap.format_key_display("alt+k,ctrl+right_square_bracket") == "alt+k,ctrl+]"
+    assert keymap.format_key_display("ctrl+backslash") == "ctrl+\\"
+    assert keymap.format_key_display("ctrl+home") == "ctrl+home"
+
+
 # ---------------------------------------------------------------------------
 # The app-scope rows this slice exposed
 # ---------------------------------------------------------------------------
@@ -953,7 +1010,16 @@ def test_fixed_app_keys_are_the_app_bindings_that_are_not_rows() -> None:
     # one silently.
     DARWIN_ONLY = {"super+b": "Sessions"}
 
-    row_keys = {action.default for action in keymap.KEY_ACTIONS if action.scope == "app"}
+    # EVERY PART of a row's default, not just the whole string: a row may carry
+    # a mnemonic alternate on one action (`alt+k,ctrl+right_square_bracket`),
+    # and each part is still that row's key, not a fixed app binding.
+    row_keys = {
+        part
+        for action in keymap.KEY_ACTIONS
+        if action.scope == "app"
+        for part in action.default.split(",")
+        if part
+    }
 
     def _derive(bindings: Any) -> dict[str, str]:
         derived: dict[str, str] = {}
