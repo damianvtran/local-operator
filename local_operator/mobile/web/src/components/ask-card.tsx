@@ -1342,7 +1342,7 @@ export function AskCard({
 							disabled={busy !== ""}
 							aria-busy={busy === "decline" || undefined}
 							onClick={decline}
-							className="flex min-h-11 min-w-fit flex-1 basis-0 items-center justify-center rounded-sm border border-danger/40 bg-danger-wash px-3 text-body-sm whitespace-nowrap text-danger active:bg-danger-wash disabled:opacity-50"
+							className="flex min-h-11 min-w-fit flex-1 basis-0 items-center justify-center rounded-sm border border-danger-border bg-danger-wash px-3 text-body-sm whitespace-nowrap text-danger active:bg-danger-wash disabled:opacity-50"
 						>
 							{messageRuntime.t("relay.asks.card.decline")}
 						</button>

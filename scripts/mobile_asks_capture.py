@@ -159,6 +159,11 @@ SHEET_PROBE = """
           .getPropertyValue('--lo-vvh')) || window.innerHeight;
       return {
         footerH: Math.round(f.getBoundingClientRect().height),
+        // The bar's own height and the 40% cap: `footerH` must equal the first
+        // until the content passes the second (QA Q-3: a shrinkable footer was
+        // squeezed to a thin window by the scroller's `flex-1`).
+        footerContentH: f.scrollHeight,
+        footerCapH: Math.round(column * 0.4),
         footerScrolls: f.scrollHeight > f.clientHeight + 1,
         readingH: Math.round(scroller.getBoundingClientRect().height),
         readingShare: +(scroller.getBoundingClientRect().height / column).toFixed(2),
@@ -667,6 +672,9 @@ def main() -> None:
     finally:
         chrome.close()
     (outdir / f"{label}-asks-geometry.json").write_text(json.dumps(report, indent=2))
+    problems = footer_problems(report)
+    for problem in problems:
+        print(f"FOOTER FAIL {problem}", file=sys.stderr)
     for key, geo in report.items():
         if "cards" in geo:
             print(
@@ -687,6 +695,31 @@ def main() -> None:
             )
         elif "autoOpened" in geo:
             print(f"{key:<22} sheet opened by itself: {geo['autoOpened']}")
+
+    if problems:
+        sys.exit(1)
+
+
+def footer_problems(report: dict[str, Any]) -> list[str]:
+    """Where the sheet's pinned footer is clipped although its content fits the cap.
+
+    The footer wrapper is `shrink-0` with a 40% `max-height`: it must show ALL of
+    its content (progress line and Dismiss… included) until the content passes
+    the cap, and only then scroll inside itself. A footer that shrinks below its
+    content while under the cap is the Q-3 regression (a thin window onto the
+    bar at DEFAULT text, 390x844 and 320x568). Tolerance is 1 px for rounding.
+    """
+    out: list[str] = []
+    for key, geo in report.items():
+        foot = geo.get("footer") if isinstance(geo, dict) else None
+        if not foot:
+            continue
+        shown, content, cap = foot["footerH"], foot["footerContentH"], foot["footerCapH"]
+        if content <= cap + 1 and shown < content - 1:
+            out.append(f"{key}: footer shows {shown}px of {content}px (cap {cap}px)")
+        if content > cap + 1 and not foot["footerScrolls"]:
+            out.append(f"{key}: footer is {content}px over its {cap}px cap but does not scroll")
+    return out
 
 
 if __name__ == "__main__":

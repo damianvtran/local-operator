@@ -247,7 +247,12 @@ export function Sheet({
 				{footer ? (
 					<div
 						data-sheet-footer
-						className="min-h-0 shrink overflow-y-auto overscroll-contain"
+						/* `shrink-0`, NOT `shrink` (QA Q-3): the scroller's `flex-1` resolves to
+						   its content height while the panel's height is indefinite, so the
+						   overflow was shared by shrink factor x content size and a shrinkable
+						   footer lost height to the scroller even at default text. The cap
+						   below (`max-height`) and `overflow-y-auto` still bound it. */
+						className="min-h-0 shrink-0 overflow-y-auto overscroll-contain"
 						style={columnCap(SHEET_FOOTER_FRACTION)}
 					>
 						{footer}

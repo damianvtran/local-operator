@@ -144,7 +144,10 @@ describe("the sheet's pinned footer", () => {
 		expect(footer?.className).toContain("overflow-y-auto");
 		expect(footer?.className).toContain("overscroll-contain");
 		expect(footer?.className).toContain("min-h-0");
-		expect(footer?.className).not.toContain("shrink-0");
+		// NOT shrinkable (QA Q-3): the scroller's `flex-1` would otherwise take the
+		// footer's height at default text. The cap bounds it instead.
+		expect(footer?.className).toContain("shrink-0");
+		expect(footer?.className.split(" ")).not.toContain("shrink");
 		expect(getComputedStyle(footer as HTMLElement).maxHeight).toContain("568px");
 		expect(getComputedStyle(footer as HTMLElement).maxHeight).toContain("0.4");
 	});

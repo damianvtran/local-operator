@@ -1464,7 +1464,7 @@ describe("the bar after the remediation batch", () => {
 		renderCard(ask());
 		const decline = screen.getByRole("button", { name: /^Decline$/ });
 		expect(decline.className).toContain("border");
-		expect(decline.className).toContain("border-danger/40");
+		expect(decline.className).toContain("border-danger-border");
 	});
 
 	it("moves focus to the first reason on Dismiss…, and back to Dismiss… on Cancel", () => {
