@@ -5033,24 +5033,20 @@ class TeamBridgeClient:
         """
 
         has_grant = attachments_hash is not None or files_hash is not None
-        # A TEXT-ONLY admission may name its template only when that template is the
-        # pinned bridge-screen-v5: v5 is a text-only prompt, and the hub validates
-        # the template vocabulary on a text-only admit (agent-server
-        # ``admitAttachmentGrant`` accepts a known template with no grant; it does not
-        # record it, code review round 2, N1). Any other
-        # template without a grant is still a caller bug: v3/v4 hashes exist to bind
-        # image/file grants, and presenting one with no grant would claim a vision
-        # screen nobody can check. (QA round 1 Q1: this used to raise for every v5
-        # text allow, so none could ever be admitted.)
-        text_only_v5 = not has_grant and template_sha256 == SCREENING_TEMPLATE_V5_PIN
-        if has_grant != (template_sha256 is not None) and not text_only_v5:
+        # Addressed-aware v5/v6 are text-only. Match the connector's exact pins so
+        # an allow can carry the template it rendered without implying an image/file
+        # grant. Other named templates still require a grant on this client path.
+        text_only_template = not has_grant and template_sha256 in (
+            SCREENING_TEMPLATE_V5_PIN,
+            SCREENING_TEMPLATE_V6_PIN,
+        )
+        if has_grant != (template_sha256 is not None) and not text_only_template:
             # ONE template presented whatever content was screened, so either grant and
             # the template travel together. A file-only admission is therefore legal:
             # v4 keeps the image slot, and a message may carry files and no images.
             raise ValueError("a grant and template_sha256 travel together")
-        if text_only_v5 and verdict != "allow":
-            # The template rides only the allow the v5 screen produced; a reject
-            # carries its refusal_class instead, exactly as before v5.
+        if text_only_template and verdict != "allow":
+            # A reject carries its refusal_class instead of template evidence.
             raise ValueError("only an allow names a text-only template")
         if attachments_hash is not None and verdict != "allow":
             raise ValueError("only an allow binds an attachments_hash")
