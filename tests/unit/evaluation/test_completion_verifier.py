@@ -326,6 +326,65 @@ async def test_audit_mode_refuses_obvious_writes_and_sweeps_changes() -> None:
     assert "-newermt @1700000000" in next(c for c in ran if c.startswith("find "))
 
 
+@pytest.mark.asyncio
+async def test_refused_and_invalid_inspections_are_not_charged_to_the_command_budget() -> None:
+    """The real inspector under the real counter, with a budget of ONE.
+
+    Two recorded checks paid a command for a write-pattern refusal that never
+    reached the guest (the count was taken before the inspector ran). A
+    refused write and an invalid call must leave the budget whole, the valid
+    read after them must still reach the guest, and only that read spends it.
+    """
+    from local_operator.harness.types import TextContent, ToolContext, ToolResult
+    from local_operator.harness.verifier import (
+        NOT_DISPATCHED_DETAIL,
+        counted_host_tools,
+    )
+
+    def texts(result: ToolResult) -> list[str]:
+        return [block.text for block in result.content if isinstance(block, TextContent)]
+
+    ran: list[str] = []
+
+    async def run_command(command: str, timeout_s: float) -> Any:
+        ran.append(command)
+        if command == SANDBOX_PROBE:
+            return _command_result(stdout=SANDBOX_TOKEN + "\n", stdout_bytes=18)
+        return _command_result(stdout="42\n", stdout_bytes=3)
+
+    inspector = VerifierInspector(run_command=run_command, window=lambda: 1)
+    exhausted: list[int] = []
+    [tool], used = counted_host_tools(
+        [inspector.tool()],
+        limit=1,
+        on_call=lambda _count: None,
+        on_exhausted=lambda: exhausted.append(1),
+    )
+
+    context = ToolContext()
+    refused = await tool.execute("c1", {"command": "echo x > /home/user/file"}, None, None, context)
+    assert refused.is_error and "looks like it writes" in texts(refused)[0]
+    assert refused.details == {NOT_DISPATCHED_DETAIL: True}
+    assert texts(refused)[-1] == "\n[not counted: 0 of 1 commands used]"
+    assert used() == 0
+
+    # ``timeout`` for ``timeout_s``: the inspector's own argument check.
+    invalid = await tool.execute("c2", {"command": "cat f", "timeout": 5}, None, None, context)
+    assert invalid.is_error and "Invalid arguments" in texts(invalid)[0]
+    assert used() == 0 and exhausted == []
+    assert [c for c in ran if c != SANDBOX_PROBE] == []  # nothing reached the guest
+
+    ok = await tool.execute("c3", {"command": "cat f"}, None, None, context)
+    assert not ok.is_error and "42" in texts(ok)[0]
+    assert ok.details is None
+    assert texts(ok)[-1] == "\n[1 of 1 commands used; that was the last one]"
+    assert used() == 1 and sandboxed("cat f") in ran
+
+    over = await tool.execute("c4", {"command": "cat g"}, None, None, context)
+    assert over.is_error and "Command budget used (1 of 1)" in over.text
+    assert exhausted == [1] and sandboxed("cat g") not in ran
+
+
 def test_obvious_write_lexicon() -> None:
     for command in (
         "rm -f a",

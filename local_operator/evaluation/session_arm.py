@@ -2481,6 +2481,17 @@ class ActionBridge:
             f"exit_code: {result.exit_code if result.exit_code is not None else 'none'}\n"
             f"timed_out: {str(result.timed_out).lower()}\n"
         )
+        # A timeout names the limit that applied. "timed_out: true" alone does
+        # not say whether the 60 s default or the caller's own value cut the
+        # command, and a caller whose timeout never arrived (a misnamed
+        # argument, an omitted one) kept re-issuing the same command against
+        # the same default. Only on a timeout: every other result keeps the
+        # text it had.
+        if result.timed_out:
+            text += (
+                f"timeout_s: {timeout} (the limit that applied; the default is "
+                f"{COMMAND_DEFAULT_TIMEOUT_S}, the maximum {COMMAND_MAX_TIMEOUT_S})\n"
+            )
         # The target's own explanation of a command it could not run. Without
         # this line the result would read "exit_code: none / timed_out: false"
         # and say nothing about WHY -- the model would be told a command failed
