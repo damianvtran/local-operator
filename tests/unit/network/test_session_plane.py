@@ -841,6 +841,56 @@ def test_a_peer_can_create_a_session_on_this_device_and_prompt_it(
         _stop_all(served)
 
 
+def test_fresh_create_reports_unconfirmed_when_pin_readback_fails(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.resume import ATTACHMENT_SIDECAR_NAME, read_session_attachment
+
+    server_a, server_b, _host_a, _port_a = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    served = _serve(monkeypatch, server_b.root)
+    link = _dial_to(server_a, record, host_b, port_b)
+    read_text = Path.read_text
+    failed_reads: list[Path] = []
+
+    def fail_first_pin_read(path: Path, *args: Any, **kwargs: Any) -> str:
+        if (
+            not failed_reads
+            and path.parent.parent == server_b.root / "sessions"
+            and path.name == ATTACHMENT_SIDECAR_NAME
+        ):
+            # Inject the error only after the real read proves the write landed.
+            read_text(path, *args, **kwargs)
+            failed_reads.append(path)
+            raise OSError("synthetic one-shot pin readback failure")
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_first_pin_read)
+    try:
+        reply = link.request(
+            {
+                "op": "net_session_create",
+                "req": 7,
+                "locality": "remote",
+                "cwd": str(server_b.root),
+                "prompt": "verify the create receipt",
+                "skill_manifest": {},
+            }
+        )
+        assert reply is not None and reply["op"] == "ack", reply
+        detail = reply["detail"]
+        assert detail["admitted"] is True, detail
+        session_dir = server_b.root / "sessions" / detail["session_id"]
+        assert failed_reads == [session_dir / ATTACHMENT_SIDECAR_NAME]
+        stored = read_session_attachment(session_dir)
+        assert stored is not None and stored.skill_manifest_pinned and stored.skill_manifest == {}
+        assert detail["skill_selection"]["status"] == "unconfirmed"
+    finally:
+        _stop_all(served)
+        link.close("test")
+
+
 @pytest.mark.parametrize(
     "case",
     ["exact", "missing", "receiver_opt_out", "empty", "legacy", "old_sender", "old_receiver"],

@@ -10807,6 +10807,7 @@ class RelayServer:
             raise MeshRefusal("definition_stale", stale)
 
         from local_operator.skills.manifest import (
+            SkillTransferStatus,
             parse_skill_manifest,
             skill_transfer_receipt,
         )
@@ -10965,7 +10966,11 @@ class RelayServer:
         # reported in the reply instead — silence about it is the one thing the
         # requirement rules out.
         attachment_agent = identity.agent_name if identity.instructions_attachable else ""
-        pinned = False
+        # Only a fresh create without an offer opts into local routing. A failed
+        # readback cannot tell us whether an offered pin actually landed.
+        skill_status: SkillTransferStatus = (
+            "local_routing" if skill_manifest is None else "unconfirmed"
+        )
         if attachment_agent or identity.team_name or skill_manifest is not None:
             from local_operator.resume import (
                 read_session_attachment,
@@ -10984,11 +10989,12 @@ class RelayServer:
             # pin just because it was offered in the frame: confirm it on disk.
             if skill_manifest is not None:
                 stored = read_session_attachment(session_dir)
-                pinned = bool(
+                if (
                     stored
                     and stored.skill_manifest_pinned
                     and stored.skill_manifest == skill_manifest
-                )
+                ):
+                    skill_status = "pinned"
         if name:
             # THROUGH ``resume.write_session_title``, never a hand-rolled
             # ``title.json`` of our own. This write used to build the payload
@@ -11046,7 +11052,7 @@ class RelayServer:
         # from its own registries — a claim about a store that does not hold this
         # session (the desktop route already makes that argument for its local half).
         identity_blocks: dict[str, Any] = {
-            "skill_selection": skill_transfer_receipt("pinned" if pinned else "local_routing"),
+            "skill_selection": skill_transfer_receipt(skill_status),
             "agent": (
                 {
                     "name": identity.agent_name,
