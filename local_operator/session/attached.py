@@ -80,8 +80,9 @@ from local_operator.harness.types import (
     Usage,
     WakeDeliveredEvent,
 )
+from local_operator.i18n.keys import session_remote_peek as _srp
 from local_operator.i18n.keys import tui_notices as _nt
-from local_operator.i18n.messages import Msg
+from local_operator.i18n.messages import Msg, render_resolved
 from local_operator.incidents import format_cut_off_notice
 from local_operator.mobile.attach_client import (
     MOVED_REASON,
@@ -6424,14 +6425,14 @@ class AttachedSession:
                             window.conversation_id,
                         ]
                     )
-                    raise ConnectionError(
-                        "this session's newest history is too large to send here; "
-                        "open the conversation on the device that holds it\n"
-                        # i18n: ignore protocol limits and literal CLI commands
-                        f"display_history(max_wire_bytes={DISPLAY_HISTORY_BYTES}, "
-                        f"max_messages={DISPLAY_HISTORY_MESSAGES}) / runtime socket line\n"
-                        f"{peek} --head=20\n{peek} --digest"
+                    message = render_resolved(
+                        _srp.display_too_large(
+                            bytes=f"{DISPLAY_HISTORY_BYTES:,}",
+                            messages=str(DISPLAY_HISTORY_MESSAGES),
+                        )
                     )
+                    # i18n: ignore literal CLI commands appended to localized prose
+                    raise ConnectionError(f"{message}\n{peek} --head=20\n{peek} --digest")
                 if window is not None and window.status == "reset":
                     # A CURSOR THAT STOPPED RESOLVING, not an old peer. The
                     # capture raced a compaction or a prune (``history_window``

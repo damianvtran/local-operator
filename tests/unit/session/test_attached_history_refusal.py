@@ -133,9 +133,10 @@ def _local_viewer(tmp_path: Path) -> AttachedSession:
 
 @pytest.mark.asyncio
 async def test_a_size_verdict_names_the_size_and_never_the_build(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The defect: a same-build size verdict reported as "the peer is too old"."""
+    """A same-build size verdict offers bounded views, not a peer update."""
+    monkeypatch.setenv("LOP_LANG", "en")
     viewer = _remote_viewer(tmp_path)
     # NO ``caplog.set_level`` HERE, deliberately: forcing the level is what makes
     # a level regression invisible (agent review round 1, MINOR-2). At the
@@ -149,9 +150,10 @@ async def test_a_size_verdict_names_the_size_and_never_the_build(
     assert "too old" not in message, message
     assert "update" not in message, message
     assert message.splitlines() == [
-        "this session's newest history is too large to send here; "
-        "open the conversation on the device that holds it",
-        "display_history(max_wire_bytes=524288, max_messages=120) / runtime socket line",
+        "Try `head=20` for the opening steps or `digest` for a compact fold.",
+        "The newest history exceeded a display page or runtime socket limit.",
+        "Display page limits: 524,288 bytes or 120 messages.",
+        "For exact history, open the conversation on the owning device.",
         "lop network sessions --peer peer-device --peek s1 --head=20",
         "lop network sessions --peer peer-device --peek s1 --digest",
     ]
