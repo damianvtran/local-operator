@@ -468,6 +468,7 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # NEW owner. Copying it would leave the moved session stamped as this
     # device's.
     "mesh.json": "the ownership stamp, rewritten by whoever adopts the copy",
+    "local-team-binding.json": "local authority journal, never inherited from a peer",
     # Describes a replica, means nothing inside a session.
     REPLICA_CURSOR_NAME: "the replica cursor, which is about this device's copy",
     # The DESKTOP sidebar's destination layout (``server.sidebar_layout``): which
@@ -4122,6 +4123,9 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
         from local_operator.network.origin import downgrade_stamps
 
         downgrade_stamps(target)
+        from local_operator.network.move_team import require_replica_reauthorization
+
+        require_replica_reauthorization(target)
     except Exception as exc:  # noqa: BLE001 — every failure here is a refusal, not a crash
         # ``Exception``, not ``(OSError, SyncRefused)`` (security review S-1): the
         # replica is peer-authored, so the downgrade can fail in ways no file API

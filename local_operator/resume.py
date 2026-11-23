@@ -954,6 +954,36 @@ def read_session_attachment(session_dir: Path) -> SessionAttachment | None:
     return SessionAttachment(team=_text("team"), agent=_text("agent"), goal=_text("goal"))
 
 
+
+class SessionAttachmentUnreadable(ValueError):
+    """Attachment evidence exists but does not establish either slot's state."""
+
+
+def read_session_attachment_evidence(session_dir: Path) -> SessionAttachment | None:
+    """Strict authority read: missing, explicitly empty, and invalid are distinct.
+
+    Presentation callers can still use the tolerant reader. A transfer or
+    restore must not interpret a partial document, bad encoding or I/O error
+    as a deliberate detach.
+    """
+    try:
+        raw = (session_dir / ATTACHMENT_SIDECAR_NAME).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError) as error:
+        raise SessionAttachmentUnreadable from error
+    try:
+        payload = json.loads(raw)
+    except ValueError as error:
+        raise SessionAttachmentUnreadable from error
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(payload.get("team"), str)
+        or any(not isinstance(payload.get(key, ""), str) for key in ("agent", "goal"))
+    ):
+        raise SessionAttachmentUnreadable
+    return SessionAttachment(*(payload.get(key, "").strip() for key in ("team", "agent", "goal")))
+
 def write_session_attachment(session_dir: Path, *, team: str, agent: str, goal: str) -> None:
     """Journal the session's attached identity so a resume can rebuild it.
 

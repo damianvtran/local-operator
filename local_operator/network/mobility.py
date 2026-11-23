@@ -1986,7 +1986,7 @@ def _destination_move(
                     "mode": "keep" if keep else "move",
                     "resume": bool(pending),
                     "have": {},
-                    move_team.KEY: True,
+                    move_team.KEY: move_team.CAPABILITY,
                     # THE QUEUE REQUEST rides the prepare, additively: an owner
                     # older than the key ignores it and answers ``busy`` exactly as
                     # before — so ``--queue`` against a pre-queue fleet degrades to
@@ -5506,11 +5506,11 @@ def _source_prepare(
             "session_id": session_id,
         }
 
-    def team_offer() -> dict[str, str] | None:
+    def team_offer() -> dict[str, Any] | None:
         return move_team.source_offer(
             server.root,
             Path(server.root) / "sessions" / session_id,
-            supported=frame.get(move_team.KEY) is True,
+            supported=frame.get(move_team.KEY) == move_team.CAPABILITY,
         )
 
     def team_refusal(error: move_team.TeamIdentityRefused) -> dict[str, Any]:

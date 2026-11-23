@@ -9022,7 +9022,7 @@ class Session:
             return ""
         return str(getattr(team, "name", "") or "")
 
-    def attach_team(self, team: Any) -> str | None:
+    def attach_team(self, team: Any, *, _verified_bound: bool = False) -> str | None:
         """Bind this session as the manager of ``team``.
 
         The team's collaboration and project briefs ride the volatile tail
@@ -9052,6 +9052,35 @@ class Session:
         actually IN FORCE, or a bare ``/team clear`` would quietly drop an
         attached profile the user never asked to lose.
         """
+        manager_name = getattr(team, "manager", "") or ""
+        kind, profile, specialist_prompt = None, None, ""
+        if _verified_bound:
+            from local_operator.network.move_team import restore_manager
+
+            # Verify before mutating ANY session state, and apply the exact
+            # resolved profile below rather than looking up its name again.
+            kind, profile, specialist_prompt = restore_manager(
+                self._transcript.directory, team, self.agent_registry
+            )
+        elif manager_name and self.agent_registry is not None:
+            # Both paths share the registry resolution order with /agent.
+            kind, profile, specialist_prompt, _ = self._resolve_profile_or_specialist(manager_name)
+        manager_pins = tuple(profile.tools or ()) if profile is not None else ()
+        directory = getattr(self._transcript, "directory", None)
+        if team is not None and not _verified_bound and isinstance(directory, Path):
+            from local_operator.harness.subagent import is_readonly_shell_role
+            from local_operator.network.move_team import journal_local_authority
+
+            # Commit the effective ceiling before applying the attachment. A
+            # failed journal must not leave live authority the next hop cannot
+            # verify. Shell confinement, unlike the role name, can be sticky.
+            journal_local_authority(
+                directory,
+                str(getattr(team, "name", "")),
+                manager_name,
+                pins=manager_pins,
+                readonly_shell=self._readonly_shell or is_readonly_shell_role(manager_name),
+            )
         # Read BEFORE the assignment below: the detach branch needs to know
         # whether a team was in force, and this is the only place that is still
         # true. Review round 1 caught a bare ``/team clear`` (no team attached)
@@ -9080,37 +9109,17 @@ class Session:
             self.refresh_frontend_state()
             return None
         preamble = getattr(team, "manager_preamble", lambda: "")()
-        # The manager's own profile instructions (the reusable BASE) sit in
-        # front of the team brief so a custom manager keeps its voice when
-        # this session was not launched with --agent. A packaged starter
-        # resolved by name is enough; a missing profile costs nothing.
-        manager_name = getattr(team, "manager", "") or ""
-        if manager_name and self.agent_registry is not None:
-            # Same resolution ORDER as ``/agent`` attach, via the ONE shared
-            # resolver: own role, then own specialist (BEFORE a same-named
-            # packaged seed), then the seed. This closes the twin of A1 — a
-            # team whose manager is the operator's own specialist named after a
-            # seed word (reviewer/coder/…) previously layered the SEED here,
-            # because ``resolve_profile`` was consulted before the specialist
-            # path. Both call sites share ``_resolve_profile_or_specialist`` so
-            # the order cannot drift between them again.
-            kind, profile, specialist_prompt, _ = self._resolve_profile_or_specialist(manager_name)
-            if kind in ("role", "seed") and profile is not None:
-                # The manager's ``tools:`` list pins those schemas published,
-                # exactly as an ``/agent`` attach of the same role would.
-                self.set_tool_deferral(pins=tuple(profile.tools or ()))
-            if kind in ("role", "seed") and profile is not None and profile.preamble:
+        if kind in ("role", "seed") and profile is not None:
+            # The profile's tools pin published schemas, just as /agent does.
+            self.set_tool_deferral(pins=manager_pins)
+            if profile.preamble:
                 preamble = profile.preamble + (preamble or "")
-            elif kind == "specialist" and specialist_prompt:
-                # A specialist has no role preamble header; wrap it so the model
-                # can tell the manager's own base voice apart from the team brief
-                # layered after it.
-                preamble = (
-                    "<manager-profile>\n"
-                    + specialist_prompt
-                    + "\n</manager-profile>\n\n"
-                    + (preamble or "")
-                )
+        elif kind == "specialist" and specialist_prompt:
+            # Specialists have no role header: keep their voice distinct from
+            # the team collaboration brief layered after it.
+            preamble = "<manager-profile>\n" + specialist_prompt + "\n</manager-profile>\n\n" + (
+                preamble or ""
+            )
         self._goal_state.team_brief = preamble or ""
         # Read BEFORE the claim, because the claim blanks it: this is the
         # profile the team is about to replace, and the caller's notice names it.
@@ -9419,11 +9428,23 @@ class Session:
         (:attr:`attachment_restore_notice`) rather than raised: a team the user
         renamed or deleted must not make a conversation unopenable.
         """
-        from local_operator.resume import read_session_attachment
+        from local_operator.network.move_team import (
+            TeamIdentityRefused,
+            UnboundAttachmentUnreadable,
+            needs_reauthorization,
+            read_local_attachment,
+        )
 
+        directory = getattr(self._transcript, "directory", None)
+        if directory is None:
+            return
+        # Known bindings with lost evidence must fail before any authority can
+        # enter the runtime. For a never-bound conversation, keep the history
+        # open but report that attachment restoration was refused.
         try:
-            stored = read_session_attachment(self._transcript.directory)
-        except Exception:  # noqa: BLE001 — a resume must always open
+            stored = read_local_attachment(directory)
+        except UnboundAttachmentUnreadable as error:
+            self.attachment_restore_notice = str(error)
             return
         if stored is None:
             return
@@ -9444,6 +9465,14 @@ class Session:
         live_goal = self._goal_state.text
         if stored.goal and (not live_goal or live_goal == stored.goal):
             self._goal_state.set(stored.goal)
+        if stored.team and needs_reauthorization(directory):
+            # Recovery preserves the attachment bytes as a hint, not a grant.
+            # Leave the journal intact so merely setting a goal cannot certify it.
+            self._unresolved_team = stored.team
+            self.attachment_restore_notice = str(
+                TeamIdentityRefused(stored.team, "reattach the team locally to authorize it")
+            )
+            return
         if stored.agent or stored.team:
             from local_operator.session.errors import ProfileRegistryUnavailable
 
@@ -9520,6 +9549,7 @@ class Session:
             # can change the manager pins or shell confinement after migration.
             # Unbound local attachments retain their legacy lookup behavior.
             team = restore_bound(self._transcript.directory, stored.team, registry)
+            verified_bound = team is not None
             if team is None:
                 if registry is None:
                     looked_up_and_absent = False
@@ -9537,7 +9567,10 @@ class Session:
                 # Through ``attach_team`` rather than by setting the brief, so
                 # ``active_team`` (what subagents inherit) is restored too, not
                 # just the prompt text.
-                self.attach_team(team)
+                if verified_bound:
+                    self.attach_team(team, _verified_bound=True)
+                else:
+                    self.attach_team(team)
         # A stored agent name is SUPERSEDED, not missing, when the same sidecar
         # named a team (issue #2014): the team owns the agent slot, so the
         # manager ``attach_team`` just claimed IS this session's speaker.

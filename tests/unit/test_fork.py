@@ -109,6 +109,8 @@ class TestTheCloneItself:
         directory copy — which would bring across every file added to a session
         directory from now on, not just the ones known today.
         """
+        from local_operator.network.move_team import LOCAL_BINDING_NAME, needs_reauthorization
+
         parent = _seed_parent(tmp_path)
         (parent / ATTACHMENT_SIDECAR_NAME).write_text('{"team": "lopdev"}', encoding="utf-8")
         (parent / TITLE_SIDECAR_NAME).write_text('{"title": "Refactor"}', encoding="utf-8")
@@ -126,7 +128,10 @@ class TestTheCloneItself:
             FORK_BOUNDARY_NAME,  # written by the fork, not inherited
             "created_at.json",  # own birth, never the parent's inherited journal date
             "origin.json",  # written by the fork itself, not copied
+            LOCAL_BINDING_NAME,  # parent stamp was unreadable; child must not inherit authority
         }
+
+        assert needs_reauthorization(fork_dir)
 
     def test_a_parents_approval_choice_does_not_reach_the_fork(self, tmp_path: Path) -> None:
         """A FORK STARTS WITH NO APPROVAL CHOICE OF ITS OWN (2026-10-23).
@@ -1590,3 +1595,25 @@ def test_a_fork_of_a_temporary_chat_is_retained(tmp_path: Path) -> None:
     fork_id = fork_session(tmp_path, PARENT_ID)
     assert not temporary.is_marked(tmp_path, fork_id)
     assert temporary.is_marked(tmp_path, PARENT_ID)
+
+
+def test_fork_carries_team_identity_without_carrying_mesh_ownership(tmp_path: Path) -> None:
+    from local_operator.network.move_team import KEY, TeamIdentityRefused, restore_bound, source_offer
+    from local_operator.resume import read_session_attachment, write_session_attachment
+    from local_operator.session.placement import MESH_STAMP_NAME, MeshStamp, write_stamp_into
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    parent = _seed_parent(tmp_path)
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(TeamEditFields(name="bound-team", instructions="original"))
+    write_session_attachment(parent, team=team.name, agent="", goal="Keep this goal")
+    binding = source_offer(tmp_path, parent, supported=True)
+    assert binding is not None
+    write_stamp_into(parent, MeshStamp(session_id=PARENT_ID, origin={KEY: binding}))
+
+    child = parent.parent / fork_session(tmp_path, PARENT_ID)
+    assert not (child / MESH_STAMP_NAME).exists()
+    assert read_session_attachment(child) == read_session_attachment(parent)
+    registry.update_team(team.id, TeamEditFields(instructions="other revision"))
+    with pytest.raises(TeamIdentityRefused):
+        restore_bound(child, team.name, registry)

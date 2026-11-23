@@ -1745,13 +1745,13 @@ def test_an_offload_refreshes_definitions_on_the_destination_before_the_invite(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("destination", ["missing", "conflict", "match"])
+@pytest.mark.parametrize("destination", ["missing", "conflict", "wider-manager", "match"])
 async def test_recall_requires_the_source_team_definition(
     pair: Devices, monkeypatch: pytest.MonkeyPatch, destination: str
 ) -> None:
     """Drive real relay recall and inspect runtime attachment in-process."""
-    from local_operator.agents import AgentRegistry
-    from local_operator.network.move_team import TeamIdentityRefused
+    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.network.move_team import TeamIdentityRefused, _digest
     from local_operator.resume import write_session_attachment
     from local_operator.session.goal import GoalState
     from local_operator.session.session import Session
@@ -1784,7 +1784,7 @@ async def test_recall_requires_the_source_team_definition(
     source_fields = TeamEditFields(
         name="identity-test", manager="manager", instructions="source brief"
     )
-    TeamRegistry(owner.root).create_team(source_fields)
+    authored = TeamRegistry(owner.root).create_team(source_fields)
     write_session_attachment(source, team="identity-test", agent="", goal="")
 
     registry = TeamRegistry(receiver.root)
@@ -1796,8 +1796,14 @@ async def test_recall_requires_the_source_team_definition(
         registry.create_team(
             TeamEditFields(name="identity-test", manager="scout", instructions="destination brief")
         )
-    elif destination == "match":
+    elif destination in {"match", "wider-manager"}:
         matching_team = registry.create_team(source_fields)
+        assert matching_team.id != authored.id
+        assert _digest(matching_team) == _digest(authored)
+        if destination == "wider-manager":
+            AgentRegistry(receiver.root).create_agent(
+                AgentEditFields(name="manager", tags=["role", "tools:edit"])
+            )
     existing_dir = _owned_session(receiver, "101010101010", rows=0)
     existing_team = "local-control" if destination == "missing" else "identity-test"
     write_session_attachment(existing_dir, team=existing_team, agent="", goal="")
@@ -1840,6 +1846,8 @@ async def test_recall_requires_the_source_team_definition(
             assert observed[0] is False, observed
             assert result["code"] == "team_definition_unavailable", result
             assert "identity-test" in str(observed[1]), observed
+            if destination == "wider-manager":
+                assert "would grant tool pins: edit" in str(observed[1]), observed
             assert arrived is None
             assert source.is_dir()
     finally:
@@ -1886,8 +1894,9 @@ def test_a_failed_definitions_refresh_does_not_block_an_already_matching_team(
     _pair_settled(pair, monkeypatch, role="admin", settings=server_b.settings)
     session_dir = _owned_session(server_a)
     fields = TeamEditFields(name="lopdev", instructions="the same team brief")
-    TeamRegistry(server_a.root).create_team(fields)
-    TeamRegistry(server_b.root).create_team(fields)
+    authored = TeamRegistry(server_a.root).create_team(fields)
+    independent = TeamRegistry(server_b.root).create_team(fields)
+    assert independent.id != authored.id
     write_session_attachment(session_dir, team="lopdev", agent="", goal="")
 
     def refused(server: Any, device_id: str, **kwargs: Any) -> dict[str, Any]:
@@ -1901,3 +1910,100 @@ def test_a_failed_definitions_refresh_does_not_block_an_already_matching_team(
     assert (server_b.root / "sessions" / SESSION).is_dir()
     notice = (result.get("carry") or {}).get("definitions_notice") or ""
     assert "definitions relay unavailable" in notice, result
+
+
+def test_team_identity_refuses_unreadable_attachment_evidence(tmp_path: Path) -> None:
+    from local_operator.network.move_team import TeamIdentityRefused, check_arrival, source_offer
+    from local_operator.resume import ATTACHMENT_SIDECAR_NAME, write_session_attachment
+
+    assert source_offer(tmp_path, tmp_path, supported=True) is None
+    write_session_attachment(tmp_path, team="", agent="", goal="")
+    assert source_offer(tmp_path, tmp_path, supported=True) is None
+    (tmp_path / ATTACHMENT_SIDECAR_NAME).write_text("{", encoding="utf-8")
+    with pytest.raises(TeamIdentityRefused):
+        source_offer(tmp_path, tmp_path, supported=True)
+    with pytest.raises(TeamIdentityRefused):
+        check_arrival(tmp_path, tmp_path, None)
+
+
+def test_team_identity_uses_current_revision_on_the_second_hop(tmp_path: Path) -> None:
+    from local_operator.network.move_team import KEY, check_arrival, source_offer
+    from local_operator.resume import write_session_attachment
+    from local_operator.session.placement import MeshStamp, write_stamp_into
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    roots = [tmp_path / str(index) for index in range(3)]
+    registries = [TeamRegistry(root) for root in roots]
+    original = registries[0].create_team(TeamEditFields(name="identity-test", instructions="v1"))
+    registries[1].save_team(original)
+    for root in roots:
+        write_session_attachment(root, team=original.name, agent="", goal="")
+    first = source_offer(roots[0], roots[0], supported=True)
+    assert first is not None
+    binding = check_arrival(roots[1], roots[1], first)
+    write_stamp_into(roots[1], MeshStamp(session_id=SESSION, origin={KEY: binding}))
+
+    updated = registries[1].update_team(original.id, TeamEditFields(instructions="v2"))
+    registries[2].save_team(updated)
+    second = source_offer(roots[1], roots[1], supported=True)
+    assert second is not None and second["digest"] != first["digest"]
+    assert check_arrival(roots[2], roots[2], second) is not None
+
+
+def test_team_identity_refuses_until_the_destination_definition_is_loaded(tmp_path: Path) -> None:
+    from local_operator.network.move_team import TeamIdentityRefused, check_arrival, source_offer
+    from local_operator.resume import write_session_attachment
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    author, peer = tmp_path / "author", tmp_path / "peer"
+    team = TeamRegistry(author).create_team(TeamEditFields(name="identity-test"))
+    for root in (author, peer):
+        write_session_attachment(root, team=team.name, agent="", goal="")
+    offer = source_offer(author, author, supported=True)
+    assert offer is not None
+    with pytest.raises(TeamIdentityRefused, match="identity-test: team definition is unavailable"):
+        check_arrival(peer, peer, offer)
+    TeamRegistry(peer).save_team(team)
+    assert check_arrival(peer, peer, offer) is not None
+
+
+def test_team_identity_refuses_a_different_manager_authority(tmp_path: Path) -> None:
+    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.network.move_team import (
+        TeamIdentityRefused,
+        _digest,
+        check_arrival,
+        source_offer,
+    )
+    from local_operator.resume import write_session_attachment
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    author, peer = tmp_path / "author", tmp_path / "peer"
+    team = TeamRegistry(author).create_team(TeamEditFields(name="identity-test", manager="lead"))
+    other = TeamRegistry(peer).create_team(TeamEditFields(name=team.name, manager=team.manager))
+    assert other.id != team.id
+    assert _digest(other) == _digest(team)
+    for root, tool in ((author, "read"), (peer, "edit")):
+        AgentRegistry(root).create_agent(
+            AgentEditFields(name="lead", description="Team manager", tags=["role", f"tools:{tool}"])
+        )
+        write_session_attachment(root, team=team.name, agent="", goal="")
+    offer = source_offer(author, author, supported=True)
+    assert offer is not None
+    with pytest.raises(TeamIdentityRefused, match="would grant tool pins: edit"):
+        check_arrival(peer, peer, offer)
+
+
+def test_team_identity_names_shell_widening_before_any_attachment(tmp_path: Path) -> None:
+    from local_operator.network.move_team import TeamIdentityRefused, check_arrival, source_offer
+    from local_operator.resume import write_session_attachment
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    author, peer = tmp_path / "author", tmp_path / "peer"
+    for root, manager in ((author, "scout"), (peer, "manager")):
+        TeamRegistry(root).create_team(TeamEditFields(name="identity-test", manager=manager))
+        write_session_attachment(root, team="identity-test", agent="", goal="")
+    offer = source_offer(author, author, supported=True)
+    assert offer is not None
+    with pytest.raises(TeamIdentityRefused, match="would grant an unrestricted shell"):
+        check_arrival(peer, peer, offer)

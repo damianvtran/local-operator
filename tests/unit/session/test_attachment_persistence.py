@@ -713,3 +713,30 @@ class TestLateAdoptionBeforeTheFirstTurn:
             assert session.attachment_restore_notice == ""
         finally:
             await session.dispose()
+
+
+@pytest.mark.parametrize("damage", ["missing", "unreadable", "manager-pins"])
+def test_moved_team_reopen_refuses_unverified_authority(tmp_path, registries, damage):
+    from local_operator.network.move_team import KEY, TeamIdentityRefused, check_arrival, source_offer
+    from local_operator.session.placement import MeshStamp, write_stamp_into
+
+    directory = tmp_path / "sess"
+    _store_sidecar(tmp_path, team="lopdev")
+    offer = source_offer(tmp_path, directory, supported=True)
+    binding = check_arrival(tmp_path, directory, offer)
+    assert binding is not None
+    write_stamp_into(directory, MeshStamp(session_id="000000000000", origin={KEY: binding}))
+
+    if damage == "missing":
+        (directory / ATTACHMENT_SIDECAR_NAME).unlink()
+        reason = "lopdev: attachment evidence is unavailable"
+    elif damage == "unreadable":
+        (directory / ATTACHMENT_SIDECAR_NAME).write_text("{", encoding="utf-8")
+        reason = "lopdev: attachment evidence is unreadable"
+    else:
+        agents, _ = registries
+        agents.create_agent(_role_fields(name="manager", tags=["role", "tools:edit"]))
+        reason = "lopdev: would grant tool pins: edit"
+
+    with pytest.raises(TeamIdentityRefused, match=reason):
+        _session(tmp_path, registries)
