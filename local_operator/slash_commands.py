@@ -1295,6 +1295,14 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # is set; that test asserts the withheld set, so an entry arriving in it
     # without a decision still fails there.
     SlashCommand("links", **_desc(wire_slash.links())),
+    # The ask list's typed door (ask-id work, design §5.2). `/ask` alone is
+    # f4's OPEN half; `/ask a-745e` (or `745e`) lands the cursor on that ask.
+    # No `desktop_destination`: the desktop renders its own ask panel with real
+    # clickable rows, so a command proxied over THIS terminal's list would add
+    # nothing — `/links`' reason in the other direction. `ArgumentShape.WORD`
+    # because the trailing token is one id, not prose: the composer must not
+    # spend a paid turn on `/ask a-745e` typed at a desktop.
+    SlashCommand("ask", **_desc(wire_slash.ask()), argument_shape=ArgumentShape.WORD),
     # Replaces the transcript; a row describing the old one would not survive.
     SlashCommand(
         "new",

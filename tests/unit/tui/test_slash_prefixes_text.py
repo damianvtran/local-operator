@@ -105,6 +105,9 @@ PREFIXES_TEXT_POLICY = {
     # WHICH message is chosen in the picker the command opens, so there is
     # nothing typed for the command to own.
     "copy": False,
+    # The id after the word is the command's argument, not prose: a desktop
+    # must not spend a paid turn on `/ask a-745e` typed at it.
+    "ask": False,
     # Takes no argument at all, for `/copy`'s reason: WHICH url is chosen in the
     # picker the command opens.
     "links": False,
@@ -346,6 +349,8 @@ ARGUMENT_SHAPE_POLICY = {
     "exit": ArgumentShape.NONE,
     "clear": ArgumentShape.NONE,
     "copy": ArgumentShape.NONE,
+    # One word: an ask id (`a-745e`, or `745e`).
+    "ask": ArgumentShape.WORD,
     "links": ArgumentShape.NONE,
     "update": ArgumentShape.NONE,
     "sidebar": ArgumentShape.NONE,

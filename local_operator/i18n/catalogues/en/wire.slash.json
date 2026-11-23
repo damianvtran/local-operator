@@ -5,6 +5,7 @@
   "wire.slash.analytics": "Aggregated token-consumption analytics across all sessions",
   "wire.slash.approvals": "Show or set tool approval mode for this session",
   "wire.slash.archive": "Hide from the lists, still resumable by id",
+  "wire.slash.ask": "Show that question in the ask list",
   "wire.slash.btw": "Ask a side question off the record (esc closes it)",
   "wire.slash.clear": "Clear the transcript (history is untouched)",
   "wire.slash.compact": "Compact the context now",
@@ -47,9 +48,9 @@
   "wire.slash.skills": "List loaded skills",
   "wire.slash.stop": "End this session, another by name/pid, or all — /resume reopens it",
   "wire.slash.team": "List teams, chart a team's org, or send a request to a team's manager",
+  "wire.slash.temporary": "Make this chat temporary, or keep it (on, off, status)",
   "wire.slash.theme": "Switch color theme; arrows preview live",
   "wire.slash.unarchive": "Show this conversation in the lists again",
   "wire.slash.update": "Install the latest version from PyPI and relaunch",
-  "wire.slash.usage": "Show provider usage quota",
-  "wire.slash.temporary": "Make this chat temporary, or keep it (on, off, status)"
+  "wire.slash.usage": "Show provider usage quota"
 }

@@ -24872,6 +24872,35 @@ class OperatorApp(App[None]):
 
         self.push_screen(CopyPickerScreen(targets), _copy_choice)
 
+    def _cmd_ask(self, arg: str, notice: NoticeFn) -> None:
+        """``/ask [<id>]`` — open the ask list, on one ask when an id is given.
+
+        Without an id this is f4's OPEN half: the list appears (or is
+        re-pointed at this conversation if it was reading another scope), which
+        is the typed route for a user whose hands are already on the composer.
+        The toggle half is the key's own: a typed command that CLOSED the
+        surface would be a surprise, and the list is the receipt either way.
+
+        With an id, both spellings are taken (``a-745e`` and ``745e``): the
+        suffix is what a person reads off a row or a sentence, and retyping the
+        prefix to satisfy a parser is friction with no upside. The reveal
+        itself is :meth:`_reveal_ask`, shared with a click on a cited id, so the
+        two doors cannot land on different rows or say different things about a
+        settled one.
+
+        An id from ANOTHER conversation is not looked up (Q1, decided): ids are
+        unique per conversation only, so a fleet-wide search would open a
+        stranger's question from a cited token — and the not-found sentence says
+        "in this conversation" for exactly that reason.
+        """
+        token = arg.strip().lower()
+        if not token:
+            self._expand_asks()
+            return
+        if not token.startswith("a-"):
+            token = f"a-{token}"
+        self._reveal_ask(token)
+
     def _cmd_links(self, notice: NoticeFn) -> None:
         """``/links`` — pick a URL out of the conversation and open it.
 
@@ -46168,6 +46197,8 @@ class OperatorApp(App[None]):
             self._cmd_highlights(arg, notice)
         elif command == "/copy":
             self._cmd_copy(notice)
+        elif command == "/ask":
+            self._cmd_ask(arg, notice)
         elif command == "/links":
             self._cmd_links(notice)
         elif command == "/approvals":

@@ -33,6 +33,10 @@ def archive() -> Msg:
     return Msg("wire.slash.archive", {})
 
 
+def ask() -> Msg:
+    return Msg("wire.slash.ask", {})
+
+
 def btw() -> Msg:
     return Msg("wire.slash.btw", {})
 

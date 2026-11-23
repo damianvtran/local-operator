@@ -5,6 +5,7 @@
   "wire.slash.analytics": "Consumo de tokens de todas las sesiones",
   "wire.slash.approvals": "Muestra o fija el modo de aprobación de esta sesión",
   "wire.slash.archive": "Ocúltala de las listas; aún se reanuda por id",
+  "wire.slash.ask": "Mostrar esa pregunta en la lista",
   "wire.slash.btw": "Pregunta al margen, sin registro (esc la cierra)",
   "wire.slash.clear": "Limpia la transcripción (el historial no se toca)",
   "wire.slash.compact": "Compacta el contexto ahora",
@@ -47,9 +48,9 @@
   "wire.slash.skills": "Lista las habilidades cargadas",
   "wire.slash.stop": "Termina esta u otra sesión o todas; /resume reabre",
   "wire.slash.team": "Lista equipos, su organigrama o pide al responsable",
+  "wire.slash.temporary": "Haz temporal este chat o consérvalo (on, off, status)",
   "wire.slash.theme": "Cambia el tema; las flechas previsualizan en vivo",
   "wire.slash.unarchive": "Vuelve a mostrar esta conversación en las listas",
   "wire.slash.update": "Instala la última versión desde PyPI y relanza",
-  "wire.slash.usage": "Muestra la cuota de uso del proveedor",
-  "wire.slash.temporary": "Haz temporal este chat o consérvalo (on, off, status)"
+  "wire.slash.usage": "Muestra la cuota de uso del proveedor"
 }

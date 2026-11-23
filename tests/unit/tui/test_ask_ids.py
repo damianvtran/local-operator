@@ -277,3 +277,166 @@ async def test_clicking_a_cited_id_opens_the_list_on_that_ask(enabled):
         listing = app.query_one(AskQueueList)
         current = listing.current()
         assert current is not None and current.ask_id == "a-745e"
+
+
+# -- `/ask <id>` (step 4) ----------------------------------------------------
+#
+# The typed door to the same reveal a click uses. Driven through the REAL
+# editor and Enter, because the command's parsing lives in the submit path and
+# calling the handler directly would skip the half a typo would land in.
+
+
+async def _submit(pilot, app, text: str) -> None:
+    """Type ``text`` into the composer and press Enter (the reported path)."""
+    from local_operator.tui.widgets.editor import Editor
+
+    editor = app.query_one(Editor)
+    # The ask list takes the keyboard when it opens, so a second command typed
+    # "into the composer" would land on the list's own Enter. Focus it the way
+    # the user does — the composer is where a slash command is typed.
+    editor.focus()
+    editor.text = text
+    await pilot.pause()
+    if editor._picker.is_open():
+        await pilot.press("escape")
+        await pilot.pause()
+    await pilot.press("enter")
+    await pilot.pause()
+    await pilot.pause()
+
+
+async def test_ask_alone_opens_the_list(enabled):
+    from local_operator.tui.widgets.ask_queue import AskQueueList
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(ask_rows([_row("a-e53b", "Ship it?"), _row("a-9f20", "Rotate?")]))
+        await pilot.pause()
+        await _submit(pilot, app, "/ask")
+        assert len(app.query(AskQueueList)) == 1
+        # A second `/ask` re-points the surface rather than closing it: the
+        # toggle is f4's own, and a typed command that shut the list it had
+        # just shown would read as a failure.
+        await _submit(pilot, app, "/ask")
+        assert len(app.query(AskQueueList)) == 1
+
+
+async def test_ask_with_an_id_lands_the_cursor_on_that_ask(enabled):
+    from local_operator.tui.widgets.ask_queue import AskQueueList
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(
+            ask_rows(
+                [
+                    _row("a-e53b", "Ship it?"),
+                    _row("a-9f20", "Rotate the relay token?"),
+                ]
+            )
+        )
+        await pilot.pause()
+        await _submit(pilot, app, "/ask a-9f20")
+        listing = app.query_one(AskQueueList)
+        assert listing.current() is not None
+        assert listing.current().ask_id == "a-9f20"
+        # The bare suffix is the same command: the prefix is what a person
+        # reads past, not what they should have to retype.
+        await _submit(pilot, app, "/ask e53b")
+        assert app.query_one(AskQueueList).current().ask_id == "a-e53b"
+
+
+async def test_ask_on_a_settled_id_switches_to_all_with_a_notice(enabled):
+    from local_operator.i18n.keys import tui_asks as ask_keys
+    from local_operator.i18n.text import tr
+    from local_operator.tui.widgets.ask_queue import FILTER_ALL, AskQueueList
+    from local_operator.tui.widgets.transcript import NoticeBlock
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(
+            ask_rows(
+                [
+                    _row("a-e53b", "Ship it?"),
+                    _row("a-745e", "Ship the relay fix tonight?", status="withdrawn"),
+                ]
+            )
+        )
+        await pilot.pause()
+        await _submit(pilot, app, "/ask a-745e")
+        listing = app.query_one(AskQueueList)
+        assert listing.filter_value == FILTER_ALL
+        assert listing.current().ask_id == "a-745e"
+        receipt = tr("tui.asks")(ask_keys.list_showing_all_settled(ask_id="a-745e"))
+        assert app.query(NoticeBlock)[-1].text() == receipt
+
+
+async def test_ask_on_an_unknown_id_says_so_and_opens_nothing(enabled):
+    from local_operator.i18n.keys import tui_asks as ask_keys
+    from local_operator.i18n.text import tr
+    from local_operator.tui.widgets.ask_queue import AskQueueList
+    from local_operator.tui.widgets.transcript import NoticeBlock
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(ask_rows([_row("a-e53b", "Ship it?")]))
+        await pilot.pause()
+        await _submit(pilot, app, "/ask a-1234")
+        assert len(app.query(AskQueueList)) == 0
+        receipt = tr("tui.asks")(ask_keys.list_no_such_ask(ask_id="a-1234"))
+        assert app.query(NoticeBlock)[-1].text() == receipt
+
+
+async def test_an_id_from_another_conversation_is_not_looked_up(enabled):
+    """Q1, decided: ids are unique per conversation only.
+
+    The same id in another session's log is a DIFFERENT ask, so a fleet-wide
+    search would open a stranger's question from a typed id — and the sentence
+    the refusal prints says "in this conversation" for that reason.
+    """
+    from local_operator.i18n.keys import tui_asks as ask_keys
+    from local_operator.i18n.text import tr
+    from local_operator.tui.widgets.ask_queue import AskQueueList
+    from local_operator.tui.widgets.transcript import NoticeBlock
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await await_booted(app, pilot)
+        app._ask_fleet_rows = [_row("a-1234", "Someone else's question?", status="open")]
+        app._sync_ask_surface(ask_rows([_row("a-e53b", "Ship it?")]))
+        await pilot.pause()
+        await _submit(pilot, app, "/ask a-1234")
+        assert len(app.query(AskQueueList)) == 0
+        receipt = tr("tui.asks")(ask_keys.list_no_such_ask(ask_id="a-1234"))
+        assert app.query(NoticeBlock)[-1].text() == receipt
+
+
+async def test_help_lists_the_ask_command(enabled):
+    """/help names the command and says what it does — the one place a hint
+    dropped from a narrow header still appears (design §3/§6)."""
+    from rich.console import Console
+
+    from local_operator.i18n.keys import wire_slash
+    from local_operator.i18n.text import tr
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await await_booted(app, pilot)
+        # The block `/help` appends, rendered through the same rich console the
+        # frame uses: the table is a GRID, so a substring check on a composed
+        # string would not be the thing the user reads.
+        console = Console(width=116, record=True, force_terminal=False)
+        console.print(app._help_block().renderable)
+        text = console.export_text()
+        assert "/ask" in text, text[:2000]
+        description = tr("wire.slash")(wire_slash.ask())
+        assert description in text, (description, text[:2000])
