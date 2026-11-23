@@ -1739,6 +1739,42 @@ class _NoProgressGuard:
         self.warned = False
 
 
+# ``AgentLoop._model_turn`` sits at pyright's code-flow complexity ceiling
+# (``reportGeneralTypeIssues``: "Code is too complex to analyze"). Every inline
+# conditional and short-circuit adds a flow branch inside its stream loop, and
+# once the function crosses the ceiling pyright stops type-checking it at all.
+# The two inline-UI decisions below were inlined there at first; together with
+# an unrelated ``except`` clause added on main they tipped it over. They live
+# here so the function's own branch count stays put. Prefer this pattern for any
+# new per-call decision in ``_model_turn`` rather than adding another branch.
+
+
+def _inline_ui_hint_for(config: LoopConfig) -> str | None:
+    """This call's request-only discovery hint, re-resolved per provider call.
+
+    Resolved per call, not per run: a folded steer can change the input
+    surface between requests (see ``LoopConfig.get_inline_ui_hint``).
+    """
+    return config.get_inline_ui_hint() if config.get_inline_ui_hint else None
+
+
+def _provider_turn_start(
+    request: ChatRequest, event: StreamStartEvent, model: ModelSpec
+) -> ProviderTurnStartEvent:
+    """The harness "on the wire" boundary for one provider stream start.
+
+    A native continuation names the selector it actually reached, which can
+    differ from the run's resolved model; fall back to that model otherwise.
+    Every field passes the one-turn-secret public-text boundary.
+    """
+    provider, model_id = event._native_selector or (model.provider, model.model_id)
+    return ProviderTurnStartEvent(
+        response_id=one_turn_public_text(request, event.response_id),
+        provider=one_turn_public_text(request, provider),
+        model_id=one_turn_public_text(request, model_id),
+    )
+
+
 async def _abortable_stream(
     stream: AsyncIterator[StreamEvent],
     signal: AbortSignal | None,
@@ -4904,7 +4940,7 @@ class AgentLoop:
                 context_tokens_hint=context_tokens_hint,
                 preparation_ms=(time.monotonic() - preparing_at) * 1000,
                 same_route_retry=same_route_retry,
-                inline_ui_hint=config.get_inline_ui_hint() if config.get_inline_ui_hint else None,
+                inline_ui_hint=_inline_ui_hint_for(config),
             )
             request = self._arm_one_turn_secrets(context, request)
             secret_active = request.has_one_turn_secrets
@@ -4959,12 +4995,7 @@ class AgentLoop:
                     # means "on the wire" — ``MessageStartEvent`` above is
                     # yielded from a placeholder before the request is even
                     # built, so it cannot carry that meaning.
-                    provider, model_id = event._native_selector or (model.provider, model.model_id)
-                    yield ProviderTurnStartEvent(
-                        response_id=one_turn_public_text(request, event.response_id),
-                        provider=one_turn_public_text(request, provider),
-                        model_id=one_turn_public_text(request, model_id),
-                    )
+                    yield _provider_turn_start(request, event, model)
                 elif isinstance(event, StreamTextDelta):
                     text_parts.append(event.delta)
                     if not secret_active:
