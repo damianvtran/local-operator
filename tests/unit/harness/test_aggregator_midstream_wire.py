@@ -107,13 +107,15 @@ def gateway(notes_path):
     state: dict[str, Any] = {
         "calls": 0,
         "bodies": [],
-        "error": {
-            "code": 502,
-            "message": "Provider returned error",
-            "metadata": {
-                "error_type": "provider_unavailable",
-                "provider_name": "Together",
-                "raw": _UPSTREAM_RAW,
+        "terminal": {
+            "error": {
+                "code": 502,
+                "message": "Provider returned error",
+                "metadata": {
+                    "error_type": "provider_unavailable",
+                    "provider_name": "Together",
+                    "raw": _UPSTREAM_RAW,
+                },
             },
         },
     }
@@ -171,15 +173,13 @@ def gateway(notes_path):
                         )
                     )
                 )
+                if prior_delta := state.get("prior_delta"):
+                    self.wfile.write(_chunk(prior_delta))
                 self.wfile.write(
                     _chunk(
                         {
-                            "id": "gen-e2e-1",
-                            "object": "chat.completion.chunk",
-                            "created": 1776000000,
-                            "model": MODEL_ID,
-                            "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
-                            "error": state["error"],
+                            **_delta({}, "error"),
+                            **state["terminal"],
                         }
                     )
                 )
@@ -306,9 +306,99 @@ async def test_the_incident_is_recovered_over_the_wire(
     Otherwise, the original stream error ends the pass without another request
     or any writes. The incomplete call must never run in either case.
     """
-    base_url, state = gateway
+    _, state = gateway
     if wire_error is not None:
-        state["error"] = wire_error
+        state["terminal"] = {"error": wire_error}
+    await _assert_wire_outcome(
+        gateway, write_tool, notes_path, executed, provider, model_id, recovers
+    )
+
+
+@pytest.mark.parametrize(
+    ("terminal_fields", "prior_delta"),
+    [
+        pytest.param(_delta({}, "content_filter"), None, id="choice-content-filter"),
+        pytest.param(
+            {
+                "choices": [
+                    *_delta({}, "error")["choices"],
+                    {"index": 1, "finish_reason": "content_filter"},
+                ]
+            },
+            None,
+            id="later-choice-content-filter",
+        ),
+        pytest.param(_delta({"refusal": "Cannot assist."}, "error"), None, id="choice-refusal"),
+        pytest.param(
+            {"choices": [{"finish_reason": "error", "native_finish_reason": "SAFETY"}]},
+            None,
+            id="native-safety-finish",
+        ),
+        pytest.param(
+            {"choices": [{"finish_reason": "error", "message": {"refusal": "Cannot assist."}}]},
+            None,
+            id="message-refusal",
+        ),
+        pytest.param({}, _delta({"refusal": "Cannot assist."}), id="prior-refusal"),
+        pytest.param({"status": 403}, None, id="envelope-status-403"),
+        pytest.param({"code": "content_filter"}, None, id="envelope-policy-code"),
+        pytest.param({"type": "refusal"}, None, id="envelope-refusal-type"),
+        pytest.param(
+            {"error": {"message": _H2_BODY_READ_ERROR, "detail": "Request refused"}},
+            None,
+            id="competing-error-detail",
+        ),
+        pytest.param(
+            {"metadata": {"error_type": "policy_violation"}}, None, id="envelope-metadata"
+        ),
+        pytest.param(
+            {
+                "error": {
+                    "message": _H2_BODY_READ_ERROR,
+                    "metadata": {"error_type": "policy_violation"},
+                }
+            },
+            None,
+            id="error-metadata",
+        ),
+        pytest.param(
+            {"error": {"message": _H2_BODY_READ_ERROR, "metadata": {"provider_code": "SAFETY"}}},
+            None,
+            id="error-provider-code",
+        ),
+        pytest.param(
+            {"choices": [{"finish_reason": "error", "error": {"code": 403}}]},
+            None,
+            id="choice-error",
+        ),
+        pytest.param(
+            {
+                "error": {
+                    "message": _H2_BODY_READ_ERROR,
+                    "metadata": {
+                        "raw": json.dumps({"error": {"code": 403, "message": _H2_BODY_READ_ERROR}})
+                    },
+                }
+            },
+            None,
+            id="relayed-upstream-status",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_mixed_transport_and_disposition_stays_terminal(
+    gateway, write_tool, notes_path, executed, terminal_fields, prior_delta
+):
+    _, state = gateway
+    state["terminal"] = {"error": {"message": _H2_BODY_READ_ERROR}, **terminal_fields}
+    state["prior_delta"] = prior_delta
+    await _assert_wire_outcome(gateway, write_tool, notes_path, executed, "radient", "auto", False)
+
+
+async def _assert_wire_outcome(
+    gateway, write_tool, notes_path, executed, provider, model_id, recovers
+):
+    base_url, state = gateway
     spec = build_model_spec(provider, model_id).model_copy(update={"base_url": base_url})
     auth = _OneBearerAuth()
     failures: list[ProviderError] = []
@@ -352,17 +442,18 @@ async def test_the_incident_is_recovered_over_the_wire(
     assert len(ends) == 1
     assert len(failures) == 1
     failure = failures[0]
-    code = state["error"].get("code")
+    wire_error = state["terminal"]["error"]
+    code = wire_error.get("code")
     assert failure.status == (code if isinstance(code, int) else None)
     if model_id == "auto":
         assert state["bodies"][0]["model"] == "auto"
     assert not failure.transport  # This was an HTTP 200 error frame, not a local read failure.
-    assert failure.connectivity_loss is recovers
     if not recovers:
+        assert (state["calls"], executed, notes_path.exists()) == (1, [], False)
         assert ends[0].error and wire_error["message"] in ends[0].error
-        assert state["calls"] == 1
-        assert executed == [] and not notes_path.exists()
+        assert not failure.connectivity_loss
         return
+    assert failure.connectivity_loss
     assert ends[0].error is None, "a gateway's upstream death must not end the pass"
     assert ends[0].aborted is False
 

@@ -975,7 +975,54 @@ def _openrouter_no_route(status: int | None, message: str) -> bool:
 _H2_BODY_READ_STREAM_ERROR = "stream error: h2 protocol error: error reading a body from connection"
 
 
-def _compat_stream_error(chunk: Mapping[str, Any]) -> ProviderError:
+def _has_explicit_error_disposition(fields: Mapping[str, Any]) -> bool:
+    # OpenRouter's Chat Completions SSE schema also carries the normalized
+    # error type and original provider code in metadata. A status-less
+    # classification must not override either, wherever the gateway put it.
+    metadata = fields.get("metadata")
+    return any(key in fields for key in ("code", "status", "type", "error_type")) or (
+        isinstance(metadata, Mapping)
+        and any(key in metadata for key in ("error_type", "provider_code"))
+    )
+
+
+def _has_relayed_error_disposition(error: Mapping[str, Any]) -> bool:
+    # metadata.raw can retain a structured upstream code even when its message
+    # matches the outer diagnostic word for word. Rendering folds that duplicate
+    # text away; it must not also fold away a verdict about the request.
+    upstream = _openrouter_upstream_error(error)
+    return upstream is not None and _has_explicit_error_disposition(upstream)
+
+
+def _has_competing_stream_choice(chunk: Mapping[str, Any]) -> bool:
+    choices = chunk.get("choices")
+    if not isinstance(choices, list):
+        return False
+    for choice in choices:
+        if not isinstance(choice, Mapping):
+            continue
+        # `error` only marks the SSE terminator. Any other explicit finish
+        # (e.g. content_filter), or dedicated refusal payload, is independent
+        # evidence. Check all choices before the error short-circuits parsing.
+        if (
+            _has_explicit_error_disposition(choice)
+            or isinstance(choice.get("error"), (Mapping, str))
+            or any(
+                choice.get(key) not in (None, "", "error")
+                for key in ("finish_reason", "native_finish_reason")
+            )
+        ):
+            return True
+        for key in ("delta", "message"):
+            content = choice.get(key)
+            if isinstance(content, Mapping) and content.get("refusal"):
+                return True
+    return False
+
+
+def _compat_stream_error(
+    chunk: Mapping[str, Any], *, prior_disposition: bool = False
+) -> ProviderError:
     """An in-band mid-stream failure on an OpenAI-compatible stream.
 
     Once a gateway has committed HTTP 200 it can no longer signal an upstream
@@ -1043,10 +1090,20 @@ def _compat_stream_error(chunk: Mapping[str, Any]) -> ProviderError:
     # can make unrelated errors sound like a transport failure.
     failure.in_band_h2_body_read_failure = (
         isinstance(error, Mapping)
-        and not any(key in error for key in ("code", "status", "type", "error_type"))
-        and not error_type
         and _first_text(error.get("message")).lower() == _H2_BODY_READ_STREAM_ERROR
         and message.lower() == _H2_BODY_READ_STREAM_ERROR
+        and not prior_disposition
+        and not _has_explicit_error_disposition(error)
+        # These fields lose to error.message in the rendering cascade. A
+        # different diagnosis there makes the narrow transport stamp ambiguous.
+        and all(
+            _first_text(fields.get(key)).lower() in ("", _H2_BODY_READ_STREAM_ERROR)
+            for fields in (chunk, error)
+            for key in ("message", "detail", "msg")
+        )
+        and not _has_explicit_error_disposition(chunk)
+        and not _has_relayed_error_disposition(error)
+        and not _has_competing_stream_choice(chunk)
         and not _names_content_verdict(chunk)
     )
     return failure
@@ -3923,6 +3980,7 @@ class OpenAICompatClient:
         replay_text: list[str] = []
         replay_calls: dict[int, dict[str, Any]] = {}
         finish_reason: str | None = None
+        prior_disposition = False
         usage: Usage | None = None
         provider_payload: dict[str, Any] | None = None
         # Refusal prose arrives in its own delta slot (``delta.refusal``), not
@@ -4021,7 +4079,11 @@ class OpenAICompatClient:
                         # 200, so this chunk is the only channel the failure has.
                         # Raise it NAMED; swallowing it left turns dying as
                         # wordless interruptions (see _compat_stream_error).
-                        raise _compat_stream_error(chunk)
+                        raise _compat_stream_error(chunk, prior_disposition=prior_disposition)
+                    if not prior_disposition:
+                        # A refusal/finish can arrive in a separate SSE frame.
+                        # Retain it for the narrow H2 recovery decision only.
+                        prior_disposition = _has_competing_stream_choice(chunk)
                     if not started:
                         # First decoded chunk: the request is on the wire and the
                         # provider is generating. Announce the boundary HERE rather
