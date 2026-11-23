@@ -329,7 +329,7 @@ async def test_a_team_launch_stamps_the_team_prefixed_agent_on_job_and_origin(tm
 @pytest.mark.parametrize(
     ("agent", "message"),
     [
-        ("team:nosuch", "unknown team 'nosuch'"),
+        ("team:nosuch", "'nosuch' is outside the recorded roster"),
         ("team:pod:2", "per copy"),
         ("team:", "no team name"),
     ],

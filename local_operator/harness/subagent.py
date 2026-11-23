@@ -1421,6 +1421,9 @@ def _specialist_instructions(agent: str, parent_session: "Session") -> str:
     """A non-role agent's own system_prompt.md, or ''."""
     if not agent or agent in {"task", "scout"}:
         return ""
+    authority = getattr(parent_session, "_team_authority", None)
+    if authority is not None:
+        return authority.roles[agent][2]
     registry = getattr(parent_session, "agent_registry", None)
     if registry is None or not hasattr(registry, "get_agent_by_name"):
         return ""
@@ -1455,6 +1458,12 @@ def _resolve_role(agent: str, parent_session: "Session") -> "AgentProfile | None
 
     if not agent or agent == "task":
         return None
+    authority = getattr(parent_session, "_team_authority", None)
+    if authority is not None:
+        from local_operator.agent_profiles import with_delivery_pointer
+
+        profile = authority.roles[agent][1]
+        return with_delivery_pointer(profile) if profile is not None else None
     try:
         from local_operator.agent_profiles import resolve_profile, with_delivery_pointer
 
@@ -1540,6 +1549,11 @@ class LaunchTarget:
     #: reaches the resumed child rather than being frozen at its birth.
     #: ``None`` when the launch has no roster at all (no active team).
     roster: Any = None
+    authority: Any = None
+
+
+def inherits_bound_team_authority(agent: str, target: LaunchTarget) -> bool:
+    return agent == "task" and not target.is_team_launch and target.authority is not None
 
 
 def team_slot_name(agent: str, is_team_launch: bool) -> str | None:
@@ -1597,6 +1611,9 @@ def lookup_team(session: "Session", name: str) -> Any:
     None also covers "no registry" and an unreadable one: the caller turns it
     into a named ``unknown team`` error rather than a generic child.
     """
+    authority = getattr(session, "_team_authority", None)
+    if authority is not None:
+        return authority.teams.get(name.casefold())
     registry = getattr(session, "team_registry", None)
     if registry is None or not hasattr(registry, "get_team_by_name"):
         return None
@@ -1643,6 +1660,30 @@ def _team_slot_kinds(team: Any, name: str) -> set[str]:
     return kinds
 
 
+def _bound_team_authority(session: "Session") -> Any:
+    from local_operator.network.move_team import TeamAuthority
+
+    value = getattr(session, "_team_authority", None)
+    return value if isinstance(value, TeamAuthority) else None
+
+
+def _require_roster_slot(roster: Any, name: str, *, kind: str) -> None:
+    # A live registry key outside the recorded graph is not evidence that the
+    # source could delegate to it. Explicit local /team reattach records the
+    # changed roster and is the remedy, rather than silently granting the slot.
+    if kind == "agent" and name == "task":
+        return
+    if kind == "team":
+        matched = any(
+            slot.kind == "team" and slot.role.casefold() == name.casefold()
+            for slot in getattr(roster, "members", ())
+        )
+    else:
+        matched = kind in _team_slot_kinds(roster, name)
+    if not matched:
+        raise TeamLaunchError(f"{name!r} is outside the recorded roster; re-attach via /team")
+
+
 def resolve_launch_target(
     agent: str,
     parent_session: "Session",
@@ -1658,6 +1699,7 @@ def resolve_launch_target(
     """
     agent = agent or "task"
     parent_team = getattr(parent_session, "active_team", None)
+    authority = getattr(parent_session, "_team_authority", None)
     sub_name = ""
     if agent.lower().startswith(TEAM_LAUNCH_PREFIX):
         sub_name = agent[len(TEAM_LAUNCH_PREFIX) :].strip()
@@ -1681,6 +1723,9 @@ def resolve_launch_target(
         sub_name = agent
 
     if carried is not None:
+        unresolved = getattr(parent_session, "_unresolved_team", "")
+        if authority is None and isinstance(unresolved, str) and unresolved:
+            raise TeamLaunchError("recorded delegation is unavailable; re-attach via /team")
         # A resume re-enters the team the child was BORN under, at the depth
         # its record carries. Checks that guarded its original launch are not
         # re-run: it already exists. That includes the depth cap — a child
@@ -1700,6 +1745,24 @@ def resolve_launch_target(
                     f"team {carried.team_name!r} this subagent ran under no longer exists"
                 )
         role = str(team.manager) if sub_name and team is not None else agent
+        roster = _carried_roster(parent_session, carried, bool(sub_name), team)
+        if authority is not None:
+            # An orphan generic child cannot reconstruct the narrower
+            # inventory of its missing real parent from the root session.
+            orphan_generic = not sub_name and role == "task" and (
+                carried.depth != _session_depth(parent_session) + 1
+            )
+            if team is None or not 1 <= carried.depth <= authority.max_depth or orphan_generic:
+                raise TeamLaunchError("recorded delegation does not match; re-attach via /team")
+            _require_roster_slot(roster, sub_name or role, kind="team" if sub_name else "agent")
+            if sub_name:
+                profile = _resolve_role(role, parent_session)
+                if (
+                    team.name.casefold() != sub_name.casefold()
+                    or role == "scout"
+                    or (profile and not profile.may_delegate)
+                ):
+                    raise TeamLaunchError(f"delegated manager for team {sub_name!r} is unavailable")
         return LaunchTarget(
             role=role,
             team=team,
@@ -1707,9 +1770,12 @@ def resolve_launch_target(
             depth=carried.depth,
             reports_to=carried.reports_to or TOP_SESSION_REPORTS_TO,
             is_team_launch=bool(sub_name),
-            roster=_carried_roster(parent_session, carried, bool(sub_name), team),
+            roster=roster,
+            authority=authority,
         )
 
+    if authority is not None:
+        _require_roster_slot(parent_team, sub_name or agent, kind="team" if sub_name else "agent")
     depth = _session_depth(parent_session) + 1
     parent_lineage = _session_lineage(parent_session)
     if sub_name:
@@ -1737,6 +1803,8 @@ def resolve_launch_target(
         lineage = parent_lineage
     if lineage:
         cap = read_max_team_depth()
+        if authority is not None:
+            cap = min(cap, authority.max_depth)
         if depth > cap:
             raise TeamLaunchError(
                 f"depth cap: this launch would be depth {depth}; "
@@ -1756,6 +1824,7 @@ def resolve_launch_target(
         roster=_reread_roster(
             parent_session, str(getattr(parent_team, "name", "") or ""), parent_team
         ),
+        authority=authority,
     )
 
 
@@ -1816,6 +1885,9 @@ def _carried_roster(
     lineage = tuple(carried.team_lineage)
     if len(lineage) < 2:
         return None
+    authority = getattr(parent_session, "_team_authority", None)
+    if authority is not None:
+        return next((row for row in authority.teams.values() if row.id == lineage[-2]), None)
     registry = getattr(parent_session, "team_registry", None)
     if registry is None:
         return None
@@ -1956,11 +2028,20 @@ def run_subagent(
     at registration, so its result is never delivered into the parent's
     conversation: the launcher awaits it and decides what the parent sees.
     """
+    if target is None and profile_override is not None:
+        # The harness verifier has a code-defined name and surface, not a
+        # named team slot. It neither borrows nor adds to the recorded roster.
+        target = LaunchTarget(agent, None, (), 0, TOP_SESSION_REPORTS_TO, False)
     if target is None:
         # Every launch resolves its team and depth, including a direct caller
         # that did not: an unresolved ``team:`` launch must raise here rather
         # than degrade into a generic child (BEN-1 N3).
         target = resolve_launch_target(agent, parent_session)
+    if inherits_bound_team_authority(agent, target):
+        # Fresh and carried generic children both use their parent's model.
+        # A stale selector or a slot cannot pin a different one.
+        model_spec, inherited_model, effort = None, None, None
+        model_selector, selection_source = "inherit", None
     if target.is_team_launch and target.team is not None:
         # Recorded as ``team:<name>`` whatever spelling launched it (a bare
         # roster name, a different case), so the row says what it is and a
@@ -4613,8 +4694,11 @@ async def _construct_child_session(
     # persisted record can supply the fact. OR-ed, never assigned, so a resume
     # can only ever preserve a denial and never clear one the live computation
     # would have found.
+    generic_bound = target is not None and inherits_bound_team_authority(agent, target)
+    inherited_names = frozenset(tool.name for tool in parent_session._tools) if generic_bound else None
     restricted = (
         restricted
+        or generic_bound
         or (profile is not None and bool(profile.tools))
         or agent == "scout"
         or bool(getattr(parent_session, MCP_DENIED_ATTR, False))
@@ -4752,6 +4836,10 @@ async def _construct_child_session(
         if "hub" not in builtin_names:
             builtin_names.append("hub")
         tools = create_tools(tool_context, enabled=builtin_names)
+    elif inherited_names is not None:
+        # Rebuilding default tools is not inheritance when the parent actually
+        # has a different inventory. Carry only the reach it currently holds.
+        tools = create_tools(tool_context, enabled=[n for n in DEFAULT_TOOL_NAMES if n in inherited_names])
     else:
         # Unrestricted/freeform children retain the full default inventory,
         # even when sticky MCP denial is inherited from a restricted ancestor.
@@ -5205,6 +5293,13 @@ async def _construct_child_session(
     # from a role whose read-only allowlist names both (``list_variables``,
     # ``read_variable``) — the exact rule this comment states, broken on the one
     # path that reaches an allowlist without a profile (CI round 3).
+    if inherited_names is not None:
+        # Keep the ceiling through later capability and declaration refreshes
+        # without pinning every tool just to limit its execution.
+        child._team_generic_tool_ceiling = inherited_names
+        child._team_generic_pin_ceiling = frozenset(parent_session._deferral_pins) & inherited_names
+        child._deferral_pins &= child._team_generic_pin_ceiling
+        child.refresh_tools(child._tools)
     set_deferral = getattr(child, "set_tool_deferral", None)
     if callable(set_deferral):
         set_deferral(pins=allowlist_names)
@@ -5336,6 +5431,7 @@ async def _construct_child_session(
         # ``attach_team``: that writes ``team_brief`` into the child's system
         # tail and journals a sidecar per child (D1 (a), (c)).
         child.active_team = target.team
+        child._team_authority = target.authority
         child._team_lineage = tuple(target.team_lineage)
         child._delegation_depth = target.depth
     if mcp is not None:

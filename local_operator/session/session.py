@@ -155,6 +155,8 @@ from local_operator.harness.render import (
 from local_operator.harness.replay_bound import bound_replay_payloads
 from local_operator.harness.rows import is_harness_injection
 from local_operator.harness.subagent import (
+    TeamLaunchError,
+    inherits_bound_team_authority,
     is_inherit_tier_sentinel,
     resolve_launch_target,
     run_subagent,
@@ -16354,6 +16356,9 @@ class Session:
         Takes effect at the next publish, like any inventory change.
         """
         if pins is not None:
+            inherited = getattr(self, "_team_generic_pin_ceiling", None)
+            if inherited is not None:
+                pins = frozenset(pins) & inherited
             # ADDITIVE, for the reason activations are sticky: dropping a pin
             # (an ``/agent clear``, a role switch) would re-defer a schema the
             # cached prefix already carries and pay a second rewrite for it.
@@ -16433,6 +16438,9 @@ class Session:
         :meth:`_scope_declared_ops`; this method is where every inventory writer
         passes, so this is where the two cannot be applied apart.
         """
+        inherited = getattr(self, "_team_generic_tool_ceiling", None)
+        if inherited is not None:
+            tools = [tool for tool in tools if tool.name in inherited]
         if self._readonly_shell and self._shell_write_root is None:
             # A read-only shell role with no enforceable sandbox gets NO shell
             # (see :meth:`_apply_readonly_shell_role`). Here, not at the attach,
@@ -25526,6 +25534,11 @@ class Session:
         # team, cycle, depth cap) raises here before any model is priced or
         # job registered (BEN-7-D1/D2/D3).
         target = resolve_launch_target(agent, self)
+        if inherits_bound_team_authority(agent, target):
+            # Generic task is not a fresh persona or model authorization.
+            if effort is not None or model not in (None, "inherit"):
+                raise TeamLaunchError("a generic team task must inherit its parent's model")
+            model = "inherit"
         # MEMORY ADMISSION (memory_guard.admission_check): a child session is
         # resident work in THIS process — its transcript, its tool commands, its
         # browser — and a small node OOM-killed its own mesh relay by adding such

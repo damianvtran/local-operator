@@ -770,3 +770,40 @@ def test_present_attachment_without_completed_binding_is_not_authority(tmp_path,
     assert reopened.goal == "keep"
     reopened.attach_team(registries[1].get_team_by_name("lopdev"))
     assert _session(tmp_path, registries, directory=directory).active_team_name == "lopdev"
+
+
+@pytest.mark.asyncio
+async def test_generic_child_of_moved_team_cannot_gain_tools_or_pins(tmp_path, registries):
+    from local_operator.harness.subagent import TeamLaunchError, _build_child_session, resolve_launch_target
+    from local_operator.harness.types import AgentTool
+    from local_operator.network.move_team import KEY, check_arrival, source_offer
+    from local_operator.session.placement import MeshStamp, write_stamp_into
+
+    agents, teams = registries
+    agents.create_agent(_role_fields(name="lead", tags=["role", "tools:read"]))
+    teams.save_team(_team("ceiling").model_copy(update={"manager": "lead"}))
+    _session(tmp_path, registries).attach_team(teams.get_team_by_name("ceiling"))
+    directory = tmp_path / "arrived"
+    write_session_attachment(directory, team="ceiling", agent="", goal="")
+    offer = source_offer(tmp_path, tmp_path / "sess", supported=True)
+    binding = check_arrival(tmp_path, directory, offer)
+    write_stamp_into(directory, MeshStamp(session_id="000000000000", origin={KEY: binding}))
+    moved = _session(tmp_path, registries, directory=directory)
+
+    async def not_called(*args, **kwargs):
+        raise AssertionError("no tools are executed")
+    moved.refresh_tools([AgentTool(name="read", execute=not_called)])
+    child = await _build_child_session(
+        label="bound", prompt="inspect", parent_session=moved, model_spec=None, job_id="job-generic",
+        target=resolve_launch_target("task", moved),
+    )
+    try:
+        assert {tool.name for tool in child._tools} == {"read"}
+        child.set_tool_deferral(pins={"edit"})
+        assert child._deferral_pins <= moved._deferral_pins == {"read"}
+        with pytest.raises(TeamLaunchError, match="must inherit its parent's model"):
+            moved._launch_subagent("bound", "inspect", effort="hi")
+        assert not moved.jobs.list()
+    finally:
+        await child.dispose()
+        await moved.dispose()
