@@ -2472,12 +2472,6 @@ def _finder_metadata_file(real: str, entry: str) -> bool:
     return parent == real or parent.startswith(real + os.sep)
 
 
-def _verified_ignored_entry(real: str, entry: str) -> bool:
-    # One predicate for the inventory and the interrupted-cleanup check, so the
-    # hold count and the cleanup verdict cannot disagree about a witness.
-    return _shared_dependencies_link(real, entry) or _finder_metadata_file(real, entry)
-
-
 def _strict_cleanup_status(real: str) -> str | None:
     return _git_quiet(
         [
@@ -2540,7 +2534,14 @@ def plain_cleanup_ignored_inventory(real: str) -> IgnoredInventory | None:
         entry = _cleanup_status_path(row)
         if entry is None:
             return None
-        if not _verified_ignored_entry(real, entry):
+        # The ``.DS_Store`` witness applies to plain removal ONLY, and
+        # ``_interrupted_cleanup_state`` (reached via ``--force``) deliberately
+        # keeps the shared-link witness alone. Plain Git never deletes tracked
+        # or untracked work, so the only bytes at stake here are ignored ones,
+        # and the operator request (2026-11-23) was for plain cleanup. Widening
+        # what ``--force`` may discard is out of scope for that request
+        # (PR #4503 round 1, R1/Q1) and is pinned by a regression test.
+        if not (_shared_dependencies_link(real, entry) or _finder_metadata_file(real, entry)):
             unverified += 1
     return IgnoredInventory(unverified, changes)
 
@@ -2588,9 +2589,9 @@ def _interrupted_cleanup_state(real: str, facts: dict[str, bool] | None) -> str:
         # A name or package manifest cannot account for the bytes under an
         # ignored directory. The only supported witness is a shared dependency
         # link: Git removes the reproducible link entry, not its referent.
-        # Finder ``.DS_Store`` view-state files are the other (see
-        # ``_finder_metadata_file``).
-        if not _verified_ignored_entry(real, entry):
+        # Finder ``.DS_Store`` files are NOT a witness on this ``--force`` route
+        # (see ``plain_cleanup_ignored_inventory`` for why the routes differ).
+        if not _shared_dependencies_link(real, entry):
             return "dirty"
     if _nested_repository(real, worktrees=True, linked_root=True) is not None:
         return "dirty"

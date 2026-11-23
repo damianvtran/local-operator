@@ -666,10 +666,13 @@ def test_non_finder_ds_store_or_other_ignored_entry_still_holds(
 def test_force_and_rm_rf_ranking_ignores_the_finder_witness(
     home: Path, mobile: Path, monkeypatch: pytest.MonkeyPatch, template: str
 ) -> None:
-    """--force and rm -rf rank exactly as they did before the witness existed."""
+    """--force and rm -rf rank exactly as they did before the witness existed.
+
+    The tree's ONLY ignored entries are ``.DS_Store`` regular files: an extra
+    ignored ``.env`` here once masked a witness leak into the --force route
+    (PR #4503 round 1, R1/Q1), because it held the tree on its own.
+    """
     wt = _ds_store_tree(home, mobile)
-    (wt / ".env").write_text("TOKEN=synthetic\n")
-    _record(home, wt)
     command = template.format(wt=wt)
 
     def rank() -> tuple[Any, ...]:
