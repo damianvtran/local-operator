@@ -888,19 +888,11 @@ def test_a_skipped_pass_logs_nothing_at_info(caplog: pytest.LogCaptureFixture) -
 async def test_a_hanging_seam_costs_the_turn_only_the_wait_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The turn pays ``waitMs``, and the answer is delivered by the next message.
+    """The wait leaves the call running; no-ID callers carry it at their next refresh.
 
-    The operator's budget is our OWN overhead per user message, and on a real roster
-    the vendor's answer takes ~250 ms median — waiting for it would put the vendor's
-    model time on the critical path. So the turn waits ``values.classification.waitMs``
-    and no longer, and what it gave up on is not lost: the call keeps running, and the
-    next admitted user message re-renders the knowledge block WITH the late answer.
-    (That is the case this test covers — the turn had ENDED. An answer that lands while
-    its own turn is still running is delivered into that turn's next model step
-    instead, which is the sibling test below.)
-    That re-render is the delivery mechanism (a changed knowledge section is
-    journaled by the harness as a ``[session-state]`` update), which is why nothing
-    here writes a bespoke host-state row.
+    Without identity the callee cannot tell whether a task changed. The first
+    frozen render stays unchanged; a compaction makes the next render consume
+    the queued advice once, keeping the legacy compaction-only contract.
     """
     index = _FakeIndex(picked=[_skill("alpha", "Alpha skill.")])
     off = await _off_block(index)
@@ -957,7 +949,7 @@ async def test_a_hanging_seam_costs_the_turn_only_the_wait_budget(
         # actual configured deadline distinguish budget enforcement from awaiting
         # the vendor even when a loaded event loop resumes after 200 ms.
         async with asyncio.timeout(5.0):
-            first = await session_factory._select_knowledge_block(hooks, "first task", task_id="t1")
+            first = await session_factory._select_knowledge_block(hooks, "first task")
             await unrelated_task
             assert observed_timeouts == [0.05]
             assert vendor_started.is_set()
@@ -970,11 +962,15 @@ async def test_a_hanging_seam_costs_the_turn_only_the_wait_budget(
             release_vendor.set()
             await vendor_task
             assert vendor_finished.is_set()
+            frozen = await session_factory._select_knowledge_block(hooks, "second task")
+            assert frozen == off
             second = await session_factory._select_knowledge_block(
-                hooks, "second task", task_id="t2"
+                hooks, "second task", compaction_id="c1"
             )
             assert second.count("guide://tunnel") == 1
-            third = await session_factory._select_knowledge_block(hooks, "third task", task_id="t3")
+            third = await session_factory._select_knowledge_block(
+                hooks, "third task", compaction_id="c2"
+            )
             assert "guide://tunnel" not in third
     finally:
         # A failed assertion or watchdog must not leak the deliberately blocked
@@ -1003,20 +999,20 @@ async def test_a_late_answer_is_delivered_once_and_only_when_it_exists() -> None
     hooks = _hooks(classifier=classifier)
     hooks.classification_wait_s = 0.05
 
-    await session_factory._select_knowledge_block(hooks, "first", task_id="t1")
-    await asyncio.sleep(0.35)  # call 1 lands, late
-    # NOTHING MORE WILL EVER BE RECOMMENDED: every later call is answered empty, so
-    # anything that appears in a later block can only be call 1's answer arriving
-    # twice — which is exactly what must not happen.
-    classifier.recommendation = _Recommendation(skipped="empty-roster")
+    select = session_factory._select_knowledge_block
+    await select(hooks, "first", task_id="t1")
+    await hooks.classification_outstanding[0].task
 
-    second = await session_factory._select_knowledge_block(hooks, "second", task_id="t2")
+    second = await select(hooks, "", task_id="t1")
     assert second.count("guide://tunnel") == 1
-    await asyncio.sleep(0.35)  # call 2 lands, empty
+    assert not hooks.classification_pending
 
-    third = await session_factory._select_knowledge_block(hooks, "third", task_id="t3")
-    assert "guide://tunnel" not in third, "a delivered answer must never be delivered twice"
+    # An ordinary frozen step keeps the block, but rebuilding this task after
+    # a compaction must not resurrect already-consumed pending advice.
+    assert await select(hooks, "", task_id="t1") == second
+    third = await select(hooks, "first", task_id="t1", compaction_id="c1")
     assert "guide://tunnel" not in third
+    assert len(classifier.requests) == 1
 
 
 @pytest.mark.asyncio
@@ -1508,29 +1504,279 @@ async def test_an_answer_that_misses_the_wait_lands_in_the_same_turn() -> None:
     assert "mcp://slack" in third
 
     # And a NEW message does not repeat it: the pending slot was consumed.
-    fourth = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t2")
+    fourth = await session_factory._select_knowledge_block(hooks, "", task_id="t2")
     assert "mcp://slack" not in fourth
 
 
 @pytest.mark.asyncio
-async def test_an_answer_for_an_older_message_still_rides_the_next_one() -> None:
-    """The old behaviour, kept for the case it exists for: the turn has ENDED.
+@pytest.mark.parametrize(
+    ("limit", "fresh", "old_still_running"),
+    [(1, True, False), (2, True, False), (2, False, False), (1, True, True), (2, False, True)],
+)
+async def test_an_older_answer_does_not_ride_the_next_user_message(
+    limit: int, fresh: bool, old_still_running: bool
+) -> None:
+    """Stale advice may neither take a slot from fresh advice nor fill an empty slot."""
+    release_old = asyncio.Event()
+    release_new = asyncio.Event()
 
-    A call that is still in flight when its message's turn finishes has no next step
-    to reach, so it is carried — and labelled — as an answer to the previous message.
-    """
-    index = _FakeIndex(picked=[])
+    class _TwoTasks(_FakeClassifier):
+        async def recommend_resources(self, request: Any) -> _Recommendation:
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                await release_old.wait()
+                return _slack_recommendation()
+            if not fresh:
+                await release_new.wait()
+            return _Recommendation(
+                resources=(_Candidate("mcp", "notion", "Pages and databases.", "mcp://notion"),),
+            )
+
+    classifier = _TwoTasks()
+    hooks = _hooks(classifier=classifier)
+    hooks.classification_wait_s = 0.01
+    hooks.classification_max_recommendations = limit
+
+    select = session_factory._select_knowledge_block
+    assert "mcp://slack" not in await select(hooks, "read my Slack messages", task_id="t1")
+    old_call = hooks.classification_outstanding[0].task
+    if not old_still_running:
+        release_old.set()
+        await old_call
+
+    later = await select(hooks, "read the Notion page", task_id="t2")
+    if old_still_running:
+        assert not old_call.done(), "supersession does not cancel work that can fill the memo"
+        release_old.set()
+        await old_call
+    if not fresh:
+        release_new.set()
+        await hooks.classification_outstanding[-1].task
+    following = await select(hooks, "", task_id="t2")
+    assert "mcp://slack" not in later
+    assert ("mcp://notion" in later) is fresh
+    assert "mcp://slack" not in following
+    assert "mcp://notion" in following
+    assert len(classifier.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_harvested_answer_cannot_cross_tasks_after_render_failure() -> None:
     classifier = _slow_classifier(_slack_recommendation())
+    hooks = _hooks(classifier=classifier)
+    hooks.classification_wait_s = 0.01
+    select = session_factory._select_knowledge_block
+
+    await select(hooks, "first task", task_id="t1")
+    await hooks.classification_outstanding[0].task
+
+    def fail_to_render(_query: str) -> str:
+        raise RuntimeError("fixture catalogue failure")
+
+    hooks.mcp_catalogue = fail_to_render
+    with pytest.raises(RuntimeError, match="fixture catalogue failure"):
+        await select(hooks, "", task_id="t1")
+    assert hooks.classification_pending, "the failure occurred after harvest"
+    hooks.mcp_catalogue = None
+    hooks.classifier = None
+    assert "mcp://slack" not in await select(hooks, "second task", task_id="t2")
+    assert "mcp://slack" not in await select(hooks, "", task_id="t2")
+    assert not hooks.classification_pending
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stamped", [True, False])
+async def test_transcript_chrome_keeps_its_active_task_owner(tmp_path: Path, stamped: bool) -> None:
+    from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
+    from local_operator.harness.types import AgentTool, ImageContent, Message
+    from local_operator.session.goal_judge import goal_continuation_prompt
+    from local_operator.session.transcript import Transcript
+
+    classifier = _slow_classifier(_slack_recommendation())
+    index = _FakeIndex()
     hooks = _hooks(index, classifier=classifier)
     hooks.classification_wait_s = 0.01
+    transcript = Transcript(tmp_path / "routing")
 
-    assert "mcp://slack" not in await session_factory._select_knowledge_block(
-        hooks, OFF_QUERY, task_id="t1"
+    async def unused_read(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the provider only needs to know that resources can be read")
+
+    tools = [AgentTool(name="read", description="Read a resource", execute=unused_read)]
+    provider = session_factory._make_system_blocks_provider(tools, transcript, hooks)
+
+    async def continuation() -> None:
+        if stamped:
+            message = Message.user(
+                "Synthetic harness continuation", provider_payload={RENDERED_INJECTION_KEY: True}
+            )
+        else:
+            message = Message.user(goal_continuation_prompt("Finish the archive"))
+        await transcript.append_message(message)
+        # Check the exact mismatch: the raw transcript index advances to chrome.
+        raw_user = transcript.latest_user_entry()
+        assert raw_user is not None and raw_user.id == message.id
+
+    await transcript.append_message(Message.user("inspect the Slack archive"))
+    assert not any("mcp://slack" in block for block in await provider())
+    await hooks.classification_outstanding[0].task
+    await continuation()
+    assert any("mcp://slack" in block for block in await provider())
+    await continuation()
+    assert any("mcp://slack" in block for block in await provider())
+    assert len(classifier.requests) == 1
+
+    # An image-only input also replaces the owner. Chrome above it must not
+    # send the previous task's words back through the classifier or embedder.
+    await transcript.append_message(
+        Message.user("", images=[ImageContent(data="dGVzdA==", mime_type="image/png")])
     )
-    await asyncio.sleep(0.3)
+    await continuation()
+    assert not any("mcp://slack" in block for block in await provider())
+    assert len(classifier.requests) == 1
 
-    later = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t2")
-    assert "mcp://slack" in later
+    # A new human row can be followed by chrome before the next provider step.
+    # It must supersede the previous task even though the newest raw row isn't human.
+    hooks.classifier = None
+    await transcript.append_message(Message.user("now inspect the Notion page"))
+    await continuation()
+    assert not any("mcp://slack" in block for block in await provider())
+    assert index.calls == [
+        "inspect the Slack archive",
+        "inspect the Slack archive",
+        "now inspect the Notion page",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["wait", "wake", "steer"])
+async def test_session_delivers_late_advice_only_to_its_owner(
+    tmp_path: Path, boundary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    from local_operator import analytics
+    from local_operator.harness.types import (
+        AgentTool,
+        ModelSpec,
+        StreamEndEvent,
+        StreamTextDelta,
+        StreamToolCallDelta,
+        ToolResult,
+    )
+    from local_operator.harness.wake_types import DueWake, WakeSchedule
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+
+    # The tool boundary is real; analytics is unrelated to this assertion and
+    # its process-global worker must not outlive this test's isolated session.
+    monkeypatch.setattr(analytics, "record_tool_call", lambda *args, **kwargs: None)
+    release = asyncio.Event()
+    job_finish = asyncio.Event()
+    requests: list[str] = []
+    job_id = ""
+
+    class Classifier(_FakeClassifier):
+        async def recommend_resources(self, request: Any) -> _Recommendation:
+            self.requests.append(request)
+            if request.user_message == "Inspect Slack archive":
+                await release.wait()
+                return _slack_recommendation()
+            if request.user_message == "Corrected Notion scope":
+                return _Recommendation(
+                    resources=(_Candidate("mcp", "notion", "Pages.", "mcp://notion"),),
+                )
+            return _Recommendation()
+
+    async def tool(call_id: str, *args: Any, **kwargs: Any) -> ToolResult:
+        return ToolResult(tool_call_id=call_id)
+
+    classifier = Classifier()
+    transcript = Transcript(tmp_path / "session")
+    hooks = _hooks(classifier=classifier)
+    hooks.classification_wait_s = 0.02
+    hooks.classification_max_recommendations = 1
+    tools = [AgentTool(name=name, description=name, execute=tool) for name in ("read", "mcp")]
+
+    def stream(request: Any, _signal: Any) -> Any:
+        requests.append("\n".join(message.text for message in request.messages))
+
+        async def events():
+            if len(requests) == 2 and boundary != "wake":
+                release.set()
+                await hooks.classification_outstanding[0].task
+                if boundary == "steer":
+                    session.steer("Corrected Notion scope", message_id="synthetic-steer")
+                job_finish.set()
+                yield StreamToolCallDelta(
+                    index=0,
+                    id="synthetic-tool",
+                    name="wait" if boundary == "wait" else "mcp",
+                    argument_delta=(
+                        json.dumps({"job_id": job_id, "wait_ms": 1000})
+                        if boundary == "wait"
+                        else "{}"
+                    ),
+                )
+                yield StreamEndEvent(stop_reason="toolUse")
+                return
+            yield StreamTextDelta(delta="fixture output")
+            yield StreamEndEvent(stop_reason="stop")
+
+        return events()
+
+    session = Session(
+        model=ModelSpec(provider="anthropic", model_id="claude-sonnet-4-6", context_window=100_000),
+        stream_fn=stream,
+        tools=tools,
+        transcript=transcript,
+        system_blocks_provider=session_factory._make_system_blocks_provider(
+            tools, transcript, hooks
+        ),
+        has_ui=True,
+    )
+    try:
+        async with asyncio.timeout(5):
+            await session.prompt("Initialize fixture")
+            if boundary == "wait":
+
+                async def job(_id: str, _signal: Any, _report: Any) -> str:
+                    await job_finish.wait()
+                    return "synthetic job finished"
+
+                job_id = session.jobs.register("task", "synthetic-task", job)
+            await session.prompt("Inspect Slack archive")
+            assert "mcp://slack" not in requests[1]
+            if boundary == "wake":
+                release.set()
+                await hooks.classification_outstanding[0].task
+                before = set(session._background_tasks)
+                schedule = WakeSchedule(
+                    id="synthetic-wake",
+                    message="Wake fixture",
+                    next_due_at=0,
+                    created_at=0,
+                    hidden=True,
+                )
+                await session._deliver_wake(
+                    DueWake(schedule=schedule, occurrence=1, planned_total=1, final=True)
+                )
+                await asyncio.gather(*(session._background_tasks - before))
+                assert "Wake fixture" in requests[2]
+            if boundary == "wait":
+                assert "synthetic job finished" in requests[2]
+            if boundary == "steer":
+                assert "Corrected Notion scope" in requests[2]
+                assert "mcp://notion" in requests[2] and "mcp://slack" not in requests[2]
+            else:
+                assert "mcp://slack" in requests[2]
+                assert [r.user_message for r in classifier.requests] == [
+                    "Initialize fixture",
+                    "Inspect Slack archive",
+                ]
+    finally:
+        release.set()
+        job_finish.set()
+        await session.dispose()
 
 
 @pytest.mark.asyncio
