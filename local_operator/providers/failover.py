@@ -46,11 +46,11 @@ from local_operator.harness.types import (
     ModelSpec,
     OneTurnSecretScopeError,
     RenderedStreamError,
+    StreamAttemptReceipt,
     StreamEndEvent,
     StreamEvent,
     StreamModelEvent,
     StreamReasoningDelta,
-    StreamResponseIdentityEvent,
     StreamStartEvent,
     StreamUsageEvent,
     TextContent,
@@ -427,8 +427,6 @@ _AGGREGATOR_UPSTREAM_STREAM_FAILURE_MARKERS = (
 #:   chain. It would also misreport a pre-content transport death as a
 #:   MID-STREAM loss, which is what :func:`is_mid_stream_connectivity_loss`
 #:   infers from this very flag.
-#: * ``StreamResponseIdentityEvent`` only completes that proof. The adapter
-#:   can get it after an empty content frame but before any forwarded delta.
 #: * ``StreamReasoningDelta`` carries the model's private reasoning, which is
 #:   DISPLAY-ONLY all the way down: the loop republishes it as
 #:   ``ReasoningDeltaEvent``, no front end writes it into a message, the
@@ -458,7 +456,6 @@ _AGGREGATOR_UPSTREAM_STREAM_FAILURE_MARKERS = (
 #: another durable effect.
 _RETRY_SAFE_STREAM_EVENTS: tuple[type[StreamEvent], ...] = (
     StreamStartEvent,
-    StreamResponseIdentityEvent,
     StreamReasoningDelta,
     StreamUsageEvent,
 )
@@ -4241,7 +4238,7 @@ def _one_turn_scrub_stream_event(request: ChatRequest, event: StreamEvent) -> St
     This boundary covers every production provider and retry, so response ids,
     upstream hosts, usage stamps, and errors cannot bypass the final scrub.
     """
-    if isinstance(event, (StreamStartEvent, StreamResponseIdentityEvent)):
+    if isinstance(event, StreamStartEvent):
         return event.model_copy(
             update={"response_id": one_turn_public_text(request, event.response_id)}
         )
@@ -4935,6 +4932,7 @@ async def _stream_with_failover_events(
             )
 
             attempt_hint = WireHintCapture()
+            receipt_pending = request.inline_ui_hint is not None
             sent_at_ms = int(time.time() * 1000)
             sent_monotonic = time.monotonic()
             successful_terminal = False
@@ -4956,6 +4954,20 @@ async def _stream_with_failover_events(
                 async for event in capture_wire_stream(
                     client.stream(current_request, key, oauth_access=access), attempt_hint
                 ):
+                    if receipt_pending:
+                        # The encoder has run, even when its wire has no native
+                        # opener. For an unsupported adapter this fresh capture
+                        # stays None, clearing any failed primary before output.
+                        # Do not count the receipt as forwarded output or flush
+                        # it from a replayable attempt we will discard.
+                        receipt_pending = False
+                        receipt = StreamAttemptReceipt(
+                            inline_ui_source_version=attempt_hint.inline_ui_source_version
+                        )
+                        if buffered is None:
+                            yield receipt
+                        else:
+                            buffered.append(receipt)
                     if isinstance(event, StreamEndEvent):
                         successful_terminal = (
                             event.stop_reason in ("stop", "length", "toolUse") and not event.error

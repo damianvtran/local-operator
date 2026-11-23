@@ -113,16 +113,15 @@ from local_operator.harness.types import (
     NoticeEvent,
     OneTurnSecretScopeError,
     OutputValidationEvent,
-    ProviderTurnIdentityEvent,
     ProviderTurnStartEvent,
     ReasoningDeltaEvent,
     RenderedStreamError,
     StaleAside,
+    StreamAttemptReceipt,
     StreamEndEvent,
     StreamEvent,
     StreamModelEvent,
     StreamReasoningDelta,
-    StreamResponseIdentityEvent,
     StreamStartEvent,
     StreamTextDelta,
     StreamToolCallDelta,
@@ -4949,27 +4948,23 @@ class AgentLoop:
                         context_metadata=True,
                         context_metadata_resolved=model.context_metadata_resolved,
                     )
-                elif isinstance(event, StreamStartEvent):
+                elif isinstance(event, StreamAttemptReceipt):
+                    # Set before output without telling supervisors that this
+                    # private wire fact is provider acceptance. In particular a
+                    # retry with a hint-free body must clear the previous mark.
                     assistant._inline_ui_source_version = event.inline_ui_source_version
+                elif isinstance(event, StreamStartEvent):
                     # The provider is generating for THIS request. Republish it
                     # as a harness event so supervisors get a boundary that
                     # means "on the wire" — ``MessageStartEvent`` above is
                     # yielded from a placeholder before the request is even
                     # built, so it cannot carry that meaning.
+                    provider, model_id = event._native_selector or (model.provider, model.model_id)
                     yield ProviderTurnStartEvent(
                         response_id=one_turn_public_text(request, event.response_id),
-                        provider=one_turn_public_text(request, model.provider),
-                        model_id=one_turn_public_text(request, model.model_id),
+                        provider=one_turn_public_text(request, provider),
+                        model_id=one_turn_public_text(request, model_id),
                     )
-                elif isinstance(event, StreamResponseIdentityEvent):
-                    # Start already set the serving attempt's receipt. This
-                    # update only completes proof, and is omitted if scrubbed.
-                    if event.response_id:
-                        yield ProviderTurnIdentityEvent(
-                            response_id=event.response_id,
-                            provider=one_turn_public_text(request, model.provider),
-                            model_id=one_turn_public_text(request, model.model_id),
-                        )
                 elif isinstance(event, StreamTextDelta):
                     text_parts.append(event.delta)
                     if not secret_active:

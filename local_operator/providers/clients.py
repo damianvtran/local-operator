@@ -60,7 +60,6 @@ from local_operator.harness.types import (
     StreamEndEvent,
     StreamEvent,
     StreamReasoningDelta,
-    StreamResponseIdentityEvent,
     StreamStartEvent,
     StreamTextDelta,
     StreamToolCallDelta,
@@ -78,7 +77,10 @@ from local_operator.model.speed import (
     FastModeSupport,
     fast_mode_support,
 )
-from local_operator.providers.account_affinity import set_wire_hint
+from local_operator.providers.account_affinity import (
+    record_inline_ui_wire_receipt,
+    set_wire_hint,
+)
 from local_operator.providers.context import bind_native_context
 from local_operator.providers.documents import (
     DocumentBudget,
@@ -277,6 +279,24 @@ def _stream_id(value: Any) -> str | None:
         return None
     trimmed = value.strip()
     return trimmed or None
+
+
+def _native_stream_start(
+    request: ChatRequest,
+    response_id: str,
+    *,
+    cache_miss_type: str | None = None,
+    cache_missed_tokens: int = 0,
+) -> StreamStartEvent:
+    event = StreamStartEvent(
+        response_id=response_id,
+        cache_miss_type=cache_miss_type,
+        cache_missed_tokens=cache_missed_tokens,
+    )
+    # Failover may change the wire selector without changing the display
+    # model. Do not put a native response ID in that display model's namespace.
+    event._native_selector = (request.model.provider, request.model.model_id)
+    return event
 
 
 #: Longest provider display name we will carry back as a cache pin.
@@ -4034,8 +4054,6 @@ class OpenAICompatClient:
                         # proof against it (see StreamStartEvent) and must not learn
                         # the turn was accepted only once it has already finished.
                         started = True
-                        # The chat body never sends discovery. Its default
-                        # None receipt also clears any failed primary's marker.
                         yield StreamStartEvent(response_id=_stream_id(chunk.get("id")))
                     chunk_choices = chunk.get("choices") or []
                     chunk_finished = bool(
@@ -4384,7 +4402,6 @@ class OpenAICompatClient:
         tool_call_count = 0
         terminal_stop: str | None = None
         terminal_error: str | None = None
-        started = False
         announced_id: str | None = None
         #: The model the upstream says actually answered (``response.model``), read
         #: off frames this loop already parses. Same contract as the chat wire's
@@ -4511,6 +4528,7 @@ class OpenAICompatClient:
             if turn_state is not None and turn_generation is not None:
                 turn_state.receive(turn_generation, response.headers.get("x-codex-turn-state"))
             self._observe_responses_headers(response.headers)
+            record_inline_ui_wire_receipt(1 if request.inline_ui_hint is not None else None)
             async for data in _iter_sse_lines(response):
                 if data == "[DONE]":
                     break
@@ -4520,13 +4538,6 @@ class OpenAICompatClient:
                     continue
                 self._observe_responses_event(payload)
                 event_type = payload.get("type", "")
-                if started and announced_id is None and event_type == "response.created":
-                    # A missing ID can be filled by the native opener, not by
-                    # item/terminal metadata. Even in the metadata tail this
-                    # is proof only: it neither reopens output nor starts again.
-                    announced_id = _stream_id((payload.get("response") or {}).get("id"))
-                    if announced_id is not None:
-                        yield StreamResponseIdentityEvent(response_id=announced_id)
                 if terminal_stop is not None:
                     # Completion closes generated output, not the transport's
                     # metadata tail. Muse's subscription receipt arrives AFTER
@@ -4535,32 +4546,15 @@ class OpenAICompatClient:
                     if event_type in ("response.failed", "error"):
                         raise _openai_response_error(payload)
                     continue
-                if not started and event_type in (
-                    "response.created",
-                    "response.in_progress",
-                    "response.output_item.added",
-                    "response.output_item.done",
-                    "response.function_call_arguments.done",
-                    "response.function_call_arguments.delta",
-                    "response.output_text.delta",
-                    "response.refusal.delta",
-                    "response.completed",
-                    "response.incomplete",
-                ):
-                    # Compatible streams can omit or delay response.created.
-                    # Projectors need this attempt's receipt before its first
-                    # output (including terminal tool snapshots). Only the
-                    # response envelope identifies the turn: item/call IDs are
-                    # not acceptance proof, and a late created cannot start it
-                    # again. Errors and transport metadata never start a turn.
-                    started = True
-                    announced_id = _stream_id((payload.get("response") or {}).get("id"))
-                    yield StreamStartEvent(
-                        response_id=announced_id,
-                        inline_ui_source_version=1 if request.inline_ui_hint is not None else None,
-                    )
                 if event_type == "response.created":
-                    created_model = _served_model_slug((payload.get("response") or {}).get("model"))
+                    created = payload.get("response") or {}
+                    # Output and terminal IDs are not acceptance proof. If a
+                    # gateway delays the native opener, keep it in wire order.
+                    if announced_id is None:
+                        announced_id = _stream_id(created.get("id"))
+                        if announced_id is not None:
+                            yield _native_stream_start(request, announced_id)
+                    created_model = _served_model_slug(created.get("model"))
                     if created_model:
                         served_model = created_model
                 # Reasoning remains invisible here, but plaintext deltas still
@@ -6098,7 +6092,6 @@ class AnthropicClient:
         native_blocks: dict[int, dict[str, Any]] = {}
         tool_json: dict[int, list[str]] = {}
         visible_text: list[str] = []
-        started = False
         announced_id: str | None = None
         #: The model the API says served this turn (``message.model`` on
         #: ``message_start``). Captured for the per-call ledger record because the
@@ -6137,6 +6130,7 @@ class AnthropicClient:
             if response.status_code >= 400:
                 await response.aread()
                 self._raise_for_status(response)
+            record_inline_ui_wire_receipt(1 if request.inline_ui_hint is not None else None)
             async for event in self._iter_events(response):
                 event_type = event.get("type")
                 if event_type == USAGE_FILL_EVENT:
@@ -6160,43 +6154,27 @@ class AnthropicClient:
                         output_reported = True
                         usage.output_tokens = int(fill["output_tokens"])
                     continue
-                if not started and event_type in (
-                    "message_start",
-                    "content_block_start",
-                    "content_block_delta",
-                    "content_block_stop",
-                    "message_delta",
-                    "message_stop",
-                ):
-                    # Messages normally starts with an identity and any cache
-                    # diagnostics. The parser also accepts content without
-                    # that frame. Don't release it without this attempt's
-                    # receipt, or guess an identity/diagnosis if it was absent.
-                    message = (event.get("message") or {}) if event_type == "message_start" else {}
-                    miss_type, missed_tokens = (
-                        _anthropic_cache_diagnosis(
-                            message,
-                            previous_id=request.cache_diagnostics_previous_id,
-                        )
-                        if event_type == "message_start" and "diagnostics" in body
-                        else (None, 0)
-                    )
-                    started = True
-                    announced_id = _stream_id(message.get("id"))
-                    yield StreamStartEvent(
-                        response_id=announced_id,
-                        inline_ui_source_version=1 if request.inline_ui_hint is not None else None,
-                        cache_miss_type=miss_type,
-                        cache_missed_tokens=missed_tokens,
-                    )
-                elif started and announced_id is None and event_type == "message_start":
-                    # This attempt already published its discovery receipt.
-                    # Report only the missing native ID, never a second Start.
-                    announced_id = _stream_id((event.get("message") or {}).get("id"))
-                    if announced_id is not None:
-                        yield StreamResponseIdentityEvent(response_id=announced_id)
                 if event_type == "message_start":
-                    start_model = _served_model_slug((event.get("message") or {}).get("model"))
+                    message = event.get("message") or {}
+                    if announced_id is None:
+                        announced_id = _stream_id(message.get("id"))
+                        if announced_id is not None:
+                            # Only this opener can name the turn and carry cache
+                            # diagnostics for a request that opted in.
+                            miss_type, missed_tokens = (
+                                _anthropic_cache_diagnosis(
+                                    message, previous_id=request.cache_diagnostics_previous_id
+                                )
+                                if "diagnostics" in body
+                                else (None, 0)
+                            )
+                            yield _native_stream_start(
+                                request,
+                                announced_id,
+                                cache_miss_type=miss_type,
+                                cache_missed_tokens=missed_tokens,
+                            )
+                    start_model = _served_model_slug(message.get("model"))
                     if start_model:
                         served_model = start_model
                     raw_usage = (event.get("message") or {}).get("usage") or {}
@@ -7030,6 +7008,7 @@ class GoogleClient:
                 logger.debug("google cache snapshot failed", exc_info=True)
         prompt_tokens = 0
         async with self._open_content_stream(request, url, body, headers) as response:
+            record_inline_ui_wire_receipt(1 if request.inline_ui_hint is not None else None)
             started = False
             async for data in _iter_sse_lines(response):
                 try:
@@ -7045,10 +7024,7 @@ class GoogleClient:
                     # so a consumer waits forever instead of failing closed on an
                     # indeterminate acceptance (which is the documented contract).
                     started = True
-                    yield StreamStartEvent(
-                        response_id=None,
-                        inline_ui_source_version=1 if request.inline_ui_hint is not None else None,
-                    )
+                    yield StreamStartEvent(response_id=None)
                 version = _served_model_slug(chunk.get("modelVersion"))
                 if version:
                     served_model = version

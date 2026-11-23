@@ -20,15 +20,18 @@ from local_operator.harness.types import (
     MessageEndEvent,
     MessageUpdateEvent,
     ModelSpec,
-    ProviderTurnIdentityEvent,
-    ProviderTurnStartEvent,
+    StreamAttemptReceipt,
     StreamEndEvent,
     StreamEvent,
-    StreamResponseIdentityEvent,
     StreamStartEvent,
     StreamTextDelta,
     TextContent,
     ToolCall,
+)
+from local_operator.headless_print import PrintRenderer
+from local_operator.providers.account_affinity import (
+    WireHintCapture,
+    capture_wire_stream,
 )
 from local_operator.providers.auth_store import OAuthAccess
 from local_operator.providers.bedrock.converse import BedrockConverseClient
@@ -42,12 +45,14 @@ from local_operator.server.utils.event_broker import EventBroker, job_channel
 from local_operator.server.utils.sse_bridge import attach_broker
 from local_operator.session.inline_ui import INSTRUCTIONS
 from local_operator.session.runtime.inline_ui_egress import InlineUiEvents
+from local_operator.session.transcript import Transcript
 from local_operator.variables import VariableStore
 from tests.unit.harness.test_one_turn_secret import _secret_tool, _tool_delta
 from tests.unit.providers.bedrock.test_converse_body import NOVA, TOOL
 from tests.unit.providers.bedrock.test_converse_stream import KEY, events, wire
 from tests.unit.providers.test_failover import FakeAuth
 from tests.unit.providers.test_native_replay import sse
+from tests.unit.session.test_peer_cycle_display import exercise as exercise_peer_cycle
 from tests.unit.session.test_session import make_session
 
 pytestmark = pytest.mark.asyncio
@@ -177,13 +182,21 @@ async def test_local_http_adapter_hint_receipt_matches_posted_wire(
             )
             for hint in (None, INSTRUCTIONS):
                 call = request.model_copy(update={"inline_ui_hint": hint})
-                result = [event async for event in client.stream(call, "synthetic-key", access)]
-                [start] = [event for event in result if isinstance(event, StreamStartEvent)]
-                assert start.inline_ui_source_version == (1 if hint and suffix else None)
-                assert isinstance(result[0], StreamStartEvent)
+                capture = WireHintCapture()
+                result = []
+                async for event in capture_wire_stream(
+                    client.stream(call, "synthetic-key", access), capture
+                ):
+                    assert capture.inline_ui_source_version == (1 if hint and suffix else None)
+                    result.append(event)
+                starts = [event for event in result if isinstance(event, StreamStartEvent)]
                 if route == "anthropic-no-start":
-                    assert start.response_id is None
-                assert "inline_ui_source_version" not in start.model_dump()
+                    assert not starts
+                    assert isinstance(result[0], StreamTextDelta)
+                else:
+                    [start] = starts
+                    assert result[0] is start
+                    assert "inline_ui_source_version" not in start.model_dump()
                 assert (
                     "".join(event.delta for event in result if isinstance(event, StreamTextDelta))
                     == _REPLY
@@ -266,7 +279,7 @@ def _native_reply(route: str, lifecycle: str, *, native_id: str | None = None) -
         second = {**template, "delta": {"type": "text_delta", "text": _CLOSER}}
     else:
         opener_type, envelope = "response.created", "response"
-        prefix = []
+        prefix = [{"type": "response.in_progress", "response": {"id": "not-created-id"}}]
         first = {
             "type": "response.output_text.delta",
             "item_id": "msg-not-a-response",
@@ -301,15 +314,16 @@ def _native_reply(route: str, lifecycle: str, *, native_id: str | None = None) -
         ("responses", "missing", None, False),
         ("responses", "missing", "anthropic", False),
         ("chat/completions", "early", "anthropic", False),
-        ("responses", "late", "openrouter", True),
-        ("messages", "late", "openrouter", True),
+        ("responses", "late", "anthropic", True),
+        ("messages", "late", "openai", True),
     ],
 )
-async def test_native_acceptance_and_identity_preserve_egress(
+async def test_native_acceptance_and_private_receipts_preserve_egress(
     tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
     route: str,
     lifecycle: str,
-    primary: Literal["anthropic", "openrouter"] | None,
+    primary: Literal["anthropic", "openai"] | None,
     hinted: bool,
 ) -> None:
     posts: list[tuple[str, bool]] = []
@@ -321,8 +335,8 @@ async def test_native_acceptance_and_identity_preserve_egress(
                 return _native_reply(route, lifecycle)
             return sse(
                 [
-                    # Opening an empty block publishes the receipt, but the
-                    # subsequent ID-only update must not prevent failover.
+                    # An empty content block is not acceptance. The genuine
+                    # late opener is safe to retry until output is forwarded.
                     _ANTHROPIC_CONTENT[0],
                     {"type": "message_start", "message": {"id": "failed-native"}},
                     {"type": "error", "error": {"type": "overloaded_error", "message": "Fixture"}},
@@ -344,18 +358,19 @@ async def test_native_acceptance_and_identity_preserve_egress(
                     )
                     + b"data: [DONE]\n\n"
                 )
-            return sse(
-                [
-                    {"id": "failed-generic", "choices": []},
-                    {"error": {"code": 503, "message": "Fixture"}},
-                ]
-            )
         assert path.endswith("/responses")
-        return _native_reply(route, lifecycle)
+        if route == "responses":
+            return _native_reply(route, lifecycle)
+        return sse(
+            [
+                {"type": "response.output_text.delta", "delta": ""},
+                {"type": "response.created", "response": {"id": "failed-openai"}},
+                {"type": "error", "code": "server_error", "message": "Fixture"},
+            ]
+        )
 
-    starts: list[tuple[str | None, int | None]] = []
-    with_start: list[str | None] = []
-    start_counts_at_updates: list[int] = []
+    wire_boundaries: list[tuple[str, str | int | None]] = []
+    acceptance: list[Any] = []
     updates: list[dict[str, Any]] = []
     endings: list[dict[str, Any]] = []
     markers: list[int | None] = []
@@ -397,16 +412,21 @@ async def test_native_acceptance_and_identity_preserve_egress(
             async for event in stream_with_failover(
                 request, auth, settings, client_for, signal=signal
             ):
-                if isinstance(event, StreamStartEvent):
-                    starts.append((event.response_id, event.inline_ui_source_version))
+                if isinstance(event, StreamAttemptReceipt):
+                    wire_boundaries.append((event.type, event.inline_ui_source_version))
+                elif isinstance(event, StreamStartEvent):
+                    wire_boundaries.append((event.type, event.response_id))
+                elif isinstance(event, StreamTextDelta):
+                    wire_boundaries.append((event.type, None))
                 yield event
 
         def on_event(event: Any) -> None:
-            if isinstance(event, ProviderTurnStartEvent):
-                with_start.append(event.response_id)
+            # Include any experimental provider or receipt frame so an unknown
+            # public event cannot disappear from the CLI/quiet-cycle assertion.
+            if event.type.startswith("provider_turn_") or event.type == "attempt_receipt":
+                acceptance.append(event)
             elif isinstance(event, MessageUpdateEvent):
                 assert isinstance(event.message, Message)
-                start_counts_at_updates.append(len(with_start))
                 markers.append(event.message._inline_ui_source_version)
                 updates.append(projector.dump(event))
             elif isinstance(event, (MessageEndEvent, AgentEndEvent)):
@@ -417,7 +437,9 @@ async def test_native_acceptance_and_identity_preserve_egress(
             stream,
             model={
                 "anthropic": ModelSpec(provider="anthropic", model_id="claude-sonnet-4-6"),
-                "openrouter": ModelSpec(provider="openrouter", model_id="openai/gpt-4o"),
+                "openai": ModelSpec(
+                    provider="openai", model_id="gpt-4o", supports_responses_api=True
+                ),
                 None: (
                     ModelSpec(provider="anthropic", model_id="claude-sonnet-4-6")
                     if route == "messages"
@@ -428,17 +450,23 @@ async def test_native_acceptance_and_identity_preserve_egress(
             }[primary],
         )
         session.subscribe(on_event)
+        renderer = PrintRenderer(json_mode=True)
+        detach_renderer = renderer.attach(session)
         attach_broker(session, broker, "inline-ui")
         try:
             await session.prompt("Show June counts.", inline_ui=bool(primary) or hinted)
-            durable_markers = [
-                message._inline_ui_source_version
-                for message in session._context.messages
-                if isinstance(message, Message) and message.role == "assistant"
-            ]
+            journal_directory = session.transcript.directory
         finally:
+            detach_renderer()
             await session.dispose()
 
+    journal = Transcript(journal_directory, read_only=True)
+    [durable] = [row for row in journal.entries() if row.payload.get("role") == "assistant"]
+    [rehydrated] = [
+        msg
+        for msg in journal.build_llm_history()
+        if isinstance(msg, Message) and msg.id == durable.id
+    ]
     # Inspect projection before asserting metadata: on the old code the
     # opener escaped unprojected, or inherited the failed attempt's marker.
     assert len(updates) >= 2
@@ -459,7 +487,12 @@ async def test_native_acceptance_and_identity_preserve_egress(
         assert all("inline_ui" not in update for update in updates)
     receipt = 1 if hinted else None
     assert markers == [receipt] * len(updates)
-    assert durable_markers == [receipt]
+    assert durable.inline_ui_source_version == receipt
+    assert "inline_ui_source_version" not in durable.payload
+    assert "".join(block["text"] for block in durable.payload["content"]) == "".join(deltas)
+    assert "".join(text for _, text in (durable.inline_ui_source_blocks or ())) == (
+        _OPENER + _CLOSER if hinted else ""
+    )
     [message_end] = [
         frame
         for frame in endings
@@ -471,42 +504,72 @@ async def test_native_acceptance_and_identity_preserve_egress(
     ]
     assert message_end["message"] == final_assistant
     assert "".join(block["text"] for block in final_assistant["content"]) == "".join(deltas)
+    durable_egress = InlineUiEvents(sidecars=True).dump(MessageEndEvent(message=rehydrated))
     if hinted:
         assert message_end["inline_ui"] == agent_end["inline_ui"] == updates[-1]["inline_ui"]
+        assert durable_egress["inline_ui"] == message_end["inline_ui"]
     else:
         assert "inline_ui" not in message_end and "inline_ui" not in agent_end
+        assert "inline_ui" not in durable_egress
     assert posts[-1] == ("/v1/messages" if route == "messages" else f"/{route}", hinted)
-    assert len(posts) == len(starts)
-    if primary == "anthropic":
-        assert starts[:-1] and all(start == (None, 1) for start in starts[:-1])
-    elif primary == "openrouter":
-        assert starts[:-1] and all(start == ("failed-generic", None) for start in starts[:-1])
+    # Use the real CLI writer and canonical SSE publisher, not a second
+    # acceptance parser. Only IDs from on-wire native openers may reach them.
+    cli = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    sse_frames = broker.retained(job_channel("inline-ui"))
+    assert all("identity_only" not in e.data and e.name != "attempt_receipt" for e in sse_frames)
+    assert all(frame["type"] != "attempt_receipt" for frame in cli)
+    provider, model = fallback.split("/", 1)
+    if route == "responses" and primary is None:
+        model = "gpt-4o"
+    if route == "chat/completions":
+        # The original compatible Start uses the loop selector on fallback;
+        # this is not a new native proof path and its attribution stays intact.
+        provider, model = "anthropic", "claude-sonnet-4-6"
     known_id = "chat-actual" if route == "chat/completions" else _NATIVE_IDS[route]
-    assert starts[-1] == (known_id if lifecycle in {"early", "duplicate"} else None, receipt)
-    assert with_start == [response_id for response_id, _ in starts]
-    assert start_counts_at_updates == [len(starts)] * len(updates)
-    publication = [
-        (event.name, event.data.get("response_id"), event.data.get("identity_only"))
-        for event in broker.retained(job_channel("inline-ui"))
-        if event.name in ("provider.start", "message.delta", "agent.end")
-    ]
-    expected: list[tuple[str, str | None, bool | None]] = []
-    for attempt, (response_id, _) in enumerate(starts):
-        expected.append(("provider.start", response_id, None))
-        if primary == "anthropic" and attempt < len(starts) - 1:
-            expected.append(("provider.start", "failed-native", True))
-    first_delta = len(expected)
-    expected += [("message.delta", None, None)] * len(updates)
-    if lifecycle in {"late", "tail"}:
-        position = first_delta + 1 if lifecycle == "late" else len(expected)
-        expected.insert(position, ("provider.start", known_id, True))
-    expected.append(("agent.end", None, None))
-    assert publication == expected
-    print(f"{primary or 'direct'} / {route} / {lifecycle}: {posts=}; {publication=}; {deltas=}")
+    public: list[tuple[str, str | None, str | None, str | None]] = [
+        ("delta", None, None, None)
+    ] * len(updates)
+    if lifecycle in {"early", "duplicate", "late"}:
+        public.insert(int(lifecycle == "late"), ("start", known_id, provider, model))
+    primary_start = {
+        "anthropic": ("start", "failed-native", "anthropic", "claude-sonnet-4-6"),
+        "openai": ("start", "failed-openai", "openai", "gpt-4o"),
+    }.get(primary or "")
+    if primary_start:
+        public.insert(0, primary_start)
+    assert [
+        (kind, frame.get("response_id"), frame.get("provider"), frame.get("model_id"))
+        for frame in cli
+        if (kind := {"provider_turn_start": "start", "message_update": "delta"}.get(frame["type"]))
+    ] == public
+    assert [
+        (
+            kind,
+            event.data.get("response_id"),
+            event.data.get("provider"),
+            event.data.get("model_id"),
+        )
+        for event in sse_frames
+        if (kind := {"provider.start": "start", "message.delta": "delta"}.get(event.name))
+    ] == public
+    assert all(event.type == "provider_turn_start" for event in acceptance)
+    # Feed the actual lifecycle frames into a pending peer's quiet-tool path.
+    # A new unknown typed event would clear the candidate instead of sealing.
+    assert len(exercise_peer_cycle(before_tools=acceptance).records) == 1
+
+    raw: list[tuple[str, str | int | None]] = [("text_delta", None)] * len(updates)
+    if lifecycle in {"early", "duplicate", "late"}:
+        raw.insert(int(lifecycle == "late"), ("start", known_id))
+    if hinted or primary:
+        raw.insert(0, ("attempt_receipt", receipt))
+    if primary_start:
+        raw[:0] = [("attempt_receipt", 1), ("start", primary_start[1])]
+    assert wire_boundaries == raw
+    print(f"{primary or 'direct'} / {route} / {lifecycle}: {posts=}; {public=}; {deltas=}")
 
 
 @pytest.mark.parametrize("route", ["responses", "messages"])
-async def test_native_late_identity_cannot_publish_a_one_turn_secret(
+async def test_native_late_start_cannot_publish_a_one_turn_secret(
     tmp_path: Path, route: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The native tool is real; the unrelated process-wide ledger writer is not
@@ -528,7 +591,6 @@ async def test_native_late_identity_cannot_publish_a_one_turn_secret(
 
     broker = EventBroker()
     scrubbed_ids: list[str | None] = []
-    public_identities: list[ProviderTurnIdentityEvent] = []
     async with _local_sse(post) as base, httpx.AsyncClient(trust_env=False, timeout=5) as http:
         client = (
             OpenAICompatClient(base, openai_api="responses", http_client=http)
@@ -551,13 +613,9 @@ async def test_native_late_identity_cannot_publish_a_one_turn_secret(
             async for event in stream_with_failover(
                 request, FakeAuth({provider: ["synthetic-key"]}), None, client_for, signal=signal
             ):
-                if isinstance(event, StreamResponseIdentityEvent):
+                if isinstance(event, StreamStartEvent):
                     scrubbed_ids.append(event.response_id)
                 yield event
-
-        def on_event(event: Any) -> None:
-            if isinstance(event, ProviderTurnIdentityEvent):
-                public_identities.append(event)
 
         session = make_session(
             tmp_path,
@@ -566,7 +624,6 @@ async def test_native_late_identity_cannot_publish_a_one_turn_secret(
             variables=VariableStore(),
             model=model,
         )
-        session.subscribe(on_event)
         attach_broker(session, broker, "secret-late-id")
         try:
             await session.prompt("Use the native tool, then answer.")
@@ -574,7 +631,7 @@ async def test_native_late_identity_cannot_publish_a_one_turn_secret(
             await session.dispose()
 
     assert len(posts) == 1 and json.dumps(posts[0]).count(canary) == 1
-    assert scrubbed_ids == [None] and public_identities == []
+    assert scrubbed_ids == [None]
     public = [event.data for event in broker.retained(job_channel("secret-late-id"))]
     assert [frame["response_id"] for frame in public if frame["type"] == "provider.start"] == [None]
     assert canary not in json.dumps(public)
@@ -582,8 +639,9 @@ async def test_native_late_identity_cannot_publish_a_one_turn_secret(
 
 
 @pytest.mark.parametrize("converse_first", [True, False])
+@pytest.mark.parametrize("replayable", [True, False])
 async def test_failover_uses_the_serving_adapters_inline_ui_receipt(
-    converse_first: bool, monkeypatch: pytest.MonkeyPatch
+    converse_first: bool, replayable: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "synthetic-bedrock-token")
     monkeypatch.delenv("LOP_BEDROCK_ENDPOINT_URL", raising=False)
@@ -634,6 +692,7 @@ async def test_failover_uses_the_serving_adapters_inline_ui_receipt(
             system_blocks=["stable"],
             messages=[Message.user("Give a brief summary.")],
             inline_ui_hint=INSTRUCTIONS,
+            replayable=replayable,
         )
         auth = FakeAuth({"openai": ["synthetic-key"], "bedrock": [KEY]})
         settings = {"retry": {"maxRetries": 0, "fallbackChains": {"default": [fallback]}}}
@@ -643,10 +702,22 @@ async def test_failover_uses_the_serving_adapters_inline_ui_receipt(
 
     assert {converse for converse, _ in received} == {True, False}
     assert all((INSTRUCTIONS in json.dumps(body)) is not converse for converse, body in received)
-    starts = [
-        event.inline_ui_source_version for event in result if isinstance(event, StreamStartEvent)
+    boundaries = [
+        (
+            (event.type, event.inline_ui_source_version)
+            if isinstance(event, StreamAttemptReceipt)
+            else (event.type, event.response_id)
+        )
+        for event in result
+        if isinstance(event, (StreamAttemptReceipt, StreamStartEvent))
     ]
-    compatible_posts = sum(not converse for converse, _ in received)
-    assert starts == [1] * compatible_posts + ([] if converse_first else [None])
+    compatible = [("attempt_receipt", 1), ("start", _NATIVE_IDS["responses"])]
+    converse = [("attempt_receipt", None), ("start", None)]
+    # A buffered attempt that never gets committed leaks neither its public
+    # acceptance nor its private receipt into the serving attempt.
+    expected = compatible if converse_first else converse
+    if not converse_first and not replayable:
+        expected = compatible + expected
+    assert boundaries == expected
     assert isinstance(result[-1], StreamEndEvent) and result[-1].stop_reason == "stop"
-    print(f"{primary} → {fallback}: {len(starts)} start(s), final inline receipt {starts[-1]}")
+    print(f"{primary} → {fallback}: {replayable=}; {boundaries=}")

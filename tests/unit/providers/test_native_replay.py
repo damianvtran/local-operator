@@ -23,6 +23,10 @@ from local_operator.harness.types import (
     TextContent,
     ToolCall,
 )
+from local_operator.providers.account_affinity import (
+    WireHintCapture,
+    capture_wire_stream,
+)
 from local_operator.providers.auth_store import OAuthAccess
 from local_operator.providers.clients import (
     CODEX_RESPONSES_URL,
@@ -141,11 +145,18 @@ async def test_responses_reasoning_survives_resume_order_and_route_switch(
         )
         unhinted_body = build(request)
         request.inline_ui_hint = INSTRUCTIONS
-        continued = [event async for event in client.stream(request, "fixture", access)]
+        capture = WireHintCapture()
+        continued = [
+            event
+            async for event in capture_wire_stream(
+                client.stream(request, "fixture", access), capture
+            )
+        ]
+        assert capture.inline_ui_source_version == 1
         [unhinted_start] = [event for event in result if isinstance(event, StreamStartEvent)]
         [hinted_start] = [event for event in continued if isinstance(event, StreamStartEvent)]
-        assert unhinted_start.inline_ui_source_version is None
-        assert hinted_start.inline_ui_source_version == 1
+        assert unhinted_start.model_dump() == hinted_start.model_dump()
+        assert hinted_start.response_id == "resp_1"
         url, body = sent[1]
         assert body["input"].pop() == {
             "type": "message",

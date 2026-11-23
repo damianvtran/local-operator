@@ -15,8 +15,8 @@ from local_operator.guides.discovery import (
 from local_operator.harness.types import (
     Message,
     MessageUpdateEvent,
+    StreamAttemptReceipt,
     StreamEndEvent,
-    StreamStartEvent,
     StreamTextDelta,
 )
 from local_operator.session.inline_ui import INSTRUCTIONS, instructions_for
@@ -68,10 +68,10 @@ async def test_inline_ui_replaces_decoration_but_keeps_file_highlights(
     async def adapter(request, signal):
         events = stream(request, signal)
         if request.inline_ui_hint and not adapter_supports_hint:
-            # A hinted primary was accepted but died before emitting content.
-            # The serving adapter's unhinted receipt must replace this one.
-            yield StreamStartEvent(response_id="failed-primary", inline_ui_source_version=1)
-        yield StreamStartEvent(
+            # A hinted primary died before emitting content. The serving
+            # adapter's unhinted receipt must replace its marked attempt.
+            yield StreamAttemptReceipt(inline_ui_source_version=1)
+        yield StreamAttemptReceipt(
             inline_ui_source_version=1 if adapter_supports_hint and request.inline_ui_hint else None
         )
         async for event in events:

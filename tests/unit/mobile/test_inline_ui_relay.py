@@ -23,9 +23,9 @@ from local_operator.harness.types import (
     MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
+    StreamAttemptReceipt,
     StreamEndEvent,
     StreamEvent,
-    StreamStartEvent,
     StreamTextDelta,
 )
 from local_operator.mobile.auth import COOKIE_NAME, sign_cookie
@@ -425,7 +425,7 @@ async def test_warm_mobile_send_streams_and_replays_widget(
                 yield event
             return
         requests.append(request)
-        yield StreamStartEvent(inline_ui_source_version=1 if request.inline_ui_hint else None)
+        yield StreamAttemptReceipt(inline_ui_source_version=1 if request.inline_ui_hint else None)
         yield StreamTextDelta(delta=lead)
         yield StreamTextDelta(delta=fragment[:16])
         yield StreamTextDelta(delta=fragment[16:])
