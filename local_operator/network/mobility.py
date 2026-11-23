@@ -2644,7 +2644,7 @@ def _destination_move(
             ),
             "",
         )
-    carry_block = promote_outcome.carry
+    carry_block = _receipt_carry(promote_outcome)
     if session_roles_left:
         # THE NOTICE THE TARGET RECORDS (design §3.5): the count came from the
         # source, the device name is the source's, and the sentence rides the
@@ -3076,7 +3076,7 @@ def _finish_from_tombstone(
             ),
             "",
         )
-    carry_block = promote_outcome.carry
+    carry_block = _receipt_carry(promote_outcome)
     clear_handoff_entry(server.root, session_id)
     progress.note(session_id, "committed")
     _audit(server, AUDIT_DONE, session_id, owner_device, resumed=True)
@@ -3109,10 +3109,21 @@ def _finish_from_tombstone(
 
 
 class _PromoteOutcome(NamedTuple):
-    """``_promote``'s answer: whether the copy landed and what it carried.
+    """``_promote``'s answer: whether the copy landed, and its scheduled-state block.
 
-    On success, ``carry`` names the skill selection result even if there was
-    no snapshot, and includes any other state adopted by this device.
+    ``ok`` is the bool the callers used to get back wholesale. ``carry`` is
+    ``None`` unless the arriving session carried something to report — the block
+    the move's receipt reports (see :class:`MoveCarryBlock`), which is the half a
+    bool could never carry out of the promote. A promote with no wakes (or other
+    adopted state) MUST leave it ``None``: the wake hook exists so sleepers pay
+    nothing for it, and ``test_move_carry_supervisor`` pins that contract.
+
+    ``skill_selection`` is a SEPARATE concern and so a separate field: the
+    destination's pin acknowledgement (or explicit local routing), present on
+    every successful promote. Folding it into ``carry`` here made ``carry``
+    non-``None`` for every promote and broke the exact wake-carry receipt shape.
+    The callers merge it into the RECEIPT's carry block (``MoveCarryBlock``
+    declares ``skill_selection``), which is where the source and the CLI read it.
 
     ``stamps_refused`` (QA Q-1) marks the one refusal that is NOT about the id
     already being taken here: the copy's origin stamps could not be lowered to
@@ -3124,6 +3135,20 @@ class _PromoteOutcome(NamedTuple):
     carry: dict[str, Any] | None
     stamps_refused: bool = False
     skill_pin_refused: bool = False
+    skill_selection: SkillTransferReceipt | None = None
+
+
+def _receipt_carry(outcome: _PromoteOutcome) -> dict[str, Any] | None:
+    """The receipt's carry block: the promote's wake-carry plus its skill selection.
+
+    ``_promote`` keeps the two apart so its own ``carry`` stays the exact wake-carry
+    contract; the RECEIPT (``MoveCarryBlock``) is where they meet, because the done
+    frame and the returned move result are what the source and the CLI read
+    ``skill_selection`` from.
+    """
+    if outcome.skill_selection is None:
+        return outcome.carry
+    return {**(outcome.carry or {}), "skill_selection": outcome.skill_selection}
 
 
 #: The refusal ``_promote`` answers with when the id is taken or the copy could
@@ -3568,11 +3593,13 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
         workset_move.promote_incoming(server.root, target_id)
     except Exception:  # noqa: BLE001 — the session is promoted; the files wait
         logger.warning("mobility: could not promote %s's working set", target_id, exc_info=True)
-    carry_block = {
-        **(carry_block or {}),
-        "skill_selection": skill_transfer_receipt("pinned" if has_snapshot else "local_routing"),
-    }
-    return _PromoteOutcome(ok=True, carry=carry_block)
+    # Kept OUT of ``carry_block``: that block is the wake-carry receipt and stays
+    # ``None`` for a promote that adopted nothing (see ``_PromoteOutcome``).
+    return _PromoteOutcome(
+        ok=True,
+        carry=carry_block,
+        skill_selection=skill_transfer_receipt("pinned" if has_snapshot else "local_routing"),
+    )
 
 
 def _roll_back_destination(server: "RelayServer", session_id: str, staging: Path) -> None:

@@ -214,9 +214,9 @@ def test_move_promotes_and_pins_the_skill_manifest(
             if server is server_b and outcome.ok:
                 # Same wire shape as a legacy destination; the requester
                 # cannot infer the actual pin from successful publication.
-                carry = dict(outcome.carry or {})
-                carry.pop("skill_selection", None)
-                return outcome._replace(carry=carry)
+                # ``skill_selection`` is its own outcome field (the wake-carry
+                # block stays exact), so dropping it is what a legacy peer sends.
+                return outcome._replace(skill_selection=None)
             return outcome
 
         monkeypatch.setattr(mobility, "_promote", promote_silently)
