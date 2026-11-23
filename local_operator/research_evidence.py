@@ -43,7 +43,14 @@ CANADA = "ca-central-1"
 _MAIN = re.compile(r"ca\.anthropic\.claude-(?:sonnet|opus)-[\w.-]+", re.ASCII)
 _URL = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 _NON_PUBLIC_TLDS = {
-    "localhost", "local", "lan", "internal", "test", "invalid", "example", "onion",
+    "localhost",
+    "local",
+    "lan",
+    "internal",
+    "test",
+    "invalid",
+    "example",
+    "onion",
 }
 # Even a validated selection is not an exhaustive extraction; don't ask the
 # model to paraphrase or decide that pagination/completeness no longer matters.

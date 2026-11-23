@@ -537,7 +537,8 @@ async def test_sdk_prompt_uses_real_bedrock_wire_and_single_ledger_id(
                 unbind()
             session_id = session.session_id
             [tool_message] = [
-                msg for msg in session._context.messages
+                msg
+                for msg in session._context.messages
                 if isinstance(msg, Message) and msg.tool_call_id == "toolu_fixture"
             ]
             if not accepted:
@@ -584,7 +585,8 @@ async def test_sdk_prompt_uses_real_bedrock_wire_and_single_ledger_id(
                 assert len(rows) == 3
                 assert len([record for record in observed if record.purpose == "turn"]) == 2
                 turns = [
-                    m for m in session._context.messages
+                    m
+                    for m in session._context.messages
                     if isinstance(m, Message) and m.role == "assistant"
                 ]
                 assert len(turns) == 2 and turns[-1].text == "Fixture answer"
