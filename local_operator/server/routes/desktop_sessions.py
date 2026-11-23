@@ -2956,8 +2956,10 @@ async def list_sessions(
     cursor: str = Query(default=""),
     # THE ORDER THE PAGE IS READ IN. Absent means the rank order -- byte for
     # byte the answer that existed before this parameter -- and "activity" is
-    # the desktop sidebar's own head order (rows that need the reader first,
-    # then everything else newest-activity-first), which is what keeps a
+    # the desktop sidebar's own head order (running rows first, then
+    # everything else -- unread and attached rows included -- newest-
+    # activity-first; ``CatalogEntry.activity_key`` says why unread rows
+    # no longer lead, local-operator-ui#2069 Q3), which is what keeps a
     # reader's recent conversations inside the first page on a store whose
     # cold population a wake band would otherwise fill. Declared as a plain
     # string and refused BY NAME below (``_requested_sort``), the same rule
