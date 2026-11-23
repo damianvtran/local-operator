@@ -629,7 +629,15 @@ export function AskCard({
 	   sheet's unmount, so collapsing the sheet discarded the draft that §5.0-R7
 	   requires be kept. The chat buffer has lived in the store all along; this is
 	   its twin, keyed by ask id so one collapse cannot mix two asks' answers. */
-	const [draft, setDraft] = useAskDraft(row.ask_id);
+	/* SECRET QUESTIONS ARE NEVER WRITTEN TO THE STORED DRAFT: the value is held in
+	   this card's memory while it is open and nowhere else (`useAskDraft`). Joined
+	   to a string so the list's identity does not change per render. */
+	const secretKey = (Array.isArray(row.questions) ? row.questions : [])
+		.filter((question) => Boolean(question.secret))
+		.map((question) => String(question.id))
+		.join("\u0000");
+	const secretIds = useMemo(() => (secretKey === "" ? [] : secretKey.split("\u0000")), [secretKey]);
+	const [draft, setDraft] = useAskDraft(row.ask_id, secretIds);
 	const [busy, setBusy] = useState<"" | "respond" | "decline" | "dismiss">("");
 	const [error, setError] = useState("");
 	/** Which control produced the refusal, so the sentence can sit beside IT
