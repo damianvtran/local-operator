@@ -970,6 +970,11 @@ def _openrouter_no_route(status: int | None, message: str) -> bool:
     return any(marker in lowered for marker in _OPENROUTER_NO_ROUTE_MARKERS)
 
 
+# A code-less error from the upstream HTTP/2 body reader, not the generic
+# “Stream error” heading (which can also carry a provider's refusal).
+_H2_BODY_READ_STREAM_ERROR = "stream error: h2 protocol error: error reading a body from connection"
+
+
 def _compat_stream_error(chunk: Mapping[str, Any]) -> ProviderError:
     """An in-band mid-stream failure on an OpenAI-compatible stream.
 
@@ -1027,12 +1032,24 @@ def _compat_stream_error(chunk: Mapping[str, Any]) -> ProviderError:
         message = error_type or "provider ended the stream with an error"
     elif error_type and error_type not in message:
         message = f"{error_type}: {message}"
-    return ProviderError(
+    failure = ProviderError(
         status,
         _capped(message),
         retryable=(relayed_upstream or status is None or status == 429 or status >= 500),
         auth_error=status in (401, 403),
     )
+    # Classify from the raw in-band fields, not rendered text or status=None:
+    # a non-HTTP policy code also parses to None, and metadata or formatting
+    # can make unrelated errors sound like a transport failure.
+    failure.in_band_h2_body_read_failure = (
+        isinstance(error, Mapping)
+        and not any(key in error for key in ("code", "status", "type", "error_type"))
+        and not error_type
+        and _first_text(error.get("message")).lower() == _H2_BODY_READ_STREAM_ERROR
+        and message.lower() == _H2_BODY_READ_STREAM_ERROR
+        and not _names_content_verdict(chunk)
+    )
+    return failure
 
 
 #: Ceiling on any advertised wait. A ``Retry-After`` is provider-supplied and

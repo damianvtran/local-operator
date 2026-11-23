@@ -2,9 +2,10 @@
 
 The loop and driver tests next door hand ``stream_with_failover`` a client that
 raises the recorded failure in process. This one replaces that stand-in with an
-ACTUAL OpenAI-compatible HTTP server that dies the way OpenRouter did — bytes
-already streamed, then an in-band ``error`` chunk carrying ``code: 502`` — so
-the shapes that only meet on the wire are exercised together: the SSE parser,
+ACTUAL OpenAI-compatible HTTP server that sends partial output and then an
+in-band error. It exercises the original relay-502 frame and a synthetic
+code-less frame reproducing the diagnostic reported on Radient auto. That
+covers the shapes that only meet on the wire: the SSE parser,
 the client's ``_compat_stream_error`` composition, the driver's ``forwarded_any``
 marking, the loop's composed continuation instruction, and the re-issued call's
 real side effect.
@@ -40,7 +41,7 @@ from local_operator.harness.types import (
 )
 from local_operator.model.configure import build_model_spec
 from local_operator.providers.clients import client_for_spec
-from local_operator.providers.failover import stream_with_failover
+from local_operator.providers.failover import ProviderError, stream_with_failover
 
 MODEL_ID = "deepseek/deepseek-v4.1-flash"
 
@@ -58,6 +59,8 @@ _UPSTREAM_RAW = json.dumps(
         }
     }
 )
+
+_H2_BODY_READ_ERROR = "Stream error: h2 protocol error: error reading a body from connection"
 
 LLM = Message
 
@@ -101,7 +104,19 @@ def gateway(notes_path):
     chat/completions calls were served, and the body of each, so the re-issued
     request can be checked on the WIRE rather than in the driver's memory.
     """
-    state: dict[str, Any] = {"calls": 0, "bodies": []}
+    state: dict[str, Any] = {
+        "calls": 0,
+        "bodies": [],
+        "error": {
+            "code": 502,
+            "message": "Provider returned error",
+            "metadata": {
+                "error_type": "provider_unavailable",
+                "provider_name": "Together",
+                "raw": _UPSTREAM_RAW,
+            },
+        },
+    }
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -164,15 +179,7 @@ def gateway(notes_path):
                             "created": 1776000000,
                             "model": MODEL_ID,
                             "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
-                            "error": {
-                                "code": 502,
-                                "message": "Provider returned error",
-                                "metadata": {
-                                    "error_type": "provider_unavailable",
-                                    "provider_name": "Together",
-                                    "raw": _UPSTREAM_RAW,
-                                },
-                            },
+                            "error": state["error"],
                         }
                     )
                 )
@@ -251,32 +258,77 @@ def executed():
     return []
 
 
+@pytest.mark.parametrize(
+    ("provider", "model_id", "wire_error", "recovers"),
+    [
+        pytest.param("radient", MODEL_ID, None, True, id="relay-502"),
+        pytest.param("radient", "auto", {"message": _H2_BODY_READ_ERROR}, True, id="radient-auto"),
+        pytest.param(
+            "radient-key", "auto", {"message": _H2_BODY_READ_ERROR}, True, id="radient-key-auto"
+        ),
+        pytest.param(
+            "radient", "auto", {"code": 400, "message": _H2_BODY_READ_ERROR}, False, id="http-400"
+        ),
+        pytest.param(
+            "radient",
+            "auto",
+            {"code": "policy_violation", "message": _H2_BODY_READ_ERROR},
+            False,
+            id="explicit-policy-code",
+        ),
+        pytest.param(
+            "radient",
+            "auto",
+            {"status": 403, "message": _H2_BODY_READ_ERROR},
+            False,
+            id="explicit-status",
+        ),
+        pytest.param(
+            "radient",
+            "auto",
+            {"type": "content_policy_violation", "message": _H2_BODY_READ_ERROR},
+            False,
+            id="explicit-refusal-type",
+        ),
+        pytest.param("radient", "auto", {"message": "Stream error: refused"}, False, id="refusal"),
+        pytest.param("openai", "gpt-4o", {"message": _H2_BODY_READ_ERROR}, False, id="first-party"),
+        pytest.param(
+            "openrouter", MODEL_ID, {"message": _H2_BODY_READ_ERROR}, False, id="openrouter"
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_the_incident_is_recovered_over_the_wire(gateway, write_tool, notes_path, executed):
-    """One request dies in band; the turn continues and the call runs for real.
+async def test_the_incident_is_recovered_over_the_wire(
+    gateway, write_tool, notes_path, executed, provider, model_id, wire_error, recovers
+):
+    """A qualified error continues the turn and the re-issued call runs for real.
 
-    Before the fix this gateway ended the pass: one request, ``agent_end.error``
-    set, rc=1, and the half-composed ``write`` lost. The assertion that matters
-    is the file: the re-issued call is only evidence of recovery if it actually
-    ran.
+    Otherwise, the original stream error ends the pass without another request
+    or any writes. The incomplete call must never run in either case.
     """
     base_url, state = gateway
-    spec = build_model_spec("radient", MODEL_ID).model_copy(update={"base_url": base_url})
+    if wire_error is not None:
+        state["error"] = wire_error
+    spec = build_model_spec(provider, model_id).model_copy(update={"base_url": base_url})
     auth = _OneBearerAuth()
-    sent: list[ChatRequest] = []
+    failures: list[ProviderError] = []
 
     async def client_for(model: Any) -> Any:
         return client_for_spec(model)
 
-    def stream_fn(request: ChatRequest, signal: AbortSignal | None):
-        sent.append(request)
-        return stream_with_failover(
-            request,
-            auth,
-            {"retry": {"baseDelayMs": 1, "maxRetries": 1}},
-            client_for,
-            signal=signal,
-        )
+    async def stream_fn(request: ChatRequest, signal: AbortSignal | None):
+        try:
+            async for event in stream_with_failover(
+                request,
+                auth,
+                {"retry": {"baseDelayMs": 1, "maxRetries": 1}},
+                client_for,
+                signal=signal,
+            ):
+                yield event
+        except ProviderError as failure:
+            failures.append(failure)
+            raise
 
     config = LoopConfig(
         model=spec,
@@ -298,6 +350,19 @@ async def test_the_incident_is_recovered_over_the_wire(gateway, write_tool, note
 
     ends = [e for e in events if isinstance(e, AgentEndEvent)]
     assert len(ends) == 1
+    assert len(failures) == 1
+    failure = failures[0]
+    code = state["error"].get("code")
+    assert failure.status == (code if isinstance(code, int) else None)
+    if model_id == "auto":
+        assert state["bodies"][0]["model"] == "auto"
+    assert not failure.transport  # This was an HTTP 200 error frame, not a local read failure.
+    assert failure.connectivity_loss is recovers
+    if not recovers:
+        assert ends[0].error and wire_error["message"] in ends[0].error
+        assert state["calls"] == 1
+        assert executed == [] and not notes_path.exists()
+        return
     assert ends[0].error is None, "a gateway's upstream death must not end the pass"
     assert ends[0].aborted is False
 
@@ -325,6 +390,9 @@ async def test_the_incident_is_recovered_over_the_wire(gateway, write_tool, note
     follow_up = state["bodies"][1]["messages"]
     instruction = follow_up[-1]["content"]
     assert follow_up[-1]["role"] == "user"
+    # The signed-in auto route can serialize the same text as cacheable blocks.
+    if isinstance(instruction, list):
+        instruction = "".join(part["text"] for part in instruction)
     assert "write" in instruction and "aborted" in instruction
     assert is_harness_chrome(instruction)
     # The truncated call never reached the wire: no unpaired tool_call in the
