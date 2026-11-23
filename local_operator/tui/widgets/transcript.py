@@ -10653,7 +10653,19 @@ class TranscriptView(ScrollableContainer):
         self._unseen_below = False
         self._sync_jump_chip()
         self._tail_anchor.acquire()
-        self.call_after_refresh(self._scroll_to_tail)
+        # The deferred scroll carries the release revision it was asked under,
+        # like ``_land_on_tail``: a reader who scrolls away between this call
+        # and the refresh has made a newer choice, and landing the tail then
+        # would also hand the anchor back (the deferred resync reads "near the
+        # bottom" and re-acquires it), undoing their release for good.
+        self.call_after_refresh(
+            self._scroll_to_tail_unless_released, self._tail_anchor.release_revision
+        )
+
+    def _scroll_to_tail_unless_released(self, release_revision: int) -> None:
+        if release_revision != self._tail_anchor.release_revision:
+            return
+        self._scroll_to_tail()
 
     def scroll_rows(self, delta: int) -> None:
         """Move the viewport ``delta`` rows as an explicit READER gesture.
