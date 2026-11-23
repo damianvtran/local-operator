@@ -342,3 +342,40 @@ describe("viewer layout and focus rings (design R2 D2, D3)", () => {
 		expect(host.className).not.toMatch(/(^|\s)h-full/);
 	});
 });
+
+describe("inline height clamp", () => {
+	/* happy-dom has no layout: the drawing's natural height is stubbed, and the
+	   clip box's clientHeight is what the browser would give it, the natural height
+	   held to the inline max-height the component set (16 px root font). */
+	function stubLayout(naturalPx: number) {
+		vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(naturalPx);
+		vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
+			const max = parseFloat(this.style.maxHeight) * 16;
+			return Number.isNaN(max) ? naturalPx : Math.min(naturalPx, max);
+		});
+	}
+
+	it("shows a small phone-width flowchart (542 px with padding) whole: no clip, no fade, no hint", async () => {
+		stubLayout(542);
+		const { container } = render(<Markdown text={fenced(DIAGRAM_SAMPLES.flowchart)} />);
+		await waitFor(() => expect(drawn(container)).not.toBeNull());
+		const tap = screen.getByTestId("diagram-tap");
+		expect(parseFloat(tap.style.maxHeight) * 16).toBeGreaterThanOrEqual(542);
+		expect(screen.queryByTestId("diagram-fade")).toBeNull();
+		expect(screen.queryByTestId("diagram-cut-hint")).toBeNull();
+	});
+
+	it("holds a genuinely tall drawing at the cap behind the fade, with a labelled hint, and still opens full size", async () => {
+		stubLayout(3000);
+		const { container } = render(<Markdown text={fenced(DIAGRAM_SAMPLES.flowchart)} />);
+		await waitFor(() => expect(drawn(container)).not.toBeNull());
+		expect(screen.getByTestId("diagram-tap").style.maxHeight).toBe("40rem");
+		expect(screen.getByTestId("diagram-fade")).not.toBeNull();
+		const hint = screen.getByTestId("diagram-cut-hint");
+		expect(hint.textContent).toContain("Full size");
+		/* decorative: opening stays with the tap area and the footer button */
+		expect(hint.closest("button")).toBeNull();
+		await act(async () => fireEvent.click(screen.getByTestId("diagram-tap")));
+		expect(await screen.findByRole("dialog")).not.toBeNull();
+	});
+});
