@@ -5,7 +5,7 @@
 // runtime is gone), shows only the rows of the conversation it was opened from,
 // and re-reads when the outstanding population moves rather than waiting for a
 // manual refresh.
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AsksSheet } from "./components/asks-sheet";
 import type { PendingAsk, SessionProjection, SessionSummary } from "./types";
@@ -663,10 +663,10 @@ describe("the ask panel", () => {
 		});
 		open();
 		await screen.findByTestId("ask-row");
-		const bar = screen.getByTestId("asks-bar");
-		expect(bar.childElementCount).toBe(0);
-		// `empty:hidden` collapses it; the class is the contract happy-dom can see.
-		expect(bar.className).toContain("empty:hidden");
+		// No card is open, so there is no bar at all, hence no stripe and no footer
+		// wrapper to reserve height (QA Q-4).
+		expect(screen.queryByTestId("asks-bar")).toBeNull();
+		expect(document.querySelector("[data-sheet-footer]")).toBeNull();
 	});
 
 	it("opens another waiting ask from its row, and closes the current one", async () => {
@@ -746,8 +746,8 @@ describe("the ask panel", () => {
 		expect(screen.getByText("blue")).toBeTruthy();
 		expect(screen.getAllByText("Answered — the agent was told")).toHaveLength(1);
 		// … and it never sits between the open card's options and the pinned buttons.
-		const bar = screen.getByTestId("asks-bar");
-		expect(bar.querySelector("dl")).toBeNull();
+		// Opening the settled row closes the live card, taking the bar with it.
+		expect(screen.queryByTestId("asks-bar")?.querySelector("dl") ?? null).toBeNull();
 	});
 
 	it("says why Send is grey, and stops saying it when the form is complete", async () => {
@@ -925,6 +925,61 @@ describe("the ask panel", () => {
 		const footer = bar.closest("[data-sheet-footer]") as HTMLElement;
 		expect(footer.className).toContain("overflow-y-auto");
 		expect(footer.className).toContain("min-h-0");
+	});
+
+	/* The reading floor and the footer belong to a DRAWN card (QA Q-4): the empty
+	   and loading sheets are one line, and a floor of 28% of the column turned them
+	   into a blank slab (112 px -> 304 px at 390x844). */
+	const scrollerOf = () => screen.getByRole("dialog").querySelector<HTMLElement>(".lo-scroll") as HTMLElement;
+
+	it("keeps the empty sheet short: no footer wrapper and no reading floor", async () => {
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({ asks: [] });
+		open();
+		await screen.findByTestId("ask-sheet-empty");
+		expect(document.querySelector("[data-sheet-footer]")).toBeNull();
+		expect(scrollerOf().style.minHeight).toBe("");
+	});
+
+	it("keeps the loading sheet short too", () => {
+		(getAsks as ReturnType<typeof vi.fn>).mockImplementation(() => new Promise(() => {}));
+		open();
+		expect(screen.getByText("Reading questions…")).toBeTruthy();
+		expect(document.querySelector("[data-sheet-footer]")).toBeNull();
+		expect(scrollerOf().style.minHeight).toBe("");
+	});
+
+	it("brings the footer and the floor with the card, and answers through the bar", async () => {
+		let resolve: (value: { asks: PendingAsk[] }) => void = () => {};
+		(getAsks as ReturnType<typeof vi.fn>).mockImplementation(
+			() => new Promise((done) => (resolve = done)),
+		);
+		open();
+		expect(document.querySelector("[data-sheet-footer]")).toBeNull();
+		// The card arrives AFTER first paint: the bar mounts with it and the card
+		// still finds its portal target (the first-open race).
+		await act(async () => resolve({ asks: [choice("late", "late question?")] }));
+		await screen.findByTestId("ask-card");
+		expect(document.querySelector("[data-sheet-footer]")).not.toBeNull();
+		expect(scrollerOf().style.minHeight).toContain("0.28");
+		const bar = screen.getByTestId("asks-bar");
+		await waitFor(() => expect(within(bar).getByRole("button", { name: /Send answer/ })).toBeTruthy());
+		expect(within(bar).getByRole("button", { name: /^Decline$/ })).toBeTruthy();
+	});
+
+	it("drops the footer again when the last card is answered away", async () => {
+		const { sendCommand } = await import("./api");
+		let current = [choice("only", "only question?")];
+		(getAsks as ReturnType<typeof vi.fn>).mockImplementation(async () => ({ asks: current }));
+		(sendCommand as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+			current = [];
+			return { ok: true, detail: "answered" };
+		});
+		open();
+		await screen.findByTestId("ask-card");
+		fireEvent.click(screen.getAllByRole("radio")[0]);
+		fireEvent.click(await screen.findByRole("button", { name: /Send answer/ }));
+		await waitFor(() => expect(document.querySelector("[data-sheet-footer]")).toBeNull());
+		expect(scrollerOf().style.minHeight).toBe("");
 	});
 });
 

@@ -508,13 +508,22 @@ export function AsksSheet({
 			closeFocusSignal={closeFocus}
 			/* THE ANSWERING CONTROLS ARE PINNED, outside the scroller: content may
 			   scroll, the control that answers the card may not. The bar is empty (and
-			   collapsed) unless the open ask has something to answer with. */
+			   collapsed) unless the open ask has something to answer with.
+
+			   ONLY WHILE A CARD IS DRAWN (QA Q-4): the sheet gives the scroller a
+			   reading floor whenever it has a footer, so offering one on the empty and
+			   loading states turned a one-line sheet into a blank slab. The bar mounts
+			   with the card; `setBarEl` hands the card its portal target on the next
+			   render, the same one-frame gap the always-mounted bar had on first open,
+			   and clears it when the card goes. */
 			footer={
-				<div
-					ref={setBarEl}
-					data-testid="asks-bar"
-					className="border-t border-hairline px-3 py-2 empty:hidden"
-				/>
+				openRow ? (
+					<div
+						ref={setBarEl}
+						data-testid="asks-bar"
+						className="border-t border-hairline px-3 py-2 empty:hidden"
+					/>
+				) : undefined
 			}
 		>
 			<div className="flex flex-col gap-3 p-3">
