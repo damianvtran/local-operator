@@ -1,7 +1,7 @@
 {
   "tui.settings_view.editor.contract": "{save_key}保存 · {cancel_key}取消",
   "tui.settings_view.editor.contract_unset": "{save_key}保存 · {cancel_key}取消 · 留空即清除",
-  "tui.settings_view.editor.suggest_long": "{browse_keys}选建议 · {complete_key}补全 · {save_key}保存 · {cancel_key}",
+  "tui.settings_view.editor.suggest_long": "{browse_keys}浏览建议 · {complete_key}补全 · {save_key}保存 · {cancel_key}",
   "tui.settings_view.editor.suggest_medium": "{browse_keys}浏览 · {complete_key}补全 · {save_key}保存",
   "tui.settings_view.editor.suggest_short": "{browse_keys} · {complete_key} · {save_key}保存",
   "tui.settings_view.pane.agents_empty": "未配置智能体",
