@@ -236,6 +236,7 @@ class _CommandHandle(_InlineHandle):
         command_id: str | None = None,
         *,
         inline_ui: bool = False,
+        delivery: str | None = None,
     ) -> str:
         if text == "busy":
             raise TurnInFlight(TURN_IN_FLIGHT)
@@ -248,8 +249,12 @@ class _CommandHandle(_InlineHandle):
         command_id: str | None = None,
         *,
         inline_ui: bool = False,
+        delivery: str | None = None,
     ) -> str:
-        return await self._record("steer", text, command_id=command_id, inline_ui=inline_ui)
+        fields = {"delivery": delivery} if delivery is not None else {}
+        return await self._record(
+            "steer", text, command_id=command_id, inline_ui=inline_ui, **fields
+        )
 
 
 @pytest.mark.asyncio
@@ -293,7 +298,7 @@ async def test_http_continuation_negotiates_inline_ui_per_send(capable: bool) ->
                     ("rich", {"inline_ui": True}, "prompt"),
                     ("legacy", {}, "prompt"),
                     ("malformed", {"inline_ui": "true"}, "prompt"),
-                    ("busy", {"inline_ui": True}, "steer"),
+                    ("busy", {"inline_ui": True, "delivery": "queue"}, "steer"),
                     ("steer", {"inline_ui": True}, "steer"),
                 ):
                     reply = await client.post(
@@ -311,7 +316,11 @@ async def test_http_continuation_negotiates_inline_ui_per_send(capable: bool) ->
             ("prompt", ("rich",), {"command_id": ids["rich"], "inline_ui": capable}),
             ("prompt", ("legacy",), {"command_id": ids["legacy"], "inline_ui": False}),
             ("prompt", ("malformed",), {"command_id": ids["malformed"], "inline_ui": False}),
-            ("steer", ("busy",), {"command_id": ids["busy"], "inline_ui": capable}),
+            (
+                "steer",
+                ("busy",),
+                {"command_id": ids["busy"], "inline_ui": capable, "delivery": "queue"},
+            ),
             ("steer", ("steer",), {"command_id": ids["steer"], "inline_ui": capable}),
         ]
     finally:

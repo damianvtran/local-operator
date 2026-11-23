@@ -1568,3 +1568,45 @@ def test_reading_a_childs_todo_snapshot_never_creates_its_directory(tmp_path) ->
     absent = tmp_path / "sessions" / "ffffffffffff"
     assert _read_restored_todos(str(absent)) == []
     assert not absent.exists(), "reading a child's snapshot must not create its directory"
+
+
+@pytest.mark.asyncio
+async def test_a_live_remap_repaints_the_collapsed_chip_and_the_expanded_footer() -> None:
+    """Q11: `sync`'s equality guard covers the store, budget, expanded flag and
+    hidden set — a remap moves none of them, so without dropping the guard the
+    COLLAPSED chip kept naming the old key (the expanded footer had its own
+    repaint, the collapsed one had nothing).
+    """
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _adopted(pilot, app)
+        builtin.TODO_STORE["sess"] = [
+            {
+                "name": "Foundation",
+                "items": [_item("wire the config", "pending"), _item("ship it", "pending")],
+            }
+        ]
+        app._refresh_band()
+        await pilot.pause()
+        panel = app.query_one(TodoPanel)
+        assert "ctrl+t" in _affordance_text(panel), _affordance_text(panel)
+
+        app._apply_keymap({"keymap.toggle_todos": "f12"}, announce=False)
+        await pilot.pause()
+        collapsed = _affordance_text(panel)
+        assert "f12" in collapsed, collapsed
+        assert "ctrl+t" not in collapsed, collapsed
+
+        app.action_toggle_todos()
+        await pilot.pause()
+        assert panel._expanded
+        assert "f12" in _affordance_text(panel), _affordance_text(panel)
+
+        app._apply_keymap({"keymap.toggle_todos": "f7"}, announce=False)
+        await pilot.pause()
+        expanded = _affordance_text(panel)
+        assert "f7" in expanded, expanded
+        assert "f12" not in expanded, expanded

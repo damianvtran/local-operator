@@ -223,6 +223,32 @@ async def test_the_hold_does_not_touch_a_reader_who_scrolled_away() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_queued_follow_does_not_undo_a_release_made_before_it_runs() -> None:
+    """The deterministic form of the race the test above only loses under load.
+
+    ``follow_tail`` defers its scroll to the next refresh. A reader who scrolls
+    away before that refresh ran has released the anchor; the stale scroll must
+    not carry them back to the tail, because the resync queued by their own
+    scroll would then read "at the bottom" and re-acquire the anchor.
+    """
+    app = _app()
+    async with app.run_test(size=FRAME) as pilot:
+        await pilot.pause()
+        view = app._transcript_view()
+        view.follow_tail()
+        await _seed(pilot, view)
+        assert view.is_following_tail, "the seed should end at the tail"
+
+        view.follow_tail()  # queued: its refresh has not run yet
+        view.scroll_to(y=0, animate=False, immediate=True, force=True)
+        view.note_user_scroll(upward=True)
+        await pilot.pause()
+
+        assert not view.is_following_tail, "a stale queued follow re-acquired the tail"
+        assert float(view.scroll_y) < float(view.max_scroll_y) - 0.5
+
+
+@pytest.mark.asyncio
 async def test_the_reveal_hold_is_taken_and_released_around_one_layout() -> None:
     """The hold is DRIVEN by the reveal and dropped again after it.
 

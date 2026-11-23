@@ -224,7 +224,10 @@ async def test_warm_mobile_prompt_negotiates_inline_ui_per_request(
 
 
 @pytest.mark.asyncio
-async def test_mobile_steer_carries_inline_ui_to_the_next_provider_call(tmp_path: Path) -> None:
+@pytest.mark.parametrize("delivery", [None, "queue"], ids=["steer", "queue"])
+async def test_mobile_steer_carries_inline_ui_to_the_next_provider_call(
+    tmp_path: Path, delivery: str | None
+) -> None:
     entered = asyncio.Event()
     release = asyncio.Event()
     requests: list[ChatRequest] = []
@@ -254,10 +257,14 @@ async def test_mobile_steer_carries_inline_ui_to_the_next_provider_call(tmp_path
                 await entered.wait()
             assert INSTRUCTIONS not in requests[0].system_blocks
             assert requests[0].inline_ui_hint is None
-            await _send(
-                writer, {"op": "steer", "text": "Add a table.", "inline_ui": True, "req": 2}
-            )
+            frame = {"op": "steer", "text": "Add a table.", "inline_ui": True, "req": 2}
+            if delivery is not None:
+                frame["delivery"] = delivery
+            await _send(writer, frame)
             assert (await _read(reader, "ack"))["req"] == 2
+            # Both modes carry the hint, but only ordinary steering may
+            # interrupt the running step while the provider is still blocked.
+            assert session._has_urgent_steering() is (delivery is None)
             release.set()
             async with asyncio.timeout(10):
                 while len(requests) < 2:

@@ -25,8 +25,11 @@ from __future__ import annotations
 
 import pytest
 
-from local_operator.session.runtime.server import RuntimeServer
-from local_operator.session.runtime.types import INPUT_MODE_CAPABILITY
+from local_operator.session.runtime.server import RuntimeServer, _takes_delivery
+from local_operator.session.runtime.types import (
+    BUSY_DELIVERY_CAPABILITY,
+    INPUT_MODE_CAPABILITY,
+)
 from tests.unit.session.runtime.test_server import FakeHandle
 
 
@@ -86,3 +89,99 @@ async def test_the_token_is_absent_on_a_kwargs_only_handle() -> None:
 @pytest.mark.asyncio
 async def test_the_token_needs_both_ops() -> None:
     assert INPUT_MODE_CAPABILITY not in _capabilities(HalfCarryingHandle())
+
+
+class DeliveryCarryingHandle(FakeHandle):
+    """The production shape for delivery modes: both ops take the keyword."""
+
+    async def prompt(
+        self, text, images=None, command_id=None, delivery=None
+    ):  # noqa: ANN001, ANN202
+        return await self._record("prompt", text)
+
+    async def steer(
+        self, text, images=None, command_id=None, delivery=None
+    ):  # noqa: ANN001, ANN202
+        return await self._record("steer", text)
+
+
+class DeliveryKwargsHandle(FakeHandle):
+    """A ``**kwargs``-only acceptor: the dispatch does not pass the keyword."""
+
+    async def prompt(self, text, images=None, command_id=None, **kwargs):  # noqa: ANN001, ANN202
+        return await self._record("prompt", text)
+
+    async def steer(self, text, images=None, **kwargs):  # noqa: ANN001, ANN202
+        return await self._record("steer", text)
+
+
+class DeliveryHalfCarryingHandle(FakeHandle):
+    """Only ``steer`` reads the keyword; the token needs both ops."""
+
+    async def steer(
+        self, text, images=None, command_id=None, delivery=None
+    ):  # noqa: ANN001, ANN202
+        return await self._record("steer", text)
+
+
+def _delivery_capabilities(handle: FakeHandle) -> list[str]:
+    return RuntimeServer(handle, kind="tui")._record.capabilities
+
+
+@pytest.mark.asyncio
+async def test_delivery_token_present_when_both_ops_take_keyword() -> None:
+    assert BUSY_DELIVERY_CAPABILITY in _delivery_capabilities(DeliveryCarryingHandle())
+
+
+@pytest.mark.asyncio
+async def test_delivery_token_absent_on_legacy_handle() -> None:
+    assert BUSY_DELIVERY_CAPABILITY not in _delivery_capabilities(FakeHandle())
+
+
+@pytest.mark.asyncio
+async def test_delivery_token_absent_on_kwargs_only_handle() -> None:
+    assert BUSY_DELIVERY_CAPABILITY not in _delivery_capabilities(DeliveryKwargsHandle())
+
+
+@pytest.mark.asyncio
+async def test_delivery_token_needs_both_ops() -> None:
+    assert BUSY_DELIVERY_CAPABILITY not in _delivery_capabilities(DeliveryHalfCarryingHandle())
+
+
+def test_the_real_handles_take_delivery() -> None:
+    """QA round 1's repro: the production classes, not the doubles above.
+
+    The token is gated on ``_takes_delivery(handle)``, which probes each op's
+    literal parameters. The doubles in this file can carry the keyword while
+    the REAL handles do not — and that is exactly what shipped: only ``steer``
+    was widened, so ``_takes_delivery(ServingSessionHandle)`` answered False
+    and no real runtime ever advertised ``busy-delivery-v1``. Pin the classes
+    the runtime actually serves, unbound, so a signature narrowing on either
+    one fails here instead of silently withdrawing the capability.
+    """
+    from local_operator.mobile.tui_handle import TuiSessionHandle
+    from local_operator.session.runtime.serving import ServingSessionHandle
+
+    assert _takes_delivery(
+        ServingSessionHandle
+    ), "ServingSessionHandle.prompt/steer must both take delivery"
+    assert _takes_delivery(
+        TuiSessionHandle
+    ), "TuiSessionHandle.prompt/steer must both take delivery"
+
+
+def test_delivery_faker_matches_the_real_handles() -> None:
+    """``DeliveryCarryingHandle`` must tell the truth about the real ones.
+
+    The double above takes ``delivery`` on both ops; the line it stands for
+    — "the production shape" — is only true while the real classes do too.
+    If either real handle narrows, this fails beside the test above, naming
+    the double that still claims otherwise.
+    """
+    from local_operator.mobile.tui_handle import TuiSessionHandle
+    from local_operator.session.runtime.serving import ServingSessionHandle
+
+    double = _takes_delivery(DeliveryCarryingHandle)
+    assert double is True
+    assert _takes_delivery(ServingSessionHandle) is True
+    assert _takes_delivery(TuiSessionHandle) is True

@@ -15,5 +15,7 @@
   "tui.transcript.group.steered": "{count, plural, one {{label} изменение инструкций} few {{label} изменения инструкций} many {{label} изменений инструкций} other {{label} изменения инструкций}}",
   "tui.transcript.hub.reply_requested": "Запрошен ответ",
   "tui.transcript.hub.steered": "Инструкции изменены",
-  "tui.transcript.hub.from": "От: {identity}"
+  "tui.transcript.hub.from": "От: {identity}",
+  "tui.transcript.jump_to_latest": "К последнему",
+  "tui.transcript.jump_to_latest.short": "Новое"
 }

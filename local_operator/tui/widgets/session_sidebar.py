@@ -32,6 +32,7 @@ from local_operator.i18n.keys import tui_tags as _tag_keys
 from local_operator.i18n.text import tr
 from local_operator.resume import format_age, peer_reason_words
 from local_operator.session.preview import AGENT_OPENED_MARK, opener_role
+from local_operator.tui import hotkey_hints
 from local_operator.tui import notifications_model as model
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
@@ -3090,6 +3091,15 @@ class SessionSidebar(Widget, can_focus=True):
             result.append("\n" + footer, style=footer_style)
         return result
 
+    def keymap_hints_changed(self) -> None:
+        """Repaint the footer ladder and its hit spans after a live remap (R1).
+
+        `_footer_line` composes per render, so the only thing needed is a paint;
+        the chip's span moves with the text, and `_chip_hit` re-derives it from
+        the same function.
+        """
+        self.refresh(layout=True)
+
     def _footer_line(self, width: int) -> tuple[str, tuple[int, int] | None]:
         """The footer as painted, plus the `⌥N` chip's span within it, if any.
 
@@ -3119,6 +3129,13 @@ class SessionSidebar(Widget, can_focus=True):
         # what gives way: the position is discoverable by scrolling (the
         # cursor row is painted) and the panel's own toggle is on the frame
         # that opens it.
+        # The LEAD stays in its SHIPPED spelling here, and every candidate is
+        # re-keyed exactly ONCE after it is fully composed (M1, review round 2).
+        # Substituting `lead` at its definition was the round-1 fix for the
+        # `head_plain` rung, but every rung in this ladder is also built from
+        # `lead` — so `base`/`head_hide` then substituted it a SECOND time, and
+        # a swap (toggle_sidebar <-> focus_sidebar) or a chain (a live value
+        # that is another shipped chord) came back corrupted.
         lead = (
             _t(_x.session_sidebar_lead_return())
             if self.has_focus
@@ -3331,13 +3348,17 @@ class SessionSidebar(Widget, can_focus=True):
                 candidates = [t + tail for tail in tail_variants for t in templates]
             if chip:
                 candidates.append(f"{lead} · {chip}")
+        # ONE substitution, over the fully composed candidates (M1): the lead,
+        # the hide suffix and the tails are all shipped copy here, so a single
+        # pass cannot rewrite its own output and a swap or a chain survives.
+        candidates = [hotkey_hints.live_copy(self, candidate) for candidate in candidates]
         hint = next(
             (
                 candidate
                 for candidate in candidates
                 if truncate_cells(candidate, width) == candidate
             ),
-            base,
+            hotkey_hints.live_copy(self, base),
         )
         footer = (
             _t_ss(_ss.footer_refresh_failed())

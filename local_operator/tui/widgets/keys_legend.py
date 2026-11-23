@@ -45,6 +45,7 @@ from textual.binding import Binding
 from textual.message import Message
 from textual.widgets import Static
 
+from local_operator import keymap as _keymap
 from local_operator.i18n.keys import tui_chrome_bindings as _x
 from local_operator.i18n.keys import tui_transcript_fold
 from local_operator.i18n.text import register_refresh, tr
@@ -221,12 +222,22 @@ LEGEND_SECTIONS: tuple[LegendSection, ...] = _legend_sections()
 
 #: Rows whose key is the DEFAULT of a remappable action, mapped to the keymap
 #: ids that can change it. Every other row's key is an unconditional binding
-#: that cannot drift; these two are the card's only rows that could become a
-#: lie after `lop config edit keymap.<id>` or the settings page (design round
-#: 1, D6), so they are resolved against the LIVE keymap at composition time.
+#: that cannot drift; the rows below are the ones that could become a lie
+#: after `lop config edit keymap.<id>` or the settings page (design round 1,
+#: D6), so they are resolved against the LIVE keymap at composition time.
+#: DESCRIPTIONS that name a chord (the sessions heading's `(f9)`, `f9 again
+#: returns`) are re-keyed by `keymap.substitute_keys` at the same paint, for
+#: the same reason and without retyping translated copy.
 #: `tests/unit/tui/test_keys_legend.py` asserts these ids exist in
 #: `KEY_ACTIONS`, which is the drift guard for the string pair.
 _REMAPPABLE_ROWS: dict[str, tuple[str, ...]] = {
+    "f9": ("keymap.focus_sidebar",),
+    "f10": ("keymap.toggle_pin",),
+    "f8": ("keymap.aside",),
+    "ctrl+b": ("keymap.toggle_sidebar",),
+    "ctrl+t": ("keymap.toggle_todos",),
+    "ctrl+g": ("keymap.toggle_subagents",),
+    "ctrl+l": ("keymap.clear_transcript",),
     "ctrl+n/ctrl+s": ("keymap.new_session", "keymap.resume"),
 }
 
@@ -329,11 +340,11 @@ def build_legend_rows(width: int, keymap: Mapping[str, str] | None = None) -> li
         # an extra painted row that `len(rows)` never counted, so the pinned
         # height under-counts and the hint row -- the only exit cue -- is the
         # first thing clipped (design round 1, D1).
-        for part in wrap_cells(section.heading, width) or [""]:
+        for part in wrap_cells(_keymap.substitute_keys(section.heading, keymap), width) or [""]:
             rows.append(Text(part, style=heading_ink))
         for key, description in section.rows:
             painted_key = resolve_key(key, keymap)
-            parts = wrap_cells(description, desc_width) or [""]
+            parts = wrap_cells(_keymap.substitute_keys(description, keymap), desc_width) or [""]
             if stacked:
                 rows.append(Text(painted_key, style=key_ink))
                 for part in parts:
@@ -424,6 +435,16 @@ class KeysLegend(Static):
         """
         screen_width, _ = overlay.screen_size(self)
         return min(natural_width(self._keymap_snapshot()), screen_width - 2)
+
+    def keymap_hints_changed(self) -> None:
+        """Recompose the card after a live remap (R1).
+
+        ``_repaint`` is the class's own composition path: the rows AND the key
+        column are functions of the keymap, so a plain ``refresh`` would repaint
+        the widget from the Text it was last given. A no-op while the card is
+        closed, which is why it is safe on every remap.
+        """
+        self._repaint()
 
     def _content_width(self) -> int:
         return max(1, self.panel_width() - PADDING_CELLS)

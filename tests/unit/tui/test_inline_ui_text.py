@@ -355,6 +355,27 @@ async def test_page_keys_read_a_narrow_grid_from_the_focused_composer(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_busy_composer_queue_keeps_inline_ui_opt_in() -> None:
+    from local_operator.session.session import INPUT_SURFACE_KEY
+    from local_operator.tui.app import OperatorApp
+    from tests.unit.tui.conftest import await_session_boot
+    from tests.unit.tui.test_app_pilot import _factory
+    from tests.unit.tui.test_busy_delivery import _DeliveryStreaming
+
+    session = _DeliveryStreaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await await_session_boot(app)
+        app._apply_keymap({"keymap.send_queue": "ctrl+enter"}, announce=False)
+        await pilot.press("t", "a", "b", "l", "e", "ctrl+enter")
+        await pilot.pause()
+        assert session.delivery_steers == [("table", "queue")]
+        (queued,) = session.queued_steering()
+        assert queued.provider_payload[INPUT_SURFACE_KEY] == "tui"
+        assert queued._inline_ui_viewer_capable is True
+
+
+@pytest.mark.asyncio
 async def test_authoritative_empty_final_removes_a_widget_only_terminal_row():
     from local_operator.harness.types import (
         Message,

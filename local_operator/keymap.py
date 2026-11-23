@@ -66,11 +66,14 @@ intercept before dispatch.
 from __future__ import annotations
 
 import dataclasses
+import re
 import sys
 from collections.abc import Callable, Mapping
+from types import MappingProxyType
 from typing import Any
 
 from local_operator.i18n.keys import tui_welcome
+from local_operator.i18n.keys import wire_settings_keymap as _wk
 from local_operator.i18n.text import register_refresh, tr
 
 # ---------------------------------------------------------------------------
@@ -85,6 +88,14 @@ from local_operator.i18n.text import register_refresh, tr
 # unchanged, and `welcome._resolve_tip` substitutes the CURRENT persisted key
 # at render — the same per-render contract the field has always had.
 _t = tr("tui.welcome")
+
+#: Hotkey row copy for the composer-scoped send chords. The ``KeyAction``
+#: literals stay empty so the i18n ratchet does not count them; THIS
+#: resolver fills them from ``wire.settings.keymap`` — the same catalogue
+#: ``settings_io._KEYMAP_COPY`` paints the settings rows from — so
+#: ``group_conflict`` and the settings page keep naming the other row in
+#: whatever locale the process is in.
+_keymap_t = tr("wire.settings.keymap")
 
 #: Prefix every remappable action's config key and binding id carries. The
 #: settings page, ``_on_config_change`` and the resolver all key on it, so
@@ -131,23 +142,43 @@ class KeyAction:
     #: under 32 cells excluding ``{key}`` — ``welcome.TIP_MIN_WIDTH`` budgets
     #: a worst-case key against it and an over-long template would push the
     #: threshold up and drop the tip row on narrow terminals. "" means "no
-    #: tip" and ``welcome.KEYED_TIPS`` skips the row.
+    #: tip" and ``welcome.KEYED_TIPS`` skips the row; the transcript-scroll
+    #: pair uses a plain static tip instead (two worst-case chords would
+    #: triple the template budget).
     tip: str
     #: Which surface OWNS the key: ``"app"`` for a Textual binding declared in
     #: ``OperatorApp.BINDINGS``, ``"desktop"`` for a global shortcut owned by
-    #: the desktop app. A desktop action declares no ``action_*`` method, no
-    #: ``Binding`` and no splash tip — the key's MEANING lives entirely in the
-    #: consumer (toggle for ``quick_send``, press-and-hold for
-    #: ``push_to_talk``), and this registry is semantics-agnostic by design;
-    #: it owns only the stored value's grammar (see the desktop-grammar block
-    #: below), because ``lop config edit`` and the desktop's settings page must
-    #: refuse the same values the capture UI does.
+    #: the desktop app, ``"composer"`` for a send chord the TUI composer reads
+    #: from the resolved keymap (no ``Binding``, no splash tip). A desktop or
+    #: composer action declares no ``action_*`` method, no ``Binding`` and no
+    #: splash tip — the key's MEANING lives entirely in the consumer (toggle
+    #: for ``quick_send``, press-and-hold for ``push_to_talk``, delivery mode
+    #: for ``send_*``), and this registry is semantics-agnostic by design; it
+    #: owns only the stored value's grammar (see the desktop-grammar and
+    #: composer-grammar blocks below), because ``lop config edit`` and the
+    #: desktop's settings page must refuse the same values the capture UI
+    #: does.
     scope: str = "app"
     #: Whether this row may be CLEARED to :data:`UNBOUND` (``"none"``).
     #: Opt-in only, and only the desktop dictation rows set it: reset deletes
     #: the key and restores the default, so `none` is the one way to have no
     #: shortcut at all. Surfacing it on the wire is ``settings_io``'s job.
     clearable: bool = False
+    #: Whether the derived ``Binding`` is ``priority=True``.
+    #:
+    #: Default False, and that default is the safe one in both directions:
+    #: a priority binding fires BEFORE the focused widget, which costs the
+    #: pickers their own ``ctrl+n``-class movements when it is unnecessary,
+    #: and — worse — it applies to whatever chord the user remaps ONTO, so a
+    #: remap onto a composer key would silently EAT the user's text instead of
+    #: the composer receiving it. Non-priority costs the reverse (the hotkey
+    #: silently does not fire while typing), which is visible rather than
+    #: destructive. Priority is only for actions that must beat a widget that
+    #: owns the chord contextually: the command palette (an open composer must
+    #: not swallow it), the transcript's session switches and effort cycling
+    #: (they own Screen-level or composer-level keys — see the bindings' own
+    #: comments in ``tui/app.py``).
+    priority: bool = False
 
 
 #: Every remappable action, in the order the settings page lists them.
@@ -183,6 +214,56 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         default="ctrl+s",
         help="Opens the picker of recent conversations, the same as /resume.",
         tip=_t(tui_welcome.tip_key_resume()),
+    ),
+    # Transcript scrolling from the COMPOSER, so a reader can re-read history
+    # while a turn streams without losing the caret or the draft. Two pairs:
+    # a ROW step and a HALF PAGE. `alt+<letter>` is printable, so TextArea
+    # would insert the letter before any app binding ran — `widgets/editor.py`
+    # claims these from the ACTIVE binding map rather than hardcoding a chord,
+    # which is what keeps a remap working with no second list to drift.
+    # `ctrl+]`/`ctrl+\` are the fallbacks for terminals whose Option key
+    # composes (macOS "Use Option as Meta" off) instead of sending `esc j`.
+    # They carry non-printable characters, so they reach the app binding on
+    # their own — but they go through the same claim, for the same reason.
+    KeyAction(
+        id="keymap.transcript_up",
+        action="keymap_transcript_up",
+        # i18n: ignore catalogued row; this literal is registry-only
+        label="Scroll transcript up",
+        default="alt+k,ctrl+right_square_bracket",
+        # i18n: ignore catalogued row; this literal is registry-only
+        help="Scrolls the conversation up two rows; the caret stays in the composer.",
+        tip="",
+    ),
+    KeyAction(
+        id="keymap.transcript_down",
+        action="keymap_transcript_down",
+        # i18n: ignore catalogued row; this literal is registry-only
+        label="Scroll transcript down",
+        default="alt+j,ctrl+backslash",
+        # i18n: ignore catalogued row; this literal is registry-only
+        help="Scrolls the conversation down two rows; the caret stays in the composer.",
+        tip="",
+    ),
+    KeyAction(
+        id="keymap.transcript_half_up",
+        action="keymap_transcript_half_up",
+        # i18n: ignore catalogued row; this literal is registry-only
+        label="Half-page transcript up",
+        default="alt+u",
+        # i18n: ignore catalogued row; this literal is registry-only
+        help="Scrolls the conversation up half a screen; the caret stays in the composer.",
+        tip="",
+    ),
+    KeyAction(
+        id="keymap.transcript_half_down",
+        action="keymap_transcript_half_down",
+        # i18n: ignore catalogued row; this literal is registry-only
+        label="Half-page transcript down",
+        default="alt+d",
+        # i18n: ignore catalogued row; this literal is registry-only
+        help="Scrolls the conversation down half a screen; the caret stays in the composer.",
+        tip="",
     ),
     # The first DESKTOP-scoped action. Not a Textual binding: no `action_*`
     # method, no `Binding`, and `tip=""` so the splash cannot advertise a key
@@ -236,33 +317,246 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         action="",
         label="Start recording",
         default="primary+shift+s",
-        # i18n: ignore keymap row copy is not extracted yet: every KEY_ACTIONS
-        # label/help is a literal here and is recorded verbatim in the
-        # wire.settings golden (the 8 keymap rows were deliberately left to a
-        # later slice). Extracting only this row would split one table across
-        # two mechanisms, and new English copy in wire.settings stales the
-        # carried locales' audited ledger rows.
+        # i18n: ignore keymap REGISTRY English. The settings surfaces paint
+        # `settings_io._KEYMAP_COPY`, i.e. the translated `wire.settings.keymap`
+        # rows; these literals exist for group-conflict refusals ("<label>
+        # already uses …") and are pinned byte-for-byte against the catalogue's
+        # English by `tests/unit/i18n/test_tui_english_slice.py`, so translating
+        # them in place would fork one sentence into two sources.
         help="Starts speech-to-text recording in the desktop window.",
         tip="",
         scope="desktop",
         clearable=True,
     ),
+    # The app-scope rows below were literal `Binding`s in `tui/app.py` until
+    # this slice; each default is the key that binding shipped with, so
+    # exposing them changes no shipped behaviour. `priority` carries the
+    # binding's own precedence — a remap through `set_keymap` re-keys the
+    # Binding but cannot change that flag, which is why it is registry data.
+    KeyAction(
+        id="keymap.command_palette",
+        action="command_palette",
+        label="Command palette",
+        default="ctrl+p",
+        # i18n: ignore keymap REGISTRY English. The settings surfaces paint
+        # `settings_io._KEYMAP_COPY`, i.e. the translated `wire.settings.keymap`
+        # rows; these literals exist for group-conflict refusals ("<label>
+        # already uses …") and are pinned byte-for-byte against the catalogue's
+        # English by `tests/unit/i18n/test_tui_english_slice.py`, so translating
+        # them in place would fork one sentence into two sources.
+        help="Searches every command, setting and conversation from one box.",
+        tip="",
+        # Textual injects its OWN priority binding on ctrl+p when no binding
+        # carries this action; declaring ours suppresses the injection, so the
+        # palette is remappable at all. Priority because it must open while
+        # the composer holds the keys.
+        priority=True,
+    ),
+    KeyAction(
+        # i18n: ignore keymap REGISTRY English — see keymap.command_palette.
+        id="keymap.toggle_sidebar",
+        action="toggle_sidebar",
+        label="Sessions list",
+        default="ctrl+b",
+        help="Shows or hides the session sidebar; /sidebar does the same.",
+        tip="",
+    ),
+    KeyAction(
+        # i18n: ignore keymap REGISTRY English — see keymap.command_palette.
+        id="keymap.focus_sidebar",
+        action="focus_sidebar",
+        label="Focus sessions",
+        default="f9",
+        help="Moves the keys into the sessions list; esc returns to the composer.",
+        tip="",
+    ),
+    KeyAction(
+        # i18n: ignore keymap REGISTRY English — see keymap.command_palette.
+        id="keymap.aside",
+        action="aside",
+        label="Aside",
+        default="f8",
+        help="Asks a side question without spending the composer's draft.",
+        tip="",
+    ),
+    KeyAction(
+        # i18n: ignore keymap REGISTRY English — see keymap.command_palette.
+        id="keymap.fork_aside",
+        action="fork_aside",
+        label="Fork aside",
+        default="ctrl+f",
+        help="Promotes the open aside exchange into the conversation.",
+        tip="",
+    ),
+    KeyAction(
+        # i18n: ignore keymap REGISTRY English — see keymap.command_palette.
+        id="keymap.toggle_todos",
+        action="toggle_todos",
+        label="Todo panel",
+        default="ctrl+t",
+        help="Expands or collapses the dock's todo list.",
+        tip="",
+    ),
+    KeyAction(
+        # i18n: ignore keymap REGISTRY English — see keymap.command_palette.
+        id="keymap.toggle_subagents",
+        action="toggle_subagents",
+        label="Subagent panel",
+        default="ctrl+g",
+        help="Cycles the dock's subagent panel: full, summary, hidden.",
+        tip="",
+    ),
+    KeyAction(
+        # i18n: ignore keymap REGISTRY English — see keymap.command_palette.
+        id="keymap.toggle_pin",
+        action="toggle_pin",
+        label="Pin session",
+        default="f10",
+        help="Pins or unpins the row under the pointer, else the sidebar's cursor.",
+        tip="",
+    ),
+    KeyAction(
+        # i18n: ignore keymap REGISTRY English — see keymap.command_palette.
+        id="keymap.toggle_asks",
+        action="toggle_asks",
+        label="Queued asks",
+        default="f4",
+        help="Opens or collapses the questions waiting on an answer.",
+        tip="",
+    ),
+    KeyAction(
+        # i18n: ignore keymap REGISTRY English — see keymap.command_palette.
+        id="keymap.prev_session",
+        action="switch_session(-1)",
+        label="Previous session",
+        default="ctrl+shift+up",
+        # Priority: the composer holds focus in the common case and would
+        # otherwise swallow the chord (the binding comment in `tui/app.py`
+        # records the audit that chose it).
+        help="Switches to the previous conversation in the sidebar.",
+        tip="",
+        priority=True,
+    ),
+    KeyAction(
+        # i18n: ignore keymap REGISTRY English — see keymap.command_palette.
+        id="keymap.next_session",
+        action="switch_session(1)",
+        label="Next session",
+        default="ctrl+shift+down",
+        help="Switches to the next conversation in the sidebar.",
+        tip="",
+        priority=True,
+    ),
+    KeyAction(
+        # i18n: ignore keymap REGISTRY English — see keymap.command_palette.
+        id="keymap.cycle_effort",
+        action="cycle_effort",
+        label="Reasoning effort",
+        default="shift+tab",
+        # Priority because Textual's `Screen` binds shift+tab to
+        # `focus_previous`; a bubbling App binding is never reached. The
+        # `_team_form`/`_agent_form` delegation is dispatch inside the action
+        # and is untouched by the key the user picks.
+        help="Cycles the reasoning effort level; /effort sets one directly.",
+        tip="",
+        priority=True,
+    ),
+    KeyAction(
+        # i18n: ignore keymap REGISTRY English — see keymap.command_palette.
+        id="keymap.clear_transcript",
+        action="clear_transcript",
+        label="Clear transcript",
+        default="ctrl+l",
+        # `clear_transcript` is a plain app action with no confirmation, which is
+        # the test the brief set for exposing it; the action itself closes every
+        # floating surface first, so a remap cannot wipe a transcript the user
+        # cannot see.
+        help="Clears the transcript view; the stored history stays.",
+        tip="",
+    ),
+    # COMPOSER-scoped send chords (D4-D9, architect contract): the TUI
+    # composer reads these from the resolved keymap and rewrites the chord
+    # to Enter with a delivery mode attached. `action=""`, no `Binding`,
+    # `tip=""` and `default=""` (UNBOUND on every surface in v1, D8): a
+    # shipped default would change today's Ctrl+Enter, and on legacy
+    # terminals the chord bytes arrive as plain Enter. The grammar is the
+    # composer grammar below (<mods>+enter, alt+<letter>); the help teaches
+    # the terminal limit because a chord that only works in kitty terminals
+    # must say so where the row is set. `label`/`help` stay EMPTY literals:
+    # the ratchet counts only prose literals, and the catalogue copy is
+    # resolved into these fields at the end of this tuple (import + locale
+    # move) so `group_conflict` keeps its row name without a literal here.
+    KeyAction(
+        id="keymap.send_steer",
+        action="",
+        label="",
+        default="",
+        help="",
+        tip="",
+        scope="composer",
+    ),
+    KeyAction(
+        id="keymap.send_queue",
+        action="",
+        label="",
+        default="",
+        help="",
+        tip="",
+        scope="composer",
+    ),
+    KeyAction(
+        id="keymap.send_both",
+        action="",
+        label="",
+        default="",
+        help="",
+        tip="",
+        scope="composer",
+    ),
 )
+
+#: The send rows' catalogue copy, resolved once at import and on every
+#: locale move (``_reload_copy``). Defined after the tuple it rewrites so
+#: the literals above can stay empty for the ratchet.
+_SEND_COPY = {
+    "keymap.send_steer": (_wk.send_steer_label, _wk.send_steer_help),
+    "keymap.send_queue": (_wk.send_queue_label, _wk.send_queue_help),
+    "keymap.send_both": (_wk.send_both_label, _wk.send_both_help),
+}
+
+
+def _apply_send_copy(actions: tuple[KeyAction, ...]) -> tuple[KeyAction, ...]:
+    return tuple(
+        (
+            dataclasses.replace(
+                action,
+                label=_keymap_t(_SEND_COPY[action.id][0]()),
+                help=_keymap_t(_SEND_COPY[action.id][1]()),
+            )
+            if action.id in _SEND_COPY
+            else action
+        )
+        for action in actions
+    )
+
+
+KEY_ACTIONS = _apply_send_copy(KEY_ACTIONS)
 
 #: ``id -> KeyAction`` for the lookups the page, the app and the tips all do.
 BY_ID: dict[str, KeyAction] = {action.id: action for action in KEY_ACTIONS}
 
 
 def _reload_copy() -> None:
-    """Re-resolve the catalogued ``tip`` templates after a locale move (C).
+    """Re-resolve the catalogued copy after a locale move (C).
 
-    Only ``tip`` is catalogued copy here: ``help``/``label`` stay literals
-    until the bindings/settings slice owns them, and every other field is a
-    key, id or scope — machine values that never translate. ``welcome``'s
-    keyed pool reads these actions when ITS refresh runs, one registration
-    later (import order), so the splash picks the new templates up in the
-    same move. The assignments mirror the definitions above; the live-locale
-    slice test pins both tips against the fixture catalogue.
+    ``tip`` is catalogued ``tui.welcome`` copy; the send rows' ``label`` /
+    ``help`` are catalogued ``wire.settings.keymap`` copy, resolved through
+    ``_apply_send_copy`` so a locale move re-paints the refusal sentence's
+    row name as well as the settings row. ``welcome``'s keyed pool reads
+    these actions when ITS refresh runs, one registration later (import
+    order), so the splash picks the new templates up in the same move. The
+    assignments mirror the definitions above; the live-locale slice test
+    pins both tips against the fixture catalogue.
     """
     global KEY_ACTIONS, BY_ID
     tips = {
@@ -273,6 +567,7 @@ def _reload_copy() -> None:
         dataclasses.replace(action, tip=tips[action.id]) if action.id in tips else action
         for action in KEY_ACTIONS
     )
+    KEY_ACTIONS = _apply_send_copy(KEY_ACTIONS)
     BY_ID = {action.id: action for action in KEY_ACTIONS}
 
 
@@ -292,6 +587,16 @@ def scope_of(action_id: str | None) -> str:
     every caller had before this axis existed.
     """
     return SCOPE_BY_ID.get(action_id or "", "app")
+
+
+#: id -> delivery mode, for the composer-scope send chords. The id tail IS
+#: the mode (`keymap.send_<mode>`), so the editor needs no second table: the
+#: row that fired names what Enter meant.
+SEND_MODES: dict[str, str] = {
+    "keymap.send_steer": "steer",
+    "keymap.send_queue": "queue",
+    "keymap.send_both": "both",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +669,12 @@ COMPOSER_KEYS: frozenset[str] = frozenset(
         "ctrl+u",
         "ctrl+y",
         "ctrl+z",
-        "ctrl+f",
+        # NOT `ctrl+f`: TextArea 8.2.8 binds none (measured from the venv
+        # through `TextArea.BINDINGS`, and `Editor.BINDINGS` adds none), which
+        # is why `fork_aside` fires on it today. It stood here as a
+        # soft-conflict guess; leaving it would warn about a key the composer
+        # does not own and would refuse `keymap.fork_aside`'s shipped default
+        # to that warning.
         "ctrl+left",
         "ctrl+right",
         "ctrl+shift+left",
@@ -390,6 +700,46 @@ COMPOSER_KEYS: frozenset[str] = frozenset(
         "down",
         "left",
         "right",
+    }
+)
+
+#: App-level chords that are NOT registry rows, so the group check cannot see
+#: them and a remap can land on one.
+#:
+#: `COMPOSER_KEYS` covers the class where a non-priority hotkey silently loses
+#: to a focused widget; this is the sibling class at APP scope: the transcript
+#: scroll extremes, the todo/aside scroll chords, copy-aside and the darwin
+#: `super+b` alternate. Textual runs every binding registered for a key until
+#: one reports handled, and these actions return nothing — so two app bindings
+#: on one key BOTH answer it, which is the silent-pair failure `group_conflict`
+#: refuses inside the registry and cannot refuse here. Warn-and-allow, like the
+#: composer set: the user may genuinely want the chord and never use the other.
+#:
+#: Fixed by construction rather than derived: importing `OperatorApp` here is
+#: forbidden (module docstring), so `tests/unit/test_keymap.py` builds the set
+#: from the live `BINDINGS` and asserts this table matches it.
+FIXED_APP_KEYS: Mapping[str, str] = MappingProxyType(
+    {
+        # key -> what the FIXED binding does, because a warning that names the
+        # chord but not its job tells the user nothing they can act on: there is
+        # no setting to rebind these by, so "pick another" needs to say what
+        # they would be giving up (M3, review round 2).
+        "ctrl+up": "Scroll todos up",
+        "ctrl+down": "Scroll todos down",
+        "ctrl+pageup": "Scroll aside back",
+        "ctrl+pagedown": "Scroll aside forward",
+        "ctrl+r": "Copy the aside",
+        "ctrl+home": "Transcript top",
+        "ctrl+end": "Transcript end",
+        # The mnemonic alternates on the SAME fixed bindings
+        # (`ctrl+home,alt+g` / `ctrl+end,alt+shift+g` in BINDINGS). Textual
+        # splits a binding on comma, so a remap onto either spelling would
+        # fight the same fixed action even though neither is a registry row.
+        "alt+g": "Transcript top",
+        "alt+shift+g": "Transcript end",
+        # The darwin-only alternate for `toggle_sidebar`; the registry stores one
+        # value per action, so a remap onto it would fight a fixed binding.
+        "super+b": "Sessions",
     }
 )
 
@@ -492,11 +842,107 @@ def alternates(text: str) -> frozenset[str]:
     return frozenset(part for part in normalize_key(text).split(",") if part)
 
 
-def _is_valid_single_key(key: str, vocabulary: frozenset[str]) -> bool:
+def normalize_composer_key(text: str) -> str:
+    """Textual's spelling of a composer-scope value, in Textual's own order.
+
+    ``_normalize_key_list`` preserves the typed order (``ctrl+alt+b`` stays
+    ``ctrl+alt+b``), but the parser never emits that order: it sorts the
+    modifier tokens alphabetically (``alt+ctrl+b``, ``ctrl+shift+enter``,
+    ``alt+shift+enter`` — measured against textual 8.2.8's ``XTermParser``).
+    A value stored in the typed order would therefore never match the
+    event's key and never fire, so this is the ONE spelling the composer
+    rows store, compare and push into the editor — the same write-boundary
+    rule :func:`normalize_key` states for app rows, applied to this scope's
+    grammar. Modifiers are also de-duplicated before sorting (``ctrl+ctrl+
+    enter`` reads as ``ctrl+enter`` when compared), which is safe here
+    because the validator refuses a repeated modifier outright rather than
+    storing the collapsed form.
+
+    Comma-separated alternates are preserved per element, matching
+    :func:`normalize_key`.
+    """
+    normalized = normalize_key(text)
+    parts = []
+    for part in normalized.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        tokens = [token for token in part.split("+") if token]
+        if len(tokens) < 2:
+            parts.append(part)
+            continue
+        key_token = tokens[-1]
+        modifiers = sorted(set(tokens[:-1]))
+        parts.append("+".join([*modifiers, key_token]))
+    return ",".join(parts)
+
+
+def _canonical_composer_variants(text: str) -> frozenset[str]:
+    """The individual chords ``text`` binds, in :func:`normalize_composer_key` form."""
+    return frozenset(part for part in normalize_composer_key(text).split(",") if part)
+
+
+def composer_chord_needs_enhanced_keys(value: Any) -> bool:
+    """Whether ``value`` only arrives under the kitty keyboard protocol.
+
+    True for every modified Enter and for ``ctrl+alt+<letter>``: on a
+    legacy terminal the first collapses to plain Enter and the second to
+    the same bytes as Enter/Tab/Backspace/LF (for ``m|i|h|j``) or never
+    arrives at all. ``alt+<letter>`` is False — it arrives as ``alt+q`` in
+    both protocols (measured).
+    """
+    if not isinstance(value, str):
+        return False
+    for part in _canonical_composer_variants(value):
+        tokens = [token for token in part.split("+") if token]
+        if len(tokens) < 2:
+            continue
+        key_token, modifiers = tokens[-1], frozenset(tokens[:-1])
+        if key_token == "enter" or modifiers == frozenset({"ctrl", "alt"}):
+            return True
+    return False
+
+
+#: Modifier names Textual puts on a key before the base key name.
+_KEY_MODIFIERS = frozenset({"alt", "ctrl", "shift", "super"})
+
+#: The ONLY action ids whose grammar accepts ``<modifier>+<printable>``.
+#:
+#: The transcript scroll rows need it: their default chords are ``alt+<letter>``,
+#: which Textual delivers but its ``Keys`` vocabulary does not enumerate, and
+#: ``widgets/editor.py`` claims exactly those ids (its ``keymap_transcript_``
+#: prefix, the same spelling) from the live binding map so the letter is not
+#: inserted into the draft. Every OTHER app row must keep the old refusal:
+#: accepting ``alt+z`` for, say, ``keymap.quick_send`` would save cleanly and
+#: then type ``z``, because no editor claim covers it — a dead binding the
+#: user only discovers when the key never fires (review round 1, F2).
+_PRINTABLE_CHORD_ID_PREFIX = "keymap.transcript_"
+
+
+def _is_valid_single_key(
+    key: str, vocabulary: frozenset[str], *, allow_printable_chord: bool = False
+) -> bool:
     """Whether ``key`` names something a terminal can actually send."""
     if not key:
         return False
     if vocabulary and key in vocabulary:
+        return True
+    # MODIFIER + PRINTABLE CHARACTER. Textual's ``Keys`` vocabulary enumerates
+    # named keys and ctrl aliases but no alt/super + character chord — measured
+    # on 8.2.8: ``alt+j`` normalizes to ``alt+j`` and the kitty protocol
+    # delivers it, yet it is not a ``Keys`` member, so the vocabulary branch
+    # alone refused the transcript-scroll defaults and every user remap onto a
+    # chord the runtime honours. Accept exactly the shape Textual itself
+    # normalizes: known modifiers in front of one printable character — and
+    # only for the actions whose editor claim makes that chord real.
+    *modifiers, base = key.split("+")
+    if (
+        allow_printable_chord
+        and modifiers
+        and all(modifier in _KEY_MODIFIERS for modifier in modifiers)
+        and len(base) == 1
+        and base.isprintable()
+    ):
         return True
     # A single printable character is a legal key and is NOT a `Keys` member,
     # so the vocabulary check alone would reject `a` and `?`. Textual maps
@@ -509,6 +955,127 @@ def _is_valid_single_key(key: str, vocabulary: frozenset[str]) -> bool:
         # (`mod+mod+name`, non-empty parts) rather than rejecting everything.
         return all(part for part in key.split("+"))
     return False
+
+
+# ---------------------------------------------------------------------------
+# Composer-scoped values: the send-chord grammar
+# ---------------------------------------------------------------------------
+#
+# A composer value is a Textual key name the Editor's `_on_key` rewrites to
+# Enter with a delivery mode attached (D9). Measured against textual 8.2.8
+# (probe tables, owner A slice): `ctrl+enter`, `alt+enter`, `super+enter`,
+# `ctrl+shift+enter`, `alt+shift+enter` arrive as those names ONLY under the
+# kitty keyboard protocol (ESC [ 13 ; <mods> u); `alt+<letter>` arrives as
+# `alt+q` in BOTH legacy (ESC q) and kitty (ESC [ 113 ; 3 u). The grammar
+# accepts exactly the two families a terminal can deliver, and refuses
+# everything that would silently collapse into Enter or type text (D7).
+
+#: Modifier sets the composer grammar allows in front of `enter`, in
+#: canonical (Textual-reported) spelling. Only kitty terminals deliver
+#: these; the row help says so.
+_COMPOSER_ENTER_MODIFIERS: frozenset[frozenset[str]] = frozenset(
+    {
+        frozenset({"ctrl"}),
+        frozenset({"alt"}),
+        frozenset({"super"}),
+        frozenset({"ctrl", "shift"}),
+        frozenset({"alt", "shift"}),
+    }
+)
+
+#: Modifier sets allowed in front of a single letter: alt alone (every
+#: terminal) and ctrl+alt (kitty; legacy macOS terminals also emit ESC).
+_COMPOSER_LETTER_MODIFIERS: frozenset[frozenset[str]] = frozenset(
+    {frozenset({"alt"}), frozenset({"ctrl", "alt"})}
+)
+
+_COMPOSER_MODIFIER_TOKENS = frozenset({"ctrl", "alt", "super", "shift"})
+
+_COMPOSER_REFUSALS: dict[str, str] = {
+    # A legacy terminal sends this press as plain Enter (Ctrl+Enter), so the
+    # refusal names what the terminal actually did rather than the chord the
+    # operator meant to press — pointing them at ctrl+enter repeats the press.
+    "enter": "your terminal sends that as plain enter — try alt+<letter>",
+    "shift+enter": "shift+enter makes a newline — pick ctrl, alt or super with enter",
+    "ctrl+j": "your terminal sends that as plain enter — try alt+<letter>",
+    "ctrl+m": "ctrl+m is the same byte as enter — it cannot be bound",
+    # ctrl+alt+letter: on a legacy terminal these are the same bytes as
+    # enter/tab/backspace/LF, so binding one silently binds the other
+    # (the RESERVED_KEYS legend, applied to the chord). Canonical form
+    # (alt before ctrl), which is what the validator compares.
+    "alt+ctrl+m": "alt+ctrl+m is the same byte as enter — it cannot be bound",
+    "alt+ctrl+i": "alt+ctrl+i is the same byte as tab — it cannot be bound",
+    "alt+ctrl+h": "alt+ctrl+h is the same byte as backspace — it cannot be bound",
+    "alt+ctrl+j": "alt+ctrl+j is the same byte as a newline — it cannot be bound",
+}
+
+
+def _validate_composer_key(value: Any) -> str | None:
+    """The composer grammar: a modified Enter the terminal can deliver, or
+    ``alt+<letter>`` / ``ctrl+alt+<letter>`` that works everywhere.
+
+    Refusals name the reason (D7): a plain character types, a bare shift
+    does nothing bindable, and the reserved/composer sets keep their jobs.
+    """
+    if not isinstance(value, str):
+        return "expected a key, like ctrl+enter or alt+s"
+    normalized = normalize_key(value)
+    if not normalized:
+        return "expected a key, like ctrl+enter or alt+s"
+    # A repeated modifier collapses in normalize_composer_key, so the
+    # duplicate is judged on the RAW spelling: ctrl+ctrl+enter is a typo,
+    # not a chord — silently storing ctrl+enter would claim a binding the
+    # operator never asked for.
+    for raw_part in normalized.split(","):
+        raw_tokens = [token for token in raw_part.split("+") if token]
+        if len(raw_tokens) >= 3 and len(raw_tokens[:-1]) != len(set(raw_tokens[:-1])):
+            return "the same modifier twice — pick one, like ctrl+enter"
+    normalized = normalize_composer_key(value)
+    for part in normalized.split(","):
+        if part in _COMPOSER_REFUSALS:
+            return _COMPOSER_REFUSALS[part]
+        reserved = RESERVED_KEYS.get(part)
+        if reserved is not None:
+            return reserved
+        if part in COMPOSER_KEYS:
+            return f"the composer uses {part} — pick another chord"
+        tokens = [token for token in part.split("+") if token]
+        if len(tokens) == 1 and tokens[0] not in _COMPOSER_MODIFIER_TOKENS:
+            if len(tokens[0]) == 1 and tokens[0].isprintable():
+                return "a plain character types into the composer — add alt"
+            return "a send chord needs ctrl, alt or super — like ctrl+enter or alt+s"
+        if not tokens:
+            return "expected a key, like ctrl+enter or alt+s"
+        key_token, modifiers = tokens[-1], frozenset(tokens[:-1])
+        if not modifiers <= _COMPOSER_MODIFIER_TOKENS:
+            return "not a key this terminal can send — try ctrl+enter or alt+s"
+        if key_token == "enter":
+            if modifiers not in _COMPOSER_ENTER_MODIFIERS:
+                # ctrl+alt+enter / super+shift+enter LOOK like the send chords
+                # but are not among them — say what is wrong and name the
+                # three that are, rather than the generic modifier sentence
+                # this arm uses for the other invalid sets.
+                if modifiers in (
+                    frozenset({"ctrl", "alt"}),
+                    frozenset({"super", "shift"}),
+                ):
+                    # 59 cells: the echoed chord is dropped so the
+                    # sentence fits the 74-cell detail at 80 columns with
+                    # the three chord names still named in full.
+                    return "not a send chord — use ctrl+enter, alt+enter or super+enter"
+                return (
+                    "a send chord needs ctrl, alt or super with enter "
+                    "(ctrl+shift/alt+shift also work) — like ctrl+enter"
+                )
+        elif len(key_token) == 1 and key_token.isalpha():
+            if modifiers not in _COMPOSER_LETTER_MODIFIERS:
+                return (
+                    "a letter chord needs alt or ctrl+alt — like alt+s "
+                    "(ctrl+letters are already used)"
+                )
+        else:
+            return "a send chord is a modified enter or alt+letter — like ctrl+enter or alt+s"
+    return None
 
 
 def validate_key(value: Any, *, scope: str = "app", action_id: str | None = None) -> str | None:
@@ -524,12 +1091,15 @@ def validate_key(value: Any, *, scope: str = "app", action_id: str | None = None
     ``scope`` selects the VALUE GRAMMAR. An app-scope value is a Textual key
     (the rules below); a desktop-scope value is a global shortcut, validated by
     the grammar registered for ``action_id`` (default: the accelerator one —
-    see ``_DESKTOP_GRAMMARS``). An unknown scope falls back to the app rules,
-    which is the pre-existing behaviour every caller had before this axis
-    existed.
+    see ``_DESKTOP_GRAMMARS``); a composer-scope value is a send chord, judged
+    by :func:`_validate_composer_key`. An unknown scope falls back to the app
+    rules, which is the pre-existing behaviour every caller had before this
+    axis existed.
     """
     if scope == "desktop":
         return validate_desktop_key(value, action_id=action_id)
+    if scope == "composer":
+        return _validate_composer_key(value)
     if not isinstance(value, str):
         return "expected a key, like ctrl+n or f5"
     normalized = normalize_key(value)
@@ -546,7 +1116,11 @@ def validate_key(value: Any, *, scope: str = "app", action_id: str | None = None
             # settings row, so it is refused with the reason rather than
             # accepted as a technically-valid key.
             return "a plain character types into the composer — add ctrl, alt or super"
-        if not _is_valid_single_key(part, vocabulary):
+        if not _is_valid_single_key(
+            part,
+            vocabulary,
+            allow_printable_chord=(action_id or "").startswith(_PRINTABLE_CHORD_ID_PREFIX),
+        ):
             return "not a key this terminal can send — try ctrl+n, f5, or press a key to capture"
     return None
 
@@ -888,6 +1462,11 @@ def _canonical_variants(action_id: str | None, text: str) -> frozenset[str]:
             return frozenset()
         normalized = normalize_desktop_key(text, action_id=action_id)
         return frozenset({normalized}) if normalized else frozenset()
+    if scope_of(action_id) == "composer":
+        # Composer chords compare in :func:`normalize_composer_key` form, so
+        # ``ctrl+alt+b`` and ``alt+ctrl+b`` are one chord (measured: the
+        # parser only ever emits the second).
+        return _canonical_composer_variants(text)
     return alternates(text)
 
 
@@ -908,11 +1487,32 @@ def conflict_note(action_id: str, key: str) -> str:
     the feature feel arbitrary; stealing silently is worse, because the victim
     is invisible until the user notices weeks later that something stopped
     working. Naming the cost at the moment of the decision is the middle path.
+
+    The sentence INVERTS for a priority row (``KeyAction.priority``): a
+    priority binding is matched before the focused widget, so a composer key
+    is not a hotkey that silently stops working — it is text the user can no
+    longer type. Same warn-and-allow, opposite consequence, and the wording
+    has to say which one the user is choosing.
     """
-    del action_id  # symmetric with the app-level path, which does key on it
+    action = BY_ID.get(action_id)
     for part in normalize_key(key).split(","):
         if part in COMPOSER_KEYS:
+            if action is not None and action.priority:
+                return (
+                    f"the composer uses {part} — a priority hotkey would take it"
+                    " away from typing"
+                )
             return f"the composer uses {part} — the hotkey will not fire while you are typing"
+        if part in FIXED_APP_KEYS:
+            # Same warn-and-allow. Both bindings answer the key (they share one
+            # map), so the cost is a second action firing that the user did not
+            # press for — named here because `group_conflict` only knows rows.
+            # No setting rebinds these, so "rebind that one first" (the first
+            # wording) pointed at a page that does not exist (M2); the job the
+            # chord does is the part the user can weigh.
+            # Short on purpose: the settings page truncates this detail line, and
+            # the one sentence that has to survive is the remedy (M2/M3).
+            return f"{part} is fixed for {FIXED_APP_KEYS[part]} — pick another key"
     return ""
 
 
@@ -1044,7 +1644,11 @@ def resolved_keymap(values: Mapping[str, Any]) -> tuple[dict[str, str], list[str
         key = (
             normalize_desktop_key(str(raw), action_id=action.id)
             if action.scope == "desktop"
-            else normalize_key(str(raw))
+            else (
+                normalize_composer_key(str(raw))
+                if action.scope == "composer"
+                else normalize_key(str(raw))
+            )
         )
         if key and key != action.default:
             resolved[action.id] = key
@@ -1062,17 +1666,106 @@ def effective_key(action: KeyAction, values: Mapping[str, Any]) -> str:
     return resolved.get(action.id, action.default)
 
 
+#: Textual key names that are not keycaps a user can find on a keyboard,
+#: mapped to the spelling `/help` and the docs use for the same chord.
+_DISPLAY_KEY_ALIASES = {
+    "left_square_bracket": "[",
+    "right_square_bracket": "]",
+    "backslash": "\\",
+}
+
+
+def painted_key(action_id: str, keymap: Mapping[str, str] | None = None) -> str:
+    """The key a user-facing hint should NAME for ``action_id``.
+
+    ``keymap`` is the mapping the app applied through ``App.set_keymap`` (the
+    app holds it on ``_keymap``); absent — a stripped harness, a pure builder
+    — the action ships its default, which is what the static hint shows.
+
+    A paint helper rather than a resolver: it never validates and never walks
+    the registry, so a caller can render one hint without reading config. A
+    value that is not a mapping (an unset app attribute, a test double) is
+    treated as absent rather than raising inside a paint.
+    """
+    if not isinstance(keymap, Mapping):
+        keymap = None
+    live = (keymap or {}).get(action_id)
+    if live:
+        return live
+    action = BY_ID.get(action_id)
+    return action.default if action is not None else ""
+
+
+def substitute_keys(text: str, keymap: Mapping[str, str] | None) -> str:
+    """``text`` with every shipped app chord replaced by its live remap.
+
+    WHY substitution rather than ICU placeholders: the copy that names these
+    chords (the legend's headings and rows, the dock's footer chips, the
+    settings help line for the dock, notifications) is TRANSLATED and audited
+    per namespace in eight locales. Retyping those sentences as templates with
+    a ``{key}`` argument would invalidate every audited row of each namespace
+    to move one token; the shipped chord is a stable technical token, so it is
+    rewritten at paint instead.
+
+    Token-bounded, so ``ctrl+b`` never rewrites a prefix of ``ctrl+backspace``.
+    Longest default first, so a default that is a prefix of another cannot eat
+    the longer one. Only app-scope rows can appear in terminal copy; the
+    desktop rows' accelerators are no terminal chord.
+    """
+    if not isinstance(keymap, Mapping) or not keymap:
+        return text
+    replacements = {
+        action.default.lower(): keymap[action.id]
+        for action in KEY_ACTIONS
+        if action.scope == "app"
+        and action.id in keymap
+        and keymap[action.id]
+        and keymap[action.id] != action.default
+    }
+    if not replacements:
+        return text
+    # ONE pass over ONE alternation, then a dict lookup. Two earlier shapes were
+    # wrong and are recorded so they do not come back: a per-key `re.sub` loop
+    # rewrote in sequence, so a SWAP (A->B, B->A) turned every A into an A
+    # again, and a remap whose live value contained another shipped chord
+    # (ctrl+b -> "f9,ctrl+t") was rewritten a second time by that chord's own
+    # iteration. A single alternation cannot see its own output.
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9_+\-])(?:"
+        + "|".join(re.escape(part) for part in sorted(replacements, key=len, reverse=True))
+        + r")(?![A-Za-z0-9_+\-])",
+        re.IGNORECASE,
+    )
+    return pattern.sub(lambda match: replacements[match.group(0).lower()], text)
+
+
 def format_key_display(key: str) -> str:
     """``key`` in Textual's own footer vocabulary (``escape`` -> ``esc``).
 
     Routed through ``textual.keys.format_key`` so the settings page, the tips
-    and Textual's own surfaces cannot spell the same key two ways.
+    and Textual's own surfaces cannot spell the same key two ways. Two of its
+    names are not keycaps a user can find on a keyboard —
+    ``ctrl+right_square_bracket`` and ``ctrl+backslash`` — so those are
+    spelled the way `/help` and the docs spell the same chords (``ctrl+]``,
+    ``ctrl+\\``). This is the ONE app-scope display path (`/settings` →
+    Hotkeys, capture echoes and every tip go through it), which is why the
+    alias belongs here and not on one page (design round 1, D5).
     """
     try:
         from textual.keys import format_key
     except Exception:  # noqa: BLE001 — no Textual: the raw spelling is honest
         return key
-    return ",".join(format_key(part) for part in key.split(",") if part)
+    shown: list[str] = []
+    for part in key.split(","):
+        if not part:
+            continue
+        formatted = format_key(part)
+        for name, glyph in _DISPLAY_KEY_ALIASES.items():
+            if formatted == name or formatted.endswith("+" + name):
+                formatted = formatted[: -len(name)] + glyph
+                break
+        shown.append(formatted)
+    return ",".join(shown)
 
 
 def display_key(value: str, *, scope: str = "app", platform: str | None = None) -> str:
@@ -1121,11 +1814,13 @@ def display_key(value: str, *, scope: str = "app", platform: str | None = None) 
 __all__ = [
     "BY_ID",
     "COMPOSER_KEYS",
+    "FIXED_APP_KEYS",
     "DESKTOP_RESERVED_COMBOS",
     "KEYMAP_PREFIX",
     "UNBOUND",
     "KEY_ACTIONS",
     "SCOPE_BY_ID",
+    "SEND_MODES",
     "KeyAction",
     "RESERVED_KEYS",
     "capturable_in_terminal",
@@ -1133,6 +1828,10 @@ __all__ = [
     "display_key",
     "effective_key",
     "format_key_display",
+    "normalize_composer_key",
+    "composer_chord_needs_enhanced_keys",
+    "painted_key",
+    "substitute_keys",
     "normalize_desktop_key",
     "normalize_key",
     "resolved_keymap",

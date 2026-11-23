@@ -41,6 +41,7 @@ from local_operator.tui import app as app_module
 from local_operator.tui.app import (
     DOUBLE_INTERRUPT_WINDOW_S,
     DOUBLE_STOP_WINDOW_S,
+    STEER_NOTICE,
     OperatorApp,
 )
 from local_operator.tui.events import (
@@ -427,7 +428,10 @@ async def test_mid_turn_submit_steers_instead_of_prompting() -> None:
         assert session.prompts == ["first task"]  # no second prompt attempted
         painted = rows(app)
         assert any("actually use pygame-ce" in row for row in painted)
-        assert any("queued" in row for row in painted)
+        # The receipt names what a steer DOES — it interrupts at the next
+        # boundary — rather than saying the text is queued for this step to
+        # finish: a steer does not wait for that.
+        assert any(STEER_NOTICE in row for row in painted)
 
 
 @pytest.mark.asyncio
