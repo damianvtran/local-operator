@@ -8326,10 +8326,10 @@ def _offload(
         )
 
         carry_block = progress.carry(session_id) or {}
-        # An older destination completes without this additive field. Do not
-        # mistake the ordinary move completion for verification of skill parity.
+        # An older destination completes without this additive field. Move
+        # completion alone confirms neither a pin nor a local routing decision.
         reported = skill_transfer_status(carry_block.get("skill_selection"))
-        carry_block["skill_selection"] = skill_transfer_receipt(reported or "local_routing")
+        carry_block["skill_selection"] = skill_transfer_receipt(reported or "unconfirmed")
         if definitions_notice:
             carry_block["definitions_notice"] = definitions_notice
         if monitors_here > 0:

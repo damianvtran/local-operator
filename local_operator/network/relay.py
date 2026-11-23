@@ -16800,15 +16800,11 @@ class RelayServer:
             skill_transfer_status,
         )
 
-        # An older owner ignores the request field and sends no acknowledgement.
-        # A lost/replayed reply can instead mean the pin landed but was not observed.
+        # Only a fresh owner acknowledgement can report a routing decision.
+        # Older owners may omit it; lookup or replay only confirms existence.
         reported = skill_transfer_status(detail.get("skill_selection"))
-        if reported is None:
-            reported = (
-                "unconfirmed"
-                if detail.get("create_unconfirmed") or detail.get("replayed")
-                else "local_routing"
-            )
+        if reported is None or detail.get("create_unconfirmed") or detail.get("replayed"):
+            reported = "unconfirmed"
         extra: dict[str, Any] = {"skill_selection": skill_transfer_receipt(reported)}
         if instructions_notice:
             extra["custom_instructions_notice"] = instructions_notice

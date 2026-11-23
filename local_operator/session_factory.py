@@ -4038,9 +4038,9 @@ async def _select_knowledge_block(
 
         from local_operator.skills.manifest import description_fingerprint
 
-        # A receiver's query may pick totally different skills. Keep its guide
-        # routing, but only admit exact carried skill names with matching local
-        # metadata. Never treat the digest as authority to load a body.
+        # The pin narrows automatic routing, not the receiver's authority.
+        # Keep local guides, discovery scope and model-invocation opt-outs;
+        # matching metadata neither grants nor removes explicit skill access.
         picked = [item for item in picked if item.resource_type != "skill"]
         for name, fingerprint in hooks.pinned_skill_manifest.items():
             skill = hooks.skills_by_name.get(name)

@@ -9950,14 +9950,16 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             skill_transfer_status,
         )
 
+        create_unconfirmed = detail.get("create_unconfirmed") or detail.get("replayed")
         status = skill_transfer_status(detail.get("skill_selection"))
-        if status is None:
-            # A new CLI can also be talking to an older local relay. It cannot
-            # attest to a pin that the relay did not report.
-            status = "unconfirmed" if detail.get("create_unconfirmed") else "local_routing"
+        if create_unconfirmed or status is None:
+            # An older relay may omit the receipt; a create-key replay confirms
+            # existence, not the original routing decision. Neither is evidence
+            # that the receiver selected locally or pinned a selection.
+            status = "unconfirmed"
         detail["skill_selection"] = skill_transfer_receipt(status)
         lines.append(detail["skill_selection"]["message"])
-        if (detail.get("create_unconfirmed") or detail.get("replayed")) and not prompt:
+        if create_unconfirmed and not prompt:
             # THE CREATE'S OWN REPLY WAS NOT THE ANSWER: either it was lost and the
             # owner confirmed the id by key, or this was a retry the owner matched
             # to the session it had already made. Either way the first turn's fate

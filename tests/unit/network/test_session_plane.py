@@ -842,7 +842,8 @@ def test_a_peer_can_create_a_session_on_this_device_and_prompt_it(
 
 
 @pytest.mark.parametrize(
-    "case", ["exact", "missing", "empty", "legacy", "old_sender", "old_receiver"]
+    "case",
+    ["exact", "missing", "receiver_opt_out", "empty", "legacy", "old_sender", "old_receiver"],
 )
 def test_peer_spawn_pins_exact_source_skills_and_names_omissions(
     peer_pair: Devices,
@@ -854,7 +855,9 @@ def test_peer_spawn_pins_exact_source_skills_and_names_omissions(
 
     A CLI test that sets the process audit ID cannot catch the tool clearing
     it. Keep that audit ID wrong on purpose and let the real factory, not a
-    test sidecar, derive the source snapshot from its rendered prompt.
+    test sidecar, derive the source snapshot from its rendered prompt. The
+    receiver can decline to auto-include a locally held skill; a manifest
+    neither grants nor removes explicit skill:// or operator access.
     """
     import hashlib
     import re
@@ -906,13 +909,21 @@ def test_peer_spawn_pins_exact_source_skills_and_names_omissions(
             instructions=team_brief,
         )
     )
+    private_body = "RECEIVER-ONLY BODY CANARY"
+    opted_out_path = None
     for device, inventory in ((source, source_skills), (receiver, dest_skills)):
         for name, text in inventory.items():
             directory = device.root / ".local-operator" / "skills" / name
             directory.mkdir(parents=True)
-            (directory / "SKILL.md").write_text(
-                f"---\nname: {name}\ndescription: {text}\n---\nBody\n"
-            )
+            path = directory / "SKILL.md"
+            if case == "receiver_opt_out" and device is receiver and name == "carry-beta":
+                opted_out_path = path
+                path.write_text(
+                    f"---\nname: {name}\ndescription: {text}\n"
+                    f"disable-model-invocation: true\n---\n{private_body}\n"
+                )
+            else:
+                path.write_text(f"---\nname: {name}\ndescription: {text}\n---\nBody\n")
 
     async def turn(device: relay.RelayServer, sid: str, *, origin: bool) -> str:
         monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(device.root))
@@ -999,18 +1010,41 @@ def test_peer_spawn_pins_exact_source_skills_and_names_omissions(
         assert delivered.skill_manifest == (expected if pinned else None)
         assert delivered.skill_manifest_pinned is pinned
         receipt = result.details["mesh"]["skill_selection"]
-        assert receipt["status"] == ("pinned" if pinned else "local_routing")
-        phrase = "pinned the source's skill selection" if pinned else "will select skills locally"
+        expected_status, phrase = ("local_routing", "will select skills locally")
+        if pinned:
+            expected_status, phrase = ("pinned", "pinned the source's skill selection")
+        elif case == "old_receiver":
+            expected_status, phrase = ("unconfirmed", "did not confirm a skill snapshot")
+        assert receipt["status"] == expected_status
         assert phrase in receipt["message"]
         assert any(phrase in getattr(block, "text", "") for block in result.content)
 
         _stop_all(served)
         served.clear()
+        body_loads: list[str] = []
+        if opted_out_path is not None:
+            roots = skills_api.default_skill_roots(receiver.root, boundary=receiver.root)
+            discovered, _ = skills_api.discover_skills(roots, boundary=receiver.root)
+            local = next(skill for skill in discovered if skill.name == "carry-beta")
+            assert local.file_path == opted_out_path and local.hide
+            assert local.description == source_skills["carry-beta"]
+            resolve_skill = skills_api.resolve_skill_url
+
+            def track_skill_read(url: str, *args: Any, **kwargs: Any) -> str | None:
+                if url.startswith("skill://carry-beta"):
+                    body_loads.append(url)
+                return resolve_skill(url, *args, **kwargs)
+
+            monkeypatch.setattr(skills_api, "resolve_skill_url", track_skill_read)
+
         dest_prompt = asyncio.run(turn(receiver, minted, origin=False))
         assert "<team>" in dest_prompt and team_brief in dest_prompt
-        if case == "missing":
+        if case in {"missing", "receiver_opt_out"}:
             assert rows(dest_prompt) == {"carry-alpha": rows(source_prompt)["carry-alpha"]}
             assert "- Unavailable on this device: carry-beta" in dest_prompt
+            if case == "receiver_opt_out":
+                assert not body_loads
+                assert "skill://carry-beta" not in dest_prompt and private_body not in dest_prompt
         elif pinned:
             assert rows(dest_prompt) == rows(source_prompt)
         else:

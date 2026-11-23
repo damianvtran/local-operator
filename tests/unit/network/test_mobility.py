@@ -184,7 +184,9 @@ def test_a_move_is_allowed_and_does_not_carry_the_approval_choice(
     ).exists(), "the copy inherited the source conversation's approval choice"
 
 
-@pytest.mark.parametrize("case", ["pinned", "legacy", "write_failure", "interrupted_publish"])
+@pytest.mark.parametrize(
+    "case", ["pinned", "legacy", "no_ack", "write_failure", "interrupted_publish"]
+)
 def test_move_promotes_and_pins_the_skill_manifest(
     pair: Devices, monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
@@ -192,7 +194,9 @@ def test_move_promotes_and_pins_the_skill_manifest(
     from local_operator.resume import read_session_attachment, write_session_attachment
 
     server_a, server_b, _host, _port = pair
-    _pair_settled(pair, monkeypatch, role="admin")
+    _pair_settled(
+        pair, monkeypatch, role="admin", settings=server_b.settings if case == "no_ack" else None
+    )
     source = _owned_session(server_a)
     manifest = {"carry-alpha": "a" * 64, "carry-beta": "b" * 64}
     expected = None if case == "legacy" else manifest
@@ -200,7 +204,23 @@ def test_move_promotes_and_pins_the_skill_manifest(
     before = read_session_attachment(source)
     assert before is not None and not before.skill_manifest_pinned
     target = server_b.root / "sessions" / SESSION
-    if case == "write_failure":
+    if case == "no_ack":
+        promote = mobility._promote
+
+        def promote_silently(
+            server: relay.RelayServer, staging: Path, target_id: str
+        ) -> mobility._PromoteOutcome:
+            outcome = promote(server, staging, target_id)
+            if server is server_b and outcome.ok:
+                # Same wire shape as a legacy destination; the requester
+                # cannot infer the actual pin from successful publication.
+                carry = dict(outcome.carry or {})
+                carry.pop("skill_selection", None)
+                return outcome._replace(carry=carry)
+            return outcome
+
+        monkeypatch.setattr(mobility, "_promote", promote_silently)
+    elif case == "write_failure":
         replace = Path.replace
         original_sidecar = (source / "attachment.json").read_bytes()
 
@@ -235,7 +255,11 @@ def test_move_promotes_and_pins_the_skill_manifest(
         assert refused["ok"] is False and not target.exists()
         assert observed == [True], "the single publish boundary must already contain the pin"
 
-    result = _move(server_b, SESSION, monkeypatch=monkeypatch)
+    if case == "no_ack":
+        # The source must wait for the destination's report over the link.
+        result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+    else:
+        result = _move(server_b, SESSION, monkeypatch=monkeypatch)
 
     assert result["ok"] is True, result
     stored = read_session_attachment(target)
@@ -245,11 +269,13 @@ def test_move_promotes_and_pins_the_skill_manifest(
     assert stored.goal == "Keep this"
     assert not (target / mobility._SKILL_PIN_ORIGINAL).exists()
 
-    status = "local_routing" if expected is None else "pinned"
+    if case == "no_ack":
+        status, phrase = ("unconfirmed", "did not confirm a skill snapshot")
+    elif expected is None:
+        status, phrase = ("local_routing", "will select skills locally")
+    else:
+        status, phrase = ("pinned", "pinned the source's skill selection")
     assert result["carry"]["skill_selection"]["status"] == status
-    phrase = (
-        "will select skills locally" if expected is None else "pinned the source's skill selection"
-    )
     assert any(phrase in line for line in _carry_lines(result))
 
 
