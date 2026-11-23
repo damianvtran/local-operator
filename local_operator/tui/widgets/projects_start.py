@@ -177,8 +177,12 @@ def _team_roles(row: dict[str, Any]) -> int:
 
 def _team_detail(row: dict[str, Any]) -> str:
     roles = _team_roles(row)
-    manager = str(row.get("manager") or "manager").strip() or "manager"
-    return f"{manager} · {roles} role" + ("" if roles == 1 else "s")
+    # The fallback is the default manager ROLE identifier, not prose, so it is
+    # passed through as data and never translated.
+    manager = str(row.get("manager") or "manager").strip() or "manager"  # i18n: ignore role identifier
+    # ICU plural instead of the old hand-rolled `role` + `s`, which could not
+    # serve any locale whose plural rules differ from English.
+    return _t(_x.start_team_detail(manager=manager, count=roles, shown=str(roles)))
 
 
 def start_targets(

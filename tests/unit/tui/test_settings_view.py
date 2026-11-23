@@ -5975,6 +5975,43 @@ async def test_settings_team_rows_paint_label_first_with_the_key(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_settings_team_rows_route_every_word_through_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The team facts/summary words are catalogue copy, never English literals.
+
+    zh-CN frames (2026-11-23) showed `6 members · alias: lop` and `no description`
+    in English on the settings pane: the member count was a hand-rolled plural and
+    the alias label and empty summary were literals. With the resolver swapped for
+    one that echoes the message id, every word must come back as an id, and the
+    user-typed alias names must pass through untouched. English is pinned too.
+    """
+    from local_operator.teams import TeamEditFields, TeamRegistry
+    from local_operator.tui import app as app_module
+
+    session = FakeSession()
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(TeamEditFields(name="solo", description="", manager="manager", aliases=["s1", "s2"]))
+    session.team_registry = registry
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 32)) as pilot:
+        assert await _settle(pilot, lambda: app._session is session), "session never bound"
+        english = app._settings_team_rows()
+        monkeypatch.setattr(app_module, "_t", lambda msg: f"<{msg.code}:{msg.params.get('aliases', '')}>")
+        keyed = app._settings_team_rows()
+
+    assert english == [("solo", "0 members · alias: s1, s2", "no description")]
+    assert keyed == [
+        (
+            "solo",
+            "<tui.app.skills.member_count:> · <tui.app.skills.team_aliases:s1, s2>",
+            "<tui.app.skills.team_no_description:>",
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_the_two_cleanup_classes_are_two_titled_groups_with_their_own_scope_tag(
     tmp_path: Path,
 ) -> None:

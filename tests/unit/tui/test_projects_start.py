@@ -134,6 +134,22 @@ def test_the_plain_row_leads_and_the_registries_keep_their_order() -> None:
     assert rows[0].detail == PLAIN_DETAIL
 
 
+def test_team_detail_is_one_icu_plural_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`manager · N roles` resolves through `tui.projects.start.team_detail`.
+
+    It was `f"... role" + "s"`, a hand-rolled English plural no locale could
+    translate. English keeps its exact bytes for one and many; with the resolver
+    swapped for an echo the whole detail is the one message, manager as data.
+    """
+    from local_operator.tui.widgets import projects_start
+
+    one, many = start_targets(teams=[_team("a", counts=(1,)), _team("b", manager="lead")], agents=[])[1:]
+    assert (one.detail, many.detail) == ("manager · 1 role", "lead · 2 roles")
+    monkeypatch.setattr(projects_start, "_t", lambda msg: f"<{msg.code}:{dict(msg.params)}>")
+    keyed = start_targets(teams=[_team("b", manager="lead")], agents=[])[1]
+    assert keyed.detail == "<tui.projects.start.team_detail:{'manager': 'lead', 'count': 2, 'shown': '2'}>"
+
+
 def test_an_empty_registry_still_offers_a_plain_session() -> None:
     """D7: the feature has to work on a fresh install with nothing registered."""
     rows = start_targets(teams=[], agents=[])

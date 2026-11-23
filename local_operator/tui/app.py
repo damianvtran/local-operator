@@ -22017,7 +22017,10 @@ class OperatorApp(App[None]):
         else:
             # "MEMBERS", never "roles" (R6): the count comes from member_count(),
             # which excludes the manager, and every sibling surface says members.
-            parts.append(f"{slots} {'member' if slots == 1 else 'members'}")
+            # Keyed with an ICU plural (not a hand-rolled `s`) so every locale
+            # picks its own plural arm; `shown` stays the raw count, matching
+            # `skills_led_by` beside it.
+            parts.append(_t(_x.skills_member_count(count=slots, shown=str(slots))))
         if registry is None:
             registry = self._team_registry()
         # Only a CONVERSATION row is marked: the account is the default a reader
@@ -41660,8 +41663,13 @@ class OperatorApp(App[None]):
                         aliases = tuple(str(alias) for alias in (getattr(row, "aliases", ()) or ()))
                         details[name.casefold()] = (
                             display_form(name, str(getattr(row, "label", "") or "")),
-                            (getattr(row, "description", "") or "").strip() or "no description",
-                            f"alias: {', '.join(aliases)}" if aliases else "",
+                            # Resolved here, at pane-open time; a language change
+                            # reopens the page and rebuilds these rows. Aliases
+                            # are user-typed identifiers, so only the label is
+                            # copy — the joined names pass through untouched.
+                            (getattr(row, "description", "") or "").strip()
+                            or _t(_x.skills_team_no_description()),
+                            _t(_x.skills_team_aliases(aliases=", ".join(aliases))) if aliases else "",
                         )
                 except Exception:  # noqa: BLE001 — labels are optional, rows are not
                     logger.debug("settings: team labels unavailable", exc_info=True)
@@ -41669,7 +41677,7 @@ class OperatorApp(App[None]):
                 display, summary, alias_fact = details.get(
                     team.name.casefold(), (team.name, team.description or "", "")
                 )
-                facts = team.detail or "team"
+                facts = team.detail or _t(_x.skills_team_fallback_facts())
                 if alias_fact:
                     facts = f"{facts} · {alias_fact}"
                 rows.append((display, facts, summary))
