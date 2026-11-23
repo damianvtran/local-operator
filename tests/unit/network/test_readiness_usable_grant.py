@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -531,7 +532,13 @@ def test_refs_with_no_row_and_an_unpulled_share_report_the_pull_gap() -> None:
 
 
 def test_refs_with_a_placed_share_and_owner_expiry_report_the_owner() -> None:
-    evidence = {"state": "expired", "owner_device": OWNER, "owner_name": "macbook", "at": 5.0}
+    # A fresh refusal (the age rule is covered by its own tests below).
+    evidence = {
+        "state": "expired",
+        "owner_device": OWNER,
+        "owner_name": "macbook",
+        "at": time.time() - 30,
+    }
     row = _row_for(
         _ref_server(has_placement=True, auth_evidence=evidence),
         _FakeViewer(device_id=OWNER, placement=OWNER_PLACEMENT),
@@ -761,3 +768,175 @@ def test_a_dead_owner_login_reads_the_same_on_ledger_viewer_and_share(
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True and payload["login_dead"] is True
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-23: a recorded owner refusal is dated, and a stale one is not a verdict
+# ---------------------------------------------------------------------------
+
+
+def _expired_evidence(at: float | None) -> dict[str, Any]:
+    evidence: dict[str, Any] = {
+        "state": "expired",
+        "code": "interactive_required",
+        "owner_device": OWNER,
+        "owner_name": "macbook",
+    }
+    if at is not None:
+        evidence["at"] = at
+    return evidence
+
+
+def _evidence_row(evidence: dict[str, Any]) -> dict[str, Any]:
+    return _row_for(
+        _ref_server(has_placement=True, auth_evidence=evidence),
+        _FakeViewer(device_id=OWNER, placement=OWNER_PLACEMENT),
+    )
+
+
+def test_fresh_owner_refusal_keeps_the_verdict_and_says_when() -> None:
+    import time as _time
+
+    at = _time.time() - 120
+    row = _evidence_row(_expired_evidence(at))
+    assert row["ok"] is False and row["code"] == readiness.CODE_OBSERVED_FAILURE, row
+    clock = _time.strftime("%H:%M UTC", _time.gmtime(at))
+    assert f"until then (refusal observed {clock}, 2 min ago)" in row["detail"], row["detail"]
+    assert "sign in again — holder cannot borrow the login for linear" in row["detail"]
+    assert row["remedies"] == ["sign in again on macbook"]
+    # --json carries the same observation as the sentence, from the same reading.
+    observed = row["observed"]
+    assert observed["auth_evidence_at"] == _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime(at))
+    assert observed["auth_evidence_fresh"] is True
+    assert 110 <= observed["auth_evidence_age_s"] <= 180
+    json.loads(json.dumps(row))  # the JSON surface serialises it as-is
+
+
+# Literal offsets, not the constant: collection must not depend on the module
+# shape, so RED on the base fails on the sentence rather than at import. 960 s
+# sits just past the 900 s bound; 3245 s is the live row's age (54 min).
+@pytest.mark.parametrize("at_offset", [960.0, 3245.0, None])
+def test_stale_or_undated_owner_refusal_is_not_presented_as_live(
+    at_offset: float | None,
+) -> None:
+    """Live 2026-11-23: a 54-minute-old ``interactive_required`` row read as a
+    current "sign in again" while the owner's own client was authenticated."""
+    import time as _time
+
+    at = None if at_offset is None else _time.time() - at_offset
+    row = _evidence_row(_expired_evidence(at))
+    # Never weakened: a failed validation stays a failure with the same code.
+    assert row["ok"] is False and row["code"] == readiness.CODE_OBSERVED_FAILURE, row
+    assert "synced" not in json.dumps(row)
+    assert "sign in again —" not in row["detail"]
+    assert "last borrow of the login for linear" in row["detail"]
+    assert "re-check before signing in" in row["detail"]
+    assert row["observed"]["auth_evidence_fresh"] is False
+    if at is None:
+        assert "at a time that was not recorded" in row["detail"]
+        assert row["observed"]["auth_evidence_at"] == ""
+    else:
+        clock = _time.strftime("%H:%M UTC", _time.gmtime(at))
+        assert f"was refused at {clock}" in row["detail"], row["detail"]
+    assert "lop network mcp credentials --repair" in row["remedies"][0]
+    assert "only if it is refused again" in row["remedies"][0]
+
+
+def test_freshness_boundary_is_inclusive() -> None:
+    now = 1_000_000.0
+    edge = readiness.auth_evidence_observed(now - readiness.AUTH_EVIDENCE_FRESH_S, now=now)
+    past = readiness.auth_evidence_observed(now - readiness.AUTH_EVIDENCE_FRESH_S - 1, now=now)
+    assert edge["fresh"] is True and past["fresh"] is False
+    # Peer clock ahead of ours: skew, not a future observation.
+    assert readiness.auth_evidence_observed(now + 30, now=now)["age_s"] == 0
+    assert readiness.auth_evidence_observed(now - 3 * 86400, now=now)["phrase"].endswith("3 d ago")
+
+
+def test_revoked_owner_evidence_is_untouched_by_the_age_rule() -> None:
+    import time as _time
+
+    def revoked(at: float) -> dict[str, Any]:
+        row = _evidence_row({**_expired_evidence(at), "state": "revoked", "code": "not_a_holder"})
+        row["observed"].pop("auth_evidence", None)
+        return row
+
+    fresh, stale = revoked(_time.time() - 60), revoked(_time.time() - 86400)
+    assert fresh == stale
+    assert "auth_evidence_at" not in fresh["observed"]
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-23: the copied auth_diagnostics are the PEER's — the payload says so
+# ---------------------------------------------------------------------------
+
+
+def test_owner_share_row_names_whose_diagnostics_it_carries() -> None:
+    """A healthy borrow: the borrower has no login of its own (its diagnostics say
+    ``usable_grant: false``), this device holds a usable one. The verdict stays
+    green; the payload names the diagnostics' device and this device's own answer,
+    so the two cannot be read as one store contradicting itself."""
+
+    class _UsableViewer(_FakeViewer):
+        def mcp_login_usable(self, url: str) -> bool | None:
+            return True
+
+    peer_diagnostics = {
+        "has_row": False,
+        "usable_grant": False,
+        "access_state": "absent",
+        "refresh_presence": "absent",
+        "identity_verified": False,
+    }
+    row = _row_for(
+        _ref_server(has_placement=True, auth_diagnostics=peer_diagnostics),
+        _UsableViewer(device_id=OWNER, placement=OWNER_PLACEMENT, holds_mcp=True),
+    )
+    assert row["ok"] is True, row
+    assert "holds a shareable login for linear and shares it with holder" in row["detail"]
+    observed = row["observed"]
+    assert observed["shareable_here"] is True
+    assert observed["local_grant_usable"] is True
+    assert observed["auth_diagnostics"] == peer_diagnostics
+    assert observed["auth_diagnostics_device"] == HOLDER.device_id
+
+
+def test_owner_share_row_without_a_usable_probe_reports_unknown_not_true() -> None:
+    row = _row_for(
+        _ref_server(has_placement=True),
+        _FakeViewer(device_id=OWNER, placement=OWNER_PLACEMENT, holds_mcp=True),
+    )
+    assert row["ok"] is True, row
+    assert row["observed"]["local_grant_usable"] is None
+
+
+def test_a_later_synced_borrow_outranks_an_older_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Live 2026-11-23: rows refused at 17:05 UTC, then a session on the node
+    borrowed the same servers successfully within the hour. The client writes
+    ``synced`` on every successful borrow (``client._resolve_grant``), and the
+    evidence document keeps ONE row per key, so the later success REPLACES the
+    refusal: the ordering is the write order on that key, not a comparison of
+    two rows — this cell pins that a replaced refusal never renders."""
+    root = _holder_root(tmp_path, monkeypatch, placed=True)
+    _write_shape(root, "registration-only")
+    key = credential_key_for_mcp(URL)
+    viewer = _FakeViewer(device_id=OWNER, placement=OWNER_PLACEMENT)
+    mcp_state.record(
+        NETWORK,
+        key,
+        state="expired",
+        code="interactive_required",
+        owner_device=OWNER,
+        owner_name="macbook",
+        root=root,
+    )
+    assert _holder_row(root, viewer=viewer)["code"] == readiness.CODE_OBSERVED_FAILURE
+    mcp_state.record(
+        NETWORK, key, state="synced", owner_device=OWNER, owner_name="macbook", root=root
+    )
+    assert mcp_state.load(NETWORK, root)[key]["state"] == "synced"
+    row = _holder_row(root, viewer=viewer)
+    assert row.get("code") != readiness.CODE_OBSERVED_FAILURE, row
+    assert "sign in again" not in row["detail"]
+    assert "was refused" not in row["detail"]

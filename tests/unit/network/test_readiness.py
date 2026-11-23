@@ -2117,7 +2117,80 @@ def test_tooling_row_names_the_anchor_devices_gaps() -> None:
         "unknown": [],
         "gh_login": "absent",
     }
-    assert len(row["remedies"]) == 3
+    # Install, PATH fix, the github share (2026-11-23: push needs a GRANT, so it
+    # leads the login remedies), and the now-optional gh login.
+    assert len(row["remedies"]) == 4
+
+
+_GITHUB_SHARE = "lop network credential share github --with cloud-node-1"
+
+
+@pytest.mark.parametrize(
+    ("github", "placement"),
+    [
+        # No own source, no share.
+        ({"source": ""}, {}),
+        # A share standing for another device only: not this peer's.
+        ({"source": ""}, {"owner_device": VIEWER, "holders": [{"device": "d_other"}]}),
+    ],
+)
+def test_tooling_login_gap_without_a_share_leads_with_the_share_verb(
+    github: dict[str, Any], placement: dict[str, Any]
+) -> None:
+    """2026-11-23: push/PR-write on a peer need a GRANTED github credential, not a
+    gh login (network guide). The share verb leads; the peer's own login is named
+    as optional, and the row asserts no outcome for offloaded work."""
+    row = readiness.tooling_row(
+        _member(),
+        _facts(tooling=_tooling_section(has_entry=False), github=github),
+        peer_label="cloud-node-1",
+        viewer=_FakeViewer(placement=placement),
+    )
+    assert row["ok"] is False and row["code"] == readiness.CODE_NOT_AUTHENTICATED
+    assert "fail" not in row["detail"], row["detail"]
+    assert "has no stored GitHub CLI login of its own, which is optional" in row["detail"]
+    assert "no GitHub credential is shared with it" in row["detail"]
+    remedies = row["remedies"]
+    assert _GITHUB_SHARE in remedies[0], remedies
+    assert remedies[-1].startswith("optional: on cloud-node-1, `gh auth login`"), remedies
+    assert "not what makes pushes or PR writes work" in remedies[-1]
+
+
+@pytest.mark.parametrize(
+    ("github", "placement"),
+    [
+        # Live 2026-11-23: share designated (holders = owner + node), node's gh not
+        # logged in, and `gh api` on a private repo succeeded there on the grant.
+        ({"source": ""}, {"owner_device": VIEWER, "holders": [{"device": PEER}]}),
+        # Its own GITHUB_TOKEN: pushes are funded without a share.
+        ({"source": "token"}, {}),
+    ],
+)
+def test_tooling_login_gap_with_a_granted_credential_claims_nothing_missing(
+    github: dict[str, Any], placement: dict[str, Any]
+) -> None:
+    row = readiness.tooling_row(
+        _member(),
+        _facts(tooling=_tooling_section(has_entry=False), github=github),
+        peer_label="cloud-node-1",
+        viewer=_FakeViewer(placement=placement),
+    )
+    assert row["ok"] is True, row
+    assert "fail" not in row["detail"], row["detail"]
+    assert "use the GitHub credential it is granted" in row["detail"]
+    assert not any("gh auth login" in remedy for remedy in row["remedies"])
+    assert not any(_GITHUB_SHARE in remedy for remedy in row["remedies"])
+    assert row["observed"]["gh_login"] == "absent"
+
+
+def test_tooling_login_gap_without_a_viewer_names_the_share_without_asserting() -> None:
+    row = readiness.tooling_row(
+        _member(), _facts(tooling=_tooling_section(has_entry=False)), peer_label="cloud-node-1"
+    )
+    assert _GITHUB_SHARE in row["remedies"][0]
+    assert "no GitHub credential is shared" not in row["detail"]
+    assert "not known here" in row["detail"]
+    assert "fail" not in row["detail"]
 
 
 def test_the_install_remedy_names_the_devices_own_command() -> None:

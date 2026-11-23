@@ -4523,7 +4523,36 @@ def _tooling_install_remedy(
     return sentence + ", then re-check"
 
 
-def tooling_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[str, Any]:
+def _github_push_covered(facts: Mapping[str, Any], *, member: Any, viewer: Any) -> bool | None:
+    """Would a push on this peer get a GitHub credential WITHOUT a gh login there?
+
+    The same two facts :func:`_github_push_clause` reads for the git row — the
+    peer's own ladder source and the github placement's holders — so the tooling
+    row cannot advise a share the git row already reports as standing. ``None``
+    when either fact is unreadable (no viewer, an older peer, an unreadable store):
+    the caller then names the share without asserting it is missing.
+    """
+    from local_operator.network.credentials import github as github_mod
+
+    fact = facts.get("github")
+    source = str(fact.get("source") or "") if isinstance(fact, Mapping) else SOURCE_UNKNOWN
+    if source in (github_mod.SOURCE_APP, github_mod.SOURCE_TOKEN):
+        return True
+    if viewer is not None:
+        placement = viewer.placement(provider=github_mod.GITHUB_KEY)
+        placement = placement if isinstance(placement, Mapping) else {}
+        if placement.get("owner_device") and str(getattr(member, "device_id", "")) in (
+            _holder_names(placement)
+        ):
+            return True
+    if viewer is None or source in (SOURCE_UNKNOWN, github_mod.SOURCE_UNREADABLE):
+        return None
+    return False
+
+
+def tooling_row(
+    member: Any, facts: Mapping[str, Any], *, peer_label: str, viewer: Any = None
+) -> dict[str, Any]:
     """(g) What command-line tooling would a lane find on this peer?
 
     The 2026-10-06 request: a lane on cloud-node-1 discovered mid-task that
@@ -4602,17 +4631,57 @@ def tooling_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> di
         clauses.append(f"has {_name_list(off_path)} installed but not on its PATH")
     if unknown:
         clauses.append(f"could not complete its tooling check for {_name_list(unknown)}")
-    if login == "absent":
-        clauses.append("has no stored GitHub CLI login")
-    elif login == "unknown":
+    if login == "unknown":
         clause = "could not read its stored GitHub CLI login"
         if login_reason:
             clause += f" ({login_reason})"
         clauses.append(clause)
-    if absent or off_path or login == "absent":
+    # A MISSING gh LOGIN IS NOT AN OUTCOME CLAIM (2026-11-23). Pushes and PR writes
+    # there use a GRANTED github credential (GH_TOKEN per command, see the network
+    # guide), not the peer's own gh login: live, a session on a node with no gh
+    # login read a private repository through `gh api` on the borrowed grant while
+    # this row said offloaded work "will fail there". So the login is its own
+    # sentence, separate from the tools tail (which is about missing binaries), and
+    # it states only facts: the peer has no CLI login of its own, and whether a
+    # GitHub credential is shared with it.
+    push_covered: bool | None = None
+    login_note = ""
+    if login == "absent":
+        push_covered = _github_push_covered(facts, member=member, viewer=viewer)
+        login_note = "has no stored GitHub CLI login of its own, which is optional"
+        if push_covered is True:
+            login_note += ": pushes and PR writes there use the GitHub credential it is granted"
+        elif push_covered is False:
+            login_note += ", and no GitHub credential is shared with it"
+        else:
+            login_note += "; whether a GitHub credential is shared with it is not known here"
+    if absent or off_path:
         tail = ": offloaded work that needs them will fail there"
-    else:
+    elif unknown or login == "unknown":
         tail = ": whether that would block offloaded work is not known"
+    else:
+        tail = ""
+    if clauses:
+        detail = f"{peer_label} " + "; ".join(clauses) + tail
+        if login_note:
+            detail += f". {peer_label} {login_note}"
+    else:
+        detail = f"{peer_label} {login_note}"
+    if not clauses and push_covered is True:
+        # Only the optional login is missing and a grant funds push/PR-write: the
+        # row must not read as the peer lacking something the work needs.
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_TOOLING,
+            ok=True,
+            detail=(
+                f"{peer_label} has the lane toolchain ({', '.join(TOOLING_TOOLS)}); it "
+                + login_note
+            ),
+            source=SOURCE_PEER,
+            observed={"absent": [], "off_path": [], "unknown": [], "gh_login": login},
+        )
     # The code cell picks the FIRST fix in this order — an install, then a PATH
     # fix, then the login, then "could not read" last: a concrete repair a
     # reader can start on outranks a probe that could not answer.
@@ -4642,7 +4711,19 @@ def tooling_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> di
         remedy += " (work can use that path directly meanwhile)"
         remedies.append(remedy)
     if login == "absent":
-        remedies.append(f"on {peer_label}, run `gh auth login` to sign the GitHub CLI in there")
+        if push_covered is not True:
+            # FIRST: the share is what makes push/PR-write work there; the peer's own
+            # login below is optional and serves only its local ``gh`` use.
+            remedies.insert(
+                0,
+                f"from the device that holds a GitHub login, run `lop network credential "
+                f"share github --with {peer_label}` so pushes and PR writes there get a "
+                "granted credential",
+            )
+        remedies.append(
+            f"optional: on {peer_label}, `gh auth login` gives that device its own GitHub "
+            "CLI login; it is not what makes pushes or PR writes work there"
+        )
     if unknown or login == "unknown":
         remedies.append(f"check the tooling on {peer_label} and re-check")
     return _capability_row(
@@ -4651,7 +4732,7 @@ def tooling_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> di
         capability=CAPABILITY_TOOLING,
         ok=False,
         code=code,
-        detail=f"{peer_label} " + "; ".join(clauses) + tail,
+        detail=detail,
         remedies=remedies,
         source=SOURCE_PEER,
         observed={"absent": absent, "off_path": off_path, "unknown": unknown, "gh_login": login},
@@ -5356,6 +5437,11 @@ def mcp_credential_rows(
             row["observed"] = {
                 **(row.get("observed") or {}),
                 "auth_diagnostics": dict(server["auth_diagnostics"]),
+                # WHOSE STORE (2026-11-23): these diagnostics describe the PEER's
+                # own login (``server`` is an entry of the peer's ``mcp`` fact), not
+                # this device's. On a borrow they read "no usable grant" by design;
+                # naming the device stops a reader taking them as the owner's.
+                "auth_diagnostics_device": str(member.device_id),
             }
         rows.append(row)
     return rows
@@ -5475,6 +5561,67 @@ def _mcp_ref_row(
     )
 
 
+#: How long a recorded owner refusal (``auth_evidence`` state ``expired``) may be
+#: presented as the CURRENT state of the owner's login, in seconds.
+#:
+#: WHY A BOUND AT ALL (2026-11-23): an evidence row is rewritten only by the next
+#: borrow attempt — ``mcp_state.clear`` has no caller and ``retire_held`` touches
+#: ``held`` rows only — so a refusal recorded once stays on the books however the
+#: owner's login changes afterwards. Live on v0.112.5, ``ready`` printed
+#: "<owner>: sign in again" from a 54-minute-old ``interactive_required`` row while
+#: that owner's own MCP client was authenticating to the same server.
+#:
+#: WHY THIS VALUE: the refusal asks the owner for an interactive sign-in, and
+#: ``mcp.auth.INTERACTIVE_GRANT_TIMEOUT_S`` (600 s) bounds how long such a sign-in
+#: runs before it completes or is abandoned; 900 s is that window plus margin. It
+#: is derived from that constant, not from a measured re-auth distribution — none
+#: is recorded.
+#:
+#: EACH SIDE: at or under the bound the row keeps the definite "sign in again" verdict
+#: (dated). Over it — or with no recorded time — the row stays ``ok=False`` with the
+#: same ``observed_failure`` code (a failed validation NEVER reads as ``synced``),
+#: but the sentence says when the last attempt was refused and sends the operator to
+#: re-try the borrow before signing in again.
+AUTH_EVIDENCE_FRESH_S = 900.0
+
+
+def auth_evidence_observed(at: Any, *, now: float | None = None) -> dict[str, Any]:
+    """When an evidence row was observed: one reading for the sentence AND ``--json``.
+
+    Returns ``at_utc`` (ISO-8601 UTC, ``""`` when unrecorded), ``age_s`` (whole
+    seconds, ``None`` when unrecorded), ``fresh`` (inside
+    :data:`AUTH_EVIDENCE_FRESH_S`) and ``phrase`` ("16:45 UTC, 54 min ago"). The
+    CLI renders ``detail`` and ``--json`` carries the same ``detail`` plus these
+    fields, so both readers get one computation and cannot disagree.
+
+    ``at`` is the PEER's clock and ``now`` this device's: a small negative age is
+    skew, clamped to zero rather than reported as a future observation.
+    """
+    from local_operator.network.credentials.types import peer_number
+
+    stamp = peer_number(at, default=0)
+    if stamp <= 0:
+        return {"at_utc": "", "age_s": None, "fresh": False, "phrase": ""}
+    current = time.time() if now is None else now
+    age = max(0, int(current - stamp))
+    if age < 60:
+        ago = "under a minute ago"
+    elif age < 3600:
+        ago = f"{age // 60} min ago"
+    elif age < 48 * 3600:
+        ago = f"{age // 3600} h ago"
+    else:
+        ago = f"{age // 86400} d ago"
+    # The clock time alone is ambiguous past a day, so older rows carry the date.
+    clock = time.strftime("%H:%M UTC" if age < 86400 else "%Y-%m-%d %H:%M UTC", time.gmtime(stamp))
+    return {
+        "at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stamp)),
+        "age_s": age,
+        "fresh": age <= AUTH_EVIDENCE_FRESH_S,
+        "phrase": f"{clock}, {ago}",
+    }
+
+
 def _mcp_credential_row(
     member: Any,
     *,
@@ -5553,19 +5700,50 @@ def _mcp_credential_row(
         owner_label = _bounded(evidence.get("owner_name") or "", 120) or _owner_label(
             placement, fallback=owner
         )
+        seen = auth_evidence_observed(evidence.get("at"))
+        observed = {
+            "server": name,
+            "url": url,
+            "auth_evidence": dict(evidence),
+            # Additive (2026-11-23): the observation time a JSON reader needs to
+            # tell a recent refusal from a recorded one; same reading as ``detail``.
+            "auth_evidence_at": seen["at_utc"],
+            "auth_evidence_age_s": seen["age_s"],
+            "auth_evidence_fresh": seen["fresh"],
+        }
+        if seen["fresh"]:
+            # Today's sentence, unchanged up to "until then" (other surfaces and
+            # tests match "<owner>: sign in again"), dated at the end.
+            detail = (
+                f"{owner_label}: sign in again — {peer_label} cannot borrow the login "
+                f"for {name} ({url}) until then (refusal observed {seen['phrase']})"
+            )
+            remedies: tuple[str, ...] = (f"sign in again on {owner_label}",)
+        else:
+            # STALE OR UNDATED: still a failure (never ``synced``), but the last
+            # recorded answer is not a live verdict on the owner's login. Only a
+            # new borrow rewrites the row, so the remedy is the member-side repair
+            # that makes one (``--repair`` borrows once and records its answer).
+            when = f"at {seen['phrase']}" if seen["phrase"] else "at a time that was not recorded"
+            detail = (
+                f"{peer_label}'s last borrow of the login for {name} ({url}) from "
+                f"{owner_label} was refused {when}; whether {owner_label} still needs to "
+                "sign in again is not known from that record — re-check before signing in"
+            )
+            remedies = (
+                f"on {peer_label}, run `lop network mcp credentials --repair` to try the "
+                f"borrow again; sign in again on {owner_label} only if it is refused again",
+            )
         return _capability_row(
             device_id=member.device_id,
             device_name=peer_label,
             capability=CAPABILITY_MCP_CREDENTIAL,
             ok=False,
             code=CODE_OBSERVED_FAILURE,
-            detail=(
-                f"{owner_label}: sign in again — {peer_label} cannot borrow the login "
-                f"for {name} ({url}) until then"
-            ),
-            remedies=(f"sign in again on {owner_label}",),
+            detail=detail,
+            remedies=remedies,
             source=SOURCE_PEER,
-            observed={"server": name, "url": url, "auth_evidence": dict(evidence)},
+            observed=observed,
         )
     if current_owner_evidence and evidence.get("state") == "held":
         # THE OFFLINE HOLD FOR MCP (2026-11-14, "Yes, GitHub and MCP"): the owner is
@@ -5618,7 +5796,12 @@ def _mcp_credential_row(
             ),
             remedies=(f"sign in again on {peer_label}",),
             source=SOURCE_PEER,
-            observed={"server": name, "url": url, "auth_diagnostics": dict(diagnostics)},
+            observed={
+                "server": name,
+                "url": url,
+                "auth_diagnostics": dict(diagnostics),
+                "auth_diagnostics_device": str(member.device_id),
+            },
         )
     if has_row is True:
         return _capability_row(
@@ -5737,7 +5920,15 @@ def _mcp_credential_row(
                     observed={"server": name, "url": url, "shareable_here": False},
                 )
             usable_lookup = getattr(viewer, "mcp_login_usable", None)
-            if callable(usable_lookup) and usable_lookup(url) is False:
+            # THIS device's own usability (tri-state; ``None`` = not readable or a
+            # viewer without the probe). Carried in ``observed`` because the row also
+            # carries the PEER's ``auth_diagnostics`` (see ``mcp_credential_rows``),
+            # which on a healthy borrow say ``usable_grant: false`` — the borrower
+            # has no login of its own. Without this field a JSON reader saw only that
+            # and read the green owner row as contradicting itself (2026-11-23).
+            local_usable = usable_lookup(url) if callable(usable_lookup) else None
+            local_usable = local_usable if isinstance(local_usable, bool) else None
+            if local_usable is False:
                 # Shareable and served, but tombstoned: ``holds_grant`` keeps it on
                 # the share path deliberately, and a borrower's own request comes
                 # back with the repair sentence. Say that here rather than a green
@@ -5758,7 +5949,12 @@ def _mcp_credential_row(
                         "so the borrow works again once this device does"
                     ],
                     source=SOURCE_LOCAL,
-                    observed={"server": name, "url": url, "shareable_here": True},
+                    observed={
+                        "server": name,
+                        "url": url,
+                        "shareable_here": True,
+                        "local_grant_usable": False,
+                    },
                 )
             return _capability_row(
                 device_id=member.device_id,
@@ -5771,7 +5967,12 @@ def _mcp_credential_row(
                     "copied and the borrow revokes with it"
                 ),
                 source=SOURCE_LOCAL,
-                observed={"server": name, "url": url, "shareable_here": True},
+                observed={
+                    "server": name,
+                    "url": url,
+                    "shareable_here": True,
+                    "local_grant_usable": local_usable,
+                },
             )
         return _capability_row(
             device_id=member.device_id,
@@ -7130,7 +7331,7 @@ def _fact_rows(
             observer_is_admin=getattr(record, "self_role", "") == "admin",
         )
         selected_row.update(row)
-    rows.append(tooling_row(member, facts, peer_label=peer_label))
+    rows.append(tooling_row(member, facts, peer_label=peer_label, viewer=viewer))
     rows.append(browser_row(member, facts, peer_label=peer_label))
     rows.append(resilience_row(member, facts, peer_label=peer_label))
     instructions_row = custom_instructions_row(
